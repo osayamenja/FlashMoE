@@ -16,7 +16,7 @@ class Edge:
         self.__weight = weight
 
     def __repr__(self) -> str:
-        return f'Edge(weight={self.weight}, group1={self.node1}, group2={self.node2})'
+        return f'Edge(weight={self.weight}, node1={self.node1}, node2={self.node2})'
 
     def __hash__(self) -> int:
         return hash((self.node1, self.node2))
@@ -54,6 +54,10 @@ class Edge:
     @property
     def weight(self) -> float:
         return self.__weight
+
+    def get_neighbor(self, node: int) -> int:
+        assert self.__node1 == node or self.__node2 == node
+        return self.__node2 if node == self.node1 else self.__node1
 
 
 class Worker:
@@ -150,12 +154,6 @@ class Group:
                            neighbor_group: Group,
                            all_reduce_func_args: Dict[str, float],
                            gamma_args: Dict[str, int]) -> bool:
-        # Update stale information
-        if neighbor_group.groupID not in self.externalEdges:
-            connecting_edge = self.externalEdges[external_node]
-            self.externalEdges.pop(external_node)
-            self.externalEdges.update({neighbor_group.groupID: connecting_edge})
-
         # effective world
         effective_world = gamma_args[Group.EFFECTIVE_WORLD]
         if self.memCapacity + neighbor_group.memCapacity >= self.numExperts:
@@ -169,7 +167,7 @@ class Group:
         all_reduce_func_args[Group.GAMMA] = self.gamma(gamma_args)
 
         self.allReduceTime = self.allReduceFunc(all_reduce_func_args)
-        self.cachedP2PTime = self.evaluate_global_p2p_time(internal_node, neighbor_group.groupID, neighbor_group)
+        self.cachedP2PTime = self.evaluate_global_p2p_time(internal_node, external_node, neighbor_group)
         args = self.__construct_obj_args(total_compute_flops=self.totalComputeFLOPS + neighbor_group.totalComputeFLOPS,
                                          total_expert_flops=self.totalExpertFlops,
                                          communication_frequency=self.eta,
@@ -193,17 +191,18 @@ class Group:
                                                                                  self.allReduceTime,
                                                                                  self.numExperts))
 
-    def evaluate_global_p2p_time(self, internal_node: int, external_group_id: int, neighbor_group: Group):
+    def evaluate_global_p2p_time(self, internal_node: int, external_node: int, neighbor_group: Group):
         return max(self.p2pTime, self.totalInternalEdgeWeights.get(internal_node, 0) +
-                   self.externalEdges[external_group_id].weight,
-                   neighbor_group.evaluate_local_p2p_time(external_group_id, internal_node))
+                   self.externalEdges[external_node].weight,
+                   neighbor_group.evaluate_local_p2p_time(external_node, internal_node))
 
-    def evaluate_local_p2p_time(self, internal_node: int, external_group_id: int) -> float:
+    def evaluate_local_p2p_time(self, internal_node: int, external_node: int) -> float:
         return max(self.p2pTime, self.totalInternalEdgeWeights.get(internal_node, 0) +
-                   self.externalEdges[external_group_id].weight)
+                   self.externalEdges[external_node].weight)
 
     def subsume_group(self, internal_node: int, external_node: int,
-                      child: Group, groups: DisjointSet) -> Tuple[Group, Set[Edge]]:
+                      child: Group, groups: DisjointSet,
+                      global_group_info: Dict[int, Group]) -> Tuple[Group, Set[Edge]]:
         self.update_p2p_time()
         self.currentObjective = self.cachedObjective
         self.memCapacity = self.memCapacity + child.memCapacity
@@ -213,27 +212,36 @@ class Group:
         self.totalInternalEdgeWeights.update({external_node: self.totalInternalEdgeWeights
                                              .get(external_node, 0) + self.externalEdges[child.groupID].weight})
 
-        external_edges: Dict[int, Edge] = dict()
+        external_edges_by_group: Dict[int, Edge] = dict()
+        external_edges_by_node: Dict[int, Edge] = dict()
         pruned_edges: Set[Edge] = set()
         group_parent = groups[internal_node]
 
-        for ext_edges in [self.externalEdges, child.externalEdges]:
+        for ext_info in [(self.externalEdges, internal_node), (child.externalEdges, external_node)]:
+            ext_edges = ext_info[0]
+            current_node = ext_info[1]
             for node in ext_edges:
                 updated_group = groups[node]
                 if not groups.connected(group_parent, node):
-                    ext_edge = external_edges.get(updated_group, None)
+                    ext_edge = external_edges_by_group.get(updated_group, None)
                     updated_ext_edge = ext_edges[node]
+                    updated_node = updated_ext_edge.get_neighbor(current_node)
                     if ext_edge is not None:
                         pruned_edge = ext_edge
-                        if ext_edge.weight > updated_ext_edge.weight:
-                            pruned_edges.add(updated_ext_edge)
+                        pruned_neighbor = pruned_edge.get_neighbor(internal_node)
+                        if ext_edge.weight >= updated_ext_edge.weight:
                             pruned_edge = updated_ext_edge
                             updated_ext_edge = ext_edge
-                        else:
-                            pruned_edges.add(ext_edge)
-                    external_edges.update({node: updated_ext_edge})
+                            updated_node = updated_ext_edge.get_neighbor(internal_node)
+                            pruned_neighbor = pruned_edge.get_neighbor(external_node)
 
-        self.externalEdges = external_edges
+                        pruned_edges.add(pruned_edge)
+                        global_group_info[groups[pruned_neighbor]].externalEdges.pop(
+                            pruned_edge.get_neighbor(pruned_neighbor))
+                    external_edges_by_node.update({updated_node: updated_ext_edge})
+                    external_edges_by_group.update({updated_group: updated_ext_edge})
+
+        self.externalEdges = external_edges_by_group
         return self, pruned_edges
 
     @staticmethod
@@ -366,7 +374,9 @@ def grigora2(a: np.ndarray, obj: Callable[[Dict[str, float]], float],
             merged_group, pruned_edges = group_info[parent_group].subsume_group(internal_node=internal_n,
                                                                                 external_node=external_n,
                                                                                 child=group_info[child_group],
-                                                                                groups=groups)
+                                                                                groups=groups,
+                                                                                global_group_info=group_info)
+            pruned_edges.add(candidate_edge) # already merged
             group_info.update({parent_group: merged_group})
             group_info.pop(child_group)
 
@@ -389,7 +399,9 @@ def grigora2(a: np.ndarray, obj: Callable[[Dict[str, float]], float],
                                                            num_participants=lower_bound_num_groups_ar)))
             if groups.connected(e.node1, e.node2):
                 global_external_edges.discard(e)
-
+        else:
+            group_info[groups[group_n1]].externalEdges.pop(n2)
+            group_info[groups[group_n2]].externalEdges.pop(n1)
     return groups
 
 
@@ -428,62 +440,6 @@ def expert_parallel_group_objective_function(args: Dict[str, float]) -> float:
     return ((args[Group.TOTAL_EXPERT_WORKLOAD] / args[Group.TOTAL_COMPUTE]) +
             (args[Group.COMMUNICATION_FREQUENCY] * args[Group.COMMUNICATION_COST]) +
             args[Group.ALL_REDUCE_TIME])
-
-
-def grigora(a: np.ndarray, obj: Callable[[Dict[str, float]], float], d: int) -> DisjointSet:
-    edges: List[Tuple[float, int, int]] = []
-    stale_edges: Set[Tuple[float, int, int]] = set()
-    objective_results: Dict[int, Tuple[float, float]] = dict()
-    external_group_edges: Dict[int, Dict[int, Tuple[int, float]]] = dict()
-    groups = DisjointSet(np.arange(a.shape[0]))
-    args: Dict[str, float] = dict()
-
-    # We assume an undirected, simple graph.
-    for i in range(1, a.shape[0]):
-        for j in range(0, i):
-            if a[i][j] > 0:
-                alpha: float = a.item((i, j, 0))
-                beta: float = a.item((i, j, 1))
-                p2p_cost = alpha + (d * beta)
-
-                edges.append((p2p_cost, min(i, j), max(i, j)))
-                i_edges = external_group_edges.get(i, dict())
-                i_edges.update({j: (i, p2p_cost)})
-                external_group_edges.update({i: i_edges})
-
-                j_edges = external_group_edges.get(j, dict())
-                j_edges.update({i: (j, p2p_cost)})
-                external_group_edges.update({j: j_edges})
-    edges.sort()
-
-    for edge in edges:
-        if edge not in stale_edges:
-            t = obj(args)
-            u = groups[edge[1]]
-            v = groups[edge[2]]
-            if t < objective_results[u][0] and t < objective_results[v][0]:
-                # Max-aggregate parallel outgoing edges from the merged component
-                union_external_edges: Dict[int, Tuple[int, float]] = dict()
-                for ext_edges in [external_group_edges[u], external_group_edges[v]]:
-                    for ext_edge_neighbor in ext_edges:
-                        if ext_edge_neighbor != edge[1] and ext_edge_neighbor != edge[2]:  # excludes internal edge
-                            refreshed_neighbor = groups[ext_edge_neighbor]
-                            merged_weight = ext_edges[ext_edge_neighbor][1]
-                            origin = ext_edges[ext_edge_neighbor][0]
-                            if refreshed_neighbor in union_external_edges:
-                                if merged_weight >= union_external_edges[refreshed_neighbor][1]:
-                                    stale_edges.add((union_external_edges[refreshed_neighbor][1],
-                                                     min(ext_edge_neighbor, origin), max(ext_edge_neighbor, origin)))
-                                    union_external_edges.update({refreshed_neighbor, (origin, merged_weight)})
-                                else:
-                                    stale_edges.add((merged_weight, min(ext_edge_neighbor, origin),
-                                                     max(ext_edge_neighbor, origin)))
-                groups.merge(u, v)
-                parent_id = groups[u]
-                child_id = u if parent_id != u else v
-                external_group_edges.pop(child_id)
-                external_group_edges.update({parent_id: union_external_edges})
-    return groups
 
 
 if __name__ == '__main__':
