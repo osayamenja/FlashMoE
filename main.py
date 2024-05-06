@@ -6,6 +6,7 @@ from typing import Callable, Dict, Set, Tuple, List, Final
 
 from scipy.cluster.hierarchy import DisjointSet
 from sortedcontainers import SortedSet
+from lazy_streams import stream
 
 
 class Edge:
@@ -29,18 +30,23 @@ class Edge:
     # Per https://docs.python.org/3/library/functools.html#functools.total_ordering
     # Although cumbersome, below is more efficient than @functools.total_ordering
     def __ne__(self, other: Edge) -> bool:
+        assert isinstance(other, Edge)
         return not self == other
 
     def __lt__(self, other: Edge) -> bool:
+        assert isinstance(other, Edge)
         return (self.weight, self.node1, self.node2) < (other.weight, other.node1, other.node2)
 
     def __le__(self, other: Edge) -> bool:
+        assert isinstance(other, Edge)
         return (self.weight, self.node1, self.node2) <= (other.weight, other.node1, other.node2)
 
     def __gt__(self, other: Edge) -> bool:
+        assert isinstance(other, Edge)
         return (self.weight, self.node1, self.node2) > (other.weight, other.node1, other.node2)
 
     def __ge__(self, other: Edge) -> bool:
+        assert isinstance(other, Edge)
         return (self.weight, self.node1, self.node2) >= (other.weight, other.node1, other.node2)
 
     @property
@@ -88,6 +94,63 @@ class Worker:
         if not isinstance(other, Worker):
             return False
         return self.worker_id == other.worker_id
+
+
+class Expert:
+    def __init__(self, compute_cost: int, expert_id: int = None):
+        self.__computeCost = compute_cost
+        if expert_id is None:
+            self.__expert_id = 0
+        else:
+            self.__expert_id = expert_id
+
+    @property
+    def expert_id(self) -> int:
+        return self.__expert_id
+
+    @property
+    def compute_cost(self) -> int:
+        return self.__computeCost
+
+    def cost_most_similar_to(self, exps: List[Expert]) -> Expert:
+        e = exps[0]
+        min_dist = int(math.fabs(self.compute_cost - e.compute_cost))
+        for i in range(1, len(exps)):
+            dist = int(math.fabs(self.compute_cost - exps[i].compute_cost))
+            if dist < min_dist:
+                min_dist = dist
+                e = exps[i]
+        return e
+
+    def __hash__(self) -> int:
+        return hash(self.expert_id)
+
+    def __repr__(self) -> str:
+        return f'Expert(id={self.expert_id}, compute_cost={self.compute_cost})'
+
+    def __eq__(self, other: Expert) -> bool:
+        if not isinstance(other, Expert):
+            return False
+        return self.compute_cost == other.compute_cost
+
+    def __ne__(self, other: Expert) -> bool:
+        return not self == other
+
+    def __lt__(self, other: Expert) -> bool:
+        assert isinstance(other, Expert)
+        return self.compute_cost < other.compute_cost
+
+    def __le__(self, other: Expert) -> bool:
+        assert isinstance(other, Expert)
+        return self.compute_cost <= other.compute_cost
+
+    def __gt__(self, other: Expert) -> bool:
+        assert isinstance(other, Expert)
+        return self.compute_cost > other.compute_cost
+
+    def __ge__(self, other: Expert) -> bool:
+        assert isinstance(other, Expert)
+        return self.compute_cost >= other.compute_cost
 
 
 class Group:
@@ -460,6 +523,84 @@ def expert_parallel_group_objective_function(args: Dict[str, float]) -> float:
             args[Group.ALL_REDUCE_TIME])
 
 
+def match(budget: Expert, ss: SortedSet) -> Expert:
+    if budget in ss:
+        ss.discard(budget)
+        return budget
+    floor = ss.bisect_left(budget) - 1
+    ceiling = ss.bisect_right(budget)
+    if floor >= 0 and ceiling <= len(ss):
+        most_similar_cost = budget.cost_most_similar_to([ss[floor], ss[ceiling]])
+        ss.discard(most_similar_cost)
+        return most_similar_cost
+    return ss[floor] if floor >= 0 else ss[ceiling]
+
+
+def expert_assignment(workers: List[Worker], experts: List[Expert]) -> Dict[Worker, Set[int]]:
+    mem_capacity: Dict[Worker, int] = dict()
+    for worker1 in workers:
+        mem_capacity.update({worker1: worker1.mem_capacity})
+    assert stream(workers).map(lambda worker: worker.mem_capacity).reduce(lambda m1, m2: m1 + m2) >= len(experts)
+    n_workers = len(workers)
+    n_experts = len(experts)
+    s: Dict[Worker, Set[int]] = dict()
+
+    # Determination of singleton multi-sets
+    skip_sort = len(set(workers)) == 1 and len(set(experts)) == 1
+
+    if n_experts % n_workers == 0:
+        req_capacity = n_experts / n_workers
+        each_worker_has_capacity = (stream(workers).
+                                    filter(lambda worker: worker.mem_capacity >= req_capacity).size() == len(workers))
+    else:
+        req_capacity = math.ceil(n_experts / n_workers)
+        outlying_req_capacity = (n_experts - ((n_workers - 1) * req_capacity))
+        each_worker_has_capacity = ((stream(workers).take(len(workers) - 1).
+                                     filter(lambda worker: worker.mem_capacity >= req_capacity))
+                                    and workers[len(workers) - 1].mem_capacity >= outlying_req_capacity)
+    if skip_sort:
+        i = 0
+        current_exp = 0
+        remaining_workers = n_workers
+        while current_exp < n_experts:
+            budget = int(math.ceil((n_experts - current_exp) / remaining_workers))
+            picked_worker = workers[i]
+            m_w = mem_capacity[picked_worker]
+            while budget > 0 and m_w > 0:
+                expert = experts[current_exp]
+                s.get(picked_worker, set()).add(expert.expert_id)
+                m_w -= 1
+                budget -= 1
+                current_exp += 1
+            mem_capacity[picked_worker] = m_w
+            i = (i + 1) % n_workers
+            if m_w == 0 or each_worker_has_capacity:
+                remaining_workers -= 1
+        return s
+
+    workers.sort()
+    expert_compute_cost: SortedSet = SortedSet(experts)
+    sum_w_flops = stream(workers).map(lambda worker: worker.flops).reduce(lambda flop1, flop2: flop1 + flop2)
+    sum_e_cost = stream(experts).map(lambda x: x.compute_cost).reduce(lambda cost1, cost2: cost1 + cost2)
+    i = 0
+    while len(expert_compute_cost) > 0:
+        picked_worker: Worker = workers[i]
+        m_w = mem_capacity[picked_worker]
+        budget = int(math.ceil((picked_worker.flops * sum_e_cost) / sum_w_flops))
+        allocated_budget = budget
+        while budget > 0 and m_w > 0 and len(expert_compute_cost) > 0:
+            expert = match(Expert(budget), expert_compute_cost)
+            s.get(picked_worker, set()).add(expert.expert_id)
+            m_w -= 1
+            budget -= expert.compute_cost
+        i = (i + 1) % n_workers
+        mem_capacity[picked_worker] = m_w
+        sum_e_cost -= (allocated_budget - budget)
+        if m_w == 0 or each_worker_has_capacity:
+            sum_w_flops -= picked_worker.flops
+    return s
+
+
 if __name__ == '__main__':
     dim = 16
     intra_node_width = 4.0
@@ -482,9 +623,9 @@ if __name__ == '__main__':
     realistic_scaling_factor = 0.43
     real_flops = int(math.ceil(realistic_scaling_factor * a100_theoretical_flop_per_ms))
 
-    w = []
+    workers_s = []
     for ii in range(adjacency.shape[0]):
-        w.append(Worker(ii, real_flops, mem))
+        workers_s.append(Worker(ii, real_flops, mem))
     n_exp = 64
     exp = []
     exp_flops = 16 * 4 * 2048 * (1024 ** 2)
@@ -506,7 +647,7 @@ if __name__ == '__main__':
                                p2p_buffer_size=p2p_buf_mb,
                                p2p_freq=p2p_fr,
                                all_reduce_buffer_size=all_r_buf,
-                               workers=w,
+                               workers=workers_s,
                                expert_workload=exp,
                                gamma_args=gamma_arguments)
     print(shard_spec.subsets())
