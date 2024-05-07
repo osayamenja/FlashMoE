@@ -95,6 +95,26 @@ class Worker:
             return False
         return self.worker_id == other.worker_id
 
+    def __ne__(self, other: Worker) -> bool:
+        assert isinstance(other, Worker)
+        return not self == other
+
+    def __lt__(self, other: Worker) -> bool:
+        assert isinstance(other, Worker)
+        return self.flops < other.flops
+
+    def __le__(self, other: Worker) -> bool:
+        assert isinstance(other, Worker)
+        return self.flops <= other.flops
+
+    def __gt__(self, other: Worker) -> bool:
+        assert isinstance(other, Worker)
+        return self.flops > other.flops
+
+    def __ge__(self, other: Worker) -> bool:
+        assert isinstance(other, Worker)
+        return self.flops >= other.flops
+
 
 class Expert:
     def __init__(self, compute_cost: int, expert_id: int = None):
@@ -123,7 +143,7 @@ class Expert:
         return e
 
     def __hash__(self) -> int:
-        return hash(self.expert_id)
+        return hash((self.compute_cost, self.expert_id))
 
     def __repr__(self) -> str:
         return f'Expert(id={self.expert_id}, compute_cost={self.compute_cost})'
@@ -131,26 +151,26 @@ class Expert:
     def __eq__(self, other: Expert) -> bool:
         if not isinstance(other, Expert):
             return False
-        return self.compute_cost == other.compute_cost
+        return self.compute_cost == other.compute_cost and self.expert_id == other.expert_id
 
     def __ne__(self, other: Expert) -> bool:
         return not self == other
 
     def __lt__(self, other: Expert) -> bool:
         assert isinstance(other, Expert)
-        return self.compute_cost < other.compute_cost
+        return (self.compute_cost, self.expert_id) < (other.compute_cost, other.expert_id)
 
     def __le__(self, other: Expert) -> bool:
         assert isinstance(other, Expert)
-        return self.compute_cost <= other.compute_cost
+        return (self.compute_cost, self.expert_id) <= (other.compute_cost, other.expert_id)
 
     def __gt__(self, other: Expert) -> bool:
         assert isinstance(other, Expert)
-        return self.compute_cost > other.compute_cost
+        return (self.compute_cost, self.expert_id) > (other.compute_cost, other.expert_id)
 
     def __ge__(self, other: Expert) -> bool:
         assert isinstance(other, Expert)
-        return self.compute_cost >= other.compute_cost
+        return (self.compute_cost, self.expert_id) >= (other.compute_cost, other.expert_id)
 
 
 class Group:
@@ -529,11 +549,16 @@ def match(budget: Expert, ss: SortedSet) -> Expert:
         return budget
     floor = ss.bisect_left(budget) - 1
     ceiling = ss.bisect_right(budget)
-    if floor >= 0 and ceiling <= len(ss):
+    if floor >= 0 and ceiling < len(ss):
         most_similar_cost = budget.cost_most_similar_to([ss[floor], ss[ceiling]])
         ss.discard(most_similar_cost)
         return most_similar_cost
-    return ss[floor] if floor >= 0 else ss[ceiling]
+    if floor >= 0:
+        most_similar_cost = ss[floor]
+    else:
+        most_similar_cost = ss[ceiling]
+    ss.discard(most_similar_cost)
+    return most_similar_cost
 
 
 def expert_assignment(workers: List[Worker], experts: List[Expert]) -> Dict[Worker, Set[int]]:
@@ -544,6 +569,8 @@ def expert_assignment(workers: List[Worker], experts: List[Expert]) -> Dict[Work
     n_workers = len(workers)
     n_experts = len(experts)
     s: Dict[Worker, Set[int]] = dict()
+    for w in workers:
+        s.update({w: set()})
 
     # Determination of singleton multi-sets
     skip_sort = len(set(workers)) == 1 and len(set(experts)) == 1
@@ -568,7 +595,7 @@ def expert_assignment(workers: List[Worker], experts: List[Expert]) -> Dict[Work
             m_w = mem_capacity[picked_worker]
             while budget > 0 and m_w > 0:
                 expert = experts[current_exp]
-                s.get(picked_worker, set()).add(expert.expert_id)
+                s.get(picked_worker).add(expert.expert_id)
                 m_w -= 1
                 budget -= 1
                 current_exp += 1
@@ -578,7 +605,7 @@ def expert_assignment(workers: List[Worker], experts: List[Expert]) -> Dict[Work
                 remaining_workers -= 1
         return s
 
-    workers.sort()
+    workers.sort(reverse=True)
     expert_compute_cost: SortedSet = SortedSet(experts)
     sum_w_flops = stream(workers).map(lambda worker: worker.flops).reduce(lambda flop1, flop2: flop1 + flop2)
     sum_e_cost = stream(experts).map(lambda x: x.compute_cost).reduce(lambda cost1, cost2: cost1 + cost2)
@@ -590,7 +617,7 @@ def expert_assignment(workers: List[Worker], experts: List[Expert]) -> Dict[Work
         allocated_budget = budget
         while budget > 0 and m_w > 0 and len(expert_compute_cost) > 0:
             expert = match(Expert(budget), expert_compute_cost)
-            s.get(picked_worker, set()).add(expert.expert_id)
+            s.get(picked_worker).add(expert.expert_id)
             m_w -= 1
             budget -= expert.compute_cost
         i = (i + 1) % n_workers
@@ -602,52 +629,16 @@ def expert_assignment(workers: List[Worker], experts: List[Expert]) -> Dict[Work
 
 
 if __name__ == '__main__':
-    dim = 16
-    intra_node_width = 4.0
-    adjacency = np.zeros((dim, dim, 2))
-    intra_node_cost = (0.009, 0.014)  # (ms, ms/MB)
-    inter_node_cost = (0.03, 0.054)
-    mem = 32
-
-    # Adjacency matrix
-    for ii in range(adjacency.shape[0]):
-        for jj in range(adjacency.shape[0]):
-            if ii != jj and math.floor(jj / intra_node_width) == math.floor(ii / intra_node_width):
-                # intra-node
-                adjacency[ii, jj] = intra_node_cost
-            else:
-                # inter-node
-                adjacency[ii, jj] = inter_node_cost
-
-    a100_theoretical_flop_per_ms = 312 * 1E9
-    realistic_scaling_factor = 0.43
-    real_flops = int(math.ceil(realistic_scaling_factor * a100_theoretical_flop_per_ms))
-
-    workers_s = []
-    for ii in range(adjacency.shape[0]):
-        workers_s.append(Worker(ii, real_flops, mem))
-    n_exp = 64
-    exp = []
-    exp_flops = 16 * 4 * 2048 * (1024 ** 2)
-    for ii in range(n_exp):
-        exp.append(exp_flops)
-    p2p_buf_mb = 16
-    p2p_fr = 4
-    all_r_buf = 512
-    gamma_arguments = {Group.NUM_LAYERS: 24,
-                       Group.GLOBAL_BATCH_SIZE: 256,
-                       Group.MINI_BATCH_SIZE: 4,
-                       Group.MOE_FREQUENCY: 2,
-                       Group.RECOMPUTATION_AMOUNT: 1}
-
-    shard_spec, inv = grigora2(a=adjacency,
-                               obj=expert_parallel_group_objective_function,
-                               all_reduce_func=all_reduce_function,
-                               gamma=gamma_function,
-                               p2p_buffer_size=p2p_buf_mb,
-                               p2p_freq=p2p_fr,
-                               all_reduce_buffer_size=all_r_buf,
-                               workers=workers_s,
-                               expert_workload=exp,
-                               gamma_args=gamma_arguments)
-    print(shard_spec.subsets())
+    experts_list: List[Expert] = [Expert(3, 0),
+                                  Expert(3, 1),
+                                  Expert(3, 2),
+                                  Expert(2, 3),
+                                  Expert(2, 4),
+                                  Expert(3, 5),
+                                  Expert(2, 6),
+                                  Expert(3, 7)]
+    workers_list: List[Worker] = [Worker(0, 42, 1),
+                                  Worker(1, 56, 5),
+                                  Worker(2, 68, 1),
+                                  Worker(3, 22, 3)]
+    print(expert_assignment(workers_list, experts_list))
