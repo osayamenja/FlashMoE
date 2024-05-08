@@ -341,7 +341,7 @@ class Group:
                     external_edges_by_node.update({updated_node: updated_ext_edge})
                     external_edges_by_group.update({updated_group: updated_ext_edge})
 
-        self.externalEdges = external_edges_by_group
+        self.externalEdges = external_edges_by_node
         return self, pruned_edges
 
     @staticmethod
@@ -501,8 +501,8 @@ def grigora2(a: np.ndarray, obj: Callable[[Dict[str, float]], float],
             if groups.connected(e.node1, e.node2):
                 global_external_edges.discard(e)
         else:
-            group_info[groups[group_n1]].externalEdges.pop(n2)
-            group_info[groups[group_n2]].externalEdges.pop(n1)
+            group_info[group_n1].externalEdges.pop(n2)
+            group_info[group_n2].externalEdges.pop(n1)
     return groups, invalid_groups
 
 
@@ -629,16 +629,70 @@ def expert_assignment(workers: List[Worker], experts: List[Expert]) -> Dict[Work
 
 
 if __name__ == '__main__':
-    experts_list: List[Expert] = [Expert(3, 0),
-                                  Expert(3, 1),
-                                  Expert(3, 2),
-                                  Expert(2, 3),
-                                  Expert(2, 4),
-                                  Expert(3, 5),
-                                  Expert(2, 6),
-                                  Expert(3, 7)]
-    workers_list: List[Worker] = [Worker(0, 42, 1),
-                                  Worker(1, 56, 5),
-                                  Worker(2, 68, 1),
-                                  Worker(3, 22, 3)]
-    print(expert_assignment(workers_list, experts_list))
+    dim = 16
+    intra_node_width = 4.0
+
+    adjacency = np.zeros((dim, dim, 2))
+    intra_node_cost = (0.009, 0.014)  # (ms, ms/MB)
+    inter_node_cost = (0.03, 0.054)
+
+    for ii in range(adjacency.shape[0]):
+        for jj in range(adjacency.shape[0]):
+            if ii != jj and math.floor(jj / intra_node_width) == math.floor(ii / intra_node_width):
+                # intra-node
+                adjacency[ii, jj] = intra_node_cost
+            else:
+                # inter-node
+                adjacency[ii, jj] = inter_node_cost
+
+    a100_theoretical_flop_per_ms = 312 * 1E9
+    realistic_scaling_factor = 0.43
+    real_flops = int(math.ceil(realistic_scaling_factor * a100_theoretical_flop_per_ms))
+
+    mem = 32
+    g_workers = []
+    for ii in range(adjacency.shape[0]):
+        g_workers.append(Worker(ii, real_flops, mem))
+
+    n_exp = 64
+    exp = []
+    ml_experts = []
+    exp_flops = 16 * 4 * 2048 * (1024 ** 2)
+    for ii in range(n_exp):
+        exp.append(exp_flops)
+        ml_experts.append(Expert(exp_flops, ii))
+
+    p2p_buf_mb = 16
+    p2p_fr = 4
+    all_r_buf = 512
+
+    gamma_arguments = {Group.NUM_LAYERS: 24,
+                       Group.GLOBAL_BATCH_SIZE: 256,
+                       Group.MINI_BATCH_SIZE: 4,
+                       Group.MOE_FREQUENCY: 2,
+                       Group.RECOMPUTATION_AMOUNT: 1}
+
+    shard_spec, inv = grigora2(a=adjacency,
+                               obj=expert_parallel_group_objective_function,
+                               all_reduce_func=all_reduce_function,
+                               gamma=gamma_function,
+                               p2p_buffer_size=p2p_buf_mb,
+                               p2p_freq=p2p_fr,
+                               all_reduce_buffer_size=all_r_buf,
+                               workers=g_workers,
+                               expert_workload=exp,
+                               gamma_args=gamma_arguments)
+    print(shard_spec.subsets())
+    # experts_list: List[Expert] = [Expert(3, 0),
+    #                               Expert(3, 1),
+    #                               Expert(3, 2),
+    #                               Expert(2, 3),
+    #                               Expert(2, 4),
+    #                               Expert(3, 5),
+    #                               Expert(2, 6),
+    #                               Expert(3, 7)]
+    # workers_list: List[Worker] = [Worker(0, 42, 1),
+    #                               Worker(1, 56, 5),
+    #                               Worker(2, 68, 1),
+    #                               Worker(3, 22, 3)]
+    # print(expert_assignment(workers_list, experts_list))
