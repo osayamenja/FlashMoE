@@ -196,7 +196,6 @@ class Group:
 
     def __init__(self, group_id: int,
                  seed_node_compute: int,
-                 external_edges: Dict[int, Edge],
                  obj: Callable[[Dict[str, float]], float],
                  all_reduce_func: Callable[[Dict[str, float]], float],
                  gamma: Callable[[Dict[str, float]], float],
@@ -206,11 +205,11 @@ class Group:
                  mem_capacity: int,
                  p2p_frequency: int,
                  num_experts: int,
-                 world: int):
+                 world: int,
+                 gamma_val: float):
         self.groupID = group_id
         self.internalP2PTimes: Dict[int, Tuple[float, float]] = {group_id: (0.0, 0.0)}
         self.memCapacity = mem_capacity
-        self.externalEdges = external_edges
         self.objectiveFunction = obj
         self.allReduceFunc = all_reduce_func
         self.gamma = gamma
@@ -220,7 +219,8 @@ class Group:
         self.numExperts = num_experts
         self.totalComputeFLOPS = seed_node_compute
         self.eta = p2p_frequency
-        self.currentObjective = self.objectiveFunction(self.__construct_obj_args(self.totalComputeFLOPS,
+        self.currentObjective = self.objectiveFunction(self.__construct_obj_args(gamma_val,
+                                                                                 self.totalComputeFLOPS,
                                                                                  self.totalExpertFlops,
                                                                                  self.eta,
                                                                                  self.p2pTime,
@@ -233,27 +233,30 @@ class Group:
         self.cachedEffectiveWorld = 1 if self.memCapacity >= self.numExperts else 0
         self.world = world
 
+    def num_nodes(self):
+        return len(self.internalP2PTimes)
+
     def evaluate_objective(self, neighbor_group: Group, all_reduce_func_args: Dict[str, float],
                            gamma_args: Dict[str, int], adj: np.ndarray, p2p_buffer: int) -> bool:
-        # effective world
-        effective_world = gamma_args[Group.EFFECTIVE_WORLD]
+        prev_effective_world = gamma_args[Group.EFFECTIVE_WORLD]
+        effective_world = prev_effective_world
         if self.memCapacity + neighbor_group.memCapacity >= self.numExperts:
             if effective_world < self.world and self.memCapacity < self.numExperts:
-                effective_world += 1
-            if effective_world < self.world and neighbor_group.memCapacity < self.memCapacity:
-                effective_world += 1
+                effective_world += self.num_nodes()
+            if effective_world < self.world and neighbor_group.memCapacity < self.numExperts:
+                effective_world += neighbor_group.num_nodes()
 
         gamma_args[Group.EFFECTIVE_WORLD] = effective_world
         self.cachedEffectiveWorld = effective_world
-        all_reduce_func_args[Group.GAMMA] = self.gamma(gamma_args)
-
         self.allReduceTime = self.allReduceFunc(all_reduce_func_args)
-        n_nodes = len(self.internalP2PTimes) + len(neighbor_group.internalP2PTimes)
+
+        n_nodes = self.num_nodes() + neighbor_group.num_nodes()
         global_p2p_time = self.evaluate_global_p2p_time(neighbor_group,
                                                         n_nodes=n_nodes,
                                                         adj=adj,
                                                         p2p_buffer=p2p_buffer)
-        args = self.__construct_obj_args(total_compute_flops=self.totalComputeFLOPS + neighbor_group.totalComputeFLOPS,
+        args = self.__construct_obj_args(gamma=self.gamma(gamma_args),
+                                         total_compute_flops=self.totalComputeFLOPS + neighbor_group.totalComputeFLOPS,
                                          total_expert_flops=self.totalExpertFlops,
                                          communication_frequency=self.eta,
                                          communication_cost=global_p2p_time,
@@ -261,6 +264,7 @@ class Group:
                                          all_reduce_time=self.allReduceTime,
                                          num_experts=self.numExperts)
         self.cachedObjective = self.objectiveFunction(args)
+        gamma_args[Group.EFFECTIVE_WORLD] = prev_effective_world  # restore global state
         if math.isinf(self.currentObjective):
             return True
         return self.cachedObjective < self.currentObjective
@@ -269,16 +273,6 @@ class Group:
         for nodes in [self.internalP2PTimes, child.internalP2PTimes]:
             for node in nodes:
                 self.internalP2PTimes.update({node: self.cachedP2PTime[node]})
-
-    def update_all_reduce_time(self, all_reduce_time: float):
-        self.allReduceTime = all_reduce_time
-        self.currentObjective = self.objectiveFunction(self.__construct_obj_args(self.totalComputeFLOPS,
-                                                                                 self.totalExpertFlops,
-                                                                                 self.eta,
-                                                                                 self.p2pTime,
-                                                                                 self.memCapacity,
-                                                                                 self.allReduceTime,
-                                                                                 self.numExperts))
 
     def evaluate_global_p2p_time(self, neighbor_group: Group, adj: np.ndarray, n_nodes: int, p2p_buffer: int) -> float:
         max_p2p_time = 0.0
@@ -304,55 +298,24 @@ class Group:
 
         return max_p2p_time
 
-    def subsume_group(self, internal_node: int, external_node: int,
-                      child: Group, groups: DisjointSet,
-                      global_group_info: Dict[int, Group]) -> Tuple[Group, Set[Edge]]:
+    def subsume_group(self, child: Group) -> Group:
         self.update_p2p_time(child)
         self.currentObjective = self.cachedObjective
         self.memCapacity = self.memCapacity + child.memCapacity
         self.totalComputeFLOPS = self.totalComputeFLOPS + child.totalComputeFLOPS
-
-        external_edges_by_group: Dict[int, Edge] = dict()
-        external_edges_by_node: Dict[int, Edge] = dict()
-        pruned_edges: Set[Edge] = set()
-        group_parent = groups[internal_node]
-
-        for ext_info in [(self.externalEdges, internal_node), (child.externalEdges, external_node)]:
-            ext_edges = ext_info[0]
-            current_node = ext_info[1]
-            for node in ext_edges:
-                updated_group = groups[node]
-                if not groups.connected(group_parent, node):
-                    ext_edge = external_edges_by_group.get(updated_group, None)
-                    updated_ext_edge = ext_edges[node]
-                    updated_node = updated_ext_edge.get_neighbor(current_node)
-                    if ext_edge is not None:
-                        pruned_edge = ext_edge
-                        pruned_neighbor = pruned_edge.get_neighbor(internal_node)
-                        if ext_edge.weight >= updated_ext_edge.weight:
-                            pruned_edge = updated_ext_edge
-                            updated_ext_edge = ext_edge
-                            updated_node = updated_ext_edge.get_neighbor(internal_node)
-                            pruned_neighbor = pruned_edge.get_neighbor(external_node)
-
-                        pruned_edges.add(pruned_edge)
-                        global_group_info[groups[pruned_neighbor]].externalEdges.pop(
-                            pruned_edge.get_neighbor(pruned_neighbor))
-                    external_edges_by_node.update({updated_node: updated_ext_edge})
-                    external_edges_by_group.update({updated_group: updated_ext_edge})
-
-        self.externalEdges = external_edges_by_node
-        return self, pruned_edges
+        return self
 
     @staticmethod
-    def __construct_obj_args(total_compute_flops: int,
+    def __construct_obj_args(gamma: float,
+                             total_compute_flops: int,
                              total_expert_flops: int,
                              communication_frequency: int,
                              communication_cost: float,
                              mem_capacity: int,
                              all_reduce_time: float,
                              num_experts: int) -> Dict[str, float]:
-        return {Group.TOTAL_COMPUTE: total_compute_flops,
+        return {Group.GAMMA: gamma,
+                Group.TOTAL_COMPUTE: total_compute_flops,
                 Group.TOTAL_EXPERT_WORKLOAD: total_expert_flops,
                 Group.COMMUNICATION_FREQUENCY: communication_frequency,
                 Group.COMMUNICATION_COST: communication_cost,
@@ -361,12 +324,8 @@ class Group:
                 Group.NUM_EXPERTS: num_experts}
 
     @staticmethod
-    def construct_all_reduce_args(gamma: float,
-                                  num_groups: int,
-                                  bottleneck_edge_time: float) -> Dict[str, float]:
-        return {Group.GAMMA: gamma,
-                Group.NUM_GROUPS: num_groups,
-                Group.BOTTLENECK_TIME: bottleneck_edge_time}
+    def construct_all_reduce_args(num_groups: int, bottleneck_edge_time: float) -> Dict[str, float]:
+        return {Group.NUM_GROUPS: num_groups, Group.BOTTLENECK_TIME: bottleneck_edge_time}
 
 
 def grigora2(a: np.ndarray, obj: Callable[[Dict[str, float]], float],
@@ -392,22 +351,6 @@ def grigora2(a: np.ndarray, obj: Callable[[Dict[str, float]], float],
 
     gamma_args.update({Group.EFFECTIVE_WORLD: len(workers) - len(invalid_groups)})
 
-    for i in range(len(workers)):
-        group_info.update({i: Group(group_id=i,
-                                    seed_node_compute=workers[i].flops,
-                                    external_edges=dict(),
-                                    obj=obj,
-                                    all_reduce_func=all_reduce_func,
-                                    p2p_time=0,
-                                    all_reduce_time=0,  # deferred for later update
-                                    expert_workload=exp_workload,
-                                    p2p_frequency=p2p_freq,
-                                    mem_capacity=workers[i].mem_capacity,
-                                    num_experts=len(expert_workload),
-                                    world=len(workers),
-                                    gamma=gamma)})
-
-    # We assume an undirected, simple graph.
     # Upper triangular traversal completes in time proportional to n*(n-1)/ 2 rather than n^2
     for i in range(a.shape[0]):
         for j in range(i + 1, a.shape[0]):
@@ -416,93 +359,95 @@ def grigora2(a: np.ndarray, obj: Callable[[Dict[str, float]], float],
                 beta: float = a.item((i, j, 1))
                 p2p_edge = Edge(i, j, weight=p2p_transfer_time(alpha=alpha, beta=beta, buffer_size=p2p_buffer_size))
                 global_candidate_edges.add(p2p_edge)
-                group_info[i].externalEdges.update({j: p2p_edge})
-                group_info[j].externalEdges.update({i: p2p_edge})
                 global_external_edges.add(
                     Edge(i, j, weight=all_reduce_bottleneck_time(alpha=alpha,
                                                                  beta=beta, buffer_size=all_reduce_buffer_size,
                                                                  num_participants=lower_bound_num_groups_ar)))
 
     init_ext_edge = global_external_edges[-1]
+    n_groups = len(workers) - len(invalid_groups)
     b_t = all_reduce_bottleneck_time(alpha=a.item(init_ext_edge.node1, init_ext_edge.node2, 0),
                                      beta=a.item(init_ext_edge.node1, init_ext_edge.node2, 1),
                                      buffer_size=all_reduce_buffer_size,
-                                     num_participants=(len(group_info) - len(invalid_groups)))
-    a_r_args = Group.construct_all_reduce_args(gamma=gamma(gamma_args),
-                                               num_groups=(len(group_info) - len(invalid_groups)),
+                                     num_participants=n_groups)
+    a_r_args = Group.construct_all_reduce_args(num_groups=n_groups,
                                                bottleneck_edge_time=b_t)
     a_r_time = all_reduce_func(a_r_args)
-    for group_id in group_info:
-        group_info[group_id].update_all_reduce_time(a_r_time)
+    gamma_init = gamma(gamma_args)
+    for i in range(len(workers)):
+        group_info.update({i: Group(group_id=i,
+                                    seed_node_compute=workers[i].flops,
+                                    obj=obj,
+                                    all_reduce_func=all_reduce_func,
+                                    p2p_time=0,
+                                    all_reduce_time=a_r_time,
+                                    expert_workload=exp_workload,
+                                    p2p_frequency=p2p_freq,
+                                    mem_capacity=workers[i].mem_capacity,
+                                    num_experts=len(expert_workload),
+                                    world=len(workers),
+                                    gamma=gamma,
+                                    gamma_val=gamma_init)})
 
     while len(global_candidate_edges) > 0:
         candidate_edge = global_candidate_edges.pop(0)
-        n1 = candidate_edge.node1
-        n2 = candidate_edge.node2
-        group_n1 = groups[n1]
-        group_n2 = groups[n2]
+        if not groups.connected(candidate_edge.node1, candidate_edge.node2):
+            n1 = candidate_edge.node1
+            n2 = candidate_edge.node2
+            group_n1 = groups[n1]
+            group_n2 = groups[n2]
 
-        e = global_external_edges[-1]
-        a_r_args[Group.NUM_GROUPS] = len(group_info) - len(invalid_groups) - 1
-        a_r_args[Group.BOTTLENECK_TIME] = all_reduce_bottleneck_time(alpha=a.item((e.node1, e.node2, 0)),
-                                                                     beta=a.item((e.node1, e.node2, 1)),
-                                                                     buffer_size=all_reduce_buffer_size,
-                                                                     num_participants=a_r_args[Group.NUM_GROUPS])
+            e = global_external_edges[-1]
+            while groups.connected(e.node1, e.node2):
+                global_external_edges.pop()
+                e = global_external_edges[-1]
 
-        group1_approves_merge = group_info[group_n1].evaluate_objective(neighbor_group=group_info[group_n2],
-                                                                        all_reduce_func_args=a_r_args,
-                                                                        gamma_args=gamma_args,
-                                                                        adj=a,
-                                                                        p2p_buffer=p2p_buffer_size)
-        group2_approves_merge = group_info[group_n2].evaluate_objective(neighbor_group=group_info[group_n1],
-                                                                        all_reduce_func_args=a_r_args,
-                                                                        gamma_args=gamma_args,
-                                                                        adj=a,
-                                                                        p2p_buffer=p2p_buffer_size)
-        if group1_approves_merge and group2_approves_merge:
-            groups.merge(group_n1, group_n2)
-            if group_n1 == groups[group_n1]:
-                parent_group = group_n1
-                internal_n = n1
-                external_n = n2
-                child_group = group_n2
-            else:
-                parent_group = group_n2
-                internal_n = n2
-                external_n = n1
-                child_group = group_n1
+            n_groups = len(group_info) - len(invalid_groups)
+            if group_n1 in invalid_groups and group_n2 in invalid_groups:
+                if group_info[group_n1].memCapacity + group_info[group_n2].memCapacity >= len(expert_workload):
+                    n_groups += 1
+            elif group_n1 not in invalid_groups and group_n2 not in invalid_groups:
+                n_groups -= 1
 
-            merged_group, pruned_edges = group_info[parent_group].subsume_group(internal_node=internal_n,
-                                                                                external_node=external_n,
-                                                                                child=group_info[child_group],
-                                                                                groups=groups,
-                                                                                global_group_info=group_info)
-            pruned_edges.add(candidate_edge)  # already merged
-            group_info.update({parent_group: merged_group})
-            group_info.pop(child_group)
+            a_r_args[Group.NUM_GROUPS] = n_groups
+            a_r_args[Group.BOTTLENECK_TIME] = all_reduce_bottleneck_time(alpha=a.item((e.node1, e.node2, 0)),
+                                                                         beta=a.item((e.node1, e.node2, 1)),
+                                                                         buffer_size=all_reduce_buffer_size,
+                                                                         num_participants=a_r_args[Group.NUM_GROUPS])
 
-            if merged_group.memCapacity >= len(expert_workload):
-                invalid_groups.discard(parent_group)
-                invalid_groups.discard(child_group)
-                gamma_args[Group.EFFECTIVE_WORLD] = min(len(workers), int(gamma_args[Group.EFFECTIVE_WORLD]) + 2)
-            else:
-                invalid_groups.discard(child_group)
+            group1_approves_merge = group_info[group_n1].evaluate_objective(neighbor_group=group_info[group_n2],
+                                                                            all_reduce_func_args=a_r_args,
+                                                                            gamma_args=gamma_args,
+                                                                            adj=a,
+                                                                            p2p_buffer=p2p_buffer_size)
+            group2_approves_merge = group_info[group_n2].evaluate_objective(neighbor_group=group_info[group_n1],
+                                                                            all_reduce_func_args=a_r_args,
+                                                                            gamma_args=gamma_args,
+                                                                            adj=a,
+                                                                            p2p_buffer=p2p_buffer_size)
+            if group1_approves_merge and group2_approves_merge:
+                groups.merge(group_n1, group_n2)
+                if group_n1 == groups[group_n1]:
+                    parent_group = group_n1
+                    child_group = group_n2
+                else:
+                    parent_group = group_n2
+                    child_group = group_n1
 
-            for edge in pruned_edges:
-                global_candidate_edges.discard(edge)
-                ext_alpha: float = a.item((edge.node1, edge.node2, 0))
-                ext_beta: float = a.item((edge.node1, edge.node2, 1))
-                global_external_edges.discard(
-                    Edge(edge.node1, edge.node2,
-                         weight=all_reduce_bottleneck_time(alpha=ext_alpha,
-                                                           beta=ext_beta,
-                                                           buffer_size=all_reduce_buffer_size,
-                                                           num_participants=lower_bound_num_groups_ar)))
-            if groups.connected(e.node1, e.node2):
-                global_external_edges.discard(e)
-        else:
-            group_info[group_n1].externalEdges.pop(n2)
-            group_info[group_n2].externalEdges.pop(n1)
+                effective_world_size = gamma_args[Group.EFFECTIVE_WORLD]
+                if group_info[parent_group].memCapacity + group_info[child_group].memCapacity >= len(expert_workload):
+                    if parent_group in invalid_groups:
+                        invalid_groups.discard(parent_group)
+                        effective_world_size += group_info[parent_group].num_nodes()
+                    if child_group in invalid_groups:
+                        invalid_groups.discard(child_group)
+                        effective_world_size += group_info[child_group].num_nodes()
+                else:
+                    invalid_groups.discard(child_group)
+                gamma_args[Group.EFFECTIVE_WORLD] = effective_world_size
+                merged_group = group_info[parent_group].subsume_group(child=group_info[child_group])
+                group_info.update({parent_group: merged_group})
+                group_info.pop(child_group)
     return groups, invalid_groups
 
 
@@ -527,20 +472,18 @@ def gamma_function(args: Dict[str, float]):
 
 
 def all_reduce_function(args: Dict[str, float]) -> float:
-    if math.isinf(args[Group.GAMMA]):
-        return 0
     # Per Rolf Rabenseifner, https://link.springer.com/content/pdf/10.1007/978-3-540-24685-5_1.pdf
     all_reduce_time = 2 * (args[Group.NUM_GROUPS] - 1) * args[Group.BOTTLENECK_TIME]
-    return all_reduce_time / args[Group.GAMMA]
+    return all_reduce_time
 
 
 def expert_parallel_group_objective_function(args: Dict[str, float]) -> float:
     if args[Group.MEM_CAPACITY] < args[Group.NUM_EXPERTS]:
         return math.inf
 
-    return ((args[Group.TOTAL_EXPERT_WORKLOAD] / args[Group.TOTAL_COMPUTE]) +
-            (args[Group.COMMUNICATION_FREQUENCY] * args[Group.COMMUNICATION_COST]) +
-            args[Group.ALL_REDUCE_TIME])
+    return args[Group.GAMMA] * ((args[Group.TOTAL_EXPERT_WORKLOAD] / args[Group.TOTAL_COMPUTE]) +
+                                (args[Group.COMMUNICATION_FREQUENCY] * args[Group.COMMUNICATION_COST]) +
+                                args[Group.ALL_REDUCE_TIME])
 
 
 def match(budget: Expert, ss: SortedSet) -> Expert:
@@ -638,12 +581,13 @@ if __name__ == '__main__':
 
     for ii in range(adjacency.shape[0]):
         for jj in range(adjacency.shape[0]):
-            if ii != jj and math.floor(jj / intra_node_width) == math.floor(ii / intra_node_width):
-                # intra-node
-                adjacency[ii, jj] = intra_node_cost
-            else:
-                # inter-node
-                adjacency[ii, jj] = inter_node_cost
+            if ii != jj:
+                if math.floor(jj / intra_node_width) == math.floor(ii / intra_node_width):
+                    # intra-node
+                    adjacency[ii, jj] = intra_node_cost
+                else:
+                    # inter-node
+                    adjacency[ii, jj] = inter_node_cost
 
     a100_theoretical_flop_per_ms = 312 * 1E9
     realistic_scaling_factor = 0.43
