@@ -486,7 +486,7 @@ def expert_parallel_group_objective_function(args: Dict[str, float]) -> float:
                                 args[Group.ALL_REDUCE_TIME])
 
 
-def match(budget: Expert, ss: SortedSet) -> Expert:
+def best_fit(budget: Expert, ss: SortedSet) -> Expert:
     if budget in ss:
         ss.discard(budget)
         return budget
@@ -559,7 +559,7 @@ def expert_assignment(workers: List[Worker], experts: List[Expert]) -> Dict[Work
         budget = int(math.ceil((picked_worker.flops * sum_e_cost) / sum_w_flops))
         allocated_budget = budget
         while budget > 0 and m_w > 0 and len(expert_compute_cost) > 0:
-            expert = match(Expert(budget), expert_compute_cost)
+            expert = best_fit(Expert(budget), expert_compute_cost)
             s.get(picked_worker).add(expert.expert_id)
             m_w -= 1
             budget -= expert.compute_cost
