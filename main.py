@@ -206,7 +206,10 @@ class Group:
                  p2p_frequency: int,
                  num_experts: int,
                  world: int,
-                 gamma_val: float):
+                 gamma_val: float,
+                 neighbors: List[Tuple[int, int]]):
+        self.p2pTimes: List[Tuple[int, int]] = neighbors
+        self.cachedP2PTimes: List[Tuple[int, int]] = neighbors
         self.groupID = group_id
         self.internalP2PTimes: Dict[int, Tuple[float, float]] = {group_id: (0.0, 0.0)}
         self.memCapacity = mem_capacity
@@ -230,14 +233,14 @@ class Group:
 
         self.cachedObjective = self.currentObjective
         self.cachedP2PTime: Dict[int, Tuple[float, float]] = dict()
-        self.cachedEffectiveWorld = 1 if self.memCapacity >= self.numExperts else 0
+        self.cachedAllReduceTime = self.allReduceTime
         self.world = world
 
-    def num_nodes(self):
+    def num_nodes(self) -> int:
         return len(self.internalP2PTimes)
 
-    def evaluate_objective(self, neighbor_group: Group, all_reduce_func_args: Dict[str, float],
-                           gamma_args: Dict[str, int], adj: np.ndarray, p2p_buffer: int) -> bool:
+    def evaluate_merge(self, neighbor_group: Group, all_reduce_func_args: Dict[str, float],
+                       gamma_args: Dict[str, int], adj: np.ndarray, p2p_buffer: int) -> bool:
         prev_effective_world = gamma_args[Group.EFFECTIVE_WORLD]
         effective_world = prev_effective_world
         if self.memCapacity + neighbor_group.memCapacity >= self.numExperts:
@@ -247,8 +250,9 @@ class Group:
                 effective_world += neighbor_group.num_nodes()
 
         gamma_args[Group.EFFECTIVE_WORLD] = effective_world
-        self.cachedEffectiveWorld = effective_world
-        self.allReduceTime = self.allReduceFunc(all_reduce_func_args)
+        current_all_reduce_time = self.allReduceFunc(all_reduce_func_args)
+        self.cache_all_reduce_time(current_all_reduce_time)
+        neighbor_group.cache_all_reduce_time(current_all_reduce_time)
 
         n_nodes = self.num_nodes() + neighbor_group.num_nodes()
         global_p2p_time = self.evaluate_global_p2p_time(neighbor_group,
@@ -263,13 +267,20 @@ class Group:
                                          mem_capacity=self.memCapacity + neighbor_group.memCapacity,
                                          all_reduce_time=self.allReduceTime,
                                          num_experts=self.numExperts)
-        self.cachedObjective = self.objectiveFunction(args)
-        gamma_args[Group.EFFECTIVE_WORLD] = prev_effective_world  # restore global state
-        if math.isinf(self.currentObjective):
-            return True
-        return self.cachedObjective < self.currentObjective
+        neighbor_group.cachedObjective = self.cachedObjective = self.objectiveFunction(args)
 
-    def update_p2p_time(self, child: Group):
+        gamma_args[Group.EFFECTIVE_WORLD] = prev_effective_world  # restore global state
+
+        return is_net_improvement(self.get_current_objective(), neighbor_group.get_current_objective(),
+                                  self.cachedObjective)
+
+    def get_current_objective(self) -> float:
+        return (self.currentObjective - self.allReduceTime) + self.cachedAllReduceTime
+
+    def cache_all_reduce_time(self, all_reduce_time: float) -> None:
+        self.cachedAllReduceTime = all_reduce_time
+
+    def update_p2p_time(self, child: Group) -> None:
         for nodes in [self.internalP2PTimes, child.internalP2PTimes]:
             for node in nodes:
                 self.internalP2PTimes.update({node: self.cachedP2PTime[node]})
@@ -279,30 +290,39 @@ class Group:
         for nodes in [self.internalP2PTimes, neighbor_group.internalP2PTimes]:
             for node in nodes:
                 self.cachedP2PTime.update({node: nodes[node]})
+                neighbor_group.cachedP2PTime.update({node: nodes[node]})
 
         for parent_node in self.internalP2PTimes:
             for child_node in neighbor_group.internalP2PTimes:
-                details = self.cachedP2PTime[parent_node]
-                p_alpha_sum = details[0] + adj.item(parent_node, child_node, 0)
-                p_beta_sum = details[1] + adj.item(parent_node, child_node, 1)
-                self.cachedP2PTime[parent_node] = (p_alpha_sum, p_beta_sum)
-
-                details = self.cachedP2PTime[child_node]
-                c_alpha_sum = details[0] + adj.item(parent_node, child_node, 0)
-                c_beta_sum = details[1] + adj.item(parent_node, child_node, 1)
-                self.cachedP2PTime[child_node] = (c_alpha_sum, c_beta_sum)
+                self.__update_cached_p2p_time(neighbor_group, parent_node,
+                                              next_alpha=adj.item(parent_node, child_node, 0),
+                                              next_beta=adj.item(parent_node, child_node, 1))
+                self.__update_cached_p2p_time(neighbor_group, child_node,
+                                              next_alpha=adj.item(parent_node, child_node, 0),
+                                              next_beta=adj.item(parent_node, child_node, 1))
+                parent_details = self.cachedP2PTime[parent_node]
+                child_details = self.cachedP2PTime[child_node]
                 split_buf = p2p_buffer / n_nodes
                 max_p2p_time = max(max_p2p_time,
-                                   p2p_transfer_time(p_alpha_sum, p_beta_sum, buffer_size=split_buf),
-                                   p2p_transfer_time(c_alpha_sum, c_beta_sum, buffer_size=split_buf))
+                                   p2p_transfer_time(parent_details[0], parent_details[1], buffer_size=split_buf),
+                                   p2p_transfer_time(child_details[0], child_details[1], buffer_size=split_buf))
 
         return max_p2p_time
+
+    def __update_cached_p2p_time(self, neighbor_group: Group, node: int, next_alpha: float,
+                                 next_beta: float) -> Tuple[float, float]:
+        details = self.cachedP2PTime[node]
+        updated_alpha = details[0] + next_alpha
+        updated_beta = details[1] + next_beta
+        neighbor_group.cachedP2PTime[node] = self.cachedP2PTime[node] = (updated_alpha, updated_beta)
+        return updated_alpha, updated_beta
 
     def subsume_group(self, child: Group) -> Group:
         self.update_p2p_time(child)
         self.currentObjective = self.cachedObjective
         self.memCapacity = self.memCapacity + child.memCapacity
         self.totalComputeFLOPS = self.totalComputeFLOPS + child.totalComputeFLOPS
+        self.allReduceTime = self.cachedAllReduceTime
         return self
 
     @staticmethod
@@ -328,16 +348,16 @@ class Group:
         return {Group.NUM_GROUPS: num_groups, Group.BOTTLENECK_TIME: bottleneck_edge_time}
 
 
-def grigora2(a: np.ndarray, obj: Callable[[Dict[str, float]], float],
-             all_reduce_func: Callable[[Dict[str, float]], float],
-             gamma: Callable[[Dict[str, float]], float],
-             p2p_buffer_size: int,
-             p2p_freq: int,
-             all_reduce_buffer_size: int,
-             workers: List[Worker],
-             expert_workload: list,
-             gamma_args: Dict[str, int]) -> Tuple[DisjointSet, Set[int]]:
-    lower_bound_num_groups_ar: Final[int] = 2  # why 2? lower bound argument
+def lysi_group(a: np.ndarray, obj: Callable[[Dict[str, float]], float],
+               all_reduce_func: Callable[[Dict[str, float]], float],
+               gamma: Callable[[Dict[str, float]], float],
+               p2p_buffer_size: int,
+               p2p_freq: int,
+               all_reduce_buffer_size: int,
+               workers: List[Worker],
+               expert_workload: list,
+               gamma_args: Dict[str, int]) -> List[Set[int]]:
+    lower_bound_num_groups_ar: Final[int] = 2
     invalid_groups: Set[int] = set()
     for worker in workers:
         if worker.mem_capacity < len(expert_workload):
@@ -387,7 +407,8 @@ def grigora2(a: np.ndarray, obj: Callable[[Dict[str, float]], float],
                                     num_experts=len(expert_workload),
                                     world=len(workers),
                                     gamma=gamma,
-                                    gamma_val=gamma_init)})
+                                    gamma_val=gamma_init,
+                                    neighbors=a[i].tolist())})
 
     while len(global_candidate_edges) > 0:
         candidate_edge = global_candidate_edges.pop(0)
@@ -415,17 +436,12 @@ def grigora2(a: np.ndarray, obj: Callable[[Dict[str, float]], float],
                                                                          buffer_size=all_reduce_buffer_size,
                                                                          num_participants=a_r_args[Group.NUM_GROUPS])
 
-            group1_approves_merge = group_info[group_n1].evaluate_objective(neighbor_group=group_info[group_n2],
-                                                                            all_reduce_func_args=a_r_args,
-                                                                            gamma_args=gamma_args,
-                                                                            adj=a,
-                                                                            p2p_buffer=p2p_buffer_size)
-            group2_approves_merge = group_info[group_n2].evaluate_objective(neighbor_group=group_info[group_n1],
-                                                                            all_reduce_func_args=a_r_args,
-                                                                            gamma_args=gamma_args,
-                                                                            adj=a,
-                                                                            p2p_buffer=p2p_buffer_size)
-            if group1_approves_merge and group2_approves_merge:
+            should_merge = group_info[group_n1].evaluate_merge(neighbor_group=group_info[group_n2],
+                                                               all_reduce_func_args=a_r_args,
+                                                               gamma_args=gamma_args,
+                                                               adj=a,
+                                                               p2p_buffer=p2p_buffer_size)
+            if should_merge:
                 groups.merge(group_n1, group_n2)
                 if group_n1 == groups[group_n1]:
                     parent_group = group_n1
@@ -448,7 +464,19 @@ def grigora2(a: np.ndarray, obj: Callable[[Dict[str, float]], float],
                 merged_group = group_info[parent_group].subsume_group(child=group_info[child_group])
                 group_info.update({parent_group: merged_group})
                 group_info.pop(child_group)
-    return groups, invalid_groups
+
+    result: List[Set[int]] = []
+    for subset in groups.subsets():
+        selected = next(iter(subset))
+        if groups[selected] not in invalid_groups:
+            result.append(subset)
+    return result
+
+
+def is_net_improvement(obj_1: float, obj_2: float, obj_1_2: float) -> bool:
+    if math.isinf(obj_1) and math.isinf(obj_2):
+        return True
+    return (obj_1_2 * (1 / obj_1 + 1 / obj_2)) <= 2
 
 
 def p2p_transfer_time(alpha: float, beta: float, buffer_size: float) -> float:
@@ -480,10 +508,9 @@ def all_reduce_function(args: Dict[str, float]) -> float:
 def expert_parallel_group_objective_function(args: Dict[str, float]) -> float:
     if args[Group.MEM_CAPACITY] < args[Group.NUM_EXPERTS]:
         return math.inf
-
-    return args[Group.GAMMA] * ((args[Group.TOTAL_EXPERT_WORKLOAD] / args[Group.TOTAL_COMPUTE]) +
-                                (args[Group.COMMUNICATION_FREQUENCY] * args[Group.COMMUNICATION_COST]) +
-                                args[Group.ALL_REDUCE_TIME])
+    moe_layer_time = args[Group.GAMMA] * ((args[Group.TOTAL_EXPERT_WORKLOAD] / args[Group.TOTAL_COMPUTE]) +
+                                          (args[Group.COMMUNICATION_FREQUENCY] * args[Group.COMMUNICATION_COST]))
+    return moe_layer_time + args[Group.ALL_REDUCE_TIME]
 
 
 def best_fit(budget: Expert, ss: SortedSet) -> Expert:
@@ -504,7 +531,7 @@ def best_fit(budget: Expert, ss: SortedSet) -> Expert:
     return most_similar_cost
 
 
-def expert_assignment(workers: List[Worker], experts: List[Expert]) -> Dict[Worker, Set[int]]:
+def lysi_assign(workers: List[Worker], experts: List[Expert]) -> Dict[Worker, Set[int]]:
     mem_capacity: Dict[Worker, int] = dict()
     for worker1 in workers:
         mem_capacity.update({worker1: worker1.mem_capacity})
@@ -598,7 +625,7 @@ if __name__ == '__main__':
     for ii in range(adjacency.shape[0]):
         g_workers.append(Worker(ii, real_flops, mem))
 
-    n_exp = 64
+    n_exp = 16
     exp = []
     ml_experts = []
     exp_flops = 16 * 4 * 2048 * (1024 ** 2)
@@ -616,27 +643,14 @@ if __name__ == '__main__':
                        Group.MOE_FREQUENCY: 2,
                        Group.RECOMPUTATION_AMOUNT: 1}
 
-    shard_spec, inv = grigora2(a=adjacency,
-                               obj=expert_parallel_group_objective_function,
-                               all_reduce_func=all_reduce_function,
-                               gamma=gamma_function,
-                               p2p_buffer_size=p2p_buf_mb,
-                               p2p_freq=p2p_fr,
-                               all_reduce_buffer_size=all_r_buf,
-                               workers=g_workers,
-                               expert_workload=exp,
-                               gamma_args=gamma_arguments)
-    print(shard_spec.subsets())
-    # experts_list: List[Expert] = [Expert(3, 0),
-    #                               Expert(3, 1),
-    #                               Expert(3, 2),
-    #                               Expert(2, 3),
-    #                               Expert(2, 4),
-    #                               Expert(3, 5),
-    #                               Expert(2, 6),
-    #                               Expert(3, 7)]
-    # workers_list: List[Worker] = [Worker(0, 42, 1),
-    #                               Worker(1, 56, 5),
-    #                               Worker(2, 68, 1),
-    #                               Worker(3, 22, 3)]
-    # print(expert_assignment(workers_list, experts_list))
+    shard_spec = lysi_group(a=adjacency,
+                            obj=expert_parallel_group_objective_function,
+                            all_reduce_func=all_reduce_function,
+                            gamma=gamma_function,
+                            p2p_buffer_size=p2p_buf_mb,
+                            p2p_freq=p2p_fr,
+                            all_reduce_buffer_size=all_r_buf,
+                            workers=g_workers,
+                            expert_workload=exp,
+                            gamma_args=gamma_arguments)
+    print(shard_spec)
