@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import math
+import time
+
 import numpy as np
 from typing import Callable, Dict, Set, Tuple, List, Final
 
@@ -199,7 +201,6 @@ class Group:
                  obj: Callable[[Dict[str, float]], float],
                  all_reduce_func: Callable[[Dict[str, float]], float],
                  gamma: Callable[[Dict[str, float]], float],
-                 p2p_time: float,
                  all_reduce_time: float,
                  expert_workload: int,
                  mem_capacity: int,
@@ -208,15 +209,14 @@ class Group:
                  world: int,
                  gamma_val: float,
                  neighbors: List[Tuple[int, int]]):
+        self.visited: Dict[int, Tuple[int, int]] = dict()
         self.p2pTimes: List[Tuple[int, int]] = neighbors
-        self.cachedP2PTimes: List[Tuple[int, int]] = neighbors
         self.groupID = group_id
-        self.internalP2PTimes: Dict[int, Tuple[float, float]] = {group_id: (0.0, 0.0)}
+        self.internalNodes: Set[int] = {group_id}
         self.memCapacity = mem_capacity
         self.objectiveFunction = obj
         self.allReduceFunc = all_reduce_func
         self.gamma = gamma
-        self.p2pTime = p2p_time
         self.allReduceTime = all_reduce_time
         self.totalExpertFlops = expert_workload
         self.numExperts = num_experts
@@ -226,21 +226,32 @@ class Group:
                                                                                  self.totalComputeFLOPS,
                                                                                  self.totalExpertFlops,
                                                                                  self.eta,
-                                                                                 self.p2pTime,
+                                                                                 0,
                                                                                  self.memCapacity,
                                                                                  self.allReduceTime,
                                                                                  self.numExperts))
 
         self.cachedObjective = self.currentObjective
-        self.cachedP2PTime: Dict[int, Tuple[float, float]] = dict()
         self.cachedAllReduceTime = self.allReduceTime
         self.world = world
 
     def num_nodes(self) -> int:
-        return len(self.internalP2PTimes)
+        return len(self.internalNodes)
+
+    def update_visited(self, neighbor_id: int, my_state: int, neighbor_state: int) -> None:
+        self.visited.update({neighbor_id: (my_state, neighbor_state)})
 
     def evaluate_merge(self, neighbor_group: Group, all_reduce_func_args: Dict[str, float],
-                       gamma_args: Dict[str, int], adj: np.ndarray, p2p_buffer: int) -> bool:
+                       gamma_args: Dict[str, int], p2p_buffer: int) -> bool:
+        prev_state = self.visited.get(neighbor_group.groupID, None)
+        if prev_state is not None and prev_state[0] == self.num_nodes() and prev_state[1] == neighbor_group.num_nodes():
+            # We have evaluated and rejected this group previously.
+            # Neither of our states has changed since our last encounter,
+            # thus we bypass the expensive evaluation procedure and proactively reject again.
+            return False
+        self.update_visited(neighbor_group.groupID, self.num_nodes(), neighbor_group.num_nodes())
+        neighbor_group.update_visited(self.groupID, neighbor_group.num_nodes(), self.num_nodes())
+
         prev_effective_world = gamma_args[Group.EFFECTIVE_WORLD]
         effective_world = prev_effective_world
         if self.memCapacity + neighbor_group.memCapacity >= self.numExperts:
@@ -257,7 +268,6 @@ class Group:
         n_nodes = self.num_nodes() + neighbor_group.num_nodes()
         global_p2p_time = self.evaluate_global_p2p_time(neighbor_group,
                                                         n_nodes=n_nodes,
-                                                        adj=adj,
                                                         p2p_buffer=p2p_buffer)
         args = self.__construct_obj_args(gamma=self.gamma(gamma_args),
                                          total_compute_flops=self.totalComputeFLOPS + neighbor_group.totalComputeFLOPS,
@@ -281,44 +291,24 @@ class Group:
         self.cachedAllReduceTime = all_reduce_time
 
     def update_p2p_time(self, child: Group) -> None:
-        for nodes in [self.internalP2PTimes, child.internalP2PTimes]:
-            for node in nodes:
-                self.internalP2PTimes.update({node: self.cachedP2PTime[node]})
+        i = 0
+        for t1, t2, in zip(self.p2pTimes, child.p2pTimes):
+            self.p2pTimes[i] = (t1[0] + t2[0], t1[1] + t2[1])
+            i += 1
 
-    def evaluate_global_p2p_time(self, neighbor_group: Group, adj: np.ndarray, n_nodes: int, p2p_buffer: int) -> float:
+    def evaluate_global_p2p_time(self, neighbor_group: Group, n_nodes: int, p2p_buffer: int) -> float:
         max_p2p_time = 0.0
-        for nodes in [self.internalP2PTimes, neighbor_group.internalP2PTimes]:
+        for nodes in [self.internalNodes, neighbor_group.internalNodes]:
             for node in nodes:
-                self.cachedP2PTime.update({node: nodes[node]})
-                neighbor_group.cachedP2PTime.update({node: nodes[node]})
-
-        for parent_node in self.internalP2PTimes:
-            for child_node in neighbor_group.internalP2PTimes:
-                self.__update_cached_p2p_time(neighbor_group, parent_node,
-                                              next_alpha=adj.item(parent_node, child_node, 0),
-                                              next_beta=adj.item(parent_node, child_node, 1))
-                self.__update_cached_p2p_time(neighbor_group, child_node,
-                                              next_alpha=adj.item(parent_node, child_node, 0),
-                                              next_beta=adj.item(parent_node, child_node, 1))
-                parent_details = self.cachedP2PTime[parent_node]
-                child_details = self.cachedP2PTime[child_node]
+                alpha = self.p2pTimes[node][0] + neighbor_group.p2pTimes[node][0]
+                beta = self.p2pTimes[node][1] + neighbor_group.p2pTimes[node][1]
                 split_buf = p2p_buffer / n_nodes
-                max_p2p_time = max(max_p2p_time,
-                                   p2p_transfer_time(parent_details[0], parent_details[1], buffer_size=split_buf),
-                                   p2p_transfer_time(child_details[0], child_details[1], buffer_size=split_buf))
-
+                max_p2p_time = max(max_p2p_time, p2p_transfer_time(alpha, beta, split_buf))
         return max_p2p_time
-
-    def __update_cached_p2p_time(self, neighbor_group: Group, node: int, next_alpha: float,
-                                 next_beta: float) -> Tuple[float, float]:
-        details = self.cachedP2PTime[node]
-        updated_alpha = details[0] + next_alpha
-        updated_beta = details[1] + next_beta
-        neighbor_group.cachedP2PTime[node] = self.cachedP2PTime[node] = (updated_alpha, updated_beta)
-        return updated_alpha, updated_beta
 
     def subsume_group(self, child: Group) -> Group:
         self.update_p2p_time(child)
+        self.internalNodes.update(child.internalNodes)
         self.currentObjective = self.cachedObjective
         self.memCapacity = self.memCapacity + child.memCapacity
         self.totalComputeFLOPS = self.totalComputeFLOPS + child.totalComputeFLOPS
@@ -399,7 +389,6 @@ def lysi_group(a: np.ndarray, obj: Callable[[Dict[str, float]], float],
                                     seed_node_compute=workers[i].flops,
                                     obj=obj,
                                     all_reduce_func=all_reduce_func,
-                                    p2p_time=0,
                                     all_reduce_time=a_r_time,
                                     expert_workload=exp_workload,
                                     p2p_frequency=p2p_freq,
@@ -439,7 +428,6 @@ def lysi_group(a: np.ndarray, obj: Callable[[Dict[str, float]], float],
             should_merge = group_info[group_n1].evaluate_merge(neighbor_group=group_info[group_n2],
                                                                all_reduce_func_args=a_r_args,
                                                                gamma_args=gamma_args,
-                                                               adj=a,
                                                                p2p_buffer=p2p_buffer_size)
             if should_merge:
                 groups.merge(group_n1, group_n2)
@@ -599,7 +587,7 @@ def lysi_assign(workers: List[Worker], experts: List[Expert]) -> Dict[Worker, Se
 
 
 if __name__ == '__main__':
-    dim = 16
+    dim = 4096
     intra_node_width = 4.0
 
     adjacency = np.zeros((dim, dim, 2))
@@ -625,7 +613,7 @@ if __name__ == '__main__':
     for ii in range(adjacency.shape[0]):
         g_workers.append(Worker(ii, real_flops, mem))
 
-    n_exp = 16
+    n_exp = 4096
     exp = []
     ml_experts = []
     exp_flops = 16 * 4 * 2048 * (1024 ** 2)
@@ -642,7 +630,7 @@ if __name__ == '__main__':
                        Group.MINI_BATCH_SIZE: 4,
                        Group.MOE_FREQUENCY: 2,
                        Group.RECOMPUTATION_AMOUNT: 1}
-
+    start_time = time.perf_counter()
     shard_spec = lysi_group(a=adjacency,
                             obj=expert_parallel_group_objective_function,
                             all_reduce_func=all_reduce_function,
@@ -653,4 +641,6 @@ if __name__ == '__main__':
                             workers=g_workers,
                             expert_workload=exp,
                             gamma_args=gamma_arguments)
+    end_time = time.perf_counter()
+    print(end_time - start_time)
     print(shard_spec)
