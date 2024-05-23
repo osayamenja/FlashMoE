@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import math
 import time
 
@@ -587,7 +588,7 @@ def lysi_assign(workers: List[Worker], experts: List[Expert]) -> Dict[Worker, Se
 
 
 if __name__ == '__main__':
-    dim = 4096
+    dim = 16
     intra_node_width = 4.0
 
     adjacency = np.zeros((dim, dim, 2))
@@ -608,12 +609,12 @@ if __name__ == '__main__':
     realistic_scaling_factor = 0.43
     real_flops = int(math.ceil(realistic_scaling_factor * a100_theoretical_flop_per_ms))
 
-    mem = 32
+    mem = 16
     g_workers = []
     for ii in range(adjacency.shape[0]):
         g_workers.append(Worker(ii, real_flops, mem))
 
-    n_exp = 4096
+    n_exp = 32
     exp = []
     ml_experts = []
     exp_flops = 16 * 4 * 2048 * (1024 ** 2)
@@ -630,6 +631,8 @@ if __name__ == '__main__':
                        Group.MINI_BATCH_SIZE: 4,
                        Group.MOE_FREQUENCY: 2,
                        Group.RECOMPUTATION_AMOUNT: 1}
+
+    gc.disable()
     start_time = time.perf_counter()
     shard_spec = lysi_group(a=adjacency,
                             obj=expert_parallel_group_objective_function,
@@ -642,5 +645,6 @@ if __name__ == '__main__':
                             expert_workload=exp,
                             gamma_args=gamma_arguments)
     end_time = time.perf_counter()
+    gc.enable()
     print(end_time - start_time)
     print(shard_spec)
