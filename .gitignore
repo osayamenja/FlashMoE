@@ -2,3 +2,8 @@
 *.iml
 .DS_Store
 __pycache__/
+
+# csrc
+csrc/cmake-build-debug
+csrc/.idea
+csrc/*.iml
