@@ -56,7 +56,6 @@ int main() {
         cudaStreamSynchronize(stream);
         std::cout << "PE " << nvshmem_my_pe()
                   << " received message " << msg[2] << std::endl;
-
         nvshmem_free(destination);
         nvshmem_finalize();
     }
