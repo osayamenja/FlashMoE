@@ -42,7 +42,13 @@ CPMAddPackage(
         GIT_TAG main # Fetches the latest commit on the main branch
 )
 
-target_link_libraries(csrc PRIVATE CCCL::CCCL)
+CPMAddPackage(
+        NAME NVTX
+        GITHUB_REPOSITORY NVIDIA/NVTX
+        GIT_TAG v3.1.0-c-cpp
+        GIT_SHALLOW TRUE)
+
+target_link_libraries(csrc PRIVATE CCCL::CCCL nvtx3-cpp)
 
 set_target_properties(csrc PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON)
