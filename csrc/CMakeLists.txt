@@ -4,6 +4,9 @@ project(csrc CUDA CXX)
 # cuBLASDx business
 set(CUBLASDX_CUDA_CXX_FLAGS "${CUBLASDX_CUDA_CXX_FLAGS} -Wall -Wextra")
 set(CUBLASDX_CUDA_CXX_FLAGS "${CUBLASDX_CUDA_CXX_FLAGS} -fno-strict-aliasing")
+if(NOT ${CMAKE_SYSTEM_PROCESSOR} MATCHES "^aarch64")
+    set(CUBLASDX_CUDA_CXX_FLAGS "${CUBLASDX_CUDA_CXX_FLAGS} -m64")
+endif ()
 set(CUBLASDX_CUDA_CXX_FLAGS "${CUBLASDX_CUDA_CXX_FLAGS} -Wno-unknown-pragmas")
 set(CUBLASDX_CUDA_CXX_FLAGS "${CUBLASDX_CUDA_CXX_FLAGS} -Wno-switch")
 set(CUBLASDX_CUDA_CXX_FLAGS "${CUBLASDX_CUDA_CXX_FLAGS} -Wno-unused-but-set-parameter")
@@ -14,8 +17,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${CUBLASDX_CUDA_CXX_FLAGS}")
 
+set(CUDA_HOST_COMPILER ${CMAKE_CXX_COMPILER})
 set(CMAKE_CUDA_ARCHITECTURES "native")
 set(CMAKE_CUDA_STANDARD 17)
+set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_EXTENSIONS OFF)
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xfatbin -compress-all") # Compress all fatbins
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcudafe --display_error_number") # Show error/warning numbers
@@ -27,15 +32,20 @@ check_compiler_flag(CUDA -t4 NVCC_THREADS)
 find_package(CUDAToolkit REQUIRED)
 
 #MathDx business
-set(NvidiaCutlass_ROOT $ENV{CUTLASS_PATH})
-set(cublasdx_CUTLASS_ROOT $ENV{CUTLASS_PATH})
+#set(NvidiaCutlass_ROOT $ENV{CUTLASS_PATH})
+#set(cublasdx_CUTLASS_ROOT $ENV{CUTLASS_PATH})
 find_package(mathdx REQUIRED COMPONENTS cublasdx CONFIG)
 
-add_executable(csrc main.cu)
+add_executable(csrc main.cu
+        ../../../CUDAProjects/CUDALibrarySamples/MathDx/cuBLASDx/common.hpp
+        queue.cuh
+        packet.cuh
+        moe.cuh
+        aristos.cuh)
 
 # add dependencies
 include(cmake/CPM.cmake)
-# This will automatically clone CCCL from GitHub and make the exported cmake targets available
+## This will automatically clone CCCL from GitHub and make the exported cmake targets available
 CPMAddPackage(
         NAME CCCL
         GITHUB_REPOSITORY nvidia/cccl
@@ -49,6 +59,7 @@ CPMAddPackage(
         GIT_SHALLOW TRUE)
 
 target_link_libraries(csrc PRIVATE CCCL::CCCL nvtx3-cpp)
+#target_link_libraries(csrc PRIVATE nvtx3-cpp)
 
 set_target_properties(csrc PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON)
@@ -62,8 +73,12 @@ target_link_libraries(csrc PUBLIC nvshmem_host nvshmem_device)
 target_link_libraries(csrc PUBLIC CUDA::cudart CUDA::cuda_driver CUDA::cublas mathdx::cublasdx)
 
 target_compile_options(csrc
-        PRIVATE $<$<CONFIG:Debug>:-O0;-g;>
+        PRIVATE
+        $<$<CONFIG:Debug>:-O0;-g;>
         $<$<AND:$<BOOL:${NVSHMEM_VERBOSE}>,$<COMPILE_LANGUAGE:CUDA>>:-Xptxas -v>
         $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Debug>>:-O0;-g;-G>
         $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<BOOL:${NVCC_THREADS}>>:-t4>
+        "$<$<COMPILE_LANGUAGE:CUDA>:SHELL:-Xfatbin -compress-all>"
+        # Required to support std::tuple in device code
+        "$<$<BOOL:True>:$<$<COMPILE_LANGUAGE:CUDA>:SHELL:--expt-relaxed-constexpr>>"
 )
