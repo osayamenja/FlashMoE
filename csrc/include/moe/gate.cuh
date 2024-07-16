@@ -11,8 +11,8 @@
 namespace aristos {
     template<Matrix T>
     CUTE_DEVICE
-    void gate(T activations, T weights){
-        // 1. TODO Compute Fused GEMM and Softmax
+    void gate(T activations, T weights, T routing){
+        // 1. TODO Compute Fused GEMM and Softmax output routing
         //2. Apply top_idx and return result
         in_place_fused_top_k_mask(activations);
     }

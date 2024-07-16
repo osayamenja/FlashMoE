@@ -5,7 +5,7 @@
 #ifndef ARISTOS_CUH
 #define ARISTOS_CUH
 
-#include "moe/expert.cuh"
+#include "moe/moe.cuh"
 #include "communication/queue.cuh"
 #include "communication/packet.cuh"
 #include "moe/gate.cuh"

@@ -46,7 +46,8 @@ namespace aristos{
                                                              NVSHMEM_CMP_LT, default_val);
             }while(n_received_pes == 0 && (optimism_factor > 0 || (clk::now() - snapshot_now) < timeout_duration));
 
-            for(int i = 0; i < n_received_pes; ++i){
+            CUTE_UNROLL
+            for(uint i = 0; i < n_received_pes; ++i){
                 auto index = indices[i];
                 if(flags[index] == NOOP || flags[index] == processed){
                     status[index] = 1; // Exclude this PE from subsequent tests

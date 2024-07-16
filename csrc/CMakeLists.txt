@@ -46,7 +46,7 @@ find_package(mathdx REQUIRED COMPONENTS cublasdx CONFIG)
 add_executable(csrc main.cu
         include/communication/queue.cuh
         include/communication/packet.cuh
-        include/moe/expert.cuh
+        include/moe/moe.cuh
         include/aristos.cuh
         include/moe/gate.cuh
         include/compute/compute.cuh

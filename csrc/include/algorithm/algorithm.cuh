@@ -20,10 +20,10 @@ namespace aristos {
     void in_place_fused_top_k_mask(T input){
         if(get_tid() < cute::size<0>(input.layout())){
             using MatrixType = typename decltype(input)::value_type;
-            cute::array<cuda::std::pair<MatrixType, int>, k> window{};
+            cute::array<cuda::std::pair<MatrixType, uint>, k> window{};
             auto my_slice = input(get_tid(), cute::_);
             CUTE_UNROLL
-            for(int i = 0; i < k; ++i){
+            for(uint i = 0; i < k; ++i){
                 window[i] = {my_slice(i), i};
             }
             cuda::std::make_heap(window.begin(), window.end(), cuda::std::greater<>{});
@@ -32,9 +32,9 @@ namespace aristos {
             CUTE_UNROLL
             for(int i = k; i < cute::size(my_slice); ++i){
                 auto min_elem = window.back();
-                if(cuda::std::pair<MatrixType, int>{my_slice(i), i} > min_elem){
+                if(cuda::std::pair<MatrixType, uint>{my_slice(i), i} > min_elem){
                     my_slice(min_elem.second) = MatrixType(0);
-                    window[k - 1] = cuda::std::pair<MatrixType, int>{my_slice(i), i};
+                    window[k - 1] = cuda::std::pair<MatrixType, uint>{my_slice(i), i};
                     cuda::std::push_heap(window.begin(), window.end(), cuda::std::greater<>{});
                     cuda::std::pop_heap(window.begin(), window.end(), cuda::std::greater<>{});
                 }
@@ -54,11 +54,11 @@ namespace aristos {
             auto in_slice = gate_routing(index, cute::_);
             auto out_slice = mapping(index, cute::_);
             auto zero_val = MatrixType(0);
-            const int n_peers = cute::size<0>(mapping.layout());
-            cute::array<int, n_peers> k_indices;
+            const uint n_peers = cute::size<0>(mapping.layout());
+            cute::array<uint, n_peers> k_indices;
             k_indices.clear(); // may be redundant
             CUTE_UNROLL
-            for(int i = 0; i < cute::size<0>(in_slice.layout()); ++i){
+            for(uint i = 0; i < cute::size<0>(in_slice.layout()); ++i){
                 if(in_slice(i) > zero_val){
                     auto peer = shard_spec(i);
                     out_slice(peer, k_indices[i]++) = i; // The value i denotes the expert index.
