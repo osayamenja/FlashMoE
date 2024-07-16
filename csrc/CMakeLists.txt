@@ -1,30 +1,37 @@
 cmake_minimum_required(VERSION 3.27)
+
+# Set c++ and c compilers
+execute_process(COMMAND "which" "g++" OUTPUT_VARIABLE CPP_COMP_PATH OUTPUT_STRIP_TRAILING_WHITESPACE)
+execute_process(COMMAND "which" "gcc" OUTPUT_VARIABLE C_COMP_PATH OUTPUT_STRIP_TRAILING_WHITESPACE)
+set(CMAKE_CXX_COMPILER "${CPP_COMP_PATH}")
+set(CMAKE_C_COMPILER "${C_COMP_PATH}")
+
 project(csrc CUDA CXX)
 
-# cuBLASDx business
-set(CUBLASDX_CUDA_CXX_FLAGS "${CUBLASDX_CUDA_CXX_FLAGS} -Wall -Wextra")
-set(CUBLASDX_CUDA_CXX_FLAGS "${CUBLASDX_CUDA_CXX_FLAGS} -fno-strict-aliasing")
+# flags
+set(ARISTOS_CUDA_CXX_FLAGS "${ARISTOS_CUDA_CXX_FLAGS} -Wall -Wextra")
+set(ARISTOS_CUDA_CXX_FLAGS "${ARISTOS_CUDA_CXX_FLAGS} -fno-strict-aliasing")
 if(NOT ${CMAKE_SYSTEM_PROCESSOR} MATCHES "^aarch64")
-    set(CUBLASDX_CUDA_CXX_FLAGS "${CUBLASDX_CUDA_CXX_FLAGS} -m64")
+    set(ARISTOS_CUDA_CXX_FLAGS "${ARISTOS_CUDA_CXX_FLAGS} -m64")
 endif ()
-set(CUBLASDX_CUDA_CXX_FLAGS "${CUBLASDX_CUDA_CXX_FLAGS} -Wno-unknown-pragmas")
-set(CUBLASDX_CUDA_CXX_FLAGS "${CUBLASDX_CUDA_CXX_FLAGS} -Wno-switch")
-set(CUBLASDX_CUDA_CXX_FLAGS "${CUBLASDX_CUDA_CXX_FLAGS} -Wno-unused-but-set-parameter")
-set(CUBLASDX_CUDA_CXX_FLAGS "${CUBLASDX_CUDA_CXX_FLAGS} -Wno-sign-compare")
+set(ARISTOS_CUDA_CXX_FLAGS "${ARISTOS_CUDA_CXX_FLAGS} -Wno-unknown-pragmas")
+set(ARISTOS_CUDA_CXX_FLAGS "${ARISTOS_CUDA_CXX_FLAGS} -Wno-switch")
+set(ARISTOS_CUDA_CXX_FLAGS "${ARISTOS_CUDA_CXX_FLAGS} -Wno-unused-but-set-parameter")
+set(ARISTOS_CUDA_CXX_FLAGS "${ARISTOS_CUDA_CXX_FLAGS} -Wno-sign-compare")
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${CUBLASDX_CUDA_CXX_FLAGS}")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${ARISTOS_CUDA_CXX_FLAGS}")
 
 set(CUDA_HOST_COMPILER ${CMAKE_CXX_COMPILER})
 set(CMAKE_CUDA_ARCHITECTURES "native")
-set(CMAKE_CUDA_STANDARD 17)
+set(CMAKE_CUDA_STANDARD 20)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_EXTENSIONS OFF)
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xfatbin -compress-all") # Compress all fatbins
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcudafe --display_error_number") # Show error/warning numbers
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler \"${CUBLASDX_CUDA_CXX_FLAGS}\"")
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler \"${ARISTOS_CUDA_CXX_FLAGS}\"")
 
 include(CheckCompilerFlag)
 check_compiler_flag(CUDA -t4 NVCC_THREADS)
@@ -32,16 +39,20 @@ check_compiler_flag(CUDA -t4 NVCC_THREADS)
 find_package(CUDAToolkit REQUIRED)
 
 #MathDx business
-#set(NvidiaCutlass_ROOT $ENV{CUTLASS_PATH})
-#set(cublasdx_CUTLASS_ROOT $ENV{CUTLASS_PATH})
+set(NvidiaCutlass_ROOT $ENV{CUTLASS_PATH})
+set(cublasdx_CUTLASS_ROOT $ENV{CUTLASS_PATH})
 find_package(mathdx REQUIRED COMPONENTS cublasdx CONFIG)
 
 add_executable(csrc main.cu
-        ../../../CUDAProjects/CUDALibrarySamples/MathDx/cuBLASDx/common.hpp
-        queue.cuh
-        packet.cuh
-        moe.cuh
-        aristos.cuh)
+        include/communication/queue.cuh
+        include/communication/packet.cuh
+        include/moe/expert.cuh
+        include/aristos.cuh
+        include/moe/gate.cuh
+        include/compute/compute.cuh
+        include/algorithm/algorithm.cuh
+        include/util/indexing.cuh
+        include/util/tensor.cuh)
 
 # add dependencies
 include(cmake/CPM.cmake)

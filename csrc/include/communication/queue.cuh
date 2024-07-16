@@ -5,9 +5,6 @@
 #ifndef ARISTOS_QUEUE_CUH
 #define ARISTOS_QUEUE_CUH
 
-#include <cuda/std/chrono>
-#include <cuda/std/ratio>
-#include <nvshmem.h>
 #include "packet.cuh"
 
 namespace aristos{
@@ -17,7 +14,7 @@ namespace aristos{
         cuda::std::chrono::time_point<clk> snapshot_now{};
         cuda::std::chrono::duration<float, ratio> timeout_duration;
         unsigned int optimism_factor;
-        unsigned short* flags; // Half amount of bytes to send over the wire compared to int
+        uint64_t* flags;
         size_t* indices;
         unsigned int n_pes;
         const unsigned int default_val;
@@ -28,7 +25,7 @@ namespace aristos{
         CUTE_DEVICE
         task_queue(cuda::std::chrono::duration<float, ratio> _timeout_duration,
                    const unsigned int _var_epsilon,
-                   unsigned short* _flags,
+                   uint64_t* _flags,
                    size_t* _indices,
                    unsigned int _n_pes,
                    int* _status) :
@@ -40,12 +37,12 @@ namespace aristos{
                     }
                 };
 
-        template<class TensorValueType>
+        template<TensorValueType V>
         CUTE_DEVICE
         void dequeue(){
             size_t n_received_pes;
             do{
-                n_received_pes = nvshmem_ushort_test_some(flags, n_pes, indices, status,
+                n_received_pes = nvshmem_uint64_test_some(flags, n_pes, indices, status,
                                                              NVSHMEM_CMP_LT, default_val);
             }while(n_received_pes == 0 && (optimism_factor > 0 || (clk::now() - snapshot_now) < timeout_duration));
 

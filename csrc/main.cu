@@ -1,10 +1,13 @@
 #include <iostream>
 #include <array>
+#include <typeinfo>
 
 #include <cuda_runtime.h>
 #include <cublasdx.hpp>
 #include <cuda/std/array>
 #include <cuda/std/chrono>
+#include <cuda/std/concepts>
+
 // Heap things
 #include <cuda/std/__algorithm/make_heap.h>
 #include <cuda/std/__algorithm/pop_heap.h>
@@ -13,26 +16,11 @@
 #include <nvshmemx.h>
 #include <nvtx3/nvtx3.hpp>
 
-#include "aristos.cuh"
-
-#define HANDLE_CUDA_ERROR(x)                                      \
-{ const auto err = x;                                             \
-  if( err != cudaSuccess )                                        \
-  { printf("Error: %s\n", cudaGetErrorString(err)); exit(-1); } \
-};
-
-#ifndef CUDA_CHECK_AND_EXIT
-#    define CUDA_CHECK_AND_EXIT(error)                                                                      \
-        {                                                                                                   \
-            auto status = static_cast<cudaError_t>(error);                                                  \
-            if (status != cudaSuccess) {                                                                    \
-                std::cout << cudaGetErrorString(status) << " " << __FILE__ << ":" << __LINE__ << std::endl; \
-                std::exit(status);                                                                          \
-            }                                                                                               \
-        }
-#endif
+#include "include/aristos.cuh"
+#include "include/algorithm/algorithm.cuh"
 
 #define THREADS_PER_WARP 32
+
 __global__ void aristos_sandbox(int *destination, int my_pe, int n_pes, bool skip = true) {
     cuda::std::array<int, 4>activations{{my_pe + 1, 2,my_pe + 3, 4}};
     int n_elems = 2;
@@ -67,11 +55,11 @@ void nvshmem_test(){
     int my_pe = nvshmem_my_pe();
     int n_pe = nvshmem_n_pes();
     int dev_count;
-    CUDA_CHECK_AND_EXIT(cudaGetDeviceCount(&dev_count))
+    CUTE_CHECK_ERROR(cudaGetDeviceCount(&dev_count));
     cudaDeviceProp prop{};
-    CUDA_CHECK_AND_EXIT(cudaGetDeviceProperties(&prop, my_pe_node % dev_count))
+    CUTE_CHECK_ERROR(cudaGetDeviceProperties(&prop, my_pe_node % dev_count));
     int clockrate;
-    CUDA_CHECK_AND_EXIT(cudaDeviceGetAttribute(&clockrate, cudaDevAttrClockRate, my_pe_node))
+    CUTE_CHECK_ERROR(cudaDeviceGetAttribute(&clockrate, cudaDevAttrClockRate, my_pe_node));
 
     fprintf(stderr, "mype: %d mype_node: %d device name: %s bus id: %d n_pes: %d\n", my_pe, my_pe_node,
             prop.name, prop.pciBusID, n_pe);
@@ -81,11 +69,11 @@ void nvshmem_test(){
     int *destination = (int*) nvshmem_calloc(msg.size(), sizeof(int));
     for (int i = 0; i < 5; ++i) {
         aristos_sandbox<<<1, 1>>>(destination, my_pe, n_pe);
-        CUDA_CHECK_AND_EXIT(cudaPeekAtLastError())
+        CUTE_CHECK_ERROR(cudaPeekAtLastError());
     }
     aristos_sandbox<<<1, 1>>>(destination, my_pe, n_pe, false);
-    CUDA_CHECK_AND_EXIT(cudaPeekAtLastError())
-    HANDLE_CUDA_ERROR(cudaMemcpyAsync(msg.data(), destination, msg.size() * sizeof(int), cudaMemcpyDeviceToHost, stream))
+    CUTE_CHECK_ERROR(cudaPeekAtLastError());
+    CUTE_CHECK_ERROR(cudaMemcpyAsync(msg.data(), destination, msg.size() * sizeof(int), cudaMemcpyDeviceToHost, stream));
     cudaStreamSynchronize(stream);
     cudaDeviceSynchronize();
     std::stringstream result_stream;
@@ -115,7 +103,7 @@ __global__ void aristos_kernel(const ValueType alpha,
     const auto dN = cublasdx::size_of<GEMM>::n;
     auto dK = cublasdx::size_of<GEMM>::k;
 
-    cute::Tensor sa_tensor = cute::make_tensor(sa, cute::make_layout(cute::make_shape(dM, dK)));
+    auto sa_tensor = cute::make_tensor(sa, cute::make_layout(cute::make_shape(dM, dK)));
     cute::Tensor sb_tensor = cute::make_tensor(sb, cute::make_layout(cute::make_shape(dK, dN)));
     cute::Tensor sc_tensor = cute::make_tensor(sc, cute::make_layout(cute::make_shape(dM, dN)));
     cute::Tensor act_tensor = cute::make_tensor(cute::make_gmem_ptr(routing_weights), cute::make_shape(dM, dK));
@@ -173,75 +161,6 @@ __global__ void aristos_kernel(const ValueType alpha,
     }
 }
 
-template<unsigned int Arch = 700>
-void aristos_kernel_run(){
-    int my_pe_node;
-    nvshmem_init();
-    my_pe_node = nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE);
-    int my_pe = nvshmem_my_pe();
-    int n_pes = nvshmem_n_pes();
-    int dev_count;
-    CUDA_CHECK_AND_EXIT(cudaGetDeviceCount(&dev_count))
-    cudaDeviceProp prop{};
-    CUDA_CHECK_AND_EXIT(cudaGetDeviceProperties(&prop, my_pe_node % dev_count))
-    int clockrate;
-    CUDA_CHECK_AND_EXIT(cudaDeviceGetAttribute(&clockrate, cudaDevAttrClockRate, my_pe_node))
-
-    fprintf(stderr, "mype: %d mype_node: %d device name: %s bus id: %d n_pes: %d\n", my_pe, my_pe_node,
-            prop.name, prop.pciBusID, n_pes);
-    cudaSetDevice(my_pe_node);
-
-    constexpr unsigned int M = 4;
-    constexpr unsigned int N = 2;
-    constexpr unsigned int K = 4;
-
-    // Choose precision (__half, float, double) and type (real or complex).
-    using precision = float;
-    constexpr auto type = cublasdx::type::real;
-
-    // Choose transpose mode for A and B: non_transposed, transposed, or conj_transposed.
-    constexpr auto a_transpose_mode = cublasdx::transpose_mode::non_transposed;
-    constexpr auto b_transpose_mode = cublasdx::transpose_mode::non_transposed;
-
-    // Define the local matrix multiplication operation.
-    using BlockMM  = decltype(cublasdx::Size<M, N, K>() +
-                              cublasdx::Precision<precision>() +
-                              cublasdx::Type<type>() +
-                              cublasdx::Function<cublasdx::function::MM>() +
-                              cublasdx::TransposeMode<a_transpose_mode, b_transpose_mode>() +
-                              cublasdx::Block() +
-                              cublasdx::SM<Arch>());
-
-    using value_type = typename BlockMM::value_type;
-
-
-    // Allocate device memory
-    value_type* abc;
-    auto size = BlockMM::a_size + BlockMM::b_size + BlockMM::c_size;
-    auto size_bytes = size * sizeof(value_type);
-    CUDA_CHECK_AND_EXIT(cudaMallocManaged(&abc, size_bytes));
-
-    value_type* a = abc;
-    value_type* b = a + BlockMM::a_size;
-    value_type* c = b + BlockMM::b_size;
-
-    // Init host data
-    const std::array<float, M*K> a_host = {{0, 0, 0, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0, 1 , 0, 0}};
-    const std::array<float, K*N> b_host = {{0, 1, 1, 1, 1, 0, 0, 0}};
-
-    // Copy host data to device
-    CUDA_CHECK_AND_EXIT(cudaMemcpy(a, a_host.data(), BlockMM::a_size * sizeof (value_type), cudaMemcpyHostToDevice))
-    CUDA_CHECK_AND_EXIT(cudaMemcpy(b, b_host.data(), BlockMM::b_size * sizeof (value_type), cudaMemcpyHostToDevice))
-
-    aristos_kernel<BlockMM><<<1, BlockMM::block_dim, BlockMM::shared_memory_size>>>
-    (1.0f, a, b, c, my_pe);
-    CUDA_CHECK_AND_EXIT(cudaPeekAtLastError())
-    CUDA_CHECK_AND_EXIT(cudaDeviceSynchronize())
-    CUDA_CHECK_AND_EXIT(cudaFree(abc))
-
-    // Device vector is in global memory https://stackoverflow.com/a/71449425
-}
-
 __global__ void sandbox(){
     cuda::std::array<int, 100> task_counts = {};
     cuda::std::fill_n(task_counts.begin(), 90, 2);
@@ -249,7 +168,7 @@ __global__ void sandbox(){
 
 void sandbox_runner(){
     sandbox<<<1,1>>>();
-    CUDA_CHECK_AND_EXIT(cudaDeviceSynchronize())
+    CUTE_CHECK_ERROR(cudaDeviceSynchronize());
 }
 
 template<class TV>
@@ -260,7 +179,7 @@ __global__ void nvsh_test_kernel(TV* dest){
 }
 
 __global__ void heap_things(){
-    cuda::std::array<int, 6> v = {3, 2, 4, 1, 5, 9};
+    cuda::std::array<int, 6> v = {{3, 2, 4, 1, 5, 9}};
     printf("initially, v is :{%d, %d, %d, %d, %d, %d}\n", v[0], v[1], v[2], v[3], v[4], v[5]);
     cuda::std::make_heap(v.begin(), v.end(), cuda::std::greater<>{});
     printf("after make_heap, v is :{%d, %d, %d, %d, %d, %d}\n", v[0], v[1], v[2], v[3], v[4], v[5]);
@@ -268,20 +187,58 @@ __global__ void heap_things(){
     printf("after pop_heap, v is :{%d, %d, %d, %d, %d, %d}\n", v[0], v[1], v[2], v[3], v[4], v[5]);
 }
 
+__global__ void heap_things_pair(){
+    cuda::std::array<cuda::std::pair<int, int>, 5> a {{{3, 0}, {2, 1}, {4, 2}, {1, 3}, {5, 4}}};
+    printf("initially, a is :{%d, %d, %d, %d, %d}\n", a[0].first, a[1].first, a[2].first, a[3].first, a[4].first);
+    cuda::std::make_heap(a.begin(), a.end(), cuda::std::greater<>{});
+    printf("after make_heap, a is :{%d, %d, %d, %d, %d}\n", a[0].first, a[1].first, a[2].first, a[3].first, a[4].first);
+    cuda::std::pop_heap(a.begin(), a.end(), cuda::std::greater<>{});
+    printf("after pop_heap, a is :{%d, %d, %d, %d, %d}\n",  a[0].first, a[1].first, a[2].first, a[3].first, a[4].first);
+}
+
 void nvsh_test_ptr(){
     nvshmem_init();
     int my_pe_node = nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE);
-    CUDA_CHECK_AND_EXIT(cudaSetDevice(my_pe_node))
+    CUTE_CHECK_ERROR(cudaSetDevice(my_pe_node));
     using TensorType = __half;
 //    auto* destination = static_cast<TensorType*>(nvshmem_calloc(4, sizeof(float)));
     auto* destination = static_cast<TensorType*>(nvshmem_calloc(4, sizeof(float)));
-    CUDA_CHECK_AND_EXIT(cudaPeekAtLastError())
+    CUTE_CHECK_ERROR(cudaPeekAtLastError());
     nvsh_test_kernel<<<1,1>>>(destination);
-    CUDA_CHECK_AND_EXIT(cudaPeekAtLastError())
-    CUDA_CHECK_AND_EXIT(cudaDeviceSynchronize())
+    CUTE_CHECK_ERROR(cudaPeekAtLastError());
+    CUTE_CHECK_ERROR(cudaDeviceSynchronize());
     nvshmem_free(destination);
     nvshmem_finalize();
 }
+
+template<aristos::Matrix T, unsigned int k=2>
+void fused_top_idx(T input){
+    using MatrixType = typename decltype(input)::value_type;
+    cute::array<cuda::std::pair<MatrixType, int>, k> window{};
+    auto my_slice = input(0, cute::_);
+    CUTE_UNROLL
+    for(int i = 0; i < k; ++i){
+        window[i] = cuda::std::pair<MatrixType, int>{my_slice(i), i};
+    }
+    cuda::std::make_heap(window.begin(), window.end(), cuda::std::greater<>{});
+    cuda::std::pop_heap(window.begin(), window.end(), cuda::std::greater<>{});
+    // min element now at the end of the array
+    for(int i = k; i < cute::size(my_slice); ++i){
+        auto min_elem = window.back();
+        if(cuda::std::pair<MatrixType, int>{my_slice(i), i} > min_elem){
+            my_slice(min_elem.second) = MatrixType(0);
+            window[k - 1] = cuda::std::pair<MatrixType, int>{my_slice(i), i};
+            cuda::std::push_heap(window.begin(), window.end(), cuda::std::greater<>{});
+            cuda::std::pop_heap(window.begin(), window.end(), cuda::std::greater<>{});
+        }
+        else{
+            my_slice(i) = 0;
+        }
+    }
+}
+template<int Bits, bool Signed>
+struct cute::is_integral<cutlass::integer_subbyte<Bits, Signed>> : cute::true_type {};
+
 int main() {
 //    cute::array<int, 4> u = {1,2,3,4};
 //    cute::array<int, 4> v = {4,5,6,7};
@@ -294,8 +251,46 @@ int main() {
 //    std::cout << cute::half_t(0.8).operator float() << std::endl;
 //    auto ff = cute::float_e4m3_t(4.25f);
 //    std::cout << ff.operator float() << std::endl;
-    heap_things<<<1,1>>>();
-    CUDA_CHECK_AND_EXIT(cudaPeekAtLastError())
-    CUDA_CHECK_AND_EXIT(cudaDeviceSynchronize())
+//    heap_things_pair<<<1,1>>>();
+//    CUTE_CHECK_ERROR(cudaPeekAtLastError());
+//    CUTE_CHECK_ERROR(cudaDeviceSynchronize());
+
+//    cute::complex<float> e_i = cute::complex(89.0);
+//    auto a_temp = std::array<int, 4>{78, 89, 91};
+//    auto a_t = cute::make_tensor(a_temp.data(), cute::make_layout(cute::make_shape(2, 2)));
+//    std::cout << (cute::is_complex<typename cute::iterator_traits<decltype(a_t.data())>::value_type>::value) << std::endl;
+//    auto a_t0 = a_t(0, cute::_);
+//    std::cout << a_t0(0) << std::endl;
+//    std::cout << cute::size(a_t) << std::endl;
+//
+//    cuda::std::pair<int, int> p = {8, 9};
+//    cuda::std::pair<int, int> q = {8, 3};
+//
+//    std::cout << (p < q) << std::endl;
+//    cuda::std::array<cuda::std::pair<int, int>, 4> a {};
+//    cuda::std::array<int, 4> a = {{1,67,3,4}};
+//    std::cout << *(a.begin() + 1) << std::endl;
+//    std::cout << *a.begin() << std::endl;
+//    cuda::std::array<cuda::std::pair<int, int>, 5> a {{{3, 0}, {2, 1}, {4, 2}, {1, 3}, {5, 4}}};
+//    auto a_t = cute::make_tensor(a.data(), cute::make_layout(cute::make_shape(1, 5)));
+//    auto my_slice = a_t(0, cute::_);
+//    int p = my_slice(0).first;
+//    auto pp = cuda::std::pair<int, int>{0, 0};
+//
+//    cuda::std::array<int, 5> a_test {{3, 2, 4, 1, 5}};
+//    auto b_t = cute::make_tensor(a_test.data(), cute::make_layout(cute::make_shape(1, 5)));
+//    printf("initially, a_test is :{%d, %d, %d, %d, %d}\n", a_test[0], a_test[1], a_test[2], a_test[3], a_test[4]);
+//    fused_top_idx(b_t);
+//    printf("after fused_top_idx, a_test is :{%d, %d, %d, %d, %d}\n", a_test[0], a_test[1], a_test[2], a_test[3], a_test[4]);
+
+//    auto hh = cute::half_t(0);
+//    using hh_t = decltype(hh);
+//    auto u8 = cute::uint1_t(0).storage
+//    static_assert(cuda::std::is_integral<decltype(cute::uint1_t(0).storage)>()); // 2 and 4 int and float no bueno, neither does nvidia types. stdints
+//
+//    static_assert(cuda::std::same_as<decltype(hh_t(0)), cute::half_t>);
+    cute::array<int, 2> aa{};
+    std::cout << aa[0]++ << std::endl;
+    std::cout << aa[0] << std::endl;
     return 0;
 }
