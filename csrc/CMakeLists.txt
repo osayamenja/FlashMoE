@@ -51,10 +51,11 @@ add_executable(csrc main.cu
         include/compute/compute.cuh
         include/algorithm/algorithm.cuh
         include/util/indexing.cuh
-        include/util/tensor.cuh
+        include/definition/tensor.cuh
         include/communication/communicator.cuh
-        include/communication/doorbell.cuh
-        include/util/platform.cuh)
+        include/definition/platform.cuh
+        include/util/debug.cuh
+        include/definition/types.cuh)
 
 # add dependencies
 include(cmake/CPM.cmake)

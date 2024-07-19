@@ -5,7 +5,7 @@
 #ifndef ARISTOS_PLATFORM_CUH
 #define ARISTOS_PLATFORM_CUH
 
-template<unsigned int capability>
+template<uint capability>
 concept MinArch = requires{
     // Due to unavailable support for atomics
     // See https://nvidia.github.io/cccl/libcudacxx/extended_api/synchronization_primitives/atomic.html#concurrency-restrictions

@@ -5,8 +5,9 @@
 #ifndef ARISTOS_MOE_CUH
 #define ARISTOS_MOE_CUH
 
-#include "../util/tensor.cuh"
+#include "../definition/tensor.cuh"
 #include "../util/indexing.cuh"
+#include "../definition/types.cuh"
 #include <cuda/cmath>
 
 namespace aristos{
@@ -17,13 +18,13 @@ namespace aristos{
         void* symmetric_heap;
         M shard_spec;
         M spec_translation;
-        uint_fast16_t n_peers;
-        uint_fast8_t capacity_factor;
-        uint_fast8_t k;
+        medium_int n_peers;
+        miniscule_int capacity_factor;
+        miniscule_int k;
 
     public:
         CUTE_DEVICE
-        FusedMoELayer(void* _symmetric_heap, M _shard_spec, M _spec_translation, uint_fast8_t _capacity_factor, uint_fast8_t _k):
+        FusedMoELayer(void* _symmetric_heap, M _shard_spec, M _spec_translation, miniscule_int _capacity_factor, miniscule_int _k):
         symmetric_heap(_symmetric_heap), shard_spec(_shard_spec),
         spec_translation(_spec_translation), capacity_factor(_capacity_factor), k(_k)
         {
@@ -47,7 +48,7 @@ namespace aristos{
             extern __shared__ float workspace[];
             auto routing_tensor = cute::make_tensor(cute::make_smem_ptr(workspace), cute::make_shape(token_dim, n_experts));
             gate(activations, w_gate, routing_tensor);
-            extern __shared__ uint_fast16_t scratch[]; // assumes n_peers in an ep_group <= UINT16_MAX = (64k - 1)
+            extern __shared__ medium_int scratch[]; // assumes n_peers in an ep_group <= UINT16_MAX = (64k - 1)
             auto mapping_tensor = cute::make_tensor(cute::make_smem_ptr(scratch), cute::make_shape(token_dim, n_peers));
             get_token_to_peer_mapping(routing_tensor, shard_spec, mapping_tensor);
             //workspace is free for reuse

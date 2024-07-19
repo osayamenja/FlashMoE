@@ -10,9 +10,9 @@
 #include "communication/packet.cuh"
 #include "algorithm/algorithm.cuh"
 #include "util/indexing.cuh"
-#include "util/tensor.cuh"
-#include "util/platform.cuh"
+#include "definition/tensor.cuh"
+#include "definition/platform.cuh"
 #include "communication/communicator.cuh"
-#include "communication/doorbell.cuh"
+#include "definition/types.cuh"
 
 #endif //ARISTOS_CUH

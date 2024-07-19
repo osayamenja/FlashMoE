@@ -11,6 +11,7 @@
 #include <cuda/std/__algorithm/pop_heap.h>
 
 #include <nvshmemx.h>
+#include <nvshmem.h>
 #include <host/nvshmemx_api.h>
 
 #include "include/aristos.cuh"
@@ -252,7 +253,7 @@ __global__ void memory_heterogeneity(void* symmetric,  uint64_t* flags, int my_p
     constexpr uint64_t set_flag = 1;
 
     // Send
-    nvshmem_putmem_signal_nbi(static_cast<void*>(scratchpad_begin),
+    nvshmemx_putmem_signal_nbi_block(static_cast<void*>(scratchpad_begin),
                               static_cast<void*>(scratchpad_begin),
                               (total_mem * 2),
                               (flags + my_pe),
