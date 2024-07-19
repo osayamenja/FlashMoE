@@ -48,11 +48,13 @@ add_executable(csrc main.cu
         include/communication/packet.cuh
         include/moe/moe.cuh
         include/aristos.cuh
-        include/moe/gate.cuh
         include/compute/compute.cuh
         include/algorithm/algorithm.cuh
         include/util/indexing.cuh
-        include/util/tensor.cuh)
+        include/util/tensor.cuh
+        include/communication/communicator.cuh
+        include/communication/doorbell.cuh
+        include/util/platform.cuh)
 
 # add dependencies
 include(cmake/CPM.cmake)

@@ -1,36 +1,32 @@
 #include <iostream>
 #include <array>
-#include <typeinfo>
 
 #include <cuda_runtime.h>
 #include <cublasdx.hpp>
 #include <cuda/std/array>
 #include <cuda/std/chrono>
-#include <cuda/std/concepts>
 
 // Heap things
 #include <cuda/std/__algorithm/make_heap.h>
 #include <cuda/std/__algorithm/pop_heap.h>
 
-#include <nvshmem.h>
 #include <nvshmemx.h>
-#include <nvtx3/nvtx3.hpp>
+#include <host/nvshmemx_api.h>
 
 #include "include/aristos.cuh"
-#include "include/algorithm/algorithm.cuh"
 
 #define THREADS_PER_WARP 32
 
-__global__ void aristos_sandbox(int *destination, int my_pe, int n_pes, bool skip = true) {
+__global__ void aristos_sandbox(int *destination, const int my_pe, const int n_pes, const bool skip = true) {
     cuda::std::array<int, 4>activations{{my_pe + 1, 2,my_pe + 3, 4}};
     int n_elems = 2;
     int k = 0;
     const auto start{cuda::std::chrono::high_resolution_clock::now()};
-    for(uint i = 0; i < n_pes; ++i){
+    for(int i = 0; i < n_pes; ++i){
         for(uint j = 0; j < n_elems; ++j){
             destination[j] = activations[k++];
         }
-        nvshmem_int_put((destination + ((my_pe+1)*n_elems)),
+        nvshmemx_int_put_block((destination + ((my_pe+1)*n_elems)),
                         destination,
                         n_elems,
                         (i % n_pes));
@@ -66,7 +62,9 @@ void nvshmem_test(){
     cudaSetDevice(my_pe_node);
     cudaStreamCreate(&stream);
 
-    int *destination = (int*) nvshmem_calloc(msg.size(), sizeof(int));
+    auto destination_void = nvshmem_calloc(msg.size(), sizeof(int));
+    auto destination = static_cast<int*>(destination_void);
+
     for (int i = 0; i < 5; ++i) {
         aristos_sandbox<<<1, 1>>>(destination, my_pe, n_pe);
         CUTE_CHECK_ERROR(cudaPeekAtLastError());
@@ -153,7 +151,7 @@ __global__ void aristos_kernel(const ValueType alpha,
     while(dN > 0 && !should_timeout){
         if(var_epsilon == 0){
             snapshot_now = cuda::std::chrono::high_resolution_clock::now();
-            var_epsilon--; // Negates the if-condition
+            --var_epsilon; // Negates the if-condition
         }
         should_timeout = (var_epsilon < 0 &&
                           (cuda::std::chrono::high_resolution_clock::now() - snapshot_now) >= timeout_duration);
@@ -201,7 +199,6 @@ void nvsh_test_ptr(){
     int my_pe_node = nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE);
     CUTE_CHECK_ERROR(cudaSetDevice(my_pe_node));
     using TensorType = __half;
-//    auto* destination = static_cast<TensorType*>(nvshmem_calloc(4, sizeof(float)));
     auto* destination = static_cast<TensorType*>(nvshmem_calloc(4, sizeof(float)));
     CUTE_CHECK_ERROR(cudaPeekAtLastError());
     nvsh_test_kernel<<<1,1>>>(destination);
@@ -238,6 +235,38 @@ void fused_top_idx(T input){
 }
 template<int Bits, bool Signed>
 struct cute::is_integral<cutlass::integer_subbyte<Bits, Signed>> : cute::true_type {};
+
+__global__ void memory_heterogeneity(void* symmetric,  uint64_t* flags, int my_pe){
+    // Arrange
+    const int peer = !my_pe;
+    constexpr int k = 2;
+    constexpr int n_tok = 2;
+    constexpr int total_mem = n_tok + k;
+    auto* scratchpad = static_cast<cute::half_t*>(symmetric);
+    auto* scratchpad_begin = scratchpad + (my_pe*total_mem);
+    scratchpad_begin[0] = cute::half_t(0.67);
+    scratchpad_begin[1] = cute::half_t(0.02);
+    auto* trailer = static_cast<uint_fast16_t*>(static_cast<void*>((scratchpad_begin + n_tok)));
+    trailer[0] = 2;
+    trailer[1] = 5;
+    constexpr uint64_t set_flag = 1;
+
+    // Send
+    nvshmem_putmem_signal_nbi(static_cast<void*>(scratchpad_begin),
+                              static_cast<void*>(scratchpad_begin),
+                              (total_mem * 2),
+                              (flags + my_pe),
+                              set_flag,
+                              NVSHMEM_SIGNAL_SET,
+                              peer);
+    nvshmem_signal_wait_until((flags + my_pe), NVSHMEM_CMP_EQ, set_flag);
+
+    // Reconstitute
+    auto* floats = scratchpad + (peer*total_mem);
+    cute::print("Received floats: %f, %f", floats[0].operator float(), floats[1].operator float());
+    auto* r_trailers = static_cast<uint_fast16_t*>(static_cast<void*>(floats + n_tok));
+    cute::print("Received trailers: %d, %d", r_trailers[0], r_trailers[1]);
+}
 
 int main() {
 //    cute::array<int, 4> u = {1,2,3,4};
@@ -289,8 +318,27 @@ int main() {
 //    static_assert(cuda::std::is_integral<decltype(cute::uint1_t(0).storage)>()); // 2 and 4 int and float no bueno, neither does nvidia types. stdints
 //
 //    static_assert(cuda::std::same_as<decltype(hh_t(0)), cute::half_t>);
-    cute::array<int, 2> aa{};
-    std::cout << aa[0]++ << std::endl;
-    std::cout << aa[0] << std::endl;
+//    cute::array<int, 2> aa{};
+//    std::cout << aa[0]++ << std::endl;
+//    std::cout << aa[0] << std::endl;
+    void* parent = calloc(4, 4);
+    const int k = 2;
+    const int n_tok = 2;
+    auto* scratchpad = static_cast<cute::half_t*>(parent);
+    scratchpad[0] = cute::half_t(0.67);
+    scratchpad[1] = cute::half_t(0.02);
+    auto* trailer = static_cast<uint_fast16_t*>(static_cast<void*>((scratchpad + n_tok)));
+    trailer[0] = 2;
+    trailer[1] = 5;
+
+    void* recipient = calloc(4, 4);
+    std::memcpy(recipient, parent, 4*4);
+
+    auto* float_payload = static_cast<cute::half_t*>(recipient);
+    cute::print("Payload is %f, %f\n", float_payload[0].operator float(), float_payload[1].operator float());
+    const auto* metadata = static_cast<uint_fast16_t*>(static_cast<void*>((float_payload + n_tok)));
+    cute::print("Trailer is %d, %d", metadata[0], metadata[1]);
+    free(recipient);
+    free(parent);
     return 0;
 }

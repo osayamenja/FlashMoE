@@ -28,6 +28,16 @@ namespace aristos{
 
     bool
     CUTE_DEVICE
+    outside_block_range(int threshold){
+    #if defined(__CUDA_ARCH__)
+        return blockIdx.x + blockIdx.y*gridDim.x + blockIdx.z*gridDim.x*gridDim.y > threshold;
+    #else
+        return true;
+    #endif
+    }
+
+    bool
+    CUTE_DEVICE
     is_thread_within_range(int threshold){
     #if defined(__CUDA_ARCH__)
         return get_tid() < threshold;

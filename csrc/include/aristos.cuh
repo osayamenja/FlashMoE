@@ -8,9 +8,11 @@
 #include "moe/moe.cuh"
 #include "communication/queue.cuh"
 #include "communication/packet.cuh"
-#include "moe/gate.cuh"
 #include "algorithm/algorithm.cuh"
 #include "util/indexing.cuh"
 #include "util/tensor.cuh"
+#include "util/platform.cuh"
+#include "communication/communicator.cuh"
+#include "communication/doorbell.cuh"
 
 #endif //ARISTOS_CUH
