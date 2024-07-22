@@ -55,7 +55,8 @@ add_executable(csrc main.cu
         include/communication/communicator.cuh
         include/definition/platform.cuh
         include/util/debug.cuh
-        include/definition/types.cuh)
+        include/definition/types.cuh
+        include/definition/memory_layout.cuh)
 
 # add dependencies
 include(cmake/CPM.cmake)
@@ -85,6 +86,7 @@ add_library(nvshmem_host ALIAS nvshmem::nvshmem_host)
 add_library(nvshmem_device ALIAS nvshmem::nvshmem_device)
 target_link_libraries(csrc PUBLIC nvshmem_host nvshmem_device)
 target_link_libraries(csrc PUBLIC CUDA::cudart CUDA::cuda_driver CUDA::cublas mathdx::cublasdx)
+target_link_libraries(csrc PRIVATE atomic)
 
 target_compile_options(csrc
         PRIVATE

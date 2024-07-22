@@ -11,6 +11,7 @@
 #include <cuda/cmath>
 
 namespace aristos{
+    __device__ __constant__ cuda::atomic<bool, cuda::thread_scope_device> stop{};
     //TODO gate, expert fusion and control plane
     /// MoE + Gate
     template<Matrix M, Tensor T>
@@ -19,12 +20,12 @@ namespace aristos{
         M shard_spec;
         M spec_translation;
         medium_int n_peers;
-        miniscule_int capacity_factor;
-        miniscule_int k;
+        medium_int capacity_factor;
+        medium_int k;
 
     public:
         CUTE_DEVICE
-        FusedMoELayer(void* _symmetric_heap, M _shard_spec, M _spec_translation, miniscule_int _capacity_factor, miniscule_int _k):
+        FusedMoELayer(void* _symmetric_heap, M _shard_spec, M _spec_translation, medium_int _capacity_factor, medium_int _k):
         symmetric_heap(_symmetric_heap), shard_spec(_shard_spec),
         spec_translation(_spec_translation), capacity_factor(_capacity_factor), k(_k)
         {

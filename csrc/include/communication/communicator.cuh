@@ -5,40 +5,67 @@
 #ifndef ARISTOS_COMMUNICATOR_CUH
 #define ARISTOS_COMMUNICATOR_CUH
 
-#include <cuda/semaphore>
 #include <cuda/atomic>
-#include "../definition/platform.cuh"
-#include "../definition/tensor.cuh"
+#include "../definition/memory_layout.cuh"
+
 namespace aristos{
-    template<Matrix M, uint Arch> requires MinArch<Arch>
+    __device__ __constant__ cuda::atomic<medium_int, cuda::thread_scope_device> doorbell{0};
+    __device__ __constant__ cuda::atomic<medium_int, cuda::thread_scope_device> last{1};
+    __device__ __constant__ cuda::atomic<medium_int, cuda::thread_scope_device> queue_index{0};
     class Communicator{
+        static uint thread_stripe_len;
     public:
-        void* message_queue;
-        cuda::atomic<uint_fast16_t, cuda::thread_scope_device> doorbell = 0;
-        cuda::atomic<bool, cuda::thread_scope_device> stop = false;
-        uint rank;
-
-
-        explicit Communicator(void* _message_queue, uint _rank, int db_count = 0):
-                message_queue(_message_queue),
-                rank(_rank)
-        {}
-
-        void start(){
+        Communicator() = default;
+        static CUTE_DEVICE
+        void start(void* message_queue, medium_int rank, uint n_peers,
+                   uint cap, uint k){
+            // Most likely == 1
+            thread_stripe_len = cuda::ceil_div(n_peers, THREADS_PER_BLOCK);
             while(!stop.load()){
-                acquire_until_signal();
-
+                check_doorbell_until_signal();
+                medium_int i = 0;
+                while(!stop.load() && doorbell.load() > 0){
+                    //collect and send
+                    doorbell--;
+                }
+            }
+        }
+        static CUTE_DEVICE
+        /// Undefined behavior if n_requests != |cooperating threads|
+        /// Caller must ensure synchronization post this call otherwise subsequent calls
+        /// yield undefined behavior
+        void batch_enqueue(int n_requests){
+            if(last.fetch_add(1) == n_requests){
+                doorbell++;
+                last.store(1);
             }
         }
     private:
-        void acquire_until_signal(){
-            while(!doorbell.load() && !stop.load()){}
+        static CUTE_DEVICE
+        void check_doorbell_until_signal(){
+            while(doorbell.load() == 0 && !stop.load()){}
         }
-
+        static CUTE_DEVICE
+        void batch_dequeue(void* message_queue, medium_int rank, const uint n_peers,
+                           uint cap, uint k, uint embed_dim, uint embed_precision){
+            using IndexPair = cuda::std::pair<uint, size_t>;
+            extern __shared__ IndexPair communication_queue[];
+            using value_type = size_t;
+            using DeviceAtomicRef = cuda::atomic_ref<value_type, cuda::thread_scope_device>;
+            auto tid = get_tid() % THREADS_PER_BLOCK;
+            auto heap_iter = static_cast<value_type*>(message_queue);
+            auto heap_index = symmetric_heap_index(cap, k, embed_dim, embed_precision) / sizeof(size_t);
+            CUTE_UNROLL
+            for(uint i = 0; i < thread_stripe_len && (i * tid) < n_peers; ++i){
+                if(size_t n_b = DeviceAtomicRef(heap_iter[(heap_index*i)]).exchange(0) != 0){
+                    auto j = queue_index.fetch_add(1);
+                    communication_queue[j] = IndexPair{(i * tid), n_b};
+                }
+            }
+            __syncthreads();
+        }
     };
 
-    class Metadata{
-
-    };
+    __device__ __constant__ Communicator communicator{};
 }
 #endif //ARISTOS_COMMUNICATOR_CUH

@@ -1,10 +1,13 @@
 #include <iostream>
 #include <array>
+#include <atomic>
 
 #include <cuda_runtime.h>
 #include <cublasdx.hpp>
 #include <cuda/std/array>
 #include <cuda/std/chrono>
+#include <cuda/atomic>
+#include <cuda/barrier>
 
 // Heap things
 #include <cuda/std/__algorithm/make_heap.h>
@@ -174,7 +177,6 @@ template<class TV>
 __global__ void nvsh_test_kernel(TV* dest){
     dest[7] = TV(4.0);
     cute::print("Here is destination[7]: %f", (__half2float(dest[7])));
-
 }
 
 __global__ void heap_things(){
@@ -269,59 +271,74 @@ __global__ void memory_heterogeneity(void* symmetric,  uint64_t* flags, int my_p
     cute::print("Received trailers: %d, %d", r_trailers[0], r_trailers[1]);
 }
 
+__device__ __constant__ cuda::atomic<unsigned int, cuda::thread_scope_device> last{1};
+__device__ __constant__ cuda::atomic<unsigned int, cuda::thread_scope_device> db{0};
+
+__global__ void play_kernel(int n){
+    printf("I am Thread %d in Block %d\n", aristos::get_tid(), aristos::get_bid());
+    if(last.fetch_add(1) == n){
+        db++;
+        printf("Thread %d in Block %d is last: %d\n", aristos::get_tid(), aristos::get_bid(), last.load());
+    }
+    __syncthreads();
+    if(aristos::get_tid() == 0){
+        printf("Doorbell is %d", db.load());
+    }
+
+}
 int main() {
-//    cute::array<int, 4> u = {1,2,3,4};
-//    cute::array<int, 4> v = {4,5,6,7};
-//    cute::tuple<cute::array<int , 4>, cute::array<int, 4>> t = {u, v};
-//    std::cout << cute::get<1>(t)[0] << std::endl;
-//    std::cout << cute::tuple_size<decltype(t)>::value << std::endl;
-//
-//    cute::array<int*, 2> u_ptr = {};
-//    cute::array<int*, 2> v_ptr = {};
-//    std::cout << cute::half_t(0.8).operator float() << std::endl;
-//    auto ff = cute::float_e4m3_t(4.25f);
-//    std::cout << ff.operator float() << std::endl;
-//    heap_things_pair<<<1,1>>>();
-//    CUTE_CHECK_ERROR(cudaPeekAtLastError());
-//    CUTE_CHECK_ERROR(cudaDeviceSynchronize());
+/*    cute::array<int, 4> u = {1,2,3,4};
+    cute::array<int, 4> v = {4,5,6,7};
+    cute::tuple<cute::array<int , 4>, cute::array<int, 4>> t = {u, v};
+    std::cout << cute::get<1>(t)[0] << std::endl;
+    std::cout << cute::tuple_size<decltype(t)>::value << std::endl;
 
-//    cute::complex<float> e_i = cute::complex(89.0);
-//    auto a_temp = std::array<int, 4>{78, 89, 91};
-//    auto a_t = cute::make_tensor(a_temp.data(), cute::make_layout(cute::make_shape(2, 2)));
-//    std::cout << (cute::is_complex<typename cute::iterator_traits<decltype(a_t.data())>::value_type>::value) << std::endl;
-//    auto a_t0 = a_t(0, cute::_);
-//    std::cout << a_t0(0) << std::endl;
-//    std::cout << cute::size(a_t) << std::endl;
-//
-//    cuda::std::pair<int, int> p = {8, 9};
-//    cuda::std::pair<int, int> q = {8, 3};
-//
-//    std::cout << (p < q) << std::endl;
-//    cuda::std::array<cuda::std::pair<int, int>, 4> a {};
-//    cuda::std::array<int, 4> a = {{1,67,3,4}};
-//    std::cout << *(a.begin() + 1) << std::endl;
-//    std::cout << *a.begin() << std::endl;
-//    cuda::std::array<cuda::std::pair<int, int>, 5> a {{{3, 0}, {2, 1}, {4, 2}, {1, 3}, {5, 4}}};
-//    auto a_t = cute::make_tensor(a.data(), cute::make_layout(cute::make_shape(1, 5)));
-//    auto my_slice = a_t(0, cute::_);
-//    int p = my_slice(0).first;
-//    auto pp = cuda::std::pair<int, int>{0, 0};
-//
-//    cuda::std::array<int, 5> a_test {{3, 2, 4, 1, 5}};
-//    auto b_t = cute::make_tensor(a_test.data(), cute::make_layout(cute::make_shape(1, 5)));
-//    printf("initially, a_test is :{%d, %d, %d, %d, %d}\n", a_test[0], a_test[1], a_test[2], a_test[3], a_test[4]);
-//    fused_top_idx(b_t);
-//    printf("after fused_top_idx, a_test is :{%d, %d, %d, %d, %d}\n", a_test[0], a_test[1], a_test[2], a_test[3], a_test[4]);
+    cute::array<int*, 2> u_ptr = {};
+    cute::array<int*, 2> v_ptr = {};
+    std::cout << cute::half_t(0.8).operator float() << std::endl;
+    auto ff = cute::float_e4m3_t(4.25f);
+    std::cout << ff.operator float() << std::endl;
+    heap_things_pair<<<1,1>>>();
+    CUTE_CHECK_ERROR(cudaPeekAtLastError());
+    CUTE_CHECK_ERROR(cudaDeviceSynchronize());
 
-//    auto hh = cute::half_t(0);
-//    using hh_t = decltype(hh);
-//    auto u8 = cute::uint1_t(0).storage
-//    static_assert(cuda::std::is_integral<decltype(cute::uint1_t(0).storage)>()); // 2 and 4 int and float no bueno, neither does nvidia types. stdints
-//
-//    static_assert(cuda::std::same_as<decltype(hh_t(0)), cute::half_t>);
-//    cute::array<int, 2> aa{};
-//    std::cout << aa[0]++ << std::endl;
-//    std::cout << aa[0] << std::endl;
+    cute::complex<float> e_i = cute::complex(89.0);
+    auto a_temp = std::array<int, 4>{78, 89, 91};
+    auto a_t = cute::make_tensor(a_temp.data(), cute::make_layout(cute::make_shape(2, 2)));
+    std::cout << (cute::is_complex<typename cute::iterator_traits<decltype(a_t.data())>::value_type>::value) << std::endl;
+    auto a_t0 = a_t(0, cute::_);
+    std::cout << a_t0(0) << std::endl;
+    std::cout << cute::size(a_t) << std::endl;
+
+    cuda::std::pair<int, int> p = {8, 9};
+    cuda::std::pair<int, int> q = {8, 3};
+
+    std::cout << (p < q) << std::endl;
+    cuda::std::array<cuda::std::pair<int, int>, 4> a {};
+    cuda::std::array<int, 4> a = {{1,67,3,4}};
+    std::cout << *(a.begin() + 1) << std::endl;
+    std::cout << *a.begin() << std::endl;
+    cuda::std::array<cuda::std::pair<int, int>, 5> a {{{3, 0}, {2, 1}, {4, 2}, {1, 3}, {5, 4}}};
+    auto a_t = cute::make_tensor(a.data(), cute::make_layout(cute::make_shape(1, 5)));
+    auto my_slice = a_t(0, cute::_);
+    int p = my_slice(0).first;
+    auto pp = cuda::std::pair<int, int>{0, 0};
+
+    cuda::std::array<int, 5> a_test {{3, 2, 4, 1, 5}};
+    auto b_t = cute::make_tensor(a_test.data(), cute::make_layout(cute::make_shape(1, 5)));
+    printf("initially, a_test is :{%d, %d, %d, %d, %d}\n", a_test[0], a_test[1], a_test[2], a_test[3], a_test[4]);
+    fused_top_idx(b_t);
+    printf("after fused_top_idx, a_test is :{%d, %d, %d, %d, %d}\n", a_test[0], a_test[1], a_test[2], a_test[3], a_test[4]);
+
+    auto hh = cute::half_t(0);
+    using hh_t = decltype(hh);
+    auto u8 = cute::uint1_t(0).storage
+    static_assert(cuda::std::is_integral<decltype(cute::uint1_t(0).storage)>()); // 2 and 4 int and float no bueno, neither does nvidia types. stdints
+
+    static_assert(cuda::std::same_as<decltype(hh_t(0)), cute::half_t>);
+    cute::array<int, 2> aa{};
+    std::cout << aa[0]++ << std::endl;
+    std::cout << aa[0] << std::endl;
     void* parent = calloc(4, 4);
     const int k = 2;
     const int n_tok = 2;
@@ -340,6 +357,12 @@ int main() {
     const auto* metadata = static_cast<uint_fast16_t*>(static_cast<void*>((float_payload + n_tok)));
     cute::print("Trailer is %d, %d", metadata[0], metadata[1]);
     free(recipient);
-    free(parent);
+    free(parent);*/
+    void* p;
+    CUTE_CHECK_ERROR(cudaMallocManaged(&p, 16));
+    CUTE_CHECK_ERROR(cudaMemset(p, 0, 16));
+    CUTE_CHECK_ERROR(cudaDeviceSynchronize());
+    play_kernel<<<2,THREADS_PER_WARP>>>(THREADS_PER_WARP);
+    CUTE_CHECK_LAST();
     return 0;
 }

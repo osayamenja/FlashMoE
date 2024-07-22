@@ -14,5 +14,6 @@
 #include "definition/platform.cuh"
 #include "communication/communicator.cuh"
 #include "definition/types.cuh"
+#include "definition/memory_layout.cuh"
 
 #endif //ARISTOS_CUH
