@@ -3,7 +3,6 @@
 #include <atomic>
 
 #include <cuda_runtime.h>
-#include <cublasdx.hpp>
 #include <cuda/std/array>
 #include <cuda/std/chrono>
 #include <cuda/atomic>
@@ -18,6 +17,13 @@
 #include <host/nvshmemx_api.h>
 
 #include "include/aristos.cuh"
+#include <cuda/pipeline>
+#include <cooperative_groups.h>
+#include <thrust/host_vector.h>
+#include <thrust/device_vector.h>
+
+#include <cute/tensor.hpp>
+#include <cute/config.hpp>
 
 #define THREADS_PER_WARP 32
 
@@ -87,80 +93,6 @@ void nvshmem_test(){
     std::cout << std::string(result_stream.str());
     nvshmem_free(destination);
     nvshmem_finalize();
-}
-
-template<class GEMM, class ValueType = typename GEMM::value_type, unsigned int epsilon = 2>
-__global__ void aristos_kernel(const ValueType alpha,
-                               const ValueType* routing_weights,
-                               const ValueType* shard_spec,
-                               ValueType* c,
-                               int my_pe){
-    // GEMM to map tokens to peers
-    extern __shared__ ValueType smem[];
-    ValueType* sa = smem;
-    ValueType* sb = smem + GEMM::a_size;
-    ValueType* sc = smem + GEMM::a_size + GEMM::b_size;
-
-    auto dM = cublasdx::size_of<GEMM>::m;
-    const auto dN = cublasdx::size_of<GEMM>::n;
-    auto dK = cublasdx::size_of<GEMM>::k;
-
-    auto sa_tensor = cute::make_tensor(sa, cute::make_layout(cute::make_shape(dM, dK)));
-    cute::Tensor sb_tensor = cute::make_tensor(sb, cute::make_layout(cute::make_shape(dK, dN)));
-    cute::Tensor sc_tensor = cute::make_tensor(sc, cute::make_layout(cute::make_shape(dM, dN)));
-    cute::Tensor act_tensor = cute::make_tensor(cute::make_gmem_ptr(routing_weights), cute::make_shape(dM, dK));
-    cute::Tensor spec_tensor = cute::make_tensor(cute::make_gmem_ptr(shard_spec), cute::make_shape(dK, dN));
-
-    cute::copy(act_tensor, sa_tensor);
-    cute::copy(spec_tensor, sb_tensor);
-
-    __syncthreads();
-    GEMM().execute(alpha, sa, sb, 0.0, sc);
-    __syncthreads();
-
-    if(cute::thread0()){
-        cute::print_tensor(sc_tensor);
-    }
-
-    cute::array_aligned<ValueType, cublasdx::size_of<GEMM>::m> tokens = {};
-    // Iterate through each token slice and send to corresponding GPU.
-    CUTE_UNROLL
-    for(unsigned int n = 0; n < cute::size<1>(sc_tensor); ++n){
-        if (cute::thread0()){
-            cute::print("Sending { ");
-        }
-        for(unsigned int m = 0; m < cute::size<0>(sc_tensor); ++m){
-            if(sc_tensor(m, n) > 0){
-                tokens[m] = sc_tensor(m, n);
-                if(cute::thread0()){
-                    cute::print("%d, ", m);
-                }
-            }
-        }
-        if(cute::thread0()){
-            cute::print("} to Peer %d...\n", n);
-        }
-    }
-
-    // Initialize algo inputs
-    cuda::std::array<int, dN> task_counts = {};
-    cuda::std::fill_n(task_counts.begin(), dN, 2);
-    int mu = 2 * dN;
-    bool should_timeout = false;
-    auto snapshot_now = cuda::std::chrono::high_resolution_clock::now();
-    auto timeout_duration = cuda::std::chrono::duration<float, cuda::std::milli>
-            (cuda::std::chrono::microseconds(1));
-
-    int var_epsilon = epsilon;
-    while(dN > 0 && !should_timeout){
-        if(var_epsilon == 0){
-            snapshot_now = cuda::std::chrono::high_resolution_clock::now();
-            --var_epsilon; // Negates the if-condition
-        }
-        should_timeout = (var_epsilon < 0 &&
-                          (cuda::std::chrono::high_resolution_clock::now() - snapshot_now) >= timeout_duration);
-
-    }
 }
 
 __global__ void sandbox(){
@@ -275,18 +207,26 @@ __device__ __constant__ cuda::atomic<unsigned int, cuda::thread_scope_device> la
 __device__ __constant__ cuda::atomic<unsigned int, cuda::thread_scope_device> db{0};
 
 __global__ void play_kernel(int n){
-    printf("I am Thread %d in Block %d\n", aristos::get_tid(), aristos::get_bid());
+    cooperative_groups::grid_group g = cg::this_grid();
+    printf("I am Thread %llu in Block %llu, x=%u, y=%u, z=%u\n",
+           cg::grid_group::thread_rank(),
+           cg::grid_group::block_rank(),
+           blockIdx.x, blockIdx.y, blockIdx.z);
     if(last.fetch_add(1) == n){
         db++;
         printf("Thread %d in Block %d is last: %d\n", aristos::get_tid(), aristos::get_bid(), last.load());
     }
-    __syncthreads();
-    if(aristos::get_tid() == 0){
-        printf("Doorbell is %d", db.load());
+    if(cooperative_groups::grid_group::thread_rank() == 15){
+        printf("Block_dim.x %d, Block_dim.y %d, Block_dim.z %d\n", cg::grid_group::dim_blocks().x,
+               cg::grid_group::dim_blocks().y, cg::grid_group::dim_blocks().z);
+        printf("Threads in a block is: %d\n", cg::thread_block::num_threads());
     }
 
 }
+
 int main() {
+//    thrust::host_vector<float> h_A(32);
+//    thrust::device_vector<float> d_A = h_A;
 /*    cute::array<int, 4> u = {1,2,3,4};
     cute::array<int, 4> v = {4,5,6,7};
     cute::tuple<cute::array<int , 4>, cute::array<int, 4>> t = {u, v};
@@ -358,11 +298,14 @@ int main() {
     cute::print("Trailer is %d, %d", metadata[0], metadata[1]);
     free(recipient);
     free(parent);*/
+
     void* p;
     CUTE_CHECK_ERROR(cudaMallocManaged(&p, 16));
     CUTE_CHECK_ERROR(cudaMemset(p, 0, 16));
     CUTE_CHECK_ERROR(cudaDeviceSynchronize());
-    play_kernel<<<2,THREADS_PER_WARP>>>(THREADS_PER_WARP);
+    dim3 dimGrid(2,2, 2);
+    dim3 dimBlock(4,8);
+    play_kernel<<<dimGrid,dimBlock>>>(8);
     CUTE_CHECK_LAST();
     return 0;
 }

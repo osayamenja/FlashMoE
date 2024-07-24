@@ -8,6 +8,7 @@
 namespace aristos{
     /// 2 Bytes
     using medium_int = unsigned short;
+    namespace cg = cooperative_groups;
 
 }
 #endif //ARISTOS_TYPES_CUH

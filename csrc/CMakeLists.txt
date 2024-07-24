@@ -1,10 +1,26 @@
 cmake_minimum_required(VERSION 3.27)
 
-# Set c++ and c compilers
-execute_process(COMMAND "which" "g++" OUTPUT_VARIABLE CPP_COMP_PATH OUTPUT_STRIP_TRAILING_WHITESPACE)
-execute_process(COMMAND "which" "gcc" OUTPUT_VARIABLE C_COMP_PATH OUTPUT_STRIP_TRAILING_WHITESPACE)
-set(CMAKE_CXX_COMPILER "${CPP_COMP_PATH}")
-set(CMAKE_C_COMPILER "${C_COMP_PATH}")
+# Set compilers and obtain compute capability, assuming the running process sees homogenous GPUs
+# Add COMMAND_ECHO STDOUT to see the commands in standard out
+execute_process(COMMAND "which" "g++"
+        COMMAND_ERROR_IS_FATAL ANY
+        OUTPUT_VARIABLE CPP_COMP_PATH
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+execute_process(COMMAND "which" "gcc"
+        COMMAND_ERROR_IS_FATAL ANY
+        OUTPUT_VARIABLE C_COMP_PATH OUTPUT_STRIP_TRAILING_WHITESPACE)
+execute_process(COMMAND "nvidia-smi" "--id=0" "--query-gpu=compute_cap" "--format=csv,noheader"
+        COMMAND_ERROR_IS_FATAL ANY
+        OUTPUT_VARIABLE COMPUTE_CAPABILITY
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+
+string(REGEX REPLACE "(\.[0-9])" "0" COMPUTE_CAPABILITY ${COMPUTE_CAPABILITY})
+message(STATUS "GPU 0 Compute Capability: ${COMPUTE_CAPABILITY}")
+
+#set(ENV{CPM_SOURCE_CACHE} "${CMAKE_CURRENT_SOURCE_DIR}/cmake/deps")
+set(ENV{CUTLASS_NVCC_ARCHS} "${COMPUTE_CAPABILITY}")
+set(CMAKE_CXX_COMPILER "${CPP_COMP_PATH}" CACHE PATH "g++ Compiler Path")
+set(CMAKE_C_COMPILER "${C_COMP_PATH}" CACHE PATH "gcc Compiler Path")
 
 project(csrc CUDA CXX)
 
@@ -59,6 +75,7 @@ add_executable(csrc main.cu
         include/definition/memory_layout.cuh)
 
 # add dependencies
+#TODO Pin versions for release build and use main for debug
 include(cmake/CPM.cmake)
 ## This will automatically clone CCCL from GitHub and make the exported cmake targets available
 CPMAddPackage(
@@ -67,14 +84,7 @@ CPMAddPackage(
         GIT_TAG main # Fetches the latest commit on the main branch
 )
 
-CPMAddPackage(
-        NAME NVTX
-        GITHUB_REPOSITORY NVIDIA/NVTX
-        GIT_TAG v3.1.0-c-cpp
-        GIT_SHALLOW TRUE)
-
-target_link_libraries(csrc PRIVATE CCCL::CCCL nvtx3-cpp)
-#target_link_libraries(csrc PRIVATE nvtx3-cpp)
+target_link_libraries(csrc PRIVATE CCCL::CCCL)
 
 set_target_properties(csrc PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON)

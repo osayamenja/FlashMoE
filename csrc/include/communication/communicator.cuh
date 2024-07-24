@@ -5,35 +5,36 @@
 #ifndef ARISTOS_COMMUNICATOR_CUH
 #define ARISTOS_COMMUNICATOR_CUH
 
+#include <cooperative_groups.h>
 #include <cuda/atomic>
+#include <cuda/annotated_ptr>
+#include <cuda/barrier>
 #include "../definition/memory_layout.cuh"
 
 namespace aristos{
-    __device__ __constant__ cuda::atomic<medium_int, cuda::thread_scope_device> doorbell{0};
-    __device__ __constant__ cuda::atomic<medium_int, cuda::thread_scope_device> last{1};
-    __device__ __constant__ cuda::atomic<medium_int, cuda::thread_scope_device> queue_index{0};
+    __device__ cuda::atomic<medium_int, cuda::thread_scope_device> doorbell{0};
+    __device__ cuda::atomic<unsigned int, cuda::thread_scope_device> last{1};
+    __device__ cuda::atomic<medium_int, cuda::thread_scope_device> queue_index{0};
+    __device__ cuda::atomic<unsigned int, cuda::thread_scope_device> comm_barrier{1};
+
     class Communicator{
-        static uint thread_stripe_len;
     public:
         Communicator() = default;
         static CUTE_DEVICE
         void start(void* message_queue, medium_int rank, uint n_peers,
-                   uint cap, uint k){
+                   uint cap, uint k, uint embed_dim, uint embed_p){
+            cuda::access_property accessProperty(cuda::access_property::persisting{});
+            cuda::associate_access_property(message_queue, accessProperty);
+
             // Most likely == 1
-            thread_stripe_len = cuda::ceil_div(n_peers, THREADS_PER_BLOCK);
             while(!stop.load()){
                 check_doorbell_until_signal();
-                medium_int i = 0;
                 while(!stop.load() && doorbell.load() > 0){
-                    //collect and send
-                    doorbell--;
+                    batch_dequeue(message_queue, rank, n_peers, cap, k, embed_dim, embed_p);
                 }
             }
         }
         static CUTE_DEVICE
-        /// Undefined behavior if n_requests != |cooperating threads|
-        /// Caller must ensure synchronization post this call otherwise subsequent calls
-        /// yield undefined behavior
         void batch_enqueue(int n_requests){
             if(last.fetch_add(1) == n_requests){
                 doorbell++;
@@ -48,11 +49,16 @@ namespace aristos{
         static CUTE_DEVICE
         void batch_dequeue(void* message_queue, medium_int rank, const uint n_peers,
                            uint cap, uint k, uint embed_dim, uint embed_precision){
+            const auto t_per_block = (blockDim.x * blockDim.y * blockDim.z);
+            // gridDim.z > 1, 2 is okay
+            const auto n_comm_blocks = (gridDim.z - 1) * (gridDim.x * gridDim.y);
+            const auto total_communicator_threads = t_per_block * n_comm_blocks;
+            uint thread_stripe_len = cuda::ceil_div(n_peers, total_communicator_threads);
             using IndexPair = cuda::std::pair<uint, size_t>;
             extern __shared__ IndexPair communication_queue[];
             using value_type = size_t;
             using DeviceAtomicRef = cuda::atomic_ref<value_type, cuda::thread_scope_device>;
-            auto tid = get_tid() % THREADS_PER_BLOCK;
+            auto tid = get_tid() % n_comm_blocks;
             auto heap_iter = static_cast<value_type*>(message_queue);
             auto heap_index = symmetric_heap_index(cap, k, embed_dim, embed_precision) / sizeof(size_t);
             CUTE_UNROLL
@@ -63,6 +69,20 @@ namespace aristos{
                 }
             }
             __syncthreads();
+
+            // decrement doorbell?
+        }
+
+        static CUTE_DEVICE
+        void sync(const CUTE_GRID_CONSTANT auto n_participants){
+            // arrive
+            if(auto token = comm_barrier.fetch_add(1); token == n_participants){
+
+            }
+            // You have nothing to do in the interim, so kindly
+            // wait
+//            while(token != comm_barrier.load()){}
+
         }
     };
 

@@ -4,6 +4,8 @@
 
 #ifndef ARISTOS_INDEXING_CUH
 #define ARISTOS_INDEXING_CUH
+
+#include <cute/config.hpp>
 namespace aristos{
     int
     CUTE_DEVICE

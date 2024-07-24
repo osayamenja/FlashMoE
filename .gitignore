@@ -7,3 +7,4 @@ __pycache__/
 csrc/cmake-build-debug
 csrc/.idea
 csrc/*.iml
+csrc/cmake/

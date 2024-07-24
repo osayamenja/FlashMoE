@@ -5,8 +5,6 @@
 #ifndef ARISTOS_PLATFORM_CUH
 #define ARISTOS_PLATFORM_CUH
 
-#define THREADS_PER_BLOCK 1024U
-#define BLOCKS_PER_COMMUNICATOR 2U
 namespace aristos{
     template<uint capability>
     concept MinArch = requires{

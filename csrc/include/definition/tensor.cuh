@@ -6,6 +6,7 @@
 #define ARISTOS_TENSOR_CUH
 
 #include <cuda/std/concepts>
+#include <cute/tensor.hpp>
 
 namespace aristos{
     template<typename V>
