@@ -6,8 +6,9 @@
 #define ARISTOS_MEMORY_LAYOUT_CUH
 
 namespace aristos{
-    /// 4 bytes to represent number of bytes for a packet in memory
-    constexpr int n_bytes_repr = 4;
+    /// NVSHMEM uses size_t
+    /// See https://docs.nvidia.com/nvshmem/api/gen/api/rma.html#nvshmem-put-nbi
+    using n_bytes_repr = size_t;
 
     /// Number of communication stages
     constexpr int stages = 2;
@@ -16,7 +17,7 @@ namespace aristos{
     constexpr int n_cells = 2 * stages;
 
     /// Per embedding vector
-    /// k is top_k
+    /// k is top_k, +1 for index, and *4 for uint precision
     constexpr uint trailer_length_bytes(uint k){
         return (k + 1) * 4;
     }
@@ -25,8 +26,8 @@ namespace aristos{
     size_t symmetric_heap_index(uint capacity, uint k, uint embed_dim, uint embed_precision){
         auto trailer_len = trailer_length_bytes(k);
         auto embed_bytes = embed_dim * embed_precision;
-        auto header_bytes = 8;
-        auto packet_bytes = 4 * capacity * (embed_bytes + trailer_len);
+        auto header_bytes = sizeof (n_bytes_repr);
+        auto packet_bytes = n_cells * capacity * (embed_bytes + trailer_len);
         return packet_bytes + header_bytes;
     }
 }

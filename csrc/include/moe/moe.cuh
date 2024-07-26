@@ -11,7 +11,7 @@
 #include <cuda/cmath>
 
 namespace aristos{
-    __device__ __constant__ cuda::atomic<bool, cuda::thread_scope_device> stop{};
+    __device__ cuda::atomic<bool, cuda::thread_scope_device> stop{false};
     //TODO gate, expert fusion and control plane
     /// MoE + Gate
     template<Matrix M, Tensor T>
@@ -49,7 +49,7 @@ namespace aristos{
             extern __shared__ float workspace[];
             auto routing_tensor = cute::make_tensor(cute::make_smem_ptr(workspace), cute::make_shape(token_dim, n_experts));
             gate(activations, w_gate, routing_tensor);
-            extern __shared__ medium_int scratch[]; // assumes n_peers in an ep_group <= UINT16_MAX = (64k - 1)
+            extern __shared__ uint scratch[];
             auto mapping_tensor = cute::make_tensor(cute::make_smem_ptr(scratch), cute::make_shape(token_dim, n_peers));
             get_token_to_peer_mapping(routing_tensor, shard_spec, mapping_tensor);
             //workspace is free for reuse

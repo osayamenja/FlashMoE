@@ -214,7 +214,7 @@ __global__ void play_kernel(int n){
            blockIdx.x, blockIdx.y, blockIdx.z);
     if(last.fetch_add(1) == n){
         db++;
-        printf("Thread %d in Block %d is last: %d\n", aristos::get_tid(), aristos::get_bid(), last.load());
+        printf("Thread %d in Block %d is last: %d\n", aristos::get_tid(), aristos::bid(), last.load());
     }
     if(cooperative_groups::grid_group::thread_rank() == 15){
         printf("Block_dim.x %d, Block_dim.y %d, Block_dim.z %d\n", cg::grid_group::dim_blocks().x,
@@ -222,6 +222,13 @@ __global__ void play_kernel(int n){
         printf("Threads in a block is: %d\n", cg::thread_block::num_threads());
     }
 
+}
+
+__global__ void play2(cuda::barrier<cuda::thread_scope_device>* b){
+    if(cg::grid_group::thread_rank() == 0){
+        printf("Not using barrier :)");
+    }
+    b->arrive_and_wait();
 }
 
 int main() {
@@ -299,13 +306,13 @@ int main() {
     free(recipient);
     free(parent);*/
 
-    void* p;
-    CUTE_CHECK_ERROR(cudaMallocManaged(&p, 16));
-    CUTE_CHECK_ERROR(cudaMemset(p, 0, 16));
+    cuda::barrier<cuda::thread_scope_device>* p;
+    CUTE_CHECK_ERROR(cudaMallocManaged(&p, sizeof(cuda::barrier<cuda::thread_scope_device>)));
     CUTE_CHECK_ERROR(cudaDeviceSynchronize());
     dim3 dimGrid(2,2, 2);
-    dim3 dimBlock(4,8);
-    play_kernel<<<dimGrid,dimBlock>>>(8);
+    dim3 dimBlock(2,2);
+    //play_kernel<<<dimGrid,dimBlock>>>(8);
+    play2<<<1,1>>>(p);
     CUTE_CHECK_LAST();
     return 0;
 }

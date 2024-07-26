@@ -14,23 +14,23 @@
 namespace aristos{
     __device__ cuda::atomic<medium_int, cuda::thread_scope_device> doorbell{0};
     __device__ cuda::atomic<unsigned int, cuda::thread_scope_device> last{1};
-    __device__ cuda::atomic<medium_int, cuda::thread_scope_device> queue_index{0};
-    __device__ cuda::atomic<unsigned int, cuda::thread_scope_device> comm_barrier{1};
 
+    using DeviceAtomicRef = cuda::atomic_ref<n_bytes_repr, cuda::thread_scope_device>;
     class Communicator{
     public:
         Communicator() = default;
         static CUTE_DEVICE
-        void start(void* message_queue, medium_int rank, uint n_peers,
+        void start(void* symmetric_heap, medium_int rank, uint n_peers,
                    uint cap, uint k, uint embed_dim, uint embed_p){
+            // TODO annotated ptr @ startup instead
             cuda::access_property accessProperty(cuda::access_property::persisting{});
-            cuda::associate_access_property(message_queue, accessProperty);
-
+            cuda::associate_access_property(symmetric_heap, accessProperty);
             // Most likely == 1
             while(!stop.load()){
+                __shared__ uint checkpoint;
                 check_doorbell_until_signal();
                 while(!stop.load() && doorbell.load() > 0){
-                    batch_dequeue(message_queue, rank, n_peers, cap, k, embed_dim, embed_p);
+                    batch_send(symmetric_heap, rank, n_peers, cap, k, embed_dim, embed_p);
                 }
             }
         }
@@ -47,41 +47,45 @@ namespace aristos{
             while(doorbell.load() == 0 && !stop.load()){}
         }
         static CUTE_DEVICE
-        void batch_dequeue(void* message_queue, medium_int rank, const uint n_peers,
-                           uint cap, uint k, uint embed_dim, uint embed_precision){
+        void batch_send(void* symmetric_heap,
+                        const medium_int rank,
+                        const uint n_peers,
+                        const uint cap,
+                        const uint k,
+                        const uint embed_dim,
+                        const uint embed_precision){
+            // TODO grid_constant
             const auto t_per_block = (blockDim.x * blockDim.y * blockDim.z);
             // gridDim.z > 1, 2 is okay
             const auto n_comm_blocks = (gridDim.z - 1) * (gridDim.x * gridDim.y);
-            const auto total_communicator_threads = t_per_block * n_comm_blocks;
-            uint thread_stripe_len = cuda::ceil_div(n_peers, total_communicator_threads);
-            using IndexPair = cuda::std::pair<uint, size_t>;
-            extern __shared__ IndexPair communication_queue[];
-            using value_type = size_t;
-            using DeviceAtomicRef = cuda::atomic_ref<value_type, cuda::thread_scope_device>;
-            auto tid = get_tid() % n_comm_blocks;
-            auto heap_iter = static_cast<value_type*>(message_queue);
-            auto heap_index = symmetric_heap_index(cap, k, embed_dim, embed_precision) / sizeof(size_t);
-            CUTE_UNROLL
-            for(uint i = 0; i < thread_stripe_len && (i * tid) < n_peers; ++i){
-                if(size_t n_b = DeviceAtomicRef(heap_iter[(heap_index*i)]).exchange(0) != 0){
-                    auto j = queue_index.fetch_add(1);
-                    communication_queue[j] = IndexPair{(i * tid), n_b};
+            auto blocks_to_peers = n_comm_blocks / n_peers; // floor division by default
+            auto peer_stripe_len = cuda::ceil_div(1U, blocks_to_peers);
+            auto heap_iter = static_cast<n_bytes_repr*>(symmetric_heap);
+            auto symmetric_heap_byte = static_cast<char*>(symmetric_heap);
+            auto n_bytes_index = symmetric_heap_index(cap, k, embed_dim, embed_precision) / sizeof(size_t);
+            auto intra_peer_index = aristos::bid() - ((aristos::bid() / blocks_to_peers) * blocks_to_peers);
+            for(uint i = (aristos::bid() / blocks_to_peers); i < peer_stripe_len; ++i){
+                if(size_t n_b = DeviceAtomicRef(heap_iter[(n_bytes_index*i)]).exchange(0) > 0){
+                    // TODO __syncwarp() somewhere here?
+                    auto chunk_size = cuda::ceil_div(n_b, size_t(blocks_to_peers));
+                    auto data_ptr = symmetric_heap_byte + (intra_peer_index*chunk_size);
+                    if(intra_peer_index == (blocks_to_peers - 1) && n_b % blocks_to_peers != 0){
+                        // residual chunk
+                        nvshmemx_putmem_nbi_block(data_ptr,
+                                                  (data_ptr + (n_b % chunk_size)),
+                                                  chunk_size,
+                                                  static_cast<int>(i));
+                    }
+                    else{
+                        // send complete chunk
+                        nvshmemx_putmem_nbi_block(data_ptr,
+                                                  (data_ptr + chunk_size),
+                                                  chunk_size,
+                                                  static_cast<int>(i));
+                    }
                 }
             }
-            __syncthreads();
-
             // decrement doorbell?
-        }
-
-        static CUTE_DEVICE
-        void sync(const CUTE_GRID_CONSTANT auto n_participants){
-            // arrive
-            if(auto token = comm_barrier.fetch_add(1); token == n_participants){
-
-            }
-            // You have nothing to do in the interim, so kindly
-            // wait
-//            while(token != comm_barrier.load()){}
 
         }
     };

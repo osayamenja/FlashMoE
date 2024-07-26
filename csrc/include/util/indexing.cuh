@@ -1,5 +1,5 @@
 //
-// Created by osayamen on 7/13/24.
+// Created by Jonathan on 7/13/24.
 //
 
 #ifndef ARISTOS_INDEXING_CUH
@@ -7,6 +7,7 @@
 
 #include <cute/config.hpp>
 namespace aristos{
+    // TODO refactor to use cooperative groups
     int
     CUTE_DEVICE
     get_tid() {
@@ -20,7 +21,7 @@ namespace aristos{
 
     int
     CUTE_DEVICE
-    get_bid() {
+    bid() {
     #if defined(__CUDA_ARCH__)
             return blockIdx.x + blockIdx.y * gridDim.x + gridDim.x * gridDim.y * blockIdx.z;
     #else
