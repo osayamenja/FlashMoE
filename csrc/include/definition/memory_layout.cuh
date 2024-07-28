@@ -26,7 +26,7 @@ namespace aristos{
     /// Per stage, there is one cell for send and another for receive
     __constant__ constexpr unsigned int n_cells = 2;
 
-    /// Per embedding vector a la token
+    /// Per embedding vector a la token.
     /// k is top_k, +1 for token index, and *4 for unsigned int precision
     CUTE_HOST_DEVICE
     constexpr unsigned int trailer_length_bytes(uint k){
@@ -59,6 +59,12 @@ namespace aristos{
         return header_bytes;
     }
 
+    CUTE_HOST_DEVICE
+    size_t payload_bytes(const unsigned int embed_bytes,
+                        const unsigned int k){
+        return (header_size<false>() + embed_bytes + trailer_length_bytes(k));
+    }
+
     template<bool isPrimingStage=false>
     CUTE_HOST_DEVICE
     size_t packet_bytes(const unsigned int capacity,
@@ -86,16 +92,27 @@ namespace aristos{
                                                    trailer_length_bytes(k)) * cell_span<false>()));
     }
 
-    //(checkpoint * (trailer_length_bytes(k) + embed_bytes + header_size<false>());
-    template<bool isPrimingStage=false>
+
     CUTE_HOST_DEVICE
-    size_t packet_trailer_start(const unsigned int cell,
+    size_t packet_trailer_index(const unsigned int cell,
                                 const unsigned int checkpoint,
                                 const unsigned int capacity,
                                 const size_t embed_bytes,
                                 unsigned int k){
         return (packet_bytes<false>(capacity, embed_bytes, trailer_length_bytes(k)) * cell) +
-                (cell * (embed_bytes + header_size<false>()));
+                (header_size<false>() + embed_bytes) +
+                (checkpoint * (trailer_length_bytes(k) + embed_bytes + header_size<false>()));
+    }
+
+    CUTE_HOST_DEVICE
+    unsigned int send_cell(int stage){
+        return 2*stage;
+    }
+
+    CUTE_HOST_DEVICE
+    size_t packet_trailer_next(const size_t current, const unsigned int checkpoint, unsigned  int k,
+                               const size_t embed_bytes){
+        return current + (checkpoint * (trailer_length_bytes(k) + embed_bytes + header_size<false>()));
     }
 }
 #endif //ARISTOS_MEMORY_LAYOUT_CUH
