@@ -7,19 +7,33 @@
 
 #include <cute/config.hpp>
 namespace aristos{
-    // TODO refactor to use cooperative groups
-    int
+    /// Block-scoped thread id
+    uint
     CUTE_DEVICE
-    get_tid() {
+    block_tid() {
+    #if defined(__CUDA_ARCH__)
+            return threadIdx.x + threadIdx.y*blockDim.x + threadIdx.z*blockDim.x*blockDim.y;
+    #else
+            return 0;
+    #endif
+    }
+
+    /// Grid-scoped thread id
+    uint
+    CUTE_DEVICE
+    grid_tid() {
     #if defined(__CUDA_ARCH__)
         auto blockId = blockIdx.x + blockIdx.y * gridDim.x + gridDim.x * gridDim.y * blockIdx.z;
-        return blockId * (blockDim.x * blockDim.y) + (threadIdx.y * blockDim.x) + threadIdx.x;
+        return blockId * (blockDim.x * blockDim.y * blockDim.z)
+                        + (threadIdx.z * (blockDim.x * blockDim.y))
+                        + (threadIdx.y * blockDim.x)
+                        + threadIdx.x;
     #else
         return 0;
     #endif
     }
 
-    int
+    uint
     CUTE_DEVICE
     bid() {
     #if defined(__CUDA_ARCH__)
@@ -53,7 +67,7 @@ namespace aristos{
     CUTE_DEVICE
     thread_within_range(int threshold){
     #if defined(__CUDA_ARCH__)
-        return get_tid() <= threshold;
+        return grid_tid() <= threshold;
     #else
         return true;
     #endif
@@ -63,7 +77,7 @@ namespace aristos{
     CUTE_DEVICE
     thread_strictly_within_range(uint threshold){
     #if defined(__CUDA_ARCH__)
-            return get_tid() < threshold;
+            return grid_tid() < threshold;
     #else
             return true;
     #endif

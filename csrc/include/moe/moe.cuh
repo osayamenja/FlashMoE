@@ -24,6 +24,7 @@ namespace aristos{
         medium_int k;
 
     public:
+        // TODO Figure out spec translation, but for now: spendthrift memory allocation
         CUTE_DEVICE
         FusedMoELayer(void* _symmetric_heap, M _shard_spec, M _spec_translation, medium_int _capacity_factor, medium_int _k):
         symmetric_heap(_symmetric_heap), shard_spec(_shard_spec),

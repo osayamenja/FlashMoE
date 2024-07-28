@@ -17,15 +17,15 @@
 #include <host/nvshmemx_api.h>
 
 #include "include/aristos.cuh"
-#include <cuda/pipeline>
 #include <cooperative_groups.h>
-#include <thrust/host_vector.h>
-#include <thrust/device_vector.h>
+#include <functional>
 
+#include <cub/cub.cuh>
 #include <cute/tensor.hpp>
 #include <cute/config.hpp>
 
 #define THREADS_PER_WARP 32
+#define THREADS_PER_BLOCK 256
 
 __global__ void aristos_sandbox(int *destination, const int my_pe, const int n_pes, const bool skip = true) {
     cuda::std::array<int, 4>activations{{my_pe + 1, 2,my_pe + 3, 4}};
@@ -214,7 +214,7 @@ __global__ void play_kernel(int n){
            blockIdx.x, blockIdx.y, blockIdx.z);
     if(last.fetch_add(1) == n){
         db++;
-        printf("Thread %d in Block %d is last: %d\n", aristos::get_tid(), aristos::bid(), last.load());
+        printf("Thread %d in Block %d is last: %d\n", aristos::grid_tid(), aristos::bid(), last.load());
     }
     if(cooperative_groups::grid_group::thread_rank() == 15){
         printf("Block_dim.x %d, Block_dim.y %d, Block_dim.z %d\n", cg::grid_group::dim_blocks().x,
@@ -224,16 +224,97 @@ __global__ void play_kernel(int n){
 
 }
 
-__global__ void play2(cuda::barrier<cuda::thread_scope_device>* b){
-    if(cg::grid_group::thread_rank() == 0){
-        printf("Not using barrier :)");
-    }
+__global__ void play2(int* sync_grid, cuda::barrier<cuda::thread_scope_device>* b){
+    auto t = cute::make_tensor(cute::make_gmem_ptr(sync_grid),
+                               cute::make_shape(1, cg::grid_group::num_threads()));
+    cuda::atomic_ref<int, cuda::thread_scope_device> a(t(cg::thread_block::thread_rank()));
+    a.fetch_add(1);
+    printf("I am Thread %llu -> %u in Block %llu -> %u, where my index is %u -> %u\n",
+           cg::grid_group::thread_rank(),
+           aristos::grid_tid(),
+           cg::grid_group::block_rank(),
+           aristos::bid(),
+           cg::thread_block::thread_rank(),
+           aristos::block_tid());
     b->arrive_and_wait();
+    if(cg::thread_block::thread_rank() == 0){
+        printf("AS EXPECTED, atomic result is %d and t[0] is %d\n", a.load(), t(0));
+    }
+}
+
+__global__ void bench_cg(CUTE_GRID_CONSTANT const int iter, unsigned long long int* sync_p, unsigned int* h_sync_p){
+    // initialization
+    cuda::associate_access_property(&last, cuda::access_property::persisting{});
+    cuda::associate_access_property(sync_p, cuda::access_property::persisting{});
+    cuda::associate_access_property(h_sync_p, cuda::access_property::persisting{});
+    auto start = cuda::std::chrono::high_resolution_clock::now();
+    auto end = cuda::std::chrono::high_resolution_clock::now();
+    auto elapsed_seconds{end - start};
+    size_t dev_atomic = 0, a_add = 0, a_cas = 0, freq_at = 0, c_a_add = 0;
+    size_t x;
+    /*auto t = aristos::grid_tid();
+    auto tt = t;*/
+    CUTE_UNROLL
+    for(int i = 0; i < iter; ++i){
+        start = cuda::std::chrono::high_resolution_clock::now();
+        last++;
+        elapsed_seconds = cuda::std::chrono::high_resolution_clock::now() - start;
+        dev_atomic += cuda::std::chrono::duration_cast<cuda::std::chrono::microseconds>(elapsed_seconds).count();
+
+        start = cuda::std::chrono::high_resolution_clock::now();
+        x = atomicAdd(sync_p, 0U); // equivalent to a load
+        elapsed_seconds = cuda::std::chrono::high_resolution_clock::now() - start;
+        a_add += cuda::std::chrono::duration_cast<cuda::std::chrono::microseconds>(elapsed_seconds).count();
+
+        start = cuda::std::chrono::high_resolution_clock::now();
+        x = atomicAdd(h_sync_p, 0U); // equivalent to a load
+        elapsed_seconds = cuda::std::chrono::high_resolution_clock::now() - start;
+        c_a_add += cuda::std::chrono::duration_cast<cuda::std::chrono::microseconds>(elapsed_seconds).count();
+
+        start = cuda::std::chrono::high_resolution_clock::now();
+        atomicCAS(sync_p, 0U, 0U); // equivalent to a load
+        elapsed_seconds = cuda::std::chrono::high_resolution_clock::now() - start;
+        a_cas += cuda::std::chrono::duration_cast<cuda::std::chrono::microseconds>(elapsed_seconds).count();
+
+        start = cuda::std::chrono::high_resolution_clock::now();
+        cuda::atomic_ref<unsigned  long long int, cuda::thread_scope_device>(*sync_p).load();
+        elapsed_seconds = cuda::std::chrono::high_resolution_clock::now() - start;
+        freq_at += cuda::std::chrono::duration_cast<cuda::std::chrono::microseconds>(elapsed_seconds).count();
+    }
+    // warp all-reduce
+//    dev_atomic = __reduce_max_sync(0xffffffff, dev_atomic);
+//    a_add = __reduce_max_sync(0xffffffff, a_add);
+//    a_cas = __reduce_max_sync(0xffffffff, a_cas);
+//    freq_at = __reduce_max_sync(0xffffffff, freq_at);
+    // Specialize BlockReduce for a 1D block of 128 threads of type int
+    using BlockReduce = cub::BlockReduce<size_t, THREADS_PER_BLOCK>;
+    __shared__ typename BlockReduce::TempStorage temp_storage;
+
+    dev_atomic = BlockReduce(temp_storage).Reduce(dev_atomic, cub::Max());
+    a_add = BlockReduce(temp_storage).Reduce(a_add, cub::Max());
+    c_a_add = BlockReduce(temp_storage).Reduce(c_a_add, cub::Max());
+    a_cas = BlockReduce(temp_storage).Reduce(a_cas, cub::Max());
+    freq_at = BlockReduce(temp_storage).Reduce(freq_at, cub::Max());
+
+    if(aristos::grid_tid() == 0){
+        printf("dev_atomic: {T: %f, V: %d}, a_add: {T: %f, V:%llu}, h_a_add: {T: %f, V:%u}, a_cas: {T: %f, V: %llu}, freq_at: {T: %f, V: %llu},"
+               " x is %llu\n",
+               dev_atomic / (iter*1.0),
+               last.load(),
+               a_add/(iter*1.0),
+               atomicAdd(sync_p, 0),
+               c_a_add/(iter*1.0),
+               atomicAdd(h_sync_p, 0),
+               a_cas/(iter*1.0),
+               atomicCAS(sync_p, 0, 0),
+               freq_at/(iter*1.0),
+               cuda::atomic_ref<unsigned  long long int, cuda::thread_scope_device>(*sync_p).load(),
+               x);
+    }
+
 }
 
 int main() {
-//    thrust::host_vector<float> h_A(32);
-//    thrust::device_vector<float> d_A = h_A;
 /*    cute::array<int, 4> u = {1,2,3,4};
     cute::array<int, 4> v = {4,5,6,7};
     cute::tuple<cute::array<int , 4>, cute::array<int, 4>> t = {u, v};
@@ -305,14 +386,34 @@ int main() {
     cute::print("Trailer is %d, %d", metadata[0], metadata[1]);
     free(recipient);
     free(parent);*/
-
-    cuda::barrier<cuda::thread_scope_device>* p;
-    CUTE_CHECK_ERROR(cudaMallocManaged(&p, sizeof(cuda::barrier<cuda::thread_scope_device>)));
-    CUTE_CHECK_ERROR(cudaDeviceSynchronize());
+    /*int* p;
     dim3 dimGrid(2,2, 2);
     dim3 dimBlock(2,2);
-    //play_kernel<<<dimGrid,dimBlock>>>(8);
-    play2<<<1,1>>>(p);
+    auto n_threads = dimGrid.x * dimGrid.y * dimGrid.z * dimBlock.x * dimBlock.y * dimBlock.z;
+    std::cout << "n_threads is " << n_threads <<  std::endl;
+    cuda::barrier<cuda::thread_scope_device>* b;
+    // OR (recommended actually) you can do the below instead of MallocManaged()
+    // auto host_b = new cuda::barrier<cuda::thread_scope_device>{n_threads};
+    // CUTE_CHECK_ERROR(cudaMalloc(&b, sizeof(cuda::barrier<cuda::thread_scope_device>)));
+    // CUTE_CHECK_LAST();
+    // CUTE_CHECK_ERROR(cudaMemcpy(b, host_b, sizeof(cuda::barrier<cuda::thread_scope_device>), cudaMemcpyHostToDevice));
+    // CUTE_CHECK_LAST();
+    CUTE_CHECK_ERROR(cudaMallocManaged(&p, sizeof(int)*n_threads));
+    CUTE_CHECK_ERROR(cudaMallocManaged(&b, sizeof(cuda::barrier<cuda::thread_scope_device>)));
+    new (b) cuda::barrier<cuda::thread_scope_device>{n_threads};
+    CUTE_CHECK_LAST();
+    CUTE_CHECK_ERROR(cudaMemset(p, 0, (sizeof(int)*n_threads)));
+    CUTE_CHECK_LAST();
+    play2<<<dimGrid,dimBlock>>>(p, b);
+    CUTE_CHECK_LAST();*/
+    unsigned long long int* p;
+    unsigned int* h_p;
+    CUTE_CHECK_ERROR(cudaMalloc(&p, sizeof(unsigned long long int)*2));
+    CUTE_CHECK_ERROR(cudaMemset(p, 0, sizeof(unsigned long long int)*2));
+    CUTE_CHECK_ERROR(cudaMalloc(&h_p, sizeof(unsigned int)));
+    CUTE_CHECK_ERROR(cudaMemset(h_p, 0, sizeof(unsigned int)));
+    CUTE_CHECK_LAST();
+    bench_cg<<<1,THREADS_PER_BLOCK>>>(1024, p, h_p);
     CUTE_CHECK_LAST();
     return 0;
 }
