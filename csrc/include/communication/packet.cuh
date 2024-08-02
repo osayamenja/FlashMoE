@@ -11,5 +11,9 @@ namespace aristos{
         shouldProcess = 1,
         begin = 2
     };
+
+    uint64_t constructSignal(unsigned long seqNo, header tag){
+        return seqNo + tag;
+    }
 }
 #endif //ARISTOS_PACKET_CUH

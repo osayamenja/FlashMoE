@@ -8,10 +8,10 @@
 #include "../definition/tensor.cuh"
 #include "../util/indexing.cuh"
 #include "../definition/types.cuh"
-#include <cuda/cmath>
+#include <cuda/atomic>
 
 namespace aristos{
-    __device__ cuda::atomic<bool, cuda::thread_scope_device> stop{false};
+    __device__ cuda::atomic<bool, cuda::thread_scope_device> stop{};
     //TODO gate, expert fusion and control plane
     /// MoE + Gate
     template<Matrix M, Tensor T>
@@ -56,7 +56,8 @@ namespace aristos{
             //workspace is free for reuse
             // All blocks send slices to workers
 
-            if(within_block_range(0)){
+            if(gridDim.z > 0){
+                // Posters and Receivers
 
             }
 

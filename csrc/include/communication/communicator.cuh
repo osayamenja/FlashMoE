@@ -20,14 +20,17 @@ namespace aristos{
 
     CUTE_DEVICE
     void try_until_signal(){
-        while(doorbell.load() == 0 && !stop.load()){}
+        while(doorbell.load() == 0 && !stop.load()){} //TODO maybe sleep?
     }
 
     template<bool isPrimingStage = false>
-    CUTE_DEVICE
+    CUTE_HOST_DEVICE // to make compiler happy
     void communicator_batch_send(unsigned int* heap_iter, // heap iterator
-                                 unsigned long long int* sync_grid,
-                                 unsigned char* symmetric_heap_byte,
+                                 unsigned int rank,
+                                 const unsigned long seq_no,
+                                 uint64_t* flags,
+                                 unsigned int* sync_grid,
+                                 std::byte* symmetric_heap,
                                  const unsigned int peer_offset,
                                  const size_t blocks_to_peers, // r
                                  const uint peer_stripe_len, // l
@@ -41,12 +44,12 @@ namespace aristos{
                                  const unsigned int* checkpoints){
         // TODO avoid copy for self-send?
         // TODO move to shared?
-        // TODO move i init outside
         for(int i = first_peer; i < peer_stripe_len; ++i){
             if(auto n_k = atomicAdd((heap_iter + (peer_offset * i)), 0); n_k > 0){ // atomicAdd == load
                 // TODO __syncwarp() somewhere here?
                 auto chunk_size = cuda::ceil_div(payload_bytes, blocks_to_peers);
-                auto data_ptr = symmetric_heap_byte + (intra_peer_index*chunk_size);
+                auto data_ptr = symmetric_heap + (intra_peer_index * chunk_size);
+                // dest is wrong below
                 if(intra_peer_index == (blocks_to_peers - 1) && payload_bytes % blocks_to_peers != 0){
                     // residual chunk
                     nvshmemx_putmem_nbi_block(data_ptr,
@@ -66,7 +69,6 @@ namespace aristos{
         __syncthreads(); // needed to ensure quiet() encompasses transfers by all threads
         if(block_tid() == 0){
             nvshmem_quiet();
-            //last block signals doorbell, sync and send signal.z, zero n_bytes
             unsigned int j = first_peer + peer_stripe_len;
             for(int i = first_peer; i < peer_stripe_len; ++i, ++j){
                 if(checkpoints[j] > 0){
@@ -75,22 +77,26 @@ namespace aristos{
                                                          cap,
                                                          embed_bytes,
                                                          k);
-                    auto old = atomicAdd((sync_grid + ((n_experts*i) + heap_iter[(peer_offset * i) + expert_i])), 1);
+                    auto old = atomicAdd((sync_grid + ((n_experts*i) + heap_iter[(peer_offset * i) + expert_i])), 1U);
                     if(old == blocks_to_peers){
-                        // I am last
-                        //send nvshmem signal
+                        nvshmemx_signal_op((flags + rank),
+                                           constructSignal(seq_no, aristos::processed),
+                                           NVSHMEM_SIGNAL_SET,
+                                           i);
                         doorbell--;
                     }
                 }
             }
         }
         __syncthreads();
-        // decrement doorbell?
     }
 
     CUTE_DEVICE
     void communicator_start(void* symmetric_heap,
-                            unsigned long long int* const sync_grid,
+                            unsigned int rank,
+                            uint64_t* flags,
+                            unsigned int* sync_grid,
+                            unsigned int seq_no,
                             const uint n_peers,
                             const uint cap,
                             const uint k,
@@ -98,16 +104,17 @@ namespace aristos{
                             const uint embed_p,
                             const uint n_experts){
         // TODO annotated ptr @ startup instead
+        // TODO shared_mem config object for all func parameters
         cuda::access_property accessProperty(cuda::access_property::persisting{});
         cuda::associate_access_property(symmetric_heap, accessProperty);
 
-        // requires gridDim.z > 1,
-        // <= 2 is reasonable
         __shared__ unsigned long stripe_len, blocksToPeers; //TODO force register use instead of shared?
         extern __shared__ unsigned int checkpoints[];
         if(aristos::block_tid() == 0){
-            stripe_len = cuda::ceil_div(1UL, blocksToPeers);
+            // 1 < gridDim.z <= 2
+            // RHS is a recommendation
             blocksToPeers = size_t(max((gridDim.z - 1) * (gridDim.x * gridDim.y) / n_peers, 1));
+            stripe_len = cuda::ceil_div(1UL, blocksToPeers);
             for(unsigned int i = 0; i < 2*stripe_len; ++i){
                 checkpoints[i] = 0;
             }
@@ -123,8 +130,11 @@ namespace aristos{
                 //TODO please cache the arguments outside the loop
                 communicator_batch_send(
                         static_cast<unsigned int*>(symmetric_heap),
+                        rank,
+                        seq_no,
+                        flags,
                         sync_grid,
-                        static_cast<unsigned char*>(symmetric_heap),
+                        static_cast<std::byte*>(symmetric_heap),
                         (symmetric_heap_peer_offset(cap, k,(embed_dim * embed_p)) / micro_header_bytes),
                         blocksToPeers,
                         stripe_len,

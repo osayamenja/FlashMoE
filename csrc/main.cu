@@ -242,7 +242,7 @@ __global__ void play2(int* sync_grid, cuda::barrier<cuda::thread_scope_device>* 
     }
 }
 
-__global__ void bench_cg(CUTE_GRID_CONSTANT const int iter, unsigned long long int* sync_p, unsigned int* h_sync_p){
+__global__ void bench_cg(CUTE_GRID_CONSTANT const int iter, unsigned int* sync_p, unsigned int* h_sync_p){
     // initialization
     cuda::associate_access_property(&last, cuda::access_property::persisting{});
     cuda::associate_access_property(sync_p, cuda::access_property::persisting{});
@@ -250,7 +250,7 @@ __global__ void bench_cg(CUTE_GRID_CONSTANT const int iter, unsigned long long i
     auto start = cuda::std::chrono::high_resolution_clock::now();
     auto end = cuda::std::chrono::high_resolution_clock::now();
     auto elapsed_seconds{end - start};
-    size_t dev_atomic = 0, a_add = 0, a_cas = 0, freq_at = 0, c_a_add = 0;
+    size_t dev_atomic = 0, a_add = 0, a_cas = 0, freq_at = 0, a_inc = 0;
     size_t x;
     /*auto t = aristos::grid_tid();
     auto tt = t;*/
@@ -267,9 +267,9 @@ __global__ void bench_cg(CUTE_GRID_CONSTANT const int iter, unsigned long long i
         a_add += cuda::std::chrono::duration_cast<cuda::std::chrono::microseconds>(elapsed_seconds).count();
 
         start = cuda::std::chrono::high_resolution_clock::now();
-        x = atomicAdd(h_sync_p, 0U); // equivalent to a load
+        atomicInc(h_sync_p, 0U); // equivalent to a load
         elapsed_seconds = cuda::std::chrono::high_resolution_clock::now() - start;
-        c_a_add += cuda::std::chrono::duration_cast<cuda::std::chrono::microseconds>(elapsed_seconds).count();
+        a_inc += cuda::std::chrono::duration_cast<cuda::std::chrono::microseconds>(elapsed_seconds).count();
 
         start = cuda::std::chrono::high_resolution_clock::now();
         atomicCAS(sync_p, 0U, 0U); // equivalent to a load
@@ -277,7 +277,7 @@ __global__ void bench_cg(CUTE_GRID_CONSTANT const int iter, unsigned long long i
         a_cas += cuda::std::chrono::duration_cast<cuda::std::chrono::microseconds>(elapsed_seconds).count();
 
         start = cuda::std::chrono::high_resolution_clock::now();
-        cuda::atomic_ref<unsigned  long long int, cuda::thread_scope_device>(*sync_p).load();
+        cuda::atomic_ref<unsigned int, cuda::thread_scope_device>(*sync_p).load();
         elapsed_seconds = cuda::std::chrono::high_resolution_clock::now() - start;
         freq_at += cuda::std::chrono::duration_cast<cuda::std::chrono::microseconds>(elapsed_seconds).count();
     }
@@ -292,23 +292,23 @@ __global__ void bench_cg(CUTE_GRID_CONSTANT const int iter, unsigned long long i
 
     dev_atomic = BlockReduce(temp_storage).Reduce(dev_atomic, cub::Max());
     a_add = BlockReduce(temp_storage).Reduce(a_add, cub::Max());
-    c_a_add = BlockReduce(temp_storage).Reduce(c_a_add, cub::Max());
+    a_inc = BlockReduce(temp_storage).Reduce(a_inc, cub::Max());
     a_cas = BlockReduce(temp_storage).Reduce(a_cas, cub::Max());
     freq_at = BlockReduce(temp_storage).Reduce(freq_at, cub::Max());
 
     if(aristos::grid_tid() == 0){
-        printf("dev_atomic: {T: %f, V: %d}, a_add: {T: %f, V:%llu}, h_a_add: {T: %f, V:%u}, a_cas: {T: %f, V: %llu}, freq_at: {T: %f, V: %llu},"
+        printf("dev_atomic: {T: %f, V: %d}, a_add: {T: %f, V:%llu}, a_inc: {T: %f, V:%u}, a_cas: {T: %f, V: %llu}, freq_at: {T: %f, V: %u},"
                " x is %llu\n",
                dev_atomic / (iter*1.0),
                last.load(),
                a_add/(iter*1.0),
                atomicAdd(sync_p, 0),
-               c_a_add/(iter*1.0),
-               atomicAdd(h_sync_p, 0),
+               a_inc / (iter * 1.0),
+               atomicExch(sync_p, 0),
                a_cas/(iter*1.0),
                atomicCAS(sync_p, 0, 0),
                freq_at/(iter*1.0),
-               cuda::atomic_ref<unsigned  long long int, cuda::thread_scope_device>(*sync_p).load(),
+               cuda::atomic_ref<unsigned int, cuda::thread_scope_device>(*sync_p).load(),
                x);
     }
 
@@ -406,10 +406,10 @@ int main() {
     CUTE_CHECK_LAST();
     play2<<<dimGrid,dimBlock>>>(p, b);
     CUTE_CHECK_LAST();*/
-    unsigned long long int* p;
+    unsigned int* p;
     unsigned int* h_p;
-    CUTE_CHECK_ERROR(cudaMalloc(&p, sizeof(unsigned long long int)*2));
-    CUTE_CHECK_ERROR(cudaMemset(p, 0, sizeof(unsigned long long int)*2));
+    CUTE_CHECK_ERROR(cudaMalloc(&p, sizeof(unsigned int)*2));
+    CUTE_CHECK_ERROR(cudaMemset(p, 0, sizeof(unsigned int)*2));
     CUTE_CHECK_ERROR(cudaMalloc(&h_p, sizeof(unsigned int)));
     CUTE_CHECK_ERROR(cudaMemset(h_p, 0, sizeof(unsigned int)));
     CUTE_CHECK_LAST();
