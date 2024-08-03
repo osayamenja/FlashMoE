@@ -24,6 +24,8 @@
 #include <cute/tensor.hpp>
 #include <cute/config.hpp>
 
+#include <nlohmann/json.hpp>
+
 #define THREADS_PER_WARP 32
 #define THREADS_PER_BLOCK 256
 
@@ -297,7 +299,7 @@ __global__ void bench_cg(CUTE_GRID_CONSTANT const int iter, unsigned int* sync_p
     freq_at = BlockReduce(temp_storage).Reduce(freq_at, cub::Max());
 
     if(aristos::grid_tid() == 0){
-        printf("dev_atomic: {T: %f, V: %d}, a_add: {T: %f, V:%llu}, a_inc: {T: %f, V:%u}, a_cas: {T: %f, V: %llu}, freq_at: {T: %f, V: %u},"
+        printf("dev_atomic: {T: %f, V: %d}, a_add: {T: %f, V:%u}, a_inc: {T: %f, V:%u}, a_cas: {T: %f, V: %u}, freq_at: {T: %f, V: %u},"
                " x is %llu\n",
                dev_atomic / (iter*1.0),
                last.load(),
@@ -314,8 +316,25 @@ __global__ void bench_cg(CUTE_GRID_CONSTANT const int iter, unsigned int* sync_p
 
 }
 
+__global__ void testArgs(){
+    __shared__ aristos::SenderConfig d_c;
+    if(aristos::block_tid() == 0){
+        d_c = aristos::SenderConfig(moeConfig);
+    }
+    __threadfence_block();
+    __syncthreads();
+    if(aristos::block_tid() == 1){
+        d_c.dump();
+        printf("Before, flags[0] is %lu; ",d_c.flags[0]);
+        d_c.flags[0] = 56;
+        printf("Now, flags[0] is %lu\n",d_c.flags[0]);
+        printf("is Heap in Global Memory? %s\n", __isGlobal(d_c.sHeap) ? "Yes" : "No");
+        printf("is d_c in Shared Memory? %s\n", __isShared(&d_c) ? "Yes" : "No");
+    }
+}
+
 int main() {
-/*    cute::array<int, 4> u = {1,2,3,4};
+    /*cute::array<int, 4> u = {1,2,3,4};
     cute::array<int, 4> v = {4,5,6,7};
     cute::tuple<cute::array<int , 4>, cute::array<int, 4>> t = {u, v};
     std::cout << cute::get<1>(t)[0] << std::endl;
@@ -406,7 +425,7 @@ int main() {
     CUTE_CHECK_LAST();
     play2<<<dimGrid,dimBlock>>>(p, b);
     CUTE_CHECK_LAST();*/
-    unsigned int* p;
+    /*unsigned int* p;
     unsigned int* h_p;
     CUTE_CHECK_ERROR(cudaMalloc(&p, sizeof(unsigned int)*2));
     CUTE_CHECK_ERROR(cudaMemset(p, 0, sizeof(unsigned int)*2));
@@ -414,6 +433,33 @@ int main() {
     CUTE_CHECK_ERROR(cudaMemset(h_p, 0, sizeof(unsigned int)));
     CUTE_CHECK_LAST();
     bench_cg<<<1,THREADS_PER_BLOCK>>>(1024, p, h_p);
+    CUTE_CHECK_LAST();*/
+    void* p;
+    uint64_t* f;
+    unsigned int* s;
+    CUTE_CHECK_ERROR(cudaMalloc(&p, sizeof(unsigned int)));
+    CUTE_CHECK_ERROR(cudaMemset(p, 0, sizeof(unsigned int)));
+    CUTE_CHECK_ERROR(cudaMalloc(&f, sizeof(unsigned int)));
+    CUTE_CHECK_ERROR(cudaMemset(f, 0, sizeof(unsigned int)));
+    CUTE_CHECK_ERROR(cudaMalloc(&s, sizeof(unsigned int)));
+    CUTE_CHECK_ERROR(cudaMemset(s, 0, sizeof(unsigned int)));
+
+    using json = nlohmann::json;
+    auto c = aristos::Config(f,
+                             p,
+                             s,
+                             s,
+                             1,
+                             0,
+                             3,
+                             2,
+                             1,
+                             1024,
+                             2,
+                             2,
+                             2048);
+    CUTE_CHECK_ERROR(cudaMemcpyToSymbol(moeConfig, &c, sizeof(aristos::Config)));
+    testArgs<<<2, 32>>>();
     CUTE_CHECK_LAST();
     return 0;
 }

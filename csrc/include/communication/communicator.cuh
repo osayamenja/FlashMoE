@@ -24,7 +24,7 @@ namespace aristos{
     }
 
     template<bool isPrimingStage = false>
-    CUTE_HOST_DEVICE // to make compiler happy
+    CUTE_DEVICE
     void communicator_batch_send(unsigned int* heap_iter, // heap iterator
                                  unsigned int rank,
                                  const unsigned long seq_no,

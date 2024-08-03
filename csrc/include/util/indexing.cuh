@@ -9,7 +9,7 @@
 namespace aristos{
     /// Block-scoped thread id
     uint
-    CUTE_DEVICE
+    CUTE_HOST_DEVICE
     block_tid() {
     #if defined(__CUDA_ARCH__)
             return threadIdx.x + threadIdx.y*blockDim.x + threadIdx.z*blockDim.x*blockDim.y;
@@ -20,7 +20,7 @@ namespace aristos{
 
     /// Grid-scoped thread id
     uint
-    CUTE_DEVICE
+    CUTE_HOST_DEVICE
     grid_tid() {
     #if defined(__CUDA_ARCH__)
         auto blockId = blockIdx.x + blockIdx.y * gridDim.x + gridDim.x * gridDim.y * blockIdx.z;
@@ -34,7 +34,7 @@ namespace aristos{
     }
 
     uint
-    CUTE_DEVICE
+    CUTE_HOST_DEVICE
     bid() {
     #if defined(__CUDA_ARCH__)
             return blockIdx.x + blockIdx.y * gridDim.x + gridDim.x * gridDim.y * blockIdx.z;
@@ -44,7 +44,7 @@ namespace aristos{
     }
 
     bool
-    CUTE_DEVICE
+    CUTE_HOST_DEVICE
     within_block_range(int threshold){
     #if defined(__CUDA_ARCH__)
         return blockIdx.x + blockIdx.y*gridDim.x + blockIdx.z*gridDim.x*gridDim.y <= threshold;
@@ -54,7 +54,7 @@ namespace aristos{
     }
 
     bool
-    CUTE_DEVICE
+    CUTE_HOST_DEVICE
     outside_block_range(int threshold){
     #if defined(__CUDA_ARCH__)
         return blockIdx.x + blockIdx.y*gridDim.x + blockIdx.z*gridDim.x*gridDim.y > threshold;
@@ -64,7 +64,7 @@ namespace aristos{
     }
 
     bool
-    CUTE_DEVICE
+    CUTE_HOST_DEVICE
     thread_within_range(int threshold){
     #if defined(__CUDA_ARCH__)
         return grid_tid() <= threshold;
@@ -74,7 +74,7 @@ namespace aristos{
     }
 
     bool
-    CUTE_DEVICE
+    CUTE_HOST_DEVICE
     thread_strictly_within_range(uint threshold){
     #if defined(__CUDA_ARCH__)
             return grid_tid() < threshold;

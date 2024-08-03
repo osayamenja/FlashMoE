@@ -12,6 +12,7 @@ namespace aristos{
         begin = 2
     };
 
+    CUTE_HOST_DEVICE
     uint64_t constructSignal(unsigned long seqNo, header tag){
         return seqNo + tag;
     }

@@ -84,7 +84,15 @@ CPMAddPackage(
         GIT_TAG main # Fetches the latest commit on the main branch
 )
 
-target_link_libraries(csrc PRIVATE CCCL::CCCL)
+CPMAddPackage(
+        NAME nlohmann_json
+        VERSION 3.11.3
+        GITHUB_REPOSITORY nlohmann/json
+        OPTIONS
+        "JSON_BuildTests OFF"
+)
+
+target_link_libraries(csrc PRIVATE CCCL::CCCL nlohmann_json::nlohmann_json)
 
 set_target_properties(csrc PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON)
