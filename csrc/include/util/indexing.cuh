@@ -6,9 +6,11 @@
 #define ARISTOS_INDEXING_CUH
 
 #include <cute/config.hpp>
+#include <cuda/cmath>
+
 namespace aristos{
     /// Block-scoped thread id
-    uint
+    decltype(auto)
     CUTE_HOST_DEVICE
     block_tid() {
     #if defined(__CUDA_ARCH__)
@@ -19,7 +21,7 @@ namespace aristos{
     }
 
     /// Grid-scoped thread id
-    uint
+    decltype(auto)
     CUTE_HOST_DEVICE
     grid_tid() {
     #if defined(__CUDA_ARCH__)
@@ -33,7 +35,7 @@ namespace aristos{
     #endif
     }
 
-    uint
+    decltype(auto)
     CUTE_HOST_DEVICE
     bid() {
     #if defined(__CUDA_ARCH__)
@@ -43,44 +45,10 @@ namespace aristos{
     #endif
     }
 
-    bool
+    decltype(auto)
     CUTE_HOST_DEVICE
-    within_block_range(int threshold){
-    #if defined(__CUDA_ARCH__)
-        return blockIdx.x + blockIdx.y*gridDim.x + blockIdx.z*gridDim.x*gridDim.y <= threshold;
-    #else
-        return true;
-    #endif
-    }
-
-    bool
-    CUTE_HOST_DEVICE
-    outside_block_range(int threshold){
-    #if defined(__CUDA_ARCH__)
-        return blockIdx.x + blockIdx.y*gridDim.x + blockIdx.z*gridDim.x*gridDim.y > threshold;
-    #else
-        return true;
-    #endif
-    }
-
-    bool
-    CUTE_HOST_DEVICE
-    thread_within_range(int threshold){
-    #if defined(__CUDA_ARCH__)
-        return grid_tid() <= threshold;
-    #else
-        return true;
-    #endif
-    }
-
-    bool
-    CUTE_HOST_DEVICE
-    thread_strictly_within_range(uint threshold){
-    #if defined(__CUDA_ARCH__)
-            return grid_tid() < threshold;
-    #else
-            return true;
-    #endif
+    blockBoundary(){
+        return (gridDim.x * gridDim.y) + (cuda::ceil_div((gridDim.x * gridDim.y * (gridDim.z - 1)), 2U) - 1);
     }
 }
 

@@ -24,7 +24,7 @@
 #include <cute/tensor.hpp>
 #include <cute/config.hpp>
 
-#include <nlohmann/json.hpp>
+#include <torch/torch.h>
 
 #define THREADS_PER_WARP 32
 #define THREADS_PER_BLOCK 256
@@ -209,7 +209,6 @@ __device__ __constant__ cuda::atomic<unsigned int, cuda::thread_scope_device> la
 __device__ __constant__ cuda::atomic<unsigned int, cuda::thread_scope_device> db{0};
 
 __global__ void play_kernel(int n){
-    cooperative_groups::grid_group g = cg::this_grid();
     printf("I am Thread %llu in Block %llu, x=%u, y=%u, z=%u\n",
            cg::grid_group::thread_rank(),
            cg::grid_group::block_rank(),
@@ -332,6 +331,22 @@ __global__ void testArgs(){
         printf("is d_c in Shared Memory? %s\n", __isShared(&d_c) ? "Yes" : "No");
     }
 }
+// local memory for days
+__global__ void testTen(std::byte* p, size_t* q, int* r){
+    __shared__ aristos::SenderConfig s;
+}
+
+
+void aristosInit(){
+    // initialize moeconfig
+    // intialize nvshmem
+}
+
+void forwardHost(){
+}
+
+void backwardHost(){
+}
 
 int main() {
     /*cute::array<int, 4> u = {1,2,3,4};
@@ -434,7 +449,21 @@ int main() {
     CUTE_CHECK_LAST();
     bench_cg<<<1,THREADS_PER_BLOCK>>>(1024, p, h_p);
     CUTE_CHECK_LAST();*/
-    void* p;
+
+    int p_bytes = 4;
+    int k = 4;
+    auto t = cute::make_counting_tensor(cute::make_layout(cute::make_shape(2, 10), cute::LayoutRight{}));
+
+    auto payloads = cute::composition(t, cute::make_shape(cute::_, p_bytes));
+    auto numRouting = t(cute::_, (p_bytes));
+    auto tokenIds = t(cute::_, cute::size<1>(t) - 1);
+    auto experts = cute::make_tensor(t.data() + p_bytes + 1, cute::make_shape(2, k), cute::make_stride(1 + p_bytes + 5, 1));
+    cute::print_tensor(t);
+    cute::print_tensor(payloads);
+    cute::print_tensor(numRouting);
+    cute::print_tensor(experts);
+    cute::print_tensor(tokenIds);
+    /*void* p;
     uint64_t* f;
     unsigned int* s;
     CUTE_CHECK_ERROR(cudaMalloc(&p, sizeof(unsigned int)));
@@ -460,6 +489,14 @@ int main() {
                              2048);
     CUTE_CHECK_ERROR(cudaMemcpyToSymbol(moeConfig, &c, sizeof(aristos::Config)));
     testArgs<<<2, 32>>>();
+    CUTE_CHECK_LAST();
+    CUTE_CHECK_ERROR(cudaFree(p));
+    CUTE_CHECK_ERROR(cudaFree(f));
+    CUTE_CHECK_ERROR(cudaFree(s));*/
+//    torch::Tensor tensor = torch::rand({2, 3});
+//    std::cout << tensor << std::endl;
+//    play_kernel<<<dim3{2,2,2}, dim3{2,2}>>>(32);
+    printf("%c", char(0));
     CUTE_CHECK_LAST();
     return 0;
 }

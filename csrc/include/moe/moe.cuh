@@ -10,6 +10,7 @@
 #include "../definition/types.cuh"
 #include <cuda/atomic>
 #include <cuda/cmath>
+#include <torch/torch.h>
 
 __constant__ aristos::Config moeConfig{};
 
@@ -26,8 +27,7 @@ namespace aristos{
     }
 
     template<Matrix M, Tensor T>
-    CUTE_DEVICE
-    void forward(M activations, T w_experts, M w_gate) {
+    __global__ void forward(M activations, T w_experts, M w_gate) {
         auto token_dim = cute::size<0>(activations.layout());
         extern __shared__ float workspace[];
         auto routing_tensor = cute::make_tensor(cute::make_smem_ptr(workspace),
@@ -43,8 +43,27 @@ namespace aristos{
         // All blocks send slices to workers
 
         if (gridDim.z > 0) {
-            // Posters and Receivers
+            if(aristos::bid() <= aristos::blockBoundary()){
+                // We are Senders
+                __shared__ SenderConfig s;
+                if(aristos::block_tid() == 0){
+                    s = SenderConfig(moeConfig);
+                }
+                __threadfence_block();
+                __syncthreads();
+
+            }
+            else{
+                // We are Receivers
+                __syncthreads();
+            }
         }
+        // We are Calculators
+        __syncthreads();
+    }
+
+    __global__ void backward(){
+
     }
 }
 #endif //ARISTOS_MOE_CUH

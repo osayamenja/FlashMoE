@@ -34,6 +34,7 @@ set(ARISTOS_CUDA_CXX_FLAGS "${ARISTOS_CUDA_CXX_FLAGS} -Wno-unknown-pragmas")
 set(ARISTOS_CUDA_CXX_FLAGS "${ARISTOS_CUDA_CXX_FLAGS} -Wno-switch")
 set(ARISTOS_CUDA_CXX_FLAGS "${ARISTOS_CUDA_CXX_FLAGS} -Wno-unused-but-set-parameter")
 set(ARISTOS_CUDA_CXX_FLAGS "${ARISTOS_CUDA_CXX_FLAGS} -Wno-sign-compare")
+# Silence nvtx deprecation warning from legacy version used in libtorch
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -92,6 +93,10 @@ CPMAddPackage(
         "JSON_BuildTests OFF"
 )
 
+#Libtorch business
+find_package(Torch REQUIRED)
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
+
 target_link_libraries(csrc PRIVATE CCCL::CCCL nlohmann_json::nlohmann_json)
 
 set_target_properties(csrc PROPERTIES
@@ -103,7 +108,8 @@ find_package(NVSHMEM REQUIRED HINTS ${NVSHMEM_HOME}/lib/cmake/nvshmem)
 add_library(nvshmem_host ALIAS nvshmem::nvshmem_host)
 add_library(nvshmem_device ALIAS nvshmem::nvshmem_device)
 target_link_libraries(csrc PUBLIC nvshmem_host nvshmem_device)
-target_link_libraries(csrc PUBLIC CUDA::cudart CUDA::cuda_driver CUDA::cublas mathdx::cublasdx)
+target_link_libraries(csrc PUBLIC CUDA::cudart CUDA::cuda_driver CUDA::cublas CUDA::nvtx3 mathdx::cublasdx
+        "${TORCH_LIBRARIES}")
 target_link_libraries(csrc PRIVATE atomic)
 
 target_compile_options(csrc
