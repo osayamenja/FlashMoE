@@ -209,10 +209,10 @@ __device__ __constant__ cuda::atomic<unsigned int, cuda::thread_scope_device> la
 __device__ __constant__ cuda::atomic<unsigned int, cuda::thread_scope_device> db{0};
 
 __global__ void play_kernel(int n){
-    printf("I am Thread %llu in Block %llu, x=%u, y=%u, z=%u\n",
+    printf("I am Thread %llu in Block %llu, x=%u, y=%u, z=%u, threadIdx.x=%u\n",
            cg::grid_group::thread_rank(),
            cg::grid_group::block_rank(),
-           blockIdx.x, blockIdx.y, blockIdx.z);
+           blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x);
     if(last.fetch_add(1) == n){
         db++;
         printf("Thread %d in Block %d is last: %d\n", aristos::grid_tid(), aristos::bid(), last.load());
@@ -336,10 +336,39 @@ __global__ void testTen(std::byte* p, size_t* q, int* r){
     __shared__ aristos::SenderConfig s;
 }
 
+template<unsigned int bM=128, unsigned int bN=128, unsigned int bK=4, unsigned int bP=3>
+__global__ void occupancyTestKernel(){
+    __shared__ float sharedA[cute::cosize_v<decltype(cute::make_layout(cute::make_shape(cute::Int<bM>{}, cute::Int<bK>{}, cute::Int<bP>{})))>];
+    __shared__ float sharedB[cute::cosize_v<decltype(cute::make_layout(cute::make_shape(cute::Int<bN>{}, cute::Int<bK>{}, cute::Int<bP>{})))>];
+}
 
-void aristosInit(){
-    // initialize moeconfig
-    // intialize nvshmem
+void aristosInit(unsigned int seqLen, unsigned int embedDim, unsigned int hiddenProjDim,
+                 unsigned int k) {
+    // initialize nvshmem
+    int my_pe = 0;
+
+    // initialize moeConfig
+    auto c = aristos::Config();
+    int numSMs = 0;
+    CUTE_CHECK_ERROR(cudaDeviceGetAttribute(&numSMs, cudaDevAttrMultiProcessorCount, my_pe));
+
+    unsigned int bM = 128;
+    unsigned int bN = 128;
+    unsigned int bK = 4;
+    unsigned int bP = 3;
+    int numBlocks = 0;
+    int blockSize = 128; // 256 is too high, since SM can only hold <= 2048 threads
+    int minCommunicatorBlocks = 2; // We can be flexible here
+    int minBlocks = (cute::ceil_div(seqLen, bM) * cute::ceil_div(hiddenProjDim, bN)) + 2;
+    CUTE_CHECK_ERROR(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+            &numBlocks,
+            occupancyTestKernel<128, 128, 4, 3>,
+            blockSize,
+            0));
+    assert(minBlocks <= (numBlocks * numSMs));
+
+    // Good to go!
+    // Let's do some initialization
 }
 
 void forwardHost(){
@@ -450,19 +479,19 @@ int main() {
     bench_cg<<<1,THREADS_PER_BLOCK>>>(1024, p, h_p);
     CUTE_CHECK_LAST();*/
 
-    int p_bytes = 4;
-    int k = 4;
-    auto t = cute::make_counting_tensor(cute::make_layout(cute::make_shape(2, 10), cute::LayoutRight{}));
-
-    auto payloads = cute::composition(t, cute::make_shape(cute::_, p_bytes));
-    auto numRouting = t(cute::_, (p_bytes));
-    auto tokenIds = t(cute::_, cute::size<1>(t) - 1);
-    auto experts = cute::make_tensor(t.data() + p_bytes + 1, cute::make_shape(2, k), cute::make_stride(1 + p_bytes + 5, 1));
-    cute::print_tensor(t);
-    cute::print_tensor(payloads);
-    cute::print_tensor(numRouting);
-    cute::print_tensor(experts);
-    cute::print_tensor(tokenIds);
+//    int p_bytes = 4;
+//    int k = 4;
+//    auto t = cute::make_counting_tensor(cute::make_layout(cute::make_shape(2, 10), cute::LayoutRight{}));
+//
+//    auto payloads = cute::composition(t, cute::make_shape(cute::_, p_bytes));
+//    auto numRouting = t(cute::_, (p_bytes));
+//    auto tokenIds = t(cute::_, cute::size<1>(t) - 1);
+//    auto experts = cute::make_tensor(t.data() + p_bytes + 1, cute::make_shape(2, k), cute::make_stride(1 + p_bytes + 5, 1));
+//    cute::print_tensor(t);
+//    cute::print_tensor(payloads);
+//    cute::print_tensor(numRouting);
+//    cute::print_tensor(experts);
+//    cute::print_tensor(tokenIds);
     /*void* p;
     uint64_t* f;
     unsigned int* s;
@@ -495,8 +524,9 @@ int main() {
     CUTE_CHECK_ERROR(cudaFree(s));*/
 //    torch::Tensor tensor = torch::rand({2, 3});
 //    std::cout << tensor << std::endl;
-//    play_kernel<<<dim3{2,2,2}, dim3{2,2}>>>(32);
-    printf("%c", char(0));
+    play_kernel<<<dim3{4,4}, dim3{2,2}>>>(32);
+    CUTE_CHECK_LAST();
+    play_kernel<<<8, dim3{2,2}>>>(32);
     CUTE_CHECK_LAST();
     return 0;
 }
