@@ -5,8 +5,8 @@
 #ifndef ARISTOS_INDEXING_CUH
 #define ARISTOS_INDEXING_CUH
 
-#include <cute/config.hpp>
-#include <cuda/cmath>
+#include "../../../../../../../../../../global/homes/o/osayamen/.local/cutlass/include/cute/config.hpp"
+#include "../../../cmake-build-debug/_deps/cccl-src/libcudacxx/include/cuda/cmath"
 
 namespace aristos{
     /// Block-scoped thread id
@@ -43,12 +43,6 @@ namespace aristos{
     #else
             return 0;
     #endif
-    }
-
-    decltype(auto)
-    CUTE_HOST_DEVICE
-    blockBoundary(){
-        return (gridDim.x * gridDim.y) + (cuda::ceil_div((gridDim.x * gridDim.y * (gridDim.z - 1)), 2U) - 1);
     }
 }
 

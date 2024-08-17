@@ -5,8 +5,8 @@
 #ifndef ARISTOS_TENSOR_CUH
 #define ARISTOS_TENSOR_CUH
 
-#include <cuda/std/concepts>
-#include <cute/tensor.hpp>
+#include "../../../../../../../../../../opt/nvidia/hpc_sdk/Linux_x86_64/24.5/cuda/12.4/targets/x86_64-linux/include/cuda/std/concepts"
+#include "../../../../../../../../../../global/homes/o/osayamen/.local/cutlass/include/cute/tensor.hpp"
 
 namespace aristos{
     template<typename V>

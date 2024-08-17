@@ -61,19 +61,19 @@ set(cublasdx_CUTLASS_ROOT $ENV{CUTLASS_PATH})
 find_package(mathdx REQUIRED COMPONENTS cublasdx CONFIG)
 
 add_executable(csrc main.cu
-        include/communication/queue.cuh
-        include/communication/packet.cuh
+        include/moe/communication/queue.cuh
+        include/moe/communication/packet.cuh
         include/moe/moe.cuh
         include/aristos.cuh
-        include/compute/compute.cuh
-        include/algorithm/algorithm.cuh
-        include/util/indexing.cuh
-        include/definition/tensor.cuh
-        include/communication/communicator.cuh
-        include/definition/platform.cuh
-        include/util/debug.cuh
-        include/definition/types.cuh
-        include/definition/memory_layout.cuh)
+        include/moe/compute/compute.cuh
+        include/moe/algorithm/algorithm.cuh
+        include/moe/util/indexing.cuh
+        include/moe/definition/tensor.cuh
+        include/moe/communication/communicator.cuh
+        include/moe/definition/platform.cuh
+        include/moe/util/debug.cuh
+        include/moe/definition/types.cuh
+        include/moe/definition/memory_layout.cuh)
 
 # add dependencies
 #TODO Pin versions for release build and use main for debug

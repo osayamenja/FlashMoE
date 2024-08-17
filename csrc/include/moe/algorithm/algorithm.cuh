@@ -17,9 +17,10 @@ namespace aristos {
     /// Complexity: O(2k + (n-k)*log(k))
     template<Matrix T, unsigned int k=1>
     CUTE_DEVICE
-    void in_place_fused_top_k_mask(T input){
+    void topKMask(T input){
         if(grid_tid() < cute::size<0>(input.layout())){
             using MatrixType = typename decltype(input)::value_type;
+            //TODO below should be shared memory
             cute::array<cuda::std::pair<MatrixType, uint>, k> window{};
             auto my_slice = input(grid_tid(), cute::_);
             CUTE_UNROLL
@@ -47,7 +48,7 @@ namespace aristos {
     /// Akin to scatter
     template<Matrix T>
     CUTE_DEVICE
-    void get_token_to_peer_mapping(T gate_routing, T shard_spec, T mapping){
+    void tokenToPeers(T gate_routing, T shard_spec, T mapping){
         auto index = grid_tid();
         if(index < cute::size<0>(gate_routing.layout())){
             using MatrixType = typename decltype(gate_routing)::value_type;

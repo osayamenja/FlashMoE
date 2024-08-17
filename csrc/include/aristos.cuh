@@ -6,14 +6,14 @@
 #define ARISTOS_CUH
 
 #include "moe/moe.cuh"
-#include "communication/queue.cuh"
-#include "communication/packet.cuh"
-#include "algorithm/algorithm.cuh"
-#include "util/indexing.cuh"
-#include "definition/tensor.cuh"
-#include "definition/platform.cuh"
-#include "communication/communicator.cuh"
-#include "definition/types.cuh"
-#include "definition/memory_layout.cuh"
+#include "moe/communication/queue.cuh"
+#include "moe/communication/packet.cuh"
+#include "moe/algorithm/algorithm.cuh"
+#include "moe/util/indexing.cuh"
+#include "moe/definition/tensor.cuh"
+#include "moe/definition/platform.cuh"
+#include "moe/communication/communicator.cuh"
+#include "moe/definition/types.cuh"
+#include "moe/definition/memory_layout.cuh"
 
 #endif //ARISTOS_CUH

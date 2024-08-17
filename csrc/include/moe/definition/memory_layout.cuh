@@ -13,24 +13,24 @@ namespace aristos{
     using n_bytes_repr = unsigned long long int;
 
     /// Number of bytes for n_bytes_repr
-    __constant__ constexpr size_t header_bytes = sizeof(n_bytes_repr);
+    constexpr size_t header_bytes = sizeof(n_bytes_repr);
 
     /// Number of bytes for micro_header, namely k from top_k.
     /// Of course, 32 bits is overkill, since practical systems use k in [1,2].
     /// However, we desire encouraging much larger k, thus we adopt uint.
-    __constant__ constexpr size_t micro_header_bytes = sizeof(unsigned int);
+    constexpr size_t micro_header_bytes = sizeof(unsigned int);
 
     /// Number of communication stages
-    __constant__ constexpr unsigned int stages = 2;
+    constexpr unsigned int stages = 2;
 
     /// Per stage, there is one cell for send and another for receive
-    __constant__ constexpr unsigned int n_cells = 2;
+    constexpr unsigned int numCells = 2;
 
     /// Per embedding vector a la token.
     /// k is top_k, +1 for token index, and *4 for unsigned int precision
     CUTE_HOST_DEVICE
-    constexpr unsigned int trailer_length_bytes(uint k){
-        return (k + 1) * 4;
+    constexpr unsigned int trailer_length_bytes(const unsigned int k){
+        return (k + 1U) * 4U;
     }
 
     template<bool isPrimingStage=false>
@@ -46,40 +46,17 @@ namespace aristos{
         return 1;
     }
 
-    template<bool isPrimingStage=false>
-    CUTE_HOST_DEVICE
-    size_t header_size(){
-        return micro_header_bytes;
-    }
-
-    /// Special case
-    template<>
-    CUTE_HOST_DEVICE
-    size_t header_size<true>(){
-        return header_bytes;
-    }
-
     CUTE_HOST_DEVICE
     size_t payload_bytes(const unsigned int embed_bytes,
                         const unsigned int k){
-        return (header_size<false>() + embed_bytes + trailer_length_bytes(k));
+        return (embed_bytes + trailer_length_bytes(k));
     }
 
-    template<bool isPrimingStage=false>
     CUTE_HOST_DEVICE
     size_t packet_bytes(const unsigned int capacity,
-                        const unsigned int embed_bytes,
-                        const unsigned int trailer_len){
-        return capacity * (header_size<false>() + embed_bytes + trailer_len);
-    }
-
-    /// Special case
-    template<>
-    CUTE_HOST_DEVICE
-    size_t packet_bytes<true>(const unsigned int capacity,
                                const unsigned int embed_bytes,
                                const unsigned int trailer_len){
-        return (capacity * (embed_bytes + trailer_len)) + header_size<true>();
+        return (capacity * (embed_bytes + trailer_len));
     }
 
 
@@ -87,8 +64,8 @@ namespace aristos{
     size_t symmetric_heap_peer_offset(const unsigned int cap,
                                       const unsigned int k,
                                       size_t embed_bytes){
-        return n_cells * ((packet_bytes<true>(cap, embed_bytes,trailer_length_bytes(k)) * cell_span<true>())
-                            + (packet_bytes<false>(cap,embed_bytes,
+        return numCells * ((packet_bytes(cap, embed_bytes, trailer_length_bytes(k)) * cell_span<true>())
+                           + (packet_bytes(cap,embed_bytes,
                                                    trailer_length_bytes(k)) * cell_span<false>()));
     }
 
@@ -99,20 +76,15 @@ namespace aristos{
                                 const unsigned int capacity,
                                 const size_t embed_bytes,
                                 unsigned int k){
-        return (packet_bytes<false>(capacity, embed_bytes, trailer_length_bytes(k)) * cell) +
-                (header_size<false>() + embed_bytes) +
-                (checkpoint * (trailer_length_bytes(k) + embed_bytes + header_size<false>()));
+        return (packet_bytes(capacity, embed_bytes, trailer_length_bytes(k)) * cell) +
+                (embed_bytes) +
+                (checkpoint * (trailer_length_bytes(k) + embed_bytes));
     }
 
     CUTE_HOST_DEVICE
-    unsigned int send_cell(int stage){
+    unsigned int send_cell(unsigned int stage){
         return 2*stage;
     }
 
-    CUTE_HOST_DEVICE
-    size_t packet_trailer_next(const size_t current, const unsigned int checkpoint, unsigned  int k,
-                               const size_t embed_bytes){
-        return current + (checkpoint * (trailer_length_bytes(k) + embed_bytes + header_size<false>()));
-    }
 }
 #endif //ARISTOS_MEMORY_LAYOUT_CUH

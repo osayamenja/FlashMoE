@@ -25,6 +25,7 @@
 #include <cute/config.hpp>
 
 #include <torch/torch.h>
+#include <cuda/annotated_ptr>
 
 #define THREADS_PER_WARP 32
 #define THREADS_PER_BLOCK 256
@@ -170,8 +171,6 @@ void fused_top_idx(T input){
         }
     }
 }
-template<int Bits, bool Signed>
-struct cute::is_integral<cutlass::integer_subbyte<Bits, Signed>> : cute::true_type {};
 
 __global__ void memory_heterogeneity(void* symmetric,  uint64_t* flags, int my_pe){
     // Arrange
@@ -336,45 +335,73 @@ __global__ void testTen(std::byte* p, size_t* q, int* r){
     __shared__ aristos::SenderConfig s;
 }
 
-template<unsigned int bM=128, unsigned int bN=128, unsigned int bK=4, unsigned int bP=3>
+template<unsigned int bM=128, unsigned int bN=128, unsigned int bK=8, unsigned int bP=3>
 __global__ void occupancyTestKernel(){
     __shared__ float sharedA[cute::cosize_v<decltype(cute::make_layout(cute::make_shape(cute::Int<bM>{}, cute::Int<bK>{}, cute::Int<bP>{})))>];
     __shared__ float sharedB[cute::cosize_v<decltype(cute::make_layout(cute::make_shape(cute::Int<bN>{}, cute::Int<bK>{}, cute::Int<bP>{})))>];
 }
 
 void aristosInit(unsigned int seqLen, unsigned int embedDim, unsigned int hiddenProjDim,
-                 unsigned int k) {
-    // initialize nvshmem
-    int my_pe = 0;
-
-    // initialize moeConfig
-    auto c = aristos::Config();
+                 unsigned int k, int deviceID, unsigned int capacityFactor,
+                 unsigned int numExperts) {
     int numSMs = 0;
-    CUTE_CHECK_ERROR(cudaDeviceGetAttribute(&numSMs, cudaDevAttrMultiProcessorCount, my_pe));
+    CUTE_CHECK_ERROR(cudaDeviceGetAttribute(&numSMs, cudaDevAttrMultiProcessorCount, deviceID));
 
-    unsigned int bM = 128;
-    unsigned int bN = 128;
-    unsigned int bK = 4;
-    unsigned int bP = 3;
-    int numBlocks = 0;
-    int blockSize = 128; // 256 is too high, since SM can only hold <= 2048 threads
+    constexpr unsigned int bM = 128;
+    constexpr unsigned int bN = 128;
+    constexpr unsigned int bK = 8;
+    constexpr unsigned int bP = 1; // pipeline stages, have to use 1 to support large matrices
+    int numBlocksPerSM = 0;
+    int blockSize = 128; // 256 is too high, since an SM can only hold <= 2048 threads
     int minCommunicatorBlocks = 2; // We can be flexible here
-    int minBlocks = (cute::ceil_div(seqLen, bM) * cute::ceil_div(hiddenProjDim, bN)) + 2;
+    auto minBlocks = (cute::ceil_div(seqLen, bM) * cute::ceil_div(hiddenProjDim, bN)) + minCommunicatorBlocks;
     CUTE_CHECK_ERROR(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-            &numBlocks,
-            occupancyTestKernel<128, 128, 4, 3>,
+            &numBlocksPerSM,
+            occupancyTestKernel<bM, bN, bK, bP>,
             blockSize,
-            0));
-    assert(minBlocks <= (numBlocks * numSMs));
+            sizeof(aristos::maxPrecision) * (bK * bP) * (bM + bN)));
+    assert(minBlocks <= (numBlocksPerSM * numSMs));
 
-    // Good to go!
-    // Let's do some initialization
+    // Good to go! Let's do some initialization
+    // initialize NVSHMEM
+    nvshmem_init();
+    auto localRank = nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE);
+    auto globalRank = nvshmem_my_pe();
+    int numNodes = nvshmem_n_pes();
+    CUTE_CHECK_ERROR(cudaSetDevice(localRank));
+    // Allocate Symmetric Heap + Flags
+    auto trailer = k + 2U;
+    size_t payload = aristos::Config::getCapacity(seqLen, numExperts, capacityFactor, k)
+            * (embedDim + trailer);
+    size_t heapBytes = numNodes * aristos::stages * aristos::numCells * payload;
+    heapBytes += numNodes * (sizeof(uint64_t) / sizeof(aristos::maxPrecision));
+    auto sHeap = nvshmem_calloc(heapBytes, sizeof(aristos::maxPrecision));
+
+    // Run Lysi
+    // generates the below
+    int numNeighbors = 0;
+    int numLocalExperts = 0;
+    std::vector<int> parallelSpec{};
+    std::vector<int> translation{};
+
+    // Final Intialization
+    auto config = aristos::Config();
+    int* bookKeeping;
+    CUTE_CHECK_ERROR(cudaMemcpyToSymbol(moeConfig, &config, sizeof(aristos::Config)));
+    CUTE_CHECK_ERROR(cudaMalloc(&bookKeeping, sizeof(int)*(numNeighbors * (numLocalExperts + 1))));
+    CUTE_CHECK_LAST();
 }
 
 void forwardHost(){
 }
 
 void backwardHost(){
+}
+
+void aristosFinalize(){
+    /// Flags + sHeap
+    nvshmem_free(moeConfig.sHeap);
+    nvshmem_finalize();
 }
 
 int main() {

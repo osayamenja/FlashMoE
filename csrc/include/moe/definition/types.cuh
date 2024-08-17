@@ -6,10 +6,10 @@
 #define ARISTOS_TYPES_CUH
 
 #include "memory_layout.cuh"
-#include <nlohmann/json.hpp>
-#include <cuda/cmath>
+#include "../../../cmake-build-debug/_deps/nlohmann_json-src/include/nlohmann/json.hpp"
 
 namespace aristos{
+    using maxPrecision = float;
     /// 2 Bytes
     using medium_int = unsigned short;
     namespace cg = cooperative_groups;
@@ -18,10 +18,8 @@ namespace aristos{
     struct Config{
         void* sHeap;
         uint64_t* flags;
-        std::byte* sHeapByte;
         unsigned int* shardSpec;
-        unsigned int* sHeapUint;
-        unsigned int* syncGrid;
+        // Expert parallel World Size
         unsigned int worldSize;
         unsigned int capacity;
         unsigned long peerOffset;
@@ -29,10 +27,11 @@ namespace aristos{
         unsigned long sequenceNumber;
         unsigned int seqLen;
         unsigned int numExperts;
-        unsigned long singularPacketBytes;
         unsigned int k;
         unsigned int embedDim;
         unsigned int embedPrecision;
+        unsigned int numCommBlocks;
+        size_t maxDynamicSharedPerBlock;
 
         CUTE_HOST_DEVICE
         Config() = default;
@@ -40,7 +39,6 @@ namespace aristos{
         CUTE_HOST_DEVICE
         Config(uint64_t* _flags,
                void* _symmetricHeap,
-               unsigned int* _syncGrid,
                unsigned int* _shardSpec,
                const unsigned int _worldSize,
                const unsigned int _rank,
@@ -53,36 +51,39 @@ namespace aristos{
                const unsigned int _seqLen):
                 sHeap(_symmetricHeap),
                 flags(_flags),
-                sHeapByte(static_cast<std::byte*>(_symmetricHeap)),
                 shardSpec(_shardSpec),
-                sHeapUint(static_cast<unsigned int*>(_symmetricHeap)),
-                syncGrid(_syncGrid),
                 worldSize(_worldSize),
-                capacity((cuda::ceil_div(_seqLen, _numExperts) * _capacityFactor * _k)),
+                capacity(getCapacity(_seqLen, _numExperts, _capacityFactor, _k)),
                 peerOffset(symmetric_heap_peer_offset(capacity, _k,
                                               (_embedDim * _embedPrecision)) / micro_header_bytes),
                 rank(_rank),
                 sequenceNumber(_sequenceNumber),
                 seqLen(_seqLen),
                 numExperts(_numExperts),
-                singularPacketBytes(payload_bytes((_embedDim * _embedPrecision), 1)),
                 k(_k), embedDim(_embedDim),
                 embedPrecision(_embedPrecision)
                 {};
-        CUTE_HOST
-        std::string to_json(){
-            return nlohmann::json{
-                    {"WorldSize", this->worldSize},
-                    {"Rank", this->rank},
-                    {"SB", this->seqLen},
-                    {"E", this->numExperts},
-                    {"H", this->embedDim},
-                    {"Precision", embedPrecision},
-                    {"PeerOffset", this->peerOffset},
-                    {"Capacity", this->capacity},
-                    {"k", this->k},
-                    {"SequenceNumber", this->sequenceNumber}
-            }.dump(4);
+
+        CUTE_HOST_DEVICE
+        static unsigned int getCapacity(const unsigned int _seqLen, const unsigned int _numExperts,
+                                        const unsigned int _capacityFactor, const unsigned int _k){
+            return cute::ceil_div(_seqLen, _numExperts) * _capacityFactor * _k;
+        }
+
+        CUTE_HOST_DEVICE
+        void dump(){
+            printf("{\n\t"
+                   "\"Capacity\": %u,\n\t"
+                   "\"E\": %u,\n\t"
+                   "\"H\": %u,\n\t"
+                   "\"PeerOffset\": %lu,\n\t"
+                   "\"Rank\": %u,\n\t"
+                   "\"SB\": %u,\n\t"
+                   "\"SequenceNumber\": %lu,\n\t"
+                   "\"WorldSize\": %u,\n\t"
+                   "\"k\": %u\n}\n",
+                   capacity, numExperts, embedDim, peerOffset,
+                   rank, seqLen, sequenceNumber, worldSize, k);
         }
     };
 
@@ -102,10 +103,7 @@ namespace aristos{
             /// Old Stuff
             sHeap = c.sHeap;
             flags = c.flags;
-            sHeapByte = c.sHeapByte;
             shardSpec = c.shardSpec;
-            sHeapUint = c.sHeapUint;
-            syncGrid = c.syncGrid;
             worldSize = c.worldSize;
             capacity = c.capacity;
             peerOffset = c.peerOffset;
