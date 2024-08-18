@@ -27,6 +27,9 @@
 #include <torch/torch.h>
 #include <cuda/annotated_ptr>
 
+#include <thrust/host_vector.h>
+#include <thrust/device_vector.h>
+
 #define THREADS_PER_WARP 32
 #define THREADS_PER_BLOCK 256
 
@@ -242,34 +245,33 @@ __global__ void play2(int* sync_grid, cuda::barrier<cuda::thread_scope_device>* 
     }
 }
 
-__global__ void bench_cg(CUTE_GRID_CONSTANT const int iter, unsigned int* sync_p, unsigned int* h_sync_p){
+__global__ void benchLoad(CUTE_GRID_CONSTANT const int iter, unsigned int* sync_p, bool shouldPersist = false){
+    if(aristos::grid_tid() == 0){
+        printf("Initial Value is %u\n", sync_p[0]);
+    }
     // initialization
-    cuda::associate_access_property(&last, cuda::access_property::persisting{});
-    cuda::associate_access_property(sync_p, cuda::access_property::persisting{});
-    cuda::associate_access_property(h_sync_p, cuda::access_property::persisting{});
+    if(shouldPersist){
+        cuda::associate_access_property(&last, cuda::access_property::persisting{});
+        cuda::associate_access_property(sync_p, cuda::access_property::persisting{});
+    }
+
     auto start = cuda::std::chrono::high_resolution_clock::now();
     auto end = cuda::std::chrono::high_resolution_clock::now();
     auto elapsed_seconds{end - start};
-    size_t dev_atomic = 0, a_add = 0, a_cas = 0, freq_at = 0, a_inc = 0;
-    size_t x;
+    size_t dev_atomic = 0, a_add = 0, a_cas = 0, freq_at = 0, a_or = 0;
     /*auto t = aristos::grid_tid();
     auto tt = t;*/
     CUTE_UNROLL
     for(int i = 0; i < iter; ++i){
         start = cuda::std::chrono::high_resolution_clock::now();
-        last++;
+        last += 0;
         elapsed_seconds = cuda::std::chrono::high_resolution_clock::now() - start;
         dev_atomic += cuda::std::chrono::duration_cast<cuda::std::chrono::microseconds>(elapsed_seconds).count();
 
         start = cuda::std::chrono::high_resolution_clock::now();
-        x = atomicAdd(sync_p, 0U); // equivalent to a load
+        atomicAdd(sync_p, 0U); // equivalent to a load
         elapsed_seconds = cuda::std::chrono::high_resolution_clock::now() - start;
         a_add += cuda::std::chrono::duration_cast<cuda::std::chrono::microseconds>(elapsed_seconds).count();
-
-        start = cuda::std::chrono::high_resolution_clock::now();
-        atomicInc(h_sync_p, 0U); // equivalent to a load
-        elapsed_seconds = cuda::std::chrono::high_resolution_clock::now() - start;
-        a_inc += cuda::std::chrono::duration_cast<cuda::std::chrono::microseconds>(elapsed_seconds).count();
 
         start = cuda::std::chrono::high_resolution_clock::now();
         atomicCAS(sync_p, 0U, 0U); // equivalent to a load
@@ -280,42 +282,103 @@ __global__ void bench_cg(CUTE_GRID_CONSTANT const int iter, unsigned int* sync_p
         cuda::atomic_ref<unsigned int, cuda::thread_scope_device>(*sync_p).load();
         elapsed_seconds = cuda::std::chrono::high_resolution_clock::now() - start;
         freq_at += cuda::std::chrono::duration_cast<cuda::std::chrono::microseconds>(elapsed_seconds).count();
+
+        start = cuda::std::chrono::high_resolution_clock::now();
+        atomicOr(sync_p, 0U);
+        elapsed_seconds = cuda::std::chrono::high_resolution_clock::now() - start;
+        a_or += cuda::std::chrono::duration_cast<cuda::std::chrono::microseconds>(elapsed_seconds).count();
     }
-    // warp all-reduce
-//    dev_atomic = __reduce_max_sync(0xffffffff, dev_atomic);
-//    a_add = __reduce_max_sync(0xffffffff, a_add);
-//    a_cas = __reduce_max_sync(0xffffffff, a_cas);
-//    freq_at = __reduce_max_sync(0xffffffff, freq_at);
     // Specialize BlockReduce for a 1D block of 128 threads of type int
     using BlockReduce = cub::BlockReduce<size_t, THREADS_PER_BLOCK>;
     __shared__ typename BlockReduce::TempStorage temp_storage;
 
     dev_atomic = BlockReduce(temp_storage).Reduce(dev_atomic, cub::Max());
     a_add = BlockReduce(temp_storage).Reduce(a_add, cub::Max());
-    a_inc = BlockReduce(temp_storage).Reduce(a_inc, cub::Max());
+    a_or = BlockReduce(temp_storage).Reduce(a_or, cub::Max());
     a_cas = BlockReduce(temp_storage).Reduce(a_cas, cub::Max());
     freq_at = BlockReduce(temp_storage).Reduce(freq_at, cub::Max());
 
-    if(aristos::grid_tid() == 0){
-        printf("dev_atomic: {T: %f, V: %d}, a_add: {T: %f, V:%u}, a_inc: {T: %f, V:%u}, a_cas: {T: %f, V: %u}, freq_at: {T: %f, V: %u},"
-               " x is %llu\n",
+    if(aristos::block_tid() == 0){
+        printf("Block Id is %u, dev_atomic: {T: %f, V: %d}, a_add: {T: %f, V:%u}, "
+               "a_cas: {T: %f, V: %u}, a_or: {T: %f, V: %u}, freq_at: {T: %f, V: %u},"
+               "persist: %s\n",
+               aristos::bid(),
                dev_atomic / (iter*1.0),
                last.load(),
                a_add/(iter*1.0),
-               atomicAdd(sync_p, 0),
-               a_inc / (iter * 1.0),
-               atomicExch(sync_p, 0),
+               atomicAdd(sync_p, 0U),
                a_cas/(iter*1.0),
-               atomicCAS(sync_p, 0, 0),
+               atomicCAS(sync_p, 0U, 0U),
+               a_or/(iter*1.0),
+               atomicOr(sync_p, 0U),
                freq_at/(iter*1.0),
                cuda::atomic_ref<unsigned int, cuda::thread_scope_device>(*sync_p).load(),
-               x);
+               (shouldPersist)? "Yes" : "No");
     }
+}
 
+__global__ void benchAtomics(CUTE_GRID_CONSTANT const int iter, unsigned int* flag, bool shouldPersist = false){
+    // initialization
+    cuda::std::atomic_flag stopFlag(false);
+    if(shouldPersist){
+        cuda::associate_access_property(flag, cuda::access_property::persisting{});
+        cuda::associate_access_property(&stopFlag, cuda::access_property::persisting{});
+    }
+    auto start = cuda::std::chrono::high_resolution_clock::now();
+    auto end = cuda::std::chrono::high_resolution_clock::now();
+    auto elapsed_seconds{end - start};
+    size_t a_flag = 0, a_cas = 0, a_or = 0, a_and = 0;
+    CUTE_UNROLL
+    for(int i = 0; i < iter; ++i){
+        start = cuda::std::chrono::high_resolution_clock::now();
+        stopFlag.test();
+        elapsed_seconds = cuda::std::chrono::high_resolution_clock::now() - start;
+        a_flag += cuda::std::chrono::duration_cast<cuda::std::chrono::microseconds>(elapsed_seconds).count();
+
+        start = cuda::std::chrono::high_resolution_clock::now();
+        atomicCAS(flag, 0, 0);
+        elapsed_seconds = cuda::std::chrono::high_resolution_clock::now() - start;
+        a_cas += cuda::std::chrono::duration_cast<cuda::std::chrono::microseconds>(elapsed_seconds).count();
+
+        start = cuda::std::chrono::high_resolution_clock::now();
+        atomicOr(flag, 0U);
+        elapsed_seconds = cuda::std::chrono::high_resolution_clock::now() - start;
+        a_or += cuda::std::chrono::duration_cast<cuda::std::chrono::microseconds>(elapsed_seconds).count();
+
+        start = cuda::std::chrono::high_resolution_clock::now();
+        atomicAnd(flag, 1U);
+        elapsed_seconds = cuda::std::chrono::high_resolution_clock::now() - start;
+        a_and += cuda::std::chrono::duration_cast<cuda::std::chrono::microseconds>(elapsed_seconds).count();
+
+    }
+    using BlockReduce = cub::BlockReduce<size_t, THREADS_PER_BLOCK>;
+    __shared__ typename BlockReduce::TempStorage temp_storage;
+
+    a_flag = BlockReduce(temp_storage).Reduce(a_flag, cub::Max());
+    a_cas = BlockReduce(temp_storage).Reduce(a_cas, cub::Max());
+    a_or = BlockReduce(temp_storage).Reduce(a_or, cub::Max());
+    a_and = BlockReduce(temp_storage).Reduce(a_and, cub::Max());
+
+    if(aristos::block_tid() == 0){
+        printf("Block Id is %u, a_flag: {T: %f, V: %d}, a_cas: {T: %f, V:%u}, a_or: {T: %f, V:%u}, a_and: {T: %f, V: %u},"
+               "persist: %s\n",
+               aristos::bid(),
+               a_flag / (iter*1.0),
+               stopFlag.test(),
+               a_cas/(iter*1.0),
+               atomicCAS(flag, 0, 0),
+               a_or / (iter * 1.0),
+               atomicOr(flag, 0U),
+               a_and/(iter*1.0),
+               atomicAnd(flag, 1U),
+               (shouldPersist)? "Yes" : "No");
+    }
 }
 
 __global__ void testTen(std::byte* p, size_t* q, int* r){
     __shared__ aristos::SenderConfig s;
+    cuda::std::atomic_flag f{};
+    f.test();
 }
 
 template<unsigned int bM=128, unsigned int bN=128, unsigned int bK=8, unsigned int bP=3>
@@ -326,6 +389,7 @@ __global__ void occupancyTestKernel(){
 
 namespace  aristos{
     bool isInitialized = false;
+    Config hostMoEConfig;
     void aristosInit(unsigned int seqLen, unsigned int embedDim, unsigned int hiddenProjDim,
                      unsigned int k, int deviceID, unsigned int capacityFactor,
                      unsigned int numExperts) {
@@ -341,7 +405,7 @@ namespace  aristos{
         int numBlocksPerSM = 0;
         int blockSize = 128; // 256 is too high, since an SM can only hold <= 2048 threads
         int minCommunicatorBlocks = 2; // We can be flexible here
-        int GEMMBlocks = cute::ceil_div(seqLen, bM) * cute::ceil_div(hiddenProjDim, bN);
+        auto GEMMBlocks = cute::ceil_div(seqLen, bM) * cute::ceil_div(hiddenProjDim, bN);
         auto minBlocks = GEMMBlocks + minCommunicatorBlocks;
         CUTE_CHECK_ERROR(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
                 &numBlocksPerSM,
@@ -376,12 +440,8 @@ namespace  aristos{
         auto sHeap = nvshmem_calloc(heapBytes, sizeof(aristos::maxPrecision));
 
         // Final Initialization
-        auto config = Config();
-        config.numCommBlocks = maxActiveBlocks - GEMMBlocks;
-        config.worldSize = numNeighbors;
         unsigned int* bookKeeping;
-        CUTE_CHECK_ERROR(cudaMemcpyToSymbol(moeConfig,
-                                            &config, sizeof(Config)));
+
         CUTE_CHECK_ERROR(cudaMalloc(&bookKeeping,
                                     sizeof(unsigned int)*(numNeighbors * (numLocalExperts + 1))));
         CUTE_CHECK_ERROR(cudaMemcpyToSymbol(expertParallelSpec,
@@ -390,6 +450,14 @@ namespace  aristos{
         CUTE_CHECK_ERROR(cudaMemcpyToSymbol(peerTranslation,
                                             translation.data(),
                                             sizeof(specType)*parallelSpec.size()));
+        hostMoEConfig = Config();
+        //TODO init with host memcpy?
+        hostMoEConfig.numCommBlocks = maxActiveBlocks - GEMMBlocks;
+        hostMoEConfig.worldSize = numNeighbors;
+        hostMoEConfig.bookKeeping = bookKeeping;
+        hostMoEConfig.sHeap = sHeap;
+        CUTE_CHECK_ERROR(cudaMemcpyToSymbol(moeConfig,
+                                            &hostMoEConfig, sizeof(Config)));
         CUTE_CHECK_LAST();
     }
 
@@ -403,8 +471,8 @@ namespace  aristos{
     void aristosFinalize(){
         assert(isInitialized);
         isInitialized = false;
-        CUTE_CHECK_ERROR(cudaFree(moeConfig.bookKeeping));
-        nvshmem_free(moeConfig.sHeap);
+        CUTE_CHECK_ERROR(cudaFree(hostMoEConfig.bookKeeping));
+        nvshmem_free(hostMoEConfig.sHeap);
         nvshmem_finalize();
         CUTE_CHECK_LAST();
     }
@@ -502,15 +570,17 @@ int main() {
     CUTE_CHECK_LAST();
     play2<<<dimGrid,dimBlock>>>(p, b);
     CUTE_CHECK_LAST();*/
-    /*unsigned int* p;
-    unsigned int* h_p;
-    CUTE_CHECK_ERROR(cudaMalloc(&p, sizeof(unsigned int)*2));
-    CUTE_CHECK_ERROR(cudaMemset(p, 0, sizeof(unsigned int)*2));
-    CUTE_CHECK_ERROR(cudaMalloc(&h_p, sizeof(unsigned int)));
-    CUTE_CHECK_ERROR(cudaMemset(h_p, 0, sizeof(unsigned int)));
+    thrust::host_vector<unsigned int> h_v(1);
+    h_v[0] = 59673;
+    thrust::device_vector<unsigned int> d_v(h_v.size());
+    thrust::copy(h_v.begin(), h_v.end(), d_v.begin());
+    unsigned int* p;
+    CUTE_CHECK_ERROR(cudaMalloc(&p, sizeof(unsigned int)));
+    CUTE_CHECK_ERROR(cudaMemset(p, 0, sizeof(unsigned int)));
     CUTE_CHECK_LAST();
-    bench_cg<<<1,THREADS_PER_BLOCK>>>(1024, p, h_p);
-    CUTE_CHECK_LAST();*/
+    benchLoad<<<4,THREADS_PER_BLOCK>>>(1024, thrust::raw_pointer_cast(d_v.data()));
+    benchLoad<<<4,THREADS_PER_BLOCK>>>(1024, thrust::raw_pointer_cast(d_v.data()), true);
+    CUTE_CHECK_LAST();
 
 //    int p_bytes = 4;
 //    int k = 4;
@@ -557,10 +627,16 @@ int main() {
     CUTE_CHECK_ERROR(cudaFree(s));*/
 //    torch::Tensor tensor = torch::rand({2, 3});
 //    std::cout << tensor << std::endl;
-    std::vector<aristos::specType> spec1{};
+//    unsigned int* f;
+//    CUTE_CHECK_ERROR(cudaMalloc(&f, sizeof(unsigned int)));
+//    CUTE_CHECK_ERROR(cudaMemset(f, 0, sizeof(unsigned int)));
+//    benchAtomics<<<4, THREADS_PER_BLOCK>>>(1024, f);
+//    benchAtomics<<<4, THREADS_PER_BLOCK>>>(1024, f, true);
+//    CUTE_CHECK_LAST();
+    /*std::vector<aristos::specType> spec1{};
     play_kernel<<<dim3{4,4}, dim3{2,2}>>>(32);
     CUTE_CHECK_LAST();
     play_kernel<<<8, dim3{2,2}>>>(32);
-    CUTE_CHECK_LAST();
+    CUTE_CHECK_LAST();*/
     return 0;
 }

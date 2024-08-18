@@ -8,19 +8,20 @@
 #include <cooperative_groups.h>
 #include <cuda/atomic>
 #include <cuda/annotated_ptr>
+#include "../util/atomics.cuh"
 #include <cuda/barrier>
 #include "../definition/memory_layout.cuh"
 
 namespace aristos{
     //TODO use global mem + atomicAdd
-    __device__ cuda::atomic<medium_int, cuda::thread_scope_device> doorbell{0};
+    __device__ cuda::atomic<specType, cuda::thread_scope_device> doorbell{0};
     __device__ cuda::atomic<unsigned int, cuda::thread_scope_device> last{1};
 
     using DeviceAtomicRef = cuda::atomic_ref<n_bytes_repr, cuda::thread_scope_device>;
 
     CUTE_DEVICE
     void try_until_signal(){
-        while(doorbell.load() == 0 && !stop.load()){} //TODO maybe sleep?
+        while(doorbell.load() == 0 && !atomicLoad(stop)){} //TODO maybe sleep?
     }
 
     template<bool isPrimingStage = false>
@@ -124,9 +125,9 @@ namespace aristos{
 
         // broadcast()
         // Most likely == 1
-        while(!stop.load()){
+        while(!atomicLoad(stop)){
             try_until_signal();
-            while(!stop.load() && doorbell.load() > 0){
+            while(!atomicLoad(stop) && doorbell.load() > 0){
                 //TODO please cache the arguments outside the loop
                 communicator_batch_send(
                         static_cast<unsigned int*>(symmetric_heap),

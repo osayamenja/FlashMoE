@@ -9,9 +9,10 @@
 #include "util/indexing.cuh"
 #include "definition/types.cuh"
 #include "algorithm/algorithm.cuh"
-#include "util/nifty.cuh"
+#include "communication/packet.cuh"
 #include <cuda/atomic>
 #include <cuda/cmath>
+#include <cuda/annotated_ptr>
 
 namespace aristos{
     __constant__ Config moeConfig{};
@@ -20,8 +21,29 @@ namespace aristos{
     /// len <= |D|
     __constant__ specType* peerTranslation;
 
-    __device__ bool stop = false;
-    __device__ unsigned long sequenceNumber = 3;
+    __device__ AtomicBoolType* stop;
+    __device__ unsigned long sequenceNumber = aristos::header::begin + 1;
+
+    CUTE_DEVICE
+    void persistHotPointers(){
+        /// Persist global stop flag
+        cuda::associate_access_property(stop, cuda::access_property::persisting{});
+        /// Persist sequence number
+        cuda::associate_access_property(&sequenceNumber, cuda::access_property::persisting{});
+        /// Persist symmetric heap flags
+        cuda::associate_access_property(moeConfig.flags,
+                                        cuda::access_property(moeConfig.flags,
+                                                              moeConfig.worldSize*sizeof(flagsType),
+                                                              moeConfig.worldSize*sizeof(flagsType),
+                                                              cuda::access_property::persisting{}));
+        /// Persist book keeping state
+        cuda::associate_access_property(moeConfig.bookKeeping,
+                                        cuda::access_property(moeConfig.bookKeeping,
+                                                              sizeof(specType)*(moeConfig.worldSize * (moeConfig.numLocalExperts + 1)),
+                                                              sizeof(specType)*(moeConfig.worldSize * (moeConfig.numLocalExperts + 1)),
+                                                              cuda::access_property::persisting{}));
+    }
+
     //TODO gate, expert fusion and control plane
     template<Matrix M>
     CUTE_DEVICE

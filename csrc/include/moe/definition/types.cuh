@@ -11,6 +11,9 @@ namespace aristos{
     using maxPrecision = float;
     using specType = unsigned int;
     using flagsType = uint64_t;
+    /// Okay, I know the type name is relatively misleading, but we had no other choice due to
+    /// NVIDIA native atomics only accepting int types.
+    using AtomicBoolType = unsigned int;
 
     namespace cg = cooperative_groups;
 

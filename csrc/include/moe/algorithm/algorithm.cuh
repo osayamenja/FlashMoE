@@ -55,8 +55,8 @@ namespace aristos {
             auto in_slice = gate_routing(index, cute::_);
             auto out_slice = mapping(index, cute::_);
             auto zero_val = MatrixType(0);
-            const medium_int n_peers = cute::size<0>(mapping.layout());
-            cute::array<medium_int, n_peers> k_indices;
+            const specType n_peers = cute::size<0>(mapping.layout());
+            cute::array<specType, n_peers> k_indices;
             k_indices.clear(); // may be redundant
             CUTE_UNROLL
             for(uint i = 0; i < cute::size<0>(in_slice.layout()); ++i){

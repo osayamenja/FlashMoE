@@ -5,8 +5,8 @@
 #ifndef ARISTOS_TENSOR_CUH
 #define ARISTOS_TENSOR_CUH
 
-#include "../../../../../../../../../../opt/nvidia/hpc_sdk/Linux_x86_64/24.5/cuda/12.4/targets/x86_64-linux/include/cuda/std/concepts"
-#include "../../../../../../../../../../global/homes/o/osayamen/.local/cutlass/include/cute/tensor.hpp"
+#include <cuda/std/concepts>
+#include <cute/tensor.hpp>
 
 namespace aristos{
     template<typename V>
@@ -16,14 +16,14 @@ namespace aristos{
 
     template<typename T>
     concept Tensor = requires(T t){
-        cute::is_tensor<T>::value == true;
+        requires cute::is_tensor<T>::value == true;
         requires TensorValueType<typename decltype(t)::value_type>;
     };
 
     template<typename M>
     concept Matrix = requires(M m){
         requires Tensor<M>;
-        cute::rank(m.layout()) == 2;
+        requires cute::rank(m.layout()) == 2;
     };
 }
 

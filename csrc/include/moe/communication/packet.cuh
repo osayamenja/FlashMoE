@@ -5,7 +5,7 @@
 #ifndef ARISTOS_PACKET_CUH
 #define ARISTOS_PACKET_CUH
 namespace aristos{
-    enum header: unsigned int {
+    enum header : unsigned int {
         NOOP = 0,
         processed = 0,
         shouldProcess = 1,
