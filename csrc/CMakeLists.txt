@@ -73,7 +73,8 @@ add_executable(csrc main.cu
         include/moe/definition/platform.cuh
         include/moe/util/debug.cuh
         include/moe/definition/types.cuh
-        include/moe/definition/memory_layout.cuh)
+        include/moe/definition/memory_layout.cuh
+        include/moe/util/nifty.cuh)
 
 # add dependencies
 #TODO Pin versions for release build and use main for debug
@@ -85,19 +86,11 @@ CPMAddPackage(
         GIT_TAG main # Fetches the latest commit on the main branch
 )
 
-CPMAddPackage(
-        NAME nlohmann_json
-        VERSION 3.11.3
-        GITHUB_REPOSITORY nlohmann/json
-        OPTIONS
-        "JSON_BuildTests OFF"
-)
-
 #Libtorch business
 find_package(Torch REQUIRED)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
 
-target_link_libraries(csrc PRIVATE CCCL::CCCL nlohmann_json::nlohmann_json)
+target_link_libraries(csrc PRIVATE CCCL::CCCL)
 
 set_target_properties(csrc PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON)

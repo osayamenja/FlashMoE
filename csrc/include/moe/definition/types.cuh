@@ -6,19 +6,18 @@
 #define ARISTOS_TYPES_CUH
 
 #include "memory_layout.cuh"
-#include "../../../cmake-build-debug/_deps/nlohmann_json-src/include/nlohmann/json.hpp"
 
 namespace aristos{
     using maxPrecision = float;
-    /// 2 Bytes
-    using medium_int = unsigned short;
+    using specType = unsigned int;
+    using flagsType = uint64_t;
+
     namespace cg = cooperative_groups;
 
-    /// Types can be much smaller than int
     struct Config{
         void* sHeap;
-        uint64_t* flags;
-        unsigned int* shardSpec;
+        void* flags;
+        void* bookKeeping;
         // Expert parallel World Size
         unsigned int worldSize;
         unsigned int capacity;
@@ -27,19 +26,18 @@ namespace aristos{
         unsigned long sequenceNumber;
         unsigned int seqLen;
         unsigned int numExperts;
+        unsigned int numLocalExperts;
         unsigned int k;
         unsigned int embedDim;
         unsigned int embedPrecision;
         unsigned int numCommBlocks;
-        size_t maxDynamicSharedPerBlock;
 
         CUTE_HOST_DEVICE
         Config() = default;
 
         CUTE_HOST_DEVICE
-        Config(uint64_t* _flags,
-               void* _symmetricHeap,
-               unsigned int* _shardSpec,
+        Config(void* _symmetricHeap,
+               void* _flags,
                const unsigned int _worldSize,
                const unsigned int _rank,
                const unsigned long _sequenceNumber,
@@ -48,10 +46,10 @@ namespace aristos{
                const unsigned int _embedDim,
                const unsigned int _embedPrecision,
                const unsigned int _numExperts,
+               const unsigned int _numLocalExperts,
                const unsigned int _seqLen):
                 sHeap(_symmetricHeap),
                 flags(_flags),
-                shardSpec(_shardSpec),
                 worldSize(_worldSize),
                 capacity(getCapacity(_seqLen, _numExperts, _capacityFactor, _k)),
                 peerOffset(symmetric_heap_peer_offset(capacity, _k,
@@ -60,6 +58,7 @@ namespace aristos{
                 sequenceNumber(_sequenceNumber),
                 seqLen(_seqLen),
                 numExperts(_numExperts),
+                numLocalExperts(_numLocalExperts),
                 k(_k), embedDim(_embedDim),
                 embedPrecision(_embedPrecision)
                 {};
@@ -75,6 +74,7 @@ namespace aristos{
             printf("{\n\t"
                    "\"Capacity\": %u,\n\t"
                    "\"E\": %u,\n\t"
+                   "\"localE\": %u,\n\t"
                    "\"H\": %u,\n\t"
                    "\"PeerOffset\": %lu,\n\t"
                    "\"Rank\": %u,\n\t"
@@ -82,7 +82,7 @@ namespace aristos{
                    "\"SequenceNumber\": %lu,\n\t"
                    "\"WorldSize\": %u,\n\t"
                    "\"k\": %u\n}\n",
-                   capacity, numExperts, embedDim, peerOffset,
+                   capacity, numExperts, numLocalExperts, embedDim, peerOffset,
                    rank, seqLen, sequenceNumber, worldSize, k);
         }
     };
@@ -102,19 +102,16 @@ namespace aristos{
         SenderConfig(const Config c){
             /// Old Stuff
             sHeap = c.sHeap;
-            flags = c.flags;
-            shardSpec = c.shardSpec;
             worldSize = c.worldSize;
             capacity = c.capacity;
             peerOffset = c.peerOffset;
             rank = c.rank;
             sequenceNumber = c.sequenceNumber;
             seqLen = c.seqLen;
-            numExperts = c.numExperts;
-            singularPacketBytes = c.singularPacketBytes;
             k = c.k;
             embedDim = c.embedDim;
             embedPrecision = c.embedPrecision;
+            numLocalExperts = c.numLocalExperts;
 
             /// New stuff
             bid = aristos::bid();
@@ -131,6 +128,7 @@ namespace aristos{
                    "\"BlocksToPeers\": %lu,\n\t"
                    "\"Capacity\": %u,\n\t"
                    "\"E\": %u,\n\t"
+                   "\"localE\": %u,\n\t"
                    "\"H\": %u,\n\t"
                    "\"FirstPeer\": %u,\n\t"
                    "\"IntraPeerIndex\": %u,\n\t"
@@ -141,7 +139,8 @@ namespace aristos{
                    "\"SequenceNumber\": %lu,\n\t"
                    "\"WorldSize\": %u,\n\t"
                    "\"k\": %u\n}\n",
-                   bid, blocksToPeers, capacity, numExperts, embedDim, firstPeer, intraPeerIndex, peerOffset,
+                   bid, blocksToPeers, capacity, numExperts, numLocalExperts,
+                   embedDim, firstPeer, intraPeerIndex, peerOffset,
                    peerStripeLength, rank, seqLen, sequenceNumber, worldSize, k);
         }
     };

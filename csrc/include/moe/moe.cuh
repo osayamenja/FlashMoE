@@ -9,17 +9,19 @@
 #include "util/indexing.cuh"
 #include "definition/types.cuh"
 #include "algorithm/algorithm.cuh"
+#include "util/nifty.cuh"
 #include <cuda/atomic>
 #include <cuda/cmath>
 
-__constant__ aristos::Config moeConfig{};
-/// len = |E|
-__constant__ int* expertParallelSpec;
-/// len <= |D|
-__constant__ int* peerTranslation;
-
 namespace aristos{
-    __device__ cuda::atomic<bool, cuda::thread_scope_device> stop{};
+    __constant__ Config moeConfig{};
+    /// len = |E|
+    __constant__ specType* expertParallelSpec;
+    /// len <= |D|
+    __constant__ specType* peerTranslation;
+
+    __device__ bool stop = false;
+    __device__ unsigned long sequenceNumber = 3;
     //TODO gate, expert fusion and control plane
     template<Matrix M>
     CUTE_DEVICE
@@ -33,19 +35,20 @@ namespace aristos{
     template<Matrix M, Tensor T>
     __global__ void forward(M activations, T expertsWeights, M gateWeights,
                             M gateOutput, M mappingTensor, M sharedSpec) {
+        persistHotPointers();
         gate(activations, gateWeights, gateOutput);
         tokenToPeers(gateOutput, sharedSpec, mappingTensor);
         /// mappingTensor (S, D)
 
         if (blockIdx.x >= (gridDim.x - moeConfig.numCommBlocks)) {
-            /// Receivers get only one block
+            /// Exclusive Subscribers get only one block
             if(blockIdx.x == gridDim.x - moeConfig.numCommBlocks){
-                // We are Receivers
+                // We are Subscribers exclusively and Publishers partially
                 __syncthreads();
             }
             else{
-                /// Senders get the remainder r, where 1 <= r <= numEPPeers
-                // We are Senders
+                /// Exclusive Publishers get the remainder
+                // We are Publishers exclusively and Subscribers partially
                 __shared__ SenderConfig s;
                 if(aristos::block_tid() == 0){
                     s = SenderConfig(moeConfig);
@@ -54,7 +57,7 @@ namespace aristos{
                 __syncthreads();
             }
         }
-        // We are Calculators
+        // We are Processors exclusively and partial Subscribers and Publishers
         __syncthreads();
     }
 

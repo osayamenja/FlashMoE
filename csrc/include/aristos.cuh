@@ -15,5 +15,6 @@
 #include "moe/communication/communicator.cuh"
 #include "moe/definition/types.cuh"
 #include "moe/definition/memory_layout.cuh"
+#include "moe/util/nifty.cuh"
 
 #endif //ARISTOS_CUH

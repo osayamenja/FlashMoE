@@ -314,23 +314,6 @@ __global__ void bench_cg(CUTE_GRID_CONSTANT const int iter, unsigned int* sync_p
 
 }
 
-__global__ void testArgs(){
-    __shared__ aristos::SenderConfig d_c;
-    if(aristos::block_tid() == 0){
-        d_c = aristos::SenderConfig(moeConfig);
-    }
-    __threadfence_block();
-    __syncthreads();
-    if(aristos::block_tid() == 1){
-        d_c.dump();
-        printf("Before, flags[0] is %lu; ",d_c.flags[0]);
-        d_c.flags[0] = 56;
-        printf("Now, flags[0] is %lu\n",d_c.flags[0]);
-        printf("is Heap in Global Memory? %s\n", __isGlobal(d_c.sHeap) ? "Yes" : "No");
-        printf("is d_c in Shared Memory? %s\n", __isShared(&d_c) ? "Yes" : "No");
-    }
-}
-// local memory for days
 __global__ void testTen(std::byte* p, size_t* q, int* r){
     __shared__ aristos::SenderConfig s;
 }
@@ -341,67 +324,90 @@ __global__ void occupancyTestKernel(){
     __shared__ float sharedB[cute::cosize_v<decltype(cute::make_layout(cute::make_shape(cute::Int<bN>{}, cute::Int<bK>{}, cute::Int<bP>{})))>];
 }
 
-void aristosInit(unsigned int seqLen, unsigned int embedDim, unsigned int hiddenProjDim,
-                 unsigned int k, int deviceID, unsigned int capacityFactor,
-                 unsigned int numExperts) {
-    int numSMs = 0;
-    CUTE_CHECK_ERROR(cudaDeviceGetAttribute(&numSMs, cudaDevAttrMultiProcessorCount, deviceID));
+namespace  aristos{
+    bool isInitialized = false;
+    void aristosInit(unsigned int seqLen, unsigned int embedDim, unsigned int hiddenProjDim,
+                     unsigned int k, int deviceID, unsigned int capacityFactor,
+                     unsigned int numExperts) {
+        assert(!isInitialized);
+        isInitialized = true;
+        int numSMs = 0;
+        CUTE_CHECK_ERROR(cudaDeviceGetAttribute(&numSMs, cudaDevAttrMultiProcessorCount, deviceID));
 
-    constexpr unsigned int bM = 128;
-    constexpr unsigned int bN = 128;
-    constexpr unsigned int bK = 8;
-    constexpr unsigned int bP = 1; // pipeline stages, have to use 1 to support large matrices
-    int numBlocksPerSM = 0;
-    int blockSize = 128; // 256 is too high, since an SM can only hold <= 2048 threads
-    int minCommunicatorBlocks = 2; // We can be flexible here
-    auto minBlocks = (cute::ceil_div(seqLen, bM) * cute::ceil_div(hiddenProjDim, bN)) + minCommunicatorBlocks;
-    CUTE_CHECK_ERROR(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-            &numBlocksPerSM,
-            occupancyTestKernel<bM, bN, bK, bP>,
-            blockSize,
-            sizeof(aristos::maxPrecision) * (bK * bP) * (bM + bN)));
-    assert(minBlocks <= (numBlocksPerSM * numSMs));
+        constexpr unsigned int bM = 128;
+        constexpr unsigned int bN = 128;
+        constexpr unsigned int bK = 8;
+        constexpr unsigned int bP = 1; // pipeline stages, have to use 1 due to shared mem constraints
+        int numBlocksPerSM = 0;
+        int blockSize = 128; // 256 is too high, since an SM can only hold <= 2048 threads
+        int minCommunicatorBlocks = 2; // We can be flexible here
+        int GEMMBlocks = cute::ceil_div(seqLen, bM) * cute::ceil_div(hiddenProjDim, bN);
+        auto minBlocks = GEMMBlocks + minCommunicatorBlocks;
+        CUTE_CHECK_ERROR(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+                &numBlocksPerSM,
+                occupancyTestKernel<bM, bN, bK, bP>,
+                blockSize,
+                sizeof(aristos::maxPrecision) * ((bK * bP) * (bM + bN))));
+        int maxActiveBlocks = numBlocksPerSM * numSMs;
+        assert(minBlocks <= maxActiveBlocks);
 
-    // Good to go! Let's do some initialization
-    // initialize NVSHMEM
-    nvshmem_init();
-    auto localRank = nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE);
-    auto globalRank = nvshmem_my_pe();
-    int numNodes = nvshmem_n_pes();
-    CUTE_CHECK_ERROR(cudaSetDevice(localRank));
-    // Allocate Symmetric Heap + Flags
-    auto trailer = k + 2U;
-    size_t payload = aristos::Config::getCapacity(seqLen, numExperts, capacityFactor, k)
-            * (embedDim + trailer);
-    size_t heapBytes = numNodes * aristos::stages * aristos::numCells * payload;
-    heapBytes += numNodes * (sizeof(uint64_t) / sizeof(aristos::maxPrecision));
-    auto sHeap = nvshmem_calloc(heapBytes, sizeof(aristos::maxPrecision));
+        // Good to go! Let's do some initialization
+        // initialize NVSHMEM
+        nvshmem_init();
+        auto localRank = nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE);
+        auto globalRank = nvshmem_my_pe();
+        int numNodes = nvshmem_n_pes();
+        CUTE_CHECK_ERROR(cudaSetDevice(localRank));
 
-    // Run Lysi
-    // generates the below
-    int numNeighbors = 0;
-    int numLocalExperts = 0;
-    std::vector<int> parallelSpec{};
-    std::vector<int> translation{};
+        // Run Lysi
+        // ...
+        // generates the below
+        int numNeighbors = 0;
+        int numLocalExperts = 0;
+        std::vector<specType> parallelSpec{};
+        std::vector<specType> translation{};
 
-    // Final Intialization
-    auto config = aristos::Config();
-    int* bookKeeping;
-    CUTE_CHECK_ERROR(cudaMemcpyToSymbol(moeConfig, &config, sizeof(aristos::Config)));
-    CUTE_CHECK_ERROR(cudaMalloc(&bookKeeping, sizeof(int)*(numNeighbors * (numLocalExperts + 1))));
-    CUTE_CHECK_LAST();
-}
+        // Allocate Symmetric Heap + Flags
+        auto trailer = k + 2U;
+        size_t payload = aristos::Config::getCapacity(seqLen, numExperts, capacityFactor, k)
+                         * (embedDim + trailer);
+        size_t heapBytes = numNeighbors * aristos::stages * aristos::numCells * payload;
+        heapBytes += numNeighbors * (sizeof(aristos::flagsType) / sizeof(aristos::maxPrecision));
+        auto sHeap = nvshmem_calloc(heapBytes, sizeof(aristos::maxPrecision));
 
-void forwardHost(){
-}
+        // Final Initialization
+        auto config = Config();
+        config.numCommBlocks = maxActiveBlocks - GEMMBlocks;
+        config.worldSize = numNeighbors;
+        unsigned int* bookKeeping;
+        CUTE_CHECK_ERROR(cudaMemcpyToSymbol(moeConfig,
+                                            &config, sizeof(Config)));
+        CUTE_CHECK_ERROR(cudaMalloc(&bookKeeping,
+                                    sizeof(unsigned int)*(numNeighbors * (numLocalExperts + 1))));
+        CUTE_CHECK_ERROR(cudaMemcpyToSymbol(expertParallelSpec,
+                                            parallelSpec.data(),
+                                            sizeof(specType)*parallelSpec.size()));
+        CUTE_CHECK_ERROR(cudaMemcpyToSymbol(peerTranslation,
+                                            translation.data(),
+                                            sizeof(specType)*parallelSpec.size()));
+        CUTE_CHECK_LAST();
+    }
 
-void backwardHost(){
-}
+    void forwardHost(){
 
-void aristosFinalize(){
-    /// Flags + sHeap
-    nvshmem_free(moeConfig.sHeap);
-    nvshmem_finalize();
+    }
+
+    void backwardHost(){
+    }
+
+    void aristosFinalize(){
+        assert(isInitialized);
+        isInitialized = false;
+        CUTE_CHECK_ERROR(cudaFree(moeConfig.bookKeeping));
+        nvshmem_free(moeConfig.sHeap);
+        nvshmem_finalize();
+        CUTE_CHECK_LAST();
+    }
 }
 
 int main() {
@@ -551,6 +557,7 @@ int main() {
     CUTE_CHECK_ERROR(cudaFree(s));*/
 //    torch::Tensor tensor = torch::rand({2, 3});
 //    std::cout << tensor << std::endl;
+    std::vector<aristos::specType> spec1{};
     play_kernel<<<dim3{4,4}, dim3{2,2}>>>(32);
     CUTE_CHECK_LAST();
     play_kernel<<<8, dim3{2,2}>>>(32);
