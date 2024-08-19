@@ -8,27 +8,16 @@
 #include <cuda/std/concepts>
 namespace aristos{
     template<typename B>
-    concept AtomicBitWiseType = requires(B b){
+    concept AtomicType = requires(B b){
         requires cuda::std::same_as<B, int> ||
-                cuda::std::same_as<B, unsigned int> || cuda::std::same_as<B, unsigned long long int>;
+                cuda::std::same_as<B, unsigned int> || cuda::std::same_as<B, unsigned long long int> ||
+                cuda::std::same_as<B, unsigned short int>;
     };
 
-    template<typename F>
-    concept AtomicFloatType = requires(F f){
-        requires cuda::std::same_as<F, float> || cuda::std::same_as<F, double> ||
-                cuda::std::same_as<F, __half> || cuda::std::same_as<F, nv_bfloat16>;
-    };
-
-    template<AtomicBitWiseType B>
+    template<AtomicType T>
     CUTE_DEVICE
-    B atomicLoad(B* addr){
-        return atomicOr(addr, B(0));
-    }
-
-    template<AtomicFloatType F>
-    CUTE_DEVICE
-    F atomicFloatLoad(F* addr){
-        return atomicAdd(addr, F(0.0));
+    T atomicLoad(T* addr){
+        __attribute__((musttail)) return atomicCAS(addr, 0U, 0U);
     }
 }
 #endif //CSRC_ATOMICS_CUH

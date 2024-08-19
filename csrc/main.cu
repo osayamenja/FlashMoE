@@ -245,46 +245,47 @@ __global__ void play2(int* sync_grid, cuda::barrier<cuda::thread_scope_device>* 
     }
 }
 
-__global__ void benchLoad(CUTE_GRID_CONSTANT const int iter, unsigned int* sync_p, bool shouldPersist = false){
+#define SEQ 0U
+__constant__ unsigned int sync_p = SEQ;
+__global__ void benchLoad(CUTE_GRID_CONSTANT const int iter, bool shouldPersist = false){
     if(aristos::grid_tid() == 0){
-        printf("Initial Value is %u\n", sync_p[0]);
+        printf("Initial Value is %u\n", sync_p);
     }
     // initialization
     if(shouldPersist){
         cuda::associate_access_property(&last, cuda::access_property::persisting{});
-        cuda::associate_access_property(sync_p, cuda::access_property::persisting{});
+        cuda::associate_access_property(&sync_p, cuda::access_property::persisting{});
+    }
+    cuda::atomic_ref<unsigned int, cuda::thread_scope_device> loader(sync_p);
+    if(shouldPersist){
+        cuda::associate_access_property(&loader, cuda::access_property::persisting{});
     }
 
     auto start = cuda::std::chrono::high_resolution_clock::now();
     auto end = cuda::std::chrono::high_resolution_clock::now();
     auto elapsed_seconds{end - start};
-    size_t dev_atomic = 0, a_add = 0, a_cas = 0, freq_at = 0, a_or = 0;
+    size_t half_cas = 0, a_add = 0, a_cas = 0, freq_at = 0, a_or = 0;
     /*auto t = aristos::grid_tid();
     auto tt = t;*/
     CUTE_UNROLL
     for(int i = 0; i < iter; ++i){
         start = cuda::std::chrono::high_resolution_clock::now();
-        last += 0;
-        elapsed_seconds = cuda::std::chrono::high_resolution_clock::now() - start;
-        dev_atomic += cuda::std::chrono::duration_cast<cuda::std::chrono::microseconds>(elapsed_seconds).count();
-
-        start = cuda::std::chrono::high_resolution_clock::now();
-        atomicAdd(sync_p, 0U); // equivalent to a load
+        atomicAdd(&sync_p, 0U); // equivalent to a load
         elapsed_seconds = cuda::std::chrono::high_resolution_clock::now() - start;
         a_add += cuda::std::chrono::duration_cast<cuda::std::chrono::microseconds>(elapsed_seconds).count();
 
         start = cuda::std::chrono::high_resolution_clock::now();
-        atomicCAS(sync_p, 0U, 0U); // equivalent to a load
+        atomicCAS(&sync_p, 0U, 0U); // equivalent to a load
         elapsed_seconds = cuda::std::chrono::high_resolution_clock::now() - start;
         a_cas += cuda::std::chrono::duration_cast<cuda::std::chrono::microseconds>(elapsed_seconds).count();
 
         start = cuda::std::chrono::high_resolution_clock::now();
-        cuda::atomic_ref<unsigned int, cuda::thread_scope_device>(*sync_p).load();
+        cuda::atomic_ref<unsigned int, cuda::thread_scope_device>(sync_p).load();
         elapsed_seconds = cuda::std::chrono::high_resolution_clock::now() - start;
         freq_at += cuda::std::chrono::duration_cast<cuda::std::chrono::microseconds>(elapsed_seconds).count();
 
         start = cuda::std::chrono::high_resolution_clock::now();
-        atomicOr(sync_p, 0U);
+        atomicOr(&sync_p, 0U);
         elapsed_seconds = cuda::std::chrono::high_resolution_clock::now() - start;
         a_or += cuda::std::chrono::duration_cast<cuda::std::chrono::microseconds>(elapsed_seconds).count();
     }
@@ -292,27 +293,25 @@ __global__ void benchLoad(CUTE_GRID_CONSTANT const int iter, unsigned int* sync_
     using BlockReduce = cub::BlockReduce<size_t, THREADS_PER_BLOCK>;
     __shared__ typename BlockReduce::TempStorage temp_storage;
 
-    dev_atomic = BlockReduce(temp_storage).Reduce(dev_atomic, cub::Max());
+    half_cas = BlockReduce(temp_storage).Reduce(half_cas, cub::Max());
     a_add = BlockReduce(temp_storage).Reduce(a_add, cub::Max());
     a_or = BlockReduce(temp_storage).Reduce(a_or, cub::Max());
     a_cas = BlockReduce(temp_storage).Reduce(a_cas, cub::Max());
     freq_at = BlockReduce(temp_storage).Reduce(freq_at, cub::Max());
 
     if(aristos::block_tid() == 0){
-        printf("Block Id is %u, dev_atomic: {T: %f, V: %d}, a_add: {T: %f, V:%u}, "
+        printf("Block Id is %u, a_add: {T: %f, V:%u}, "
                "a_cas: {T: %f, V: %u}, a_or: {T: %f, V: %u}, freq_at: {T: %f, V: %u},"
                "persist: %s\n",
                aristos::bid(),
-               dev_atomic / (iter*1.0),
-               last.load(),
                a_add/(iter*1.0),
-               atomicAdd(sync_p, 0U),
+               atomicAdd(&sync_p, 0U),
                a_cas/(iter*1.0),
-               atomicCAS(sync_p, 0U, 0U),
+               atomicCAS(&sync_p, 0U, 0U),
                a_or/(iter*1.0),
-               atomicOr(sync_p, 0U),
+               atomicOr(&sync_p, 0U),
                freq_at/(iter*1.0),
-               cuda::atomic_ref<unsigned int, cuda::thread_scope_device>(*sync_p).load(),
+               cuda::atomic_ref<unsigned int, cuda::thread_scope_device>(sync_p).load(),
                (shouldPersist)? "Yes" : "No");
     }
 }
@@ -570,16 +569,8 @@ int main() {
     CUTE_CHECK_LAST();
     play2<<<dimGrid,dimBlock>>>(p, b);
     CUTE_CHECK_LAST();*/
-    thrust::host_vector<unsigned int> h_v(1);
-    h_v[0] = 59673;
-    thrust::device_vector<unsigned int> d_v(h_v.size());
-    thrust::copy(h_v.begin(), h_v.end(), d_v.begin());
-    unsigned int* p;
-    CUTE_CHECK_ERROR(cudaMalloc(&p, sizeof(unsigned int)));
-    CUTE_CHECK_ERROR(cudaMemset(p, 0, sizeof(unsigned int)));
-    CUTE_CHECK_LAST();
-    benchLoad<<<4,THREADS_PER_BLOCK>>>(1024, thrust::raw_pointer_cast(d_v.data()));
-    benchLoad<<<4,THREADS_PER_BLOCK>>>(1024, thrust::raw_pointer_cast(d_v.data()), true);
+    benchLoad<<<16,THREADS_PER_BLOCK>>>(1024);
+    benchLoad<<<16,THREADS_PER_BLOCK>>>(1024,true);
     CUTE_CHECK_LAST();
 
 //    int p_bytes = 4;

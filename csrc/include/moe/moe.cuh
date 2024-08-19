@@ -21,13 +21,13 @@ namespace aristos{
     /// len <= |D|
     __constant__ specType* peerTranslation;
 
-    __device__ AtomicBoolType* stop;
+    __device__ AtomicBoolType stillExecuting;
     __device__ unsigned long sequenceNumber = aristos::header::begin + 1;
 
     CUTE_DEVICE
     void persistHotPointers(){
-        /// Persist global stop flag
-        cuda::associate_access_property(stop, cuda::access_property::persisting{});
+        /// Persist global stillExecuting flag
+        cuda::associate_access_property(&stillExecuting, cuda::access_property::persisting{});
         /// Persist sequence number
         cuda::associate_access_property(&sequenceNumber, cuda::access_property::persisting{});
         /// Persist symmetric heap flags
@@ -67,6 +67,7 @@ namespace aristos{
             if(blockIdx.x == gridDim.x - moeConfig.numCommBlocks){
                 // We are Subscribers exclusively and Publishers partially
                 __syncthreads();
+                // construct tensors and deploy to queue
             }
             else{
                 /// Exclusive Publishers get the remainder
@@ -77,6 +78,7 @@ namespace aristos{
                 }
                 __threadfence_block();
                 __syncthreads();
+                // construct tensors and deploy to communicator
             }
         }
         // We are Processors exclusively and partial Subscribers and Publishers
