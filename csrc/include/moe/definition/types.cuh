@@ -15,12 +15,21 @@ namespace aristos{
     /// NVIDIA native atomics only accepting int types.
     using AtomicBoolType = unsigned int;
 
+    /// GEMM Block spec
+    extern constexpr unsigned int bM = 128;
+    extern constexpr unsigned int bN = 128;
+    extern constexpr unsigned int bK = 8;
+    extern constexpr unsigned int bP = 1; // pipeline stages, have to use 1 due to shared mem constraints
+    extern constexpr unsigned int blockSize = 128; // 256 is too high, since an SM can only hold <= 2048 threads
+    /// empirical threshold of threads to saturate NVLink bandwidth
+    extern constexpr unsigned int NVLinkBlockReq = 4096;
+
     namespace cg = cooperative_groups;
 
     struct Config{
         void* sHeap;
         void* flags;
-        void* bookKeeping;
+        void* pubQueue;
         // Expert parallel World Size
         unsigned int worldSize;
         unsigned int capacity;
@@ -34,6 +43,7 @@ namespace aristos{
         unsigned int embedDim;
         unsigned int embedPrecision;
         unsigned int numCommBlocks;
+        unsigned int numResultChunks;
 
         CUTE_HOST_DEVICE
         Config() = default;
@@ -63,7 +73,8 @@ namespace aristos{
                 numExperts(_numExperts),
                 numLocalExperts(_numLocalExperts),
                 k(_k), embedDim(_embedDim),
-                embedPrecision(_embedPrecision)
+                embedPrecision(_embedPrecision),
+                numResultChunks(cute::ceil_div(embedDim, bN))
                 {};
 
         CUTE_HOST_DEVICE
@@ -119,7 +130,7 @@ namespace aristos{
             /// New stuff
             bid = aristos::bid();
             blocksToPeers = max((gridDim.z - 1) * (gridDim.x * gridDim.y) / worldSize, 1);
-            peerStripeLength = cuda::ceil_div(1UL, blocksToPeers);
+            peerStripeLength = cute::ceil_div(1UL, blocksToPeers);
             intraPeerIndex = bid - ((bid / blocksToPeers) * blocksToPeers);
             firstPeer = static_cast<int>(bid / blocksToPeers);
         };
@@ -147,5 +158,17 @@ namespace aristos{
                    peerStripeLength, rank, seqLen, sequenceNumber, worldSize, k);
         }
     };
+
+    enum header : unsigned int {
+        NOOP = 0,
+        processed = 0,
+        shouldProcess = 1,
+        begin = 2
+    };
+
+    CUTE_HOST_DEVICE
+    uint64_t constructSignal(unsigned long seqNo, header tag){
+        return seqNo + tag;
+    }
 }
 #endif //ARISTOS_TYPES_CUH

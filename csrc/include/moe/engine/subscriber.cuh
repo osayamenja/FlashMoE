@@ -5,7 +5,8 @@
 #ifndef ARISTOS_QUEUE_CUH
 #define ARISTOS_QUEUE_CUH
 
-#include "packet.cuh"
+#include "../definition/types.cuh"
+#include "../definition/tensor.cuh"
 
 namespace aristos{
     using ratio = cuda::std::micro;
@@ -21,7 +22,7 @@ namespace aristos{
     bool activated_countdown = false;
 
     CUTE_DEVICE
-    void startQueue(){
+    void startSubscriber(){
 
     }
 

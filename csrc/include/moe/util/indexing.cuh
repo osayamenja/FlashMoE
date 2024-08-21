@@ -5,8 +5,7 @@
 #ifndef ARISTOS_INDEXING_CUH
 #define ARISTOS_INDEXING_CUH
 
-#include "../../../../../../../../../../global/homes/o/osayamen/.local/cutlass/include/cute/config.hpp"
-#include "../../../cmake-build-debug/_deps/cccl-src/libcudacxx/include/cuda/cmath"
+#include <cute/config.hpp>
 
 namespace aristos{
     /// Block-scoped thread id

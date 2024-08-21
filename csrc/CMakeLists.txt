@@ -61,20 +61,19 @@ set(cublasdx_CUTLASS_ROOT $ENV{CUTLASS_PATH})
 find_package(mathdx REQUIRED COMPONENTS cublasdx CONFIG)
 
 add_executable(csrc main.cu
-        include/moe/communication/queue.cuh
-        include/moe/communication/packet.cuh
+        include/moe/engine/subscriber.cuh
         include/moe/moe.cuh
         include/aristos.cuh
-        include/moe/compute/compute.cuh
+        include/moe/engine/processor.cuh
         include/moe/algorithm/algorithm.cuh
         include/moe/util/indexing.cuh
         include/moe/definition/tensor.cuh
-        include/moe/communication/communicator.cuh
+        include/moe/engine/publisher.cuh
         include/moe/definition/platform.cuh
-        include/moe/util/debug.cuh
         include/moe/definition/types.cuh
         include/moe/definition/memory_layout.cuh
         include/moe/util/atomics.cuh
+        include/moe/definition/values.cuh
 )
 
 # add dependencies

@@ -17,7 +17,7 @@ namespace aristos{
     template<AtomicType T>
     CUTE_DEVICE
     T atomicLoad(T* addr){
-        __attribute__((musttail)) return atomicCAS(addr, 0U, 0U);
+        return atomicCAS(addr, 0U, 0U);
     }
 }
 #endif //CSRC_ATOMICS_CUH
