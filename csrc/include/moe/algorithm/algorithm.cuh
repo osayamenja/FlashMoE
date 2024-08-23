@@ -11,6 +11,7 @@
 #include <cuda/std/concepts>
 #include "../definition/tensor.cuh"
 #include "../util/indexing.cuh"
+#include "../definition/values.cuh"
 
 //TODO dimensions for all params
 namespace aristos {
@@ -61,7 +62,7 @@ namespace aristos {
             CUTE_UNROLL
             for(uint i = 0; i < cute::size<0>(in_slice.layout()); ++i){
                 if(in_slice(i) > zero_val){
-                    auto peer = shard_spec(i);
+                    auto peer = moeConfig.expertParallelSpec[i];
                     out_slice(peer, k_indices[i]++) = i; // The value i denotes the expert index.
                 }
             }

@@ -5,11 +5,7 @@
 #ifndef ARISTOS_COMMUNICATOR_CUH
 #define ARISTOS_COMMUNICATOR_CUH
 
-#include <cooperative_groups.h>
-#include <cuda/atomic>
-#include <cuda/annotated_ptr>
 #include "../util/atomics.cuh"
-#include <cuda/barrier>
 #include "../definition/memory_layout.cuh"
 #include "../definition/values.cuh"
 
@@ -19,90 +15,118 @@ namespace aristos{
 
     CUTE_DEVICE
     void tryUntilSignal(){
-        while(atomicLoad(&doorbell) == 0 && atomicLoad(&stillExecuting)){}
+        while(atomicLoad(&doorbell) == 0 && atomicLoad(&stillExecuting)){
+            /// Mitigate frivolous consumption of prized memory bandwidth
+            __nanosleep(2);
+        }
     }
 
     CUTE_DEVICE
-    void batchSend(unsigned int* heap_iter, // heap iterator
-                                 unsigned int rank,
-                    const unsigned long seq_no,
-                    uint64_t* flags,
-                    unsigned int* sync_grid,
-                    std::byte* symmetric_heap,
-                    const unsigned int peer_offset,
-                    const size_t blocks_to_peers, // r
-                                 const uint peer_stripe_len, // l
-                                 const unsigned int cap,
-                    const unsigned int embed_bytes,
-                    const unsigned int k,
-                    const uint intra_peer_index,
-                    const uint n_experts,
-                    const size_t payload_bytes,
-                    const int first_peer,
-                    const unsigned int* checkpoints){
-        // TODO avoid copy for self-send?
-        // TODO move to shared?
-        for(int i = first_peer; i < peer_stripe_len; ++i){
-            if(auto n_k = atomicAdd((heap_iter + (peer_offset * i)), 0); n_k > 0){ // atomicAdd == load
-                // TODO __syncwarp() somewhere here?
-                auto chunk_size = cute::ceil_div(payload_bytes, blocks_to_peers);
-                auto data_ptr = symmetric_heap + (intra_peer_index * chunk_size);
-                // dest is wrong below
-                if(intra_peer_index == (blocks_to_peers - 1) && payload_bytes % blocks_to_peers != 0){
-                    // residual chunk
-                    nvshmemx_putmem_nbi_block(data_ptr,
-                                              (data_ptr + (payload_bytes % chunk_size)),
-                                              chunk_size,
-                                              i);
-                }
-                else{
-                    // send complete chunk
-                    nvshmemx_putmem_nbi_block(data_ptr,
-                                              (data_ptr + chunk_size),
-                                              chunk_size,
-                                              i);
-                }
+    void startSingularPublisher(){
+        __shared__ SenderConfig senderConfig;
+        __shared__ unsigned int queueHead;
+        __shared__ unsigned int queueTag;
+        __shared__ unsigned int warpsWidth;
+        __shared__ unsigned int normalizedBID;
+        extern __shared__ unsigned int scratchpad[];
+        auto checkpoints = scratchpad + moeConfig.worldSize;
+        auto isRemote = scratchpad;
+        if(!aristos::block_tid()){
+            normalizedBID = blockIdx.x - (gridDim.x - moeConfig.numPublisherBlocks);
+            warpsWidth = blockSizeWarp * (moeConfig.numPublisherBlocks - 1); // excluding subscriber block
+            queueHead = 0;
+            queueTag = 0;
+            senderConfig = SenderConfig(moeConfig);
+            CUTE_UNROLL
+            for(unsigned int i = 0; i < moeConfig.worldSize; ++i){
+                isRemote[i] = nvshmem_ptr(moeConfig.sHeap, moeConfig.peerTranslation[i]) == NULL;
+                checkpoints[i] = 0;
             }
         }
-        __syncthreads(); // needed to ensure quiet() encompasses transfers by all threads
-        if(block_tid() == 0){
-            nvshmem_quiet();
-            unsigned int j = first_peer + peer_stripe_len;
-            for(int i = first_peer; i < peer_stripe_len; ++i, ++j){
-                if(checkpoints[j] > 0){
-                    auto expert_i = packet_trailer_index(send_cell(1),
-                                                         checkpoints[j],
-                                                         cap,
-                                                         embed_bytes,
-                                                         k);
-                    auto old = atomicAdd((sync_grid + ((n_experts*i) + heap_iter[(peer_offset * i) + expert_i])), 1U);
-                    if(old == blocks_to_peers){
-                        nvshmemx_signal_op((flags + rank),
-                                           constructSignal(seq_no, aristos::processed),
-                                           NVSHMEM_SIGNAL_SET,
-                                           i);
-                        doorbell--;
+        __threadfence_block();
+
+        while(atomicLoad(&stillExecuting)){
+            tryUntilSignal();
+            /// Optimistically complete data transfers without interruption.
+            while(atomicLoad(&doorbell) > 0){
+                /// Use warp instead of thread below due to warp divergence
+                if(atomicLoad(&queueTag) == aristos::block_wid()){
+                    /// I am responsible for making this transfer.
+                    /// Technically, only a single thread is needed;
+                    /// however, predicated instruction execution due to warp divergence allegedly
+                    /// nullifies any purported performance gains of thread-level parallelism, thus we use a warp.
+                    auto peer = atomicLoad((senderConfig.pubQueue + queueHead));
+                    auto numTokensBytes = senderConfig.pubQueue[queueHead + 1] * moeConfig.tokenStride;
+                    if(isRemote[peer]){
+                        if(!aristos::block_lid()){
+                            atomicDec(&doorbell, 1U);
+                            atomicAdd(&queueHead, 1U);
+                            atomicCAS(&queueTag, aristos::block_wid(), ((aristos::block_wid() + 1) % warpsWidth));
+                        }
+                        nvshmemx_putmem_signal_nbi_warp(getTokenPointer(moeConfig.rank, 1, receiveCell, checkpoints[peer]),
+                                                        getTokenPointer(peer, 1, sendCell, checkpoints[peer]),
+                                                        numTokensBytes, moeConfig.flags + moeConfig.rank,
+                                                        constructSignal(moeConfig.sequenceNumber, header::processed),
+                                                        NVSHMEM_SIGNAL_SET, peer);
+                    }
+                    else{
+                        /// All warps must cooperate
+                        if(!aristos::block_lid()){
+                            atomicCAS(&queueTag, aristos::block_wid(), ((aristos::block_wid() + 1) % warpsWidth));
+                        }
+                        numTokensBytes = cute::ceil_div(numTokensBytes, moeConfig.numPublisherBlocks);
+                        if(normalizedBID == moeConfig.numPublisherBlocks - 1 && numTokensBytes % moeConfig.numPublisherBlocks != 0){
+                            nvshmemx_putmem_block((getTokenPointer(moeConfig.rank, 1, receiveCell, checkpoints[peer]) + (normalizedBID * numTokensBytes)),
+                                                      (getTokenPointer(peer, 1, sendCell, checkpoints[peer]) + (normalizedBID * numTokensBytes)),
+                                                      numTokensBytes % moeConfig.numPublisherBlocks, peer);
+                        }
+                        else{
+                            nvshmemx_putmem_block((getTokenPointer(moeConfig.rank, 1, receiveCell, checkpoints[peer]) + (normalizedBID * numTokensBytes)),
+                                                      (getTokenPointer(peer, 1, sendCell, checkpoints[peer]) + (normalizedBID * numTokensBytes)),
+                                                      numTokensBytes, peer);
+                        }
+                        if(!aristos::block_tid()){
+                            if(atomicAdd(moeConfig.syncGrid + peer, 1U) % moeConfig.numPublisherBlocks == 0){
+                                // I am the last
+                                atomicDec(&doorbell, 1U);
+                                atomicAdd(&queueHead, 1U);
+                                nvshmemx_signal_op(moeConfig.flags + moeConfig.rank,
+                                                   constructSignal(moeConfig.sequenceNumber, aristos::processed),
+                                                   NVSHMEM_SIGNAL_SET,
+                                                   peer);
+
+                            }
+                        }
+                        if(!aristos::block_wid()){
+                            __syncwarp();
+                        }
+                        /// Other warps are free to go without synchronization!
                     }
                 }
+                else{
+                    /// Note that this sleep is unlike backoff as there is no contention for access due to the
+                    /// static round-robin allocation.
+                    /// Instead, the below delay mitigates frivolous consumption of scarce memory bandwidth
+                    __nanosleep(2);
+                }
             }
         }
-        __syncthreads();
     }
 
     CUTE_DEVICE
     void startPublisher(){
-        __shared__ SenderConfig s;
-        if(aristos::block_tid() == 0){
-            s = SenderConfig(moeConfig);
-        }
-        __threadfence_block();
-        __syncthreads();
-
         // broadcast()
-        while(atomicLoad(&stillExecuting)){
-            tryUntilSignal();
-            while(atomicLoad( &stillExecuting) && atomicLoad(&doorbell) > 0){
+        if(floor(blockSize * (moeConfig.numPublisherBlocks - 1)) == 0){
+            /// number of threads is insufficient for remote specialization
+            startSingularPublisher();
+        }
+        else{
+            /// Remote specialization
+            while(atomicLoad(&stillExecuting)){
+                tryUntilSignal();
+                while(atomicLoad(&stillExecuting) && atomicLoad(&doorbell) > 0){
 
+                }
             }
         }
     }
@@ -113,6 +137,7 @@ namespace aristos{
             atomicAdd(&doorbell, 1U);
         }
     }
+
 
 }
 #endif //ARISTOS_COMMUNICATOR_CUH

@@ -8,10 +8,6 @@
 #include <cuda/atomic>
 #include <cuda/barrier>
 
-// Heap things
-#include <cuda/std/__algorithm/make_heap.h>
-#include <cuda/std/__algorithm/pop_heap.h>
-
 #include <nvshmemx.h>
 #include <nvshmem.h>
 #include <host/nvshmemx_api.h>
@@ -26,6 +22,7 @@
 
 #include <torch/torch.h>
 #include <cuda/annotated_ptr>
+#include <cuda/semaphore>
 
 #include <thrust/host_vector.h>
 #include <thrust/device_vector.h>
@@ -317,7 +314,7 @@ namespace  aristos{
         CUTE_CHECK_ERROR(cudaDeviceGetAttribute(&numSMs, cudaDevAttrMultiProcessorCount, deviceID));
 
         int numBlocksPerSM = 0;
-        int minCommunicatorBlocks = 2; // We can be flexible here
+        int minCommunicatorBlocks = 2;
         auto GEMMBlocks = cute::ceil_div(seqLen, bM) * cute::ceil_div(hiddenProjDim, bN);
         auto minBlocks = GEMMBlocks + minCommunicatorBlocks;
         CUTE_CHECK_ERROR(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
@@ -333,14 +330,14 @@ namespace  aristos{
         nvshmem_init();
         auto localRank = nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE);
         auto globalRank = nvshmem_my_pe();
-        int numNodes = nvshmem_n_pes();
+        unsigned int numNodes = nvshmem_n_pes();
         CUTE_CHECK_ERROR(cudaSetDevice(localRank));
 
         // Run Lysi
         // ...
         // generates the below
-        int numNeighbors = 0;
-        int numLocalExperts = 0;
+        unsigned int numNeighbors = 0;
+        unsigned int numLocalExperts = 0;
         std::vector<specType> parallelSpec{};
         std::vector<specType> translation{};
 
@@ -354,23 +351,23 @@ namespace  aristos{
 
         // Final Initialization
         unsigned int* bookKeeping;
-
-        CUTE_CHECK_ERROR(cudaMalloc(&bookKeeping,
-                                    sizeof(unsigned int)*(numNeighbors * numLocalExperts)));
-        CUTE_CHECK_ERROR(cudaMemcpyToSymbol(expertParallelSpec,
-                                            parallelSpec.data(),
-                                            sizeof(specType)*parallelSpec.size()));
-        CUTE_CHECK_ERROR(cudaMemcpyToSymbol(peerTranslation,
-                                            translation.data(),
-                                            sizeof(specType)*parallelSpec.size()));
+        /// Multiplied by 2 to simulate pair: {index, numTokens}
+        unsigned int pubQueueLen = numLocalExperts * numNeighbors * 2;
+        unsigned int translationLen = numNeighbors;
+        unsigned int shardSpecLen = numExperts;
+        unsigned int syncVectorLen = numNeighbors;
+        CUTE_CHECK_ERROR(cudaMallocAsync(&bookKeeping,
+                                    sizeof(specType)*(pubQueueLen + translationLen + shardSpecLen + syncVectorLen),
+                                    cudaStreamDefault));
         hostMoEConfig = Config();
         //TODO init with host memcpy?
-        hostMoEConfig.numCommBlocks = maxActiveBlocks - GEMMBlocks;
+        hostMoEConfig.numPublisherBlocks = maxActiveBlocks - GEMMBlocks;
         hostMoEConfig.worldSize = numNeighbors;
-        hostMoEConfig.pubQueue = bookKeeping;
-        hostMoEConfig.sHeap = sHeap;
+        hostMoEConfig.bookKeeping = bookKeeping;
+        hostMoEConfig.sHeap = static_cast<cuda::std::byte*>(sHeap);
         CUTE_CHECK_ERROR(cudaMemcpyToSymbol(moeConfig,
                                             &hostMoEConfig, sizeof(Config)));
+        CUTE_CHECK_ERROR(cudaStreamSynchronize(cudaStreamDefault));
         CUTE_CHECK_LAST();
     }
 
@@ -384,181 +381,86 @@ namespace  aristos{
     void aristosFinalize(){
         assert(isInitialized);
         isInitialized = false;
-        CUTE_CHECK_ERROR(cudaFree(hostMoEConfig.pubQueue));
+        CUTE_CHECK_ERROR(cudaFree(hostMoEConfig.bookKeeping));
         nvshmem_free(hostMoEConfig.sHeap);
         nvshmem_finalize();
         CUTE_CHECK_LAST();
     }
 }
 
-template<bool isRemote>
-void foo(){
-    std::cout << "Remote Transfer" << std::endl;
+extern constexpr int peers = 1;
+extern constexpr int stages = 2;
+extern constexpr int cells = 2;
+
+extern constexpr int capacity = 1;
+extern constexpr int k = 0;
+extern constexpr int embedDim = 0;
+extern constexpr int tokens = capacity * (embedDim + k + 1);
+
+extern constexpr int peerStride = stages * cells * tokens;
+extern constexpr int stageStride = cells * tokens;
+extern constexpr int cellStride = tokens;
+extern constexpr int tokenStride = (embedDim + k + 1);
+extern constexpr int finalTokenStride = (embedDim + 1);
+
+template<typename T>
+CUTE_DEVICE
+T* getTokenPointer(T* const& addr, unsigned int const& peer, unsigned int const& stage, unsigned int const& cell, unsigned int const& token){
+    return addr + ((peer * peerStride) + (stage * stageStride) + (cell * cellStride) + (token * tokenStride));
 }
 
-template<>
-void foo<false>(){
-    std::cout << "NVLink Transfer " << std::endl;
+std::byte* getTokenP(std::byte* const& addr, unsigned int const& peer, unsigned int const& stage, unsigned int const& cell, unsigned int const& token){
+    return addr + ((peer * peerStride) + (stage * stageStride) + (cell * cellStride) + (token * tokenStride));
 }
 
-bool bar (int x){
-    return x > 4;
+__global__ void benchTen(int* foo, bool shouldPersist = false){
+    auto start = cuda::std::chrono::high_resolution_clock::now();
+    auto elapsed_seconds{cuda::std::chrono::high_resolution_clock::now() - start};
+    size_t cute_t = 0, raw_t = 0;
+    auto t = cute::make_tensor(cute::make_gmem_ptr(foo), cute::make_shape(peers, cute::make_shape(cute::make_shape(stages, cells), tokens)), cute::LayoutRight{});
+    if(shouldPersist){
+        cuda::associate_access_property(foo, cuda::access_property::persisting{});
+    }
+
+    CUTE_UNROLL
+    for(unsigned int i = 0; i < 1000; ++i){
+        start = cuda::std::chrono::high_resolution_clock::now();
+        &t(0, cute::make_coord(cute::make_coord(0,1),0));
+        elapsed_seconds = cuda::std::chrono::high_resolution_clock::now() - start;
+        cute_t += cuda::std::chrono::duration_cast<cuda::std::chrono::microseconds>(elapsed_seconds).count();
+
+        start = cuda::std::chrono::high_resolution_clock::now();
+        getTokenPointer(foo, 0, 0, 1, 0);
+        elapsed_seconds = cuda::std::chrono::high_resolution_clock::now() - start;
+        raw_t += cuda::std::chrono::duration_cast<cuda::std::chrono::microseconds>(elapsed_seconds).count();
+    }
+
+    using BlockReduce = cub::BlockReduce<size_t, THREADS_PER_BLOCK>;
+    __shared__ typename BlockReduce::TempStorage temp_storage;
+
+    cute_t = BlockReduce(temp_storage).Reduce(cute_t, cub::Max());
+    raw_t = BlockReduce(temp_storage).Reduce(raw_t, cub::Max());
+    if(aristos::block_tid() == 0){
+        printf("Block Id is %u, cute_t: {T: %f, V: %d}, raw_t: {T: %f, V:%d} "
+               "persist: %s\n",
+               aristos::bid(),
+               cute_t / (1000*1.0),
+               t(0, cute::make_coord(cute::make_coord(0,1),0)),
+               raw_t / (1000*1.0),
+               *getTokenPointer(foo, 0, 0, 1, 0),
+               (shouldPersist)? "Yes" : "No");
+    }
 }
+
 int main() {
-    std::srand(std::time(nullptr));
-    foo<false>();
-    /*cute::array<int, 4> u = {1,2,3,4};
-    cute::array<int, 4> v = {4,5,6,7};
-    cute::tuple<cute::array<int , 4>, cute::array<int, 4>> t = {u, v};
-    std::cout << cute::get<1>(t)[0] << std::endl;
-    std::cout << cute::tuple_size<decltype(t)>::value << std::endl;
-
-    cute::array<int*, 2> u_ptr = {};
-    cute::array<int*, 2> v_ptr = {};
-    std::cout << cute::half_t(0.8).operator float() << std::endl;
-    auto ff = cute::float_e4m3_t(4.25f);
-    std::cout << ff.operator float() << std::endl;
-    heap_things_pair<<<1,1>>>();
-    CUTE_CHECK_ERROR(cudaPeekAtLastError());
-    CUTE_CHECK_ERROR(cudaDeviceSynchronize());
-
-    cute::complex<float> e_i = cute::complex(89.0);
-    auto a_temp = std::array<int, 4>{78, 89, 91};
-    auto a_t = cute::make_tensor(a_temp.data(), cute::make_layout(cute::make_shape(2, 2)));
-    std::cout << (cute::is_complex<typename cute::iterator_traits<decltype(a_t.data())>::value_type>::value) << std::endl;
-    auto a_t0 = a_t(0, cute::_);
-    std::cout << a_t0(0) << std::endl;
-    std::cout << cute::size(a_t) << std::endl;
-
-    cuda::std::pair<int, int> p = {8, 9};
-    cuda::std::pair<int, int> q = {8, 3};
-
-    std::cout << (p < q) << std::endl;
-    cuda::std::array<cuda::std::pair<int, int>, 4> a {};
-    cuda::std::array<int, 4> a = {{1,67,3,4}};
-    std::cout << *(a.begin() + 1) << std::endl;
-    std::cout << *a.begin() << std::endl;
-    cuda::std::array<cuda::std::pair<int, int>, 5> a {{{3, 0}, {2, 1}, {4, 2}, {1, 3}, {5, 4}}};
-    auto a_t = cute::make_tensor(a.data(), cute::make_layout(cute::make_shape(1, 5)));
-    auto my_slice = a_t(0, cute::_);
-    int p = my_slice(0).first;
-    auto pp = cuda::std::pair<int, int>{0, 0};
-
-    cuda::std::array<int, 5> a_test {{3, 2, 4, 1, 5}};
-    auto b_t = cute::make_tensor(a_test.data(), cute::make_layout(cute::make_shape(1, 5)));
-    printf("initially, a_test is :{%d, %d, %d, %d, %d}\n", a_test[0], a_test[1], a_test[2], a_test[3], a_test[4]);
-    fused_top_idx(b_t);
-    printf("after fused_top_idx, a_test is :{%d, %d, %d, %d, %d}\n", a_test[0], a_test[1], a_test[2], a_test[3], a_test[4]);
-
-    auto hh = cute::half_t(0);
-    using hh_t = decltype(hh);
-    auto u8 = cute::uint1_t(0).storage
-    static_assert(cuda::std::is_integral<decltype(cute::uint1_t(0).storage)>()); // 2 and 4 int and float no bueno, neither does nvidia types. stdints
-
-    static_assert(cuda::std::same_as<decltype(hh_t(0)), cute::half_t>);
-    cute::array<int, 2> aa{};
-    std::cout << aa[0]++ << std::endl;
-    std::cout << aa[0] << std::endl;
-    void* parent = calloc(4, 4);
-    const int k = 2;
-    const int n_tok = 2;
-    auto* scratchpad = static_cast<cute::half_t*>(parent);
-    scratchpad[0] = cute::half_t(0.67);
-    scratchpad[1] = cute::half_t(0.02);
-    auto* trailer = static_cast<uint_fast16_t*>(static_cast<void*>((scratchpad + n_tok)));
-    trailer[0] = 2;
-    trailer[1] = 5;
-
-    void* recipient = calloc(4, 4);
-    std::memcpy(recipient, parent, 4*4);
-
-    auto* float_payload = static_cast<cute::half_t*>(recipient);
-    cute::print("Payload is %f, %f\n", float_payload[0].operator float(), float_payload[1].operator float());
-    const auto* metadata = static_cast<uint_fast16_t*>(static_cast<void*>((float_payload + n_tok)));
-    cute::print("Trailer is %d, %d", metadata[0], metadata[1]);
-    free(recipient);
-    free(parent);*/
-    /*int* p;
-    dim3 dimGrid(2,2, 2);
-    dim3 dimBlock(2,2);
-    auto n_threads = dimGrid.x * dimGrid.y * dimGrid.z * dimBlock.x * dimBlock.y * dimBlock.z;
-    std::cout << "n_threads is " << n_threads <<  std::endl;
-    cuda::barrier<cuda::thread_scope_device>* b;
-    // OR (recommended actually) you can do the below instead of MallocManaged()
-    // auto host_b = new cuda::barrier<cuda::thread_scope_device>{n_threads};
-    // CUTE_CHECK_ERROR(cudaMalloc(&b, sizeof(cuda::barrier<cuda::thread_scope_device>)));
-    // CUTE_CHECK_LAST();
-    // CUTE_CHECK_ERROR(cudaMemcpy(b, host_b, sizeof(cuda::barrier<cuda::thread_scope_device>), cudaMemcpyHostToDevice));
-    // CUTE_CHECK_LAST();
-    CUTE_CHECK_ERROR(cudaMallocManaged(&p, sizeof(int)*n_threads));
-    CUTE_CHECK_ERROR(cudaMallocManaged(&b, sizeof(cuda::barrier<cuda::thread_scope_device>)));
-    new (b) cuda::barrier<cuda::thread_scope_device>{n_threads};
+    std::array<int, 4> a = {{0,1,2,3}};
+    void* pp = static_cast<void*>(a.begin());
+    int* p;
+    CUTE_CHECK_ERROR(cudaMallocAsync(&p, sizeof(int)*a.size(), cudaStreamDefault));
+    CUTE_CHECK_ERROR(cudaMemcpyAsync(p, a.cbegin(), sizeof(int)*a.size(), cudaMemcpyHostToDevice, cudaStreamDefault));
+    CUTE_CHECK_ERROR(cudaStreamSynchronize(cudaStreamDefault));
+    benchTen<<<1, THREADS_PER_BLOCK>>>(p);
+    benchTen<<<1, THREADS_PER_BLOCK>>>(p, true);
     CUTE_CHECK_LAST();
-    CUTE_CHECK_ERROR(cudaMemset(p, 0, (sizeof(int)*n_threads)));
-    CUTE_CHECK_LAST();
-    play2<<<dimGrid,dimBlock>>>(p, b);
-    CUTE_CHECK_LAST();*/
-    /*unsigned int* s_p;
-    CUTE_CHECK_ERROR(cudaMalloc(&s_p, sizeof(unsigned int)));
-    benchLoad<<<16,THREADS_PER_BLOCK>>>(1024, s_p);
-    benchLoad<<<16,THREADS_PER_BLOCK>>>(1024, s_p, true);
-    CUTE_CHECK_LAST();
-
-    int p_bytes = 4;
-    int k = 4;
-    auto t = cute::make_counting_tensor(cute::make_layout(cute::make_shape(2, 10), cute::LayoutRight{}));
-
-    auto payloads = cute::composition(t, cute::make_shape(cute::_, p_bytes));
-    auto numRouting = t(cute::_, (p_bytes));
-    auto tokenIds = t(cute::_, cute::size<1>(t) - 1);
-    auto experts = cute::make_tensor(t.data() + p_bytes + 1, cute::make_shape(2, k), cute::make_stride(1 + p_bytes + 5, 1));
-    cute::print_tensor(t);
-    cute::print_tensor(payloads);
-    cute::print_tensor(numRouting);
-    cute::print_tensor(experts);
-    cute::print_tensor(tokenIds);*/
-    /*void* p;
-    uint64_t* f;
-    unsigned int* s;
-    CUTE_CHECK_ERROR(cudaMalloc(&p, sizeof(unsigned int)));
-    CUTE_CHECK_ERROR(cudaMemset(p, 0, sizeof(unsigned int)));
-    CUTE_CHECK_ERROR(cudaMalloc(&f, sizeof(unsigned int)));
-    CUTE_CHECK_ERROR(cudaMemset(f, 0, sizeof(unsigned int)));
-    CUTE_CHECK_ERROR(cudaMalloc(&s, sizeof(unsigned int)));
-    CUTE_CHECK_ERROR(cudaMemset(s, 0, sizeof(unsigned int)));
-
-    using json = nlohmann::json;
-    auto c = aristos::Config(f,
-                             p,
-                             s,
-                             s,
-                             1,
-                             0,
-                             3,
-                             2,
-                             1,
-                             1024,
-                             2,
-                             2,
-                             2048);
-    CUTE_CHECK_ERROR(cudaMemcpyToSymbol(moeConfig, &c, sizeof(aristos::Config)));
-    testArgs<<<2, 32>>>();
-    CUTE_CHECK_LAST();
-    CUTE_CHECK_ERROR(cudaFree(p));
-    CUTE_CHECK_ERROR(cudaFree(f));
-    CUTE_CHECK_ERROR(cudaFree(s));*/
-    /*torch::Tensor tensor = torch::rand({2, 3});
-    std::cout << tensor << std::endl;
-    unsigned int* f;
-    CUTE_CHECK_ERROR(cudaMalloc(&f, sizeof(unsigned int)));
-    CUTE_CHECK_ERROR(cudaMemset(f, 0, sizeof(unsigned int)));
-    benchAtomics<<<4, THREADS_PER_BLOCK>>>(1024, f);
-    benchAtomics<<<4, THREADS_PER_BLOCK>>>(1024, f, true);
-    CUTE_CHECK_LAST();*/
-    /*std::vector<aristos::specType> spec1{};
-    play_kernel<<<dim3{4,4}, dim3{2,2}>>>(32);
-    CUTE_CHECK_LAST();
-    play_kernel<<<8, dim3{2,2}>>>(32);
-    CUTE_CHECK_LAST();*/
-    return 0;
+    cuda::counting_semaphore
 }

@@ -6,25 +6,14 @@
 #define ARISTOS_MEMORY_LAYOUT_CUH
 
 namespace aristos{
-    /// header
-    /// NVSHMEM uses size_t
-    /// See https://docs.nvidia.com/nvshmem/api/gen/api/rma.html#nvshmem-put-nbi
-    /// But atomicAdd() requires ull
-    using n_bytes_repr = unsigned long long int;
-
-    /// Number of bytes for n_bytes_repr
-    constexpr size_t header_bytes = sizeof(n_bytes_repr);
-
-    /// Number of bytes for micro_header, namely k from top_k.
-    /// Of course, 32 bits is overkill, since practical systems use k in [1,2].
-    /// However, we desire encouraging much larger k, thus we adopt uint.
-    constexpr size_t micro_header_bytes = sizeof(unsigned int);
-
     /// Number of communication stages
-    constexpr unsigned int stages = 2;
+    __constant__ constexpr unsigned int stages = 2;
 
     /// Per stage, there is one cell for send and another for receive
-    constexpr unsigned int numCells = 2;
+    __constant__ constexpr unsigned int numCells = 2;
+
+    __constant__ constexpr unsigned int sendCell = 0;
+    __constant__ constexpr unsigned int receiveCell = 1;
 
     /// Per embedding vector a la token.
     /// k is top_k, +1 for token index, and *4 for unsigned int precision
@@ -84,6 +73,12 @@ namespace aristos{
     CUTE_HOST_DEVICE
     unsigned int send_cell(unsigned int stage){
         return 2*stage;
+    }
+
+
+    CUTE_DEVICE
+    cuda::std::byte* getTokenPointer(unsigned int const& peer, unsigned int const& stage, unsigned int const& cell, unsigned int const& token){
+        return moeConfig.sHeap + ((peer * moeConfig.peerStride) + (stage * moeConfig.stageStride) + (cell * moeConfig.cellStride) + (token * moeConfig.tokenStride));
     }
 
 }

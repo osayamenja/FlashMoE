@@ -7,7 +7,6 @@
 
 #include "moe/moe.cuh"
 #include "moe/engine/subscriber.cuh"
-#include "moe/definition/packet.cuh"
 #include "moe/algorithm/algorithm.cuh"
 #include "moe/util/indexing.cuh"
 #include "moe/definition/tensor.cuh"

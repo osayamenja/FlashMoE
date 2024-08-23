@@ -19,6 +19,28 @@ namespace aristos{
     #endif
     }
 
+    /// Block-scoped warp id
+    decltype(auto)
+    CUTE_HOST_DEVICE
+    block_wid() {
+    #if defined(__CUDA_ARCH__)
+            return (threadIdx.x + threadIdx.y*blockDim.x + threadIdx.z*blockDim.x*blockDim.y) >> 5;
+    #else
+            return 0;
+    #endif
+    }
+
+    /// Block-scoped and warp-scoped thread id
+    decltype(auto)
+    CUTE_HOST_DEVICE
+    block_lid() {
+    #if defined(__CUDA_ARCH__)
+            return (threadIdx.x + threadIdx.y*blockDim.x + threadIdx.z*blockDim.x*blockDim.y) % 32;
+    #else
+            return 0;
+    #endif
+    }
+
     /// Grid-scoped thread id
     decltype(auto)
     CUTE_HOST_DEVICE

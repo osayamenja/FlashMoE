@@ -9,22 +9,23 @@
 #include "util/indexing.cuh"
 #include "definition/types.cuh"
 #include "algorithm/algorithm.cuh"
-#include "definition/packet.cuh"
 #include "engine/publisher.cuh"
 #include "engine/subscriber.cuh"
 #include "engine/processor.cuh"
 #include "definition/values.cuh"
-#include <cuda/atomic>
-#include <cuda/cmath>
 #include <cuda/annotated_ptr>
 
 namespace aristos{
     CUTE_DEVICE
     void persistHotPointers(){
-        /// Persist global stillExecuting flag
+        /// Persist global interrupt
         cuda::associate_access_property(&stillExecuting, cuda::access_property::persisting{});
         /// Persist sequence number
         cuda::associate_access_property(&sequenceNumber, cuda::access_property::persisting{});
+        /// Persist publisher doorbell
+        cuda::associate_access_property(&doorbell, cuda::access_property::persisting{});
+        cuda::associate_access_property(&blockade, cuda::access_property::persisting{});
+
         /// Persist symmetric heap flags
         cuda::associate_access_property(moeConfig.flags,
                                         cuda::access_property(moeConfig.flags,
@@ -32,10 +33,10 @@ namespace aristos{
                                                               moeConfig.worldSize*sizeof(flagsType),
                                                               cuda::access_property::persisting{}));
         /// Persist book keeping state
-        cuda::associate_access_property(moeConfig.pubQueue,
-                                        cuda::access_property(moeConfig.pubQueue,
-                                                              sizeof(specType)*(moeConfig.worldSize * (moeConfig.numLocalExperts + 1)),
-                                                              sizeof(specType)*(moeConfig.worldSize * (moeConfig.numLocalExperts + 1)),
+        cuda::associate_access_property(moeConfig.bookKeeping,
+                                        cuda::access_property(moeConfig.bookKeeping,
+                                                              sizeof(specType)*((moeConfig.worldSize * moeConfig.numExperts * 2) + (moeConfig.worldSize * 2) + (moeConfig.numExperts)),
+                                                              sizeof(specType)*((moeConfig.worldSize * moeConfig.numExperts * 2) + (moeConfig.worldSize * 2) + (moeConfig.numExperts)),
                                                               cuda::access_property::persisting{}));
     }
 
@@ -49,16 +50,16 @@ namespace aristos{
 
     //TODO add launch bounds
     template<Matrix M, Tensor T>
-    __global__ void forward(M activations, T expertsWeights, M gateWeights,
+    __global__ void forward(M const& activations, T const& expertsWeights, M const& gateWeights,
                             M gateOutput, M mappingTensor, M sharedSpec) {
         persistHotPointers();
         gate(activations, gateWeights, gateOutput);
         tokenToPeers(gateOutput, sharedSpec, mappingTensor);
         /// mappingTensor (S, D)
 
-        if (blockIdx.x >= (gridDim.x - moeConfig.numCommBlocks)) {
+        if (blockIdx.x >= (gridDim.x - (moeConfig.numPublisherBlocks + 1))) {
             /// Exclusive Subscribers get only one block
-            if(blockIdx.x == gridDim.x - moeConfig.numCommBlocks){
+            if(blockIdx.x == gridDim.x - (moeConfig.numPublisherBlocks + 1)){
                 // We are Subscribers explicitly and Publishers semantically
                 startSubscriber();
             }
