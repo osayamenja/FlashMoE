@@ -20,11 +20,12 @@ namespace aristos{
     void persistHotPointers(){
         /// Persist global interrupt
         cuda::associate_access_property(&stillExecuting, cuda::access_property::persisting{});
-        /// Persist sequence number
-        cuda::associate_access_property(&sequenceNumber, cuda::access_property::persisting{});
-        /// Persist publisher doorbell
+        /// Persist publisher notifiers
         cuda::associate_access_property(&doorbell, cuda::access_property::persisting{});
         cuda::associate_access_property(&blockade, cuda::access_property::persisting{});
+        cuda::associate_access_property(&queueHead, cuda::access_property::persisting{});
+        cuda::associate_access_property(&queueTail, cuda::access_property::persisting{});
+        cuda::associate_access_property(&queueTag, cuda::access_property::persisting{});
 
         /// Persist symmetric heap flags
         cuda::associate_access_property(moeConfig.flags,
@@ -35,14 +36,14 @@ namespace aristos{
         /// Persist book keeping state
         cuda::associate_access_property(moeConfig.bookKeeping,
                                         cuda::access_property(moeConfig.bookKeeping,
-                                                              sizeof(specType)*((moeConfig.worldSize * moeConfig.numExperts * 2) + (moeConfig.worldSize * 2) + (moeConfig.numExperts)),
-                                                              sizeof(specType)*((moeConfig.worldSize * moeConfig.numExperts * 2) + (moeConfig.worldSize * 2) + (moeConfig.numExperts)),
+                                                              sizeof(specType) * moeConfig.bookKeepingLen,
+                                                              sizeof(specType)* moeConfig.bookKeepingLen,
                                                               cuda::access_property::persisting{}));
     }
 
     template<Matrix M>
     CUTE_DEVICE
-    void gate(M activations, M weights, M routing){
+    void gate(M const& activations, M const& weights, M routing){
         // 1. TODO Compute Fused GEMM and Softmax output routing
         //2. Apply top_idx and return result
         topKMask(activations);

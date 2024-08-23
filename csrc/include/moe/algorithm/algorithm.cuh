@@ -19,11 +19,11 @@ namespace aristos {
     template<Matrix T, unsigned int k=1>
     CUTE_DEVICE
     void topKMask(T input){
-        if(grid_tid() < cute::size<0>(input.layout())){
+        if(grid::threadID() < cute::size<0>(input.layout())){
             using MatrixType = typename decltype(input)::value_type;
             //TODO below should be shared memory
             cute::array<cuda::std::pair<MatrixType, uint>, k> window{};
-            auto my_slice = input(grid_tid(), cute::_);
+            auto my_slice = input(grid::threadID(), cute::_);
             CUTE_UNROLL
             for(uint i = 0; i < k; ++i){
                 window[i] = {my_slice(i), i};
@@ -50,7 +50,7 @@ namespace aristos {
     template<Matrix T>
     CUTE_DEVICE
     void tokenToPeers(T gate_routing, T shard_spec, T mapping){
-        auto index = grid_tid();
+        auto index = grid::threadID();
         if(index < cute::size<0>(gate_routing.layout())){
             using MatrixType = typename decltype(gate_routing)::value_type;
             auto in_slice = gate_routing(index, cute::_);

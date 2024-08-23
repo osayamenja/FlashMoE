@@ -29,7 +29,7 @@ namespace aristos{
         cuda::std::byte* sHeap;
         flagsType* flags;
         specType* bookKeeping;
-        specType* syncGrid;
+        specType* pubQueue;
         /// len = |E|
         specType* expertParallelSpec;
         /// len <= |D|
@@ -51,6 +51,7 @@ namespace aristos{
         unsigned int stageStride;
         unsigned int cellStride;
         unsigned int tokenStride;
+        unsigned int bookKeepingLen;
 
         CUTE_HOST_DEVICE
         Config() = default;
@@ -108,38 +109,42 @@ namespace aristos{
     };
 
     /// Owned by a block
-    struct SenderConfig{
-        unsigned int bid;
+    struct PublisherConfig{
+        unsigned int localBlockID;
         unsigned long blocksToPeers;
         unsigned int peerStripeLength;
         unsigned int intraPeerIndex;
         unsigned int firstPeer;
-        specType* pubQueue;
+        specType* syncGrid;
+        specType* pubBarrier;
+        specType* checkpoints;
 
         CUTE_DEVICE
-        SenderConfig() = default; // Circumvents warning about 'initializing shared variables'
+        PublisherConfig() = default; // Circumvents warning about 'initializing shared variables'
 
         CUTE_DEVICE
-        SenderConfig(const Config& c){
-            bid = aristos::bid();
+        PublisherConfig(const Config& c){
+            localBlockID = blockIdx.x - (gridDim.x - c.numPublisherBlocks);
             blocksToPeers = max((gridDim.z - 1) * (gridDim.x * gridDim.y) / c.worldSize, 1);
             peerStripeLength = cute::ceil_div(1UL, blocksToPeers);
-            intraPeerIndex = bid - ((bid / blocksToPeers) * blocksToPeers);
-            firstPeer = static_cast<int>(bid / blocksToPeers);
+            intraPeerIndex = aristos::grid::blockID() - ((aristos::grid::blockID() / blocksToPeers) * blocksToPeers);
+            firstPeer = static_cast<int>(aristos::grid::blockID() / blocksToPeers);
         };
 
         CUTE_DEVICE
         void dump(){
             printf("{\n\t"
                    "\"BlockID\": %u,\n\t"
+                   "\"LocalBlockID\": %u,\n\t"
                    "\"BlocksToPeers\": %lu,\n\t"
                    "\"FirstPeer\": %u,\n\t"
                    "\"IntraPeerIndex\": %u,\n\t"
                    "\"PeerStripeLength\": %u,\n\t",
-                   bid, blocksToPeers, firstPeer, intraPeerIndex,
+                   aristos::grid::blockID(), localBlockID, blocksToPeers, firstPeer, intraPeerIndex,
                    peerStripeLength);
         }
     };
+
 
     enum header : unsigned int {
         NOOP = 0,
@@ -149,7 +154,7 @@ namespace aristos{
     };
 
     CUTE_HOST_DEVICE
-    uint64_t constructSignal(unsigned long seqNo, header tag){
+    uint64_t constructSignal(unsigned long const& seqNo, header const& tag){
         return seqNo + tag;
     }
 }

@@ -12,6 +12,9 @@
 namespace aristos{
     __device__ unsigned int doorbell = 0U;
     __device__ unsigned int blockade = 1U;
+    __device__ unsigned int queueHead = 0U;
+    __device__ unsigned int queueTail = 0U;
+    __device__ unsigned int queueTag = 0U;
 
     CUTE_DEVICE
     void tryUntilSignal(){
@@ -23,24 +26,16 @@ namespace aristos{
 
     CUTE_DEVICE
     void startSingularPublisher(){
-        __shared__ SenderConfig senderConfig;
-        __shared__ unsigned int queueHead;
-        __shared__ unsigned int queueTag;
+        __shared__ PublisherConfig publisherConfig;
         __shared__ unsigned int warpsWidth;
-        __shared__ unsigned int normalizedBID;
         extern __shared__ unsigned int scratchpad[];
-        auto checkpoints = scratchpad + moeConfig.worldSize;
         auto isRemote = scratchpad;
-        if(!aristos::block_tid()){
-            normalizedBID = blockIdx.x - (gridDim.x - moeConfig.numPublisherBlocks);
-            warpsWidth = blockSizeWarp * (moeConfig.numPublisherBlocks - 1); // excluding subscriber block
-            queueHead = 0;
-            queueTag = 0;
-            senderConfig = SenderConfig(moeConfig);
+        if(!aristos::block::threadID()){
+            warpsWidth = blockSizeWarp * moeConfig.numPublisherBlocks;
+            publisherConfig = PublisherConfig(moeConfig);
             CUTE_UNROLL
             for(unsigned int i = 0; i < moeConfig.worldSize; ++i){
                 isRemote[i] = nvshmem_ptr(moeConfig.sHeap, moeConfig.peerTranslation[i]) == NULL;
-                checkpoints[i] = 0;
             }
         }
         __threadfence_block();
@@ -50,57 +45,68 @@ namespace aristos{
             /// Optimistically complete data transfers without interruption.
             while(atomicLoad(&doorbell) > 0){
                 /// Use warp instead of thread below due to warp divergence
-                if(atomicLoad(&queueTag) == aristos::block_wid()){
+                if(atomicLoad(&queueTag) == aristos::block::warpID()){
                     /// I am responsible for making this transfer.
                     /// Technically, only a single thread is needed;
                     /// however, predicated instruction execution due to warp divergence allegedly
                     /// nullifies any purported performance gains of thread-level parallelism, thus we use a warp.
-                    auto peer = atomicLoad((senderConfig.pubQueue + queueHead));
-                    auto numTokensBytes = senderConfig.pubQueue[queueHead + 1] * moeConfig.tokenStride;
+                    auto peer = atomicLoad((moeConfig.pubQueue + queueHead));
+                    auto numTokensBytes = moeConfig.pubQueue[queueHead + 1] * moeConfig.tokenStride;
                     if(isRemote[peer]){
-                        if(!aristos::block_lid()){
+                        if(!aristos::warp::laneID()){
                             atomicDec(&doorbell, 1U);
                             atomicAdd(&queueHead, 1U);
-                            atomicCAS(&queueTag, aristos::block_wid(), ((aristos::block_wid() + 1) % warpsWidth));
+                            /// Advance token pointer
+                            atomicAdd(&publisherConfig.checkpoints[peer], moeConfig.pubQueue[queueHead + 1]);
+                            atomicCAS(&queueTag, aristos::block::warpID(), ((aristos::block::warpID() + 1) % warpsWidth));
                         }
-                        nvshmemx_putmem_signal_nbi_warp(getTokenPointer(moeConfig.rank, 1, receiveCell, checkpoints[peer]),
-                                                        getTokenPointer(peer, 1, sendCell, checkpoints[peer]),
+                        nvshmemx_putmem_signal_nbi_warp(getTokenPointer(moeConfig.rank, 1, receiveCell, publisherConfig.checkpoints[peer]),
+                                                        getTokenPointer(peer, 1, sendCell, publisherConfig.checkpoints[peer]),
                                                         numTokensBytes, moeConfig.flags + moeConfig.rank,
                                                         constructSignal(moeConfig.sequenceNumber, header::processed),
                                                         NVSHMEM_SIGNAL_SET, peer);
                     }
                     else{
-                        /// All warps must cooperate
-                        if(!aristos::block_lid()){
-                            atomicCAS(&queueTag, aristos::block_wid(), ((aristos::block_wid() + 1) % warpsWidth));
+                        /// All warps must cooperate for efficient completion of this NVLink transfer
+                        if(!aristos::warp::laneID()){
+                            atomicCAS(&queueTag, aristos::block::warpID(), ((aristos::block::warpID() + 1) % warpsWidth));
                         }
                         numTokensBytes = cute::ceil_div(numTokensBytes, moeConfig.numPublisherBlocks);
-                        if(normalizedBID == moeConfig.numPublisherBlocks - 1 && numTokensBytes % moeConfig.numPublisherBlocks != 0){
-                            nvshmemx_putmem_block((getTokenPointer(moeConfig.rank, 1, receiveCell, checkpoints[peer]) + (normalizedBID * numTokensBytes)),
-                                                      (getTokenPointer(peer, 1, sendCell, checkpoints[peer]) + (normalizedBID * numTokensBytes)),
+                        if(publisherConfig.localBlockID == moeConfig.numPublisherBlocks - 1 && numTokensBytes % moeConfig.numPublisherBlocks != 0){
+                            /// Residual chunk
+                            nvshmemx_putmem_block((getTokenPointer(moeConfig.rank, 1, receiveCell, publisherConfig.checkpoints[peer]) + (publisherConfig.localBlockID * numTokensBytes)),
+                                                      (getTokenPointer(peer, 1, sendCell, publisherConfig.checkpoints[peer]) + (publisherConfig.localBlockID * numTokensBytes)),
                                                       numTokensBytes % moeConfig.numPublisherBlocks, peer);
                         }
                         else{
-                            nvshmemx_putmem_block((getTokenPointer(moeConfig.rank, 1, receiveCell, checkpoints[peer]) + (normalizedBID * numTokensBytes)),
-                                                      (getTokenPointer(peer, 1, sendCell, checkpoints[peer]) + (normalizedBID * numTokensBytes)),
+                            nvshmemx_putmem_block((getTokenPointer(moeConfig.rank, 1, receiveCell, publisherConfig.checkpoints[peer]) + (publisherConfig.localBlockID * numTokensBytes)),
+                                                      (getTokenPointer(peer, 1, sendCell, publisherConfig.checkpoints[peer]) + (publisherConfig.localBlockID * numTokensBytes)),
                                                       numTokensBytes, peer);
                         }
-                        if(!aristos::block_tid()){
-                            if(atomicAdd(moeConfig.syncGrid + peer, 1U) % moeConfig.numPublisherBlocks == 0){
+                        if(!aristos::block::threadID()){
+                            if(atomicAdd(publisherConfig.syncGrid + peer, 1U) % moeConfig.numPublisherBlocks == 0){
                                 // I am the last
                                 atomicDec(&doorbell, 1U);
                                 atomicAdd(&queueHead, 1U);
+                                atomicAdd(publisherConfig.syncGrid + peer, 1U);
+                                atomicAdd(&publisherConfig.checkpoints[peer], moeConfig.pubQueue[queueHead + 1]);
                                 nvshmemx_signal_op(moeConfig.flags + moeConfig.rank,
                                                    constructSignal(moeConfig.sequenceNumber, aristos::processed),
                                                    NVSHMEM_SIGNAL_SET,
                                                    peer);
 
                             }
+                            else{
+                                atomicAdd(publisherConfig.pubBarrier + peer, 1U);
+                                /// Await the last publishing block to update queue head and doorbell
+                                while(atomicLoad(publisherConfig.pubBarrier) % moeConfig.numPublisherBlocks == 0){
+                                    __nanosleep(2);
+                                }
+                            }
                         }
-                        if(!aristos::block_wid()){
-                            __syncwarp();
+                        else{
+                            __syncthreads();
                         }
-                        /// Other warps are free to go without synchronization!
                     }
                 }
                 else{
@@ -134,6 +140,7 @@ namespace aristos{
     CUTE_DEVICE
     void batchNotifyPublisher(){
         if(atomicAdd(&blockade, 1U) % moeConfig.numResultChunks == 0){
+            //TODO enqueue index using queueTail
             atomicAdd(&doorbell, 1U);
         }
     }

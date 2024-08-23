@@ -20,13 +20,6 @@
 #include <cute/tensor.hpp>
 #include <cute/config.hpp>
 
-#include <torch/torch.h>
-#include <cuda/annotated_ptr>
-#include <cuda/semaphore>
-
-#include <thrust/host_vector.h>
-#include <thrust/device_vector.h>
-
 #define THREADS_PER_WARP 32
 #define THREADS_PER_BLOCK 256
 
@@ -131,46 +124,10 @@ __global__ void memory_heterogeneity(void* symmetric,  uint64_t* flags, int my_p
 }
 
 __device__ __constant__ cuda::atomic<unsigned int, cuda::thread_scope_device> last{1};
-__device__ __constant__ cuda::atomic<unsigned int, cuda::thread_scope_device> db{0};
-
-__global__ void play_kernel(int n){
-    printf("I am Thread %llu in Block %llu, x=%u, y=%u, z=%u, threadIdx.x=%u\n",
-           cg::grid_group::thread_rank(),
-           cg::grid_group::block_rank(),
-           blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x);
-    if(last.fetch_add(1) == n){
-        db++;
-        printf("Thread %d in Block %d is last: %d\n", aristos::grid_tid(), aristos::bid(), last.load());
-    }
-    if(cooperative_groups::grid_group::thread_rank() == 15){
-        printf("Block_dim.x %d, Block_dim.y %d, Block_dim.z %d\n", cg::grid_group::dim_blocks().x,
-               cg::grid_group::dim_blocks().y, cg::grid_group::dim_blocks().z);
-        printf("Threads in a block is: %d\n", cg::thread_block::num_threads());
-    }
-
-}
-
-__global__ void play2(int* sync_grid, cuda::barrier<cuda::thread_scope_device>* b){
-    auto t = cute::make_tensor(cute::make_gmem_ptr(sync_grid),
-                               cute::make_shape(1, cg::grid_group::num_threads()));
-    cuda::atomic_ref<int, cuda::thread_scope_device> a(t(cg::thread_block::thread_rank()));
-    a.fetch_add(1);
-    printf("I am Thread %llu -> %u in Block %llu -> %u, where my index is %u -> %u\n",
-           cg::grid_group::thread_rank(),
-           aristos::grid_tid(),
-           cg::grid_group::block_rank(),
-           aristos::bid(),
-           cg::thread_block::thread_rank(),
-           aristos::block_tid());
-    b->arrive_and_wait();
-    if(cg::thread_block::thread_rank() == 0){
-        printf("AS EXPECTED, atomic result is %d and t[0] is %d\n", a.load(), t(0));
-    }
-}
 
 #define SEQ 23U
 __global__ void benchLoad(CUTE_GRID_CONSTANT const int iter, unsigned int* sync_p, bool shouldPersist = false){
-    if(aristos::grid_tid() == 0){
+    if(aristos::grid::threadID() == 0){
         printf("Initial Value is %u\n", sync_p[0]);
     }
     // initialization
@@ -221,11 +178,11 @@ __global__ void benchLoad(CUTE_GRID_CONSTANT const int iter, unsigned int* sync_
     a_cas = BlockReduce(temp_storage).Reduce(a_cas, cub::Max());
     freq_at = BlockReduce(temp_storage).Reduce(freq_at, cub::Max());
 
-    if(aristos::block_tid() == 0){
+    if(aristos::block::threadID() == 0){
         printf("Block Id is %u, a_add: {T: %f, V:%u}, "
                "a_cas: {T: %f, V: %u}, a_or: {T: %f, V: %u}, freq_at: {T: %f, V: %u},"
                "persist: %s\n",
-               aristos::bid(),
+               aristos::grid::blockID(),
                a_add/(iter*1.0),
                atomicAdd(sync_p, 0U),
                a_cas/(iter*1.0),
@@ -280,10 +237,10 @@ __global__ void benchAtomics(CUTE_GRID_CONSTANT const int iter, unsigned int* fl
     a_or = BlockReduce(temp_storage).Reduce(a_or, cub::Max());
     a_and = BlockReduce(temp_storage).Reduce(a_and, cub::Max());
 
-    if(aristos::block_tid() == 0){
+    if(aristos::block::threadID() == 0){
         printf("Block Id is %u, a_flag: {T: %f, V: %d}, a_cas: {T: %f, V:%u}, a_or: {T: %f, V:%u}, a_and: {T: %f, V: %u},"
                "persist: %s\n",
-               aristos::bid(),
+               aristos::grid::blockID(),
                a_flag / (iter*1.0),
                stopFlag.test(),
                a_cas/(iter*1.0),
@@ -350,16 +307,15 @@ namespace  aristos{
         auto sHeap = nvshmem_calloc(heapBytes, sizeof(aristos::maxPrecision));
 
         // Final Initialization
-        unsigned int* bookKeeping;
-        /// Multiplied by 2 to simulate pair: {index, numTokens}
-        unsigned int pubQueueLen = numLocalExperts * numNeighbors * 2;
-        unsigned int translationLen = numNeighbors;
-        unsigned int shardSpecLen = numExperts;
-        unsigned int syncVectorLen = numNeighbors;
-        CUTE_CHECK_ERROR(cudaMallocAsync(&bookKeeping,
-                                    sizeof(specType)*(pubQueueLen + translationLen + shardSpecLen + syncVectorLen),
-                                    cudaStreamDefault));
         hostMoEConfig = Config();
+        unsigned int* bookKeeping;
+        /// pubQueueLen -> Multiplied by 2 to simulate pair: {index, numTokens}
+        /// + translationLen + shardSpecLen +
+        /// syncVectorLen -> {syncGrid, pubBarrier, checkpoints}
+        hostMoEConfig.bookKeepingLen = (numLocalExperts * numNeighbors * 2) + numNeighbors + numExperts + (numNeighbors * 3);
+        CUTE_CHECK_ERROR(cudaMallocAsync(&bookKeeping,
+                                    sizeof(specType)*hostMoEConfig.bookKeepingLen,
+                                    cudaStreamDefault));
         //TODO init with host memcpy?
         hostMoEConfig.numPublisherBlocks = maxActiveBlocks - GEMMBlocks;
         hostMoEConfig.worldSize = numNeighbors;
@@ -409,10 +365,6 @@ T* getTokenPointer(T* const& addr, unsigned int const& peer, unsigned int const&
     return addr + ((peer * peerStride) + (stage * stageStride) + (cell * cellStride) + (token * tokenStride));
 }
 
-std::byte* getTokenP(std::byte* const& addr, unsigned int const& peer, unsigned int const& stage, unsigned int const& cell, unsigned int const& token){
-    return addr + ((peer * peerStride) + (stage * stageStride) + (cell * cellStride) + (token * tokenStride));
-}
-
 __global__ void benchTen(int* foo, bool shouldPersist = false){
     auto start = cuda::std::chrono::high_resolution_clock::now();
     auto elapsed_seconds{cuda::std::chrono::high_resolution_clock::now() - start};
@@ -440,10 +392,10 @@ __global__ void benchTen(int* foo, bool shouldPersist = false){
 
     cute_t = BlockReduce(temp_storage).Reduce(cute_t, cub::Max());
     raw_t = BlockReduce(temp_storage).Reduce(raw_t, cub::Max());
-    if(aristos::block_tid() == 0){
+    if(aristos::block::threadID() == 0){
         printf("Block Id is %u, cute_t: {T: %f, V: %d}, raw_t: {T: %f, V:%d} "
                "persist: %s\n",
-               aristos::bid(),
+               aristos::block::threadID(),
                cute_t / (1000*1.0),
                t(0, cute::make_coord(cute::make_coord(0,1),0)),
                raw_t / (1000*1.0),
@@ -452,6 +404,7 @@ __global__ void benchTen(int* foo, bool shouldPersist = false){
     }
 }
 
+#include <condition_variable>
 int main() {
     std::array<int, 4> a = {{0,1,2,3}};
     void* pp = static_cast<void*>(a.begin());
@@ -462,5 +415,4 @@ int main() {
     benchTen<<<1, THREADS_PER_BLOCK>>>(p);
     benchTen<<<1, THREADS_PER_BLOCK>>>(p, true);
     CUTE_CHECK_LAST();
-    cuda::counting_semaphore
 }
