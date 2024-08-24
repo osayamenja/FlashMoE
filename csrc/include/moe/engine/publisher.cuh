@@ -15,10 +15,11 @@ namespace aristos{
     __device__ unsigned int queueHead = 0U;
     __device__ unsigned int queueTail = 0U;
     __device__ unsigned int queueTag = 0U;
+    __device__ unsigned int syncStages = 1U;
 
     CUTE_DEVICE
     void tryUntilSignal(){
-        while(atomicLoad(&doorbell) == 0 && atomicLoad(&stillExecuting)){
+        while(atomicLoad(&stillExecuting) && atomicLoad(&doorbell) == 0){
             /// Mitigate frivolous consumption of prized memory bandwidth
             __nanosleep(2);
         }
@@ -28,8 +29,7 @@ namespace aristos{
     void startSingularPublisher(){
         __shared__ PublisherConfig publisherConfig;
         __shared__ unsigned int warpsWidth;
-        extern __shared__ unsigned int scratchpad[];
-        auto isRemote = scratchpad;
+        extern __shared__ unsigned int isRemote[];
         if(!aristos::block::threadID()){
             warpsWidth = blockSizeWarp * moeConfig.numPublisherBlocks;
             publisherConfig = PublisherConfig(moeConfig);
@@ -84,12 +84,14 @@ namespace aristos{
                                                       numTokensBytes, peer);
                         }
                         if(!aristos::block::threadID()){
-                            if(atomicAdd(publisherConfig.syncGrid + peer, 1U) % moeConfig.numPublisherBlocks == 0){
+                            if(atomicAdd(publisherConfig.syncGrid + peer, 1U) == (moeConfig.numPublisherBlocks * (syncStages + 1))){
                                 // I am the last
                                 atomicDec(&doorbell, 1U);
                                 atomicAdd(&queueHead, 1U);
-                                atomicAdd(publisherConfig.syncGrid + peer, 1U);
                                 atomicAdd(&publisherConfig.checkpoints[peer], moeConfig.pubQueue[queueHead + 1]);
+                                atomicAdd(&syncStages, 2U);
+                                /// unblock other blocks
+                                atomicAdd(publisherConfig.syncGrid + peer, 1U);
                                 nvshmemx_signal_op(moeConfig.flags + moeConfig.rank,
                                                    constructSignal(moeConfig.sequenceNumber, aristos::processed),
                                                    NVSHMEM_SIGNAL_SET,
@@ -97,9 +99,9 @@ namespace aristos{
 
                             }
                             else{
-                                atomicAdd(publisherConfig.pubBarrier + peer, 1U);
                                 /// Await the last publishing block to update queue head and doorbell
-                                while(atomicLoad(publisherConfig.pubBarrier) % moeConfig.numPublisherBlocks == 0){
+                                atomicAdd(publisherConfig.syncGrid + peer, 1U);
+                                while(atomicLoad(publisherConfig.syncGrid + peer) != (moeConfig.numPublisherBlocks * (syncStages + 2))){
                                     __nanosleep(2);
                                 }
                             }
@@ -122,15 +124,23 @@ namespace aristos{
     CUTE_DEVICE
     void startPublisher(){
         // broadcast()
-        if(floor(blockSize * (moeConfig.numPublisherBlocks - 1)) == 0){
+        if(moeConfig.numPublisherBlocks < ((NVLinkThreshold / blockSize) + 1)){
             /// number of threads is insufficient for remote specialization
             startSingularPublisher();
         }
         else{
-            /// Remote specialization
+            /// local publisher block 0 will service remote communication
+            /// while other blocks will further specialize for parallel NVLink transfers
+            if(!PublisherConfig::getLocalBlockID(moeConfig.numPublisherBlocks)){
+                /// remote publisher
+                
+            }
+            else{
+                /// NVLink publisher
+            }
             while(atomicLoad(&stillExecuting)){
                 tryUntilSignal();
-                while(atomicLoad(&stillExecuting) && atomicLoad(&doorbell) > 0){
+                while(atomicLoad(&doorbell) > 0){
 
                 }
             }

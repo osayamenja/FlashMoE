@@ -21,7 +21,7 @@ namespace aristos{
     extern constexpr unsigned int blockSize = 128; // 256 is too high, since an SM can only hold <= 2048 threads
     extern constexpr unsigned int blockSizeWarp = 4; // 128 / 32
     /// empirical threshold of threads to saturate NVLink bandwidth for one transfer
-    extern constexpr unsigned int NVLinkBlockReq = 2048;
+    extern constexpr unsigned int NVLinkThreshold = 2048;
 
     namespace cg = cooperative_groups;
 
@@ -116,7 +116,6 @@ namespace aristos{
         unsigned int intraPeerIndex;
         unsigned int firstPeer;
         specType* syncGrid;
-        specType* pubBarrier;
         specType* checkpoints;
 
         CUTE_DEVICE
@@ -130,6 +129,11 @@ namespace aristos{
             intraPeerIndex = aristos::grid::blockID() - ((aristos::grid::blockID() / blocksToPeers) * blocksToPeers);
             firstPeer = static_cast<int>(aristos::grid::blockID() / blocksToPeers);
         };
+
+        CUTE_DEVICE
+        static decltype(auto) getLocalBlockID(auto const& numPublisherBlocks){
+            return blockIdx.x - (gridDim.x - numPublisherBlocks);
+        }
 
         CUTE_DEVICE
         void dump(){

@@ -311,8 +311,8 @@ namespace  aristos{
         unsigned int* bookKeeping;
         /// pubQueueLen -> Multiplied by 2 to simulate pair: {index, numTokens}
         /// + translationLen + shardSpecLen +
-        /// syncVectorLen -> {syncGrid, pubBarrier, checkpoints}
-        hostMoEConfig.bookKeepingLen = (numLocalExperts * numNeighbors * 2) + numNeighbors + numExperts + (numNeighbors * 3);
+        /// syncVectorLen -> {syncGrid, checkpoints}
+        hostMoEConfig.bookKeepingLen = (numLocalExperts * numNeighbors * 2) + numNeighbors + numExperts + (numNeighbors * 2);
         CUTE_CHECK_ERROR(cudaMallocAsync(&bookKeeping,
                                     sizeof(specType)*hostMoEConfig.bookKeepingLen,
                                     cudaStreamDefault));

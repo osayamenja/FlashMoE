@@ -6,7 +6,7 @@
 #define ARISTOS_MEMORY_LAYOUT_CUH
 
 namespace aristos{
-    /// We conceptualize the symmetric heap as a 4-D tensor (P, S, C, T)
+    /// The symmetric heap is a 4-D tensor (P, S, C, T)
     /// where P, S, C, and T denote dimensions for peers, communication stages,
     /// cells and tokens.
     /// Number of communication stages S

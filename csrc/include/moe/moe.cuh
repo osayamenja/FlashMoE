@@ -26,6 +26,7 @@ namespace aristos{
         cuda::associate_access_property(&queueHead, cuda::access_property::persisting{});
         cuda::associate_access_property(&queueTail, cuda::access_property::persisting{});
         cuda::associate_access_property(&queueTag, cuda::access_property::persisting{});
+        cuda::associate_access_property(&syncStages, cuda::access_property::persisting{});
 
         /// Persist symmetric heap flags
         cuda::associate_access_property(moeConfig.flags,
@@ -70,8 +71,10 @@ namespace aristos{
                 startPublisher();
             }
         }
-        // We are Processors explicitly and semantic Subscribers and Publishers
-        startProcessor();
+        else{
+            // We are Processors explicitly and semantic Subscribers and Publishers
+            startProcessor();
+        }
     }
 
     __global__ void backward(){
