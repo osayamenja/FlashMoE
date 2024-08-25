@@ -10,7 +10,6 @@
 #include "moe/algorithm/algorithm.cuh"
 #include "moe/util/indexing.cuh"
 #include "moe/definition/tensor.cuh"
-#include "moe/definition/platform.cuh"
 #include "moe/engine/publisher.cuh"
 #include "moe/definition/types.cuh"
 #include "moe/definition/memory_layout.cuh"

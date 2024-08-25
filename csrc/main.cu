@@ -273,6 +273,9 @@ namespace  aristos{
 
         int numBlocksPerSM = 0;
         int minCommunicatorBlocks = 2;
+        int localRank = 0;
+        int computeCapability = 0;
+        CUTE_CHECK_ERROR(cudaGetDevice(&localRank));
         auto GEMMBlocks = cute::ceil_div(seqLen, bM) * cute::ceil_div(hiddenProjDim, bN);
         auto minBlocks = GEMMBlocks + minCommunicatorBlocks;
         CUTE_CHECK_ERROR(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
@@ -282,20 +285,18 @@ namespace  aristos{
                 sizeof(aristos::maxPrecision) * ((bK * bP) * (bM + bN))));
         int maxActiveBlocks = numBlocksPerSM * numSMs;
         assert(minBlocks <= maxActiveBlocks);
+        int deviceSupportsMemoryPools = 0;
+        CUTE_CHECK_ERROR(cudaDeviceGetAttribute(&deviceSupportsMemoryPools,
+                                                cudaDevAttrMemoryPoolsSupported, localRank));
+        assert(deviceSupportsMemoryPools);
+        CUTE_CHECK_ERROR(cudaDeviceGetAttribute(&computeCapability, cudaDevAttrComputeCapabilityMajor, localRank));
+        /// Due to CUTLASS: https://github.com/NVIDIA/cutlass/blob/main/README.md
+        assert(computeCapability >= 7);
 
         // Good to go! Let's do some initialization
         // initialize NVSHMEM
         nvshmem_init();
-        auto localRank = nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE);
-        auto globalRank = nvshmem_my_pe();
-        unsigned int numNodes = nvshmem_n_pes();
         CUTE_CHECK_ERROR(cudaSetDevice(localRank));
-
-        int deviceSupportsMemoryPools = 0;
-        CUTE_CHECK_ERROR(cudaDeviceGetAttribute(&deviceSupportsMemoryPools,
-                               cudaDevAttrMemoryPoolsSupported, localRank));
-        assert(deviceSupportsMemoryPools);
-
         // Run Lysi
         // ...
         // generates the below

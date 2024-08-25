@@ -69,7 +69,6 @@ add_executable(csrc main.cu
         include/moe/util/indexing.cuh
         include/moe/definition/tensor.cuh
         include/moe/engine/publisher.cuh
-        include/moe/definition/platform.cuh
         include/moe/definition/types.cuh
         include/moe/definition/memory_layout.cuh
         include/moe/util/atomics.cuh
