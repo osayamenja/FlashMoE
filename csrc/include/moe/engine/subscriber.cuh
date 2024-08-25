@@ -8,7 +8,7 @@
 #include "../definition/types.cuh"
 #include "../definition/tensor.cuh"
 
-namespace aristos{
+namespace aristos::subscriber{
     using ratio = cuda::std::micro;
     using clk = cuda::std::chrono::high_resolution_clock;
     cuda::std::chrono::time_point<clk> snapshot_now{};
@@ -22,7 +22,7 @@ namespace aristos{
     bool activated_countdown = false;
 
     CUTE_DEVICE
-    void startSubscriber(){
+    void start(){
 
     }
 

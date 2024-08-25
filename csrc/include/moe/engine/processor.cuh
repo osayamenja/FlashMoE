@@ -7,9 +7,9 @@
 
 // GEMM stuff
 
-namespace aristos{
+namespace aristos::processor{
     CUTE_DEVICE
-    void startProcessor(){
+    void start(){
     }
 }
 #endif //ARISTOS_COMPUTE_CUH

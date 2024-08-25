@@ -21,12 +21,12 @@ namespace aristos{
         /// Persist global interrupt
         cuda::associate_access_property(&stillExecuting, cuda::access_property::persisting{});
         /// Persist publisher notifiers
-        cuda::associate_access_property(&doorbell, cuda::access_property::persisting{});
-        cuda::associate_access_property(&blockade, cuda::access_property::persisting{});
-        cuda::associate_access_property(&queueHead, cuda::access_property::persisting{});
-        cuda::associate_access_property(&queueTail, cuda::access_property::persisting{});
-        cuda::associate_access_property(&queueTag, cuda::access_property::persisting{});
-        cuda::associate_access_property(&syncStages, cuda::access_property::persisting{});
+        cuda::associate_access_property(&publisher::doorbell, cuda::access_property::persisting{});
+        cuda::associate_access_property(&publisher::blockade, cuda::access_property::persisting{});
+        cuda::associate_access_property(&publisher::logHead, cuda::access_property::persisting{});
+        cuda::associate_access_property(&publisher::logTail, cuda::access_property::persisting{});
+        cuda::associate_access_property(&publisher::baton, cuda::access_property::persisting{});
+        cuda::associate_access_property(&publisher::syncStages, cuda::access_property::persisting{});
 
         /// Persist symmetric heap flags
         cuda::associate_access_property(moeConfig.flags,
@@ -63,17 +63,17 @@ namespace aristos{
             /// Exclusive Subscribers get only one block
             if(blockIdx.x == gridDim.x - (moeConfig.numPublisherBlocks + 1)){
                 // We are Subscribers explicitly and Publishers semantically
-                startSubscriber();
+                subscriber::start();
             }
             else{
                 /// Exclusive Publishers get the remainder
                 // We are Publishers explicitly and Subscribers semantically
-                startPublisher();
+                publisher::start();
             }
         }
         else{
             // We are Processors explicitly and semantic Subscribers and Publishers
-            startProcessor();
+            processor::start();
         }
     }
 

@@ -18,10 +18,11 @@ namespace aristos{
     extern constexpr unsigned int bN = 128;
     extern constexpr unsigned int bK = 8;
     extern constexpr unsigned int bP = 1; // pipeline stages, have to use 1 due to shared mem constraints
-    extern constexpr unsigned int blockSize = 128; // 256 is too high, since an SM can only hold <= 2048 threads
+    extern constexpr unsigned int blockSize = 128; // 256 is too high, since a SM can only hold <= 2048 threads
     extern constexpr unsigned int blockSizeWarp = 4; // 128 / 32
     /// empirical threshold of threads to saturate NVLink bandwidth for one transfer
     extern constexpr unsigned int NVLinkThreshold = 2048;
+    extern constexpr unsigned int superBlockSize = NVLinkThreshold / blockSize;
 
     namespace cg = cooperative_groups;
 
@@ -29,15 +30,17 @@ namespace aristos{
         cuda::std::byte* sHeap;
         flagsType* flags;
         specType* bookKeeping;
-        specType* pubQueue;
+        /// Append-only log, allowing replays
+        specType* publisherLog;
         /// len = |E|
         specType* expertParallelSpec;
         /// len <= |D|
         specType* peerTranslation;
-        // Expert parallel World Size
+        /// Expert parallel World Size
         unsigned int worldSize;
         unsigned int capacity;
         unsigned long peerOffset;
+        /// Expert parallel group rank
         unsigned int rank;
         unsigned long sequenceNumber;
         unsigned int seqLen;
@@ -123,7 +126,7 @@ namespace aristos{
 
         CUTE_DEVICE
         PublisherConfig(const Config& c){
-            localBlockID = blockIdx.x - (gridDim.x - c.numPublisherBlocks);
+            localBlockID = PublisherConfig::getLocalBlockID(c.numPublisherBlocks);
             blocksToPeers = max((gridDim.z - 1) * (gridDim.x * gridDim.y) / c.worldSize, 1);
             peerStripeLength = cute::ceil_div(1UL, blocksToPeers);
             intraPeerIndex = aristos::grid::blockID() - ((aristos::grid::blockID() / blocksToPeers) * blocksToPeers);
@@ -133,6 +136,11 @@ namespace aristos{
         CUTE_DEVICE
         static decltype(auto) getLocalBlockID(auto const& numPublisherBlocks){
             return blockIdx.x - (gridDim.x - numPublisherBlocks);
+        }
+
+        CUTE_DEVICE
+        static decltype(auto) getLastLocalBlockID(){
+            return gridDim.x - 1;
         }
 
         CUTE_DEVICE

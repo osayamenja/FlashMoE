@@ -261,6 +261,7 @@ __global__ void occupancyTestKernel(){
 
 namespace  aristos{
     bool isInitialized = false;
+    cudaStream_t aristosStream = cudaStreamPerThread;
     Config hostMoEConfig;
     void aristosInit(unsigned int seqLen, unsigned int embedDim, unsigned int hiddenProjDim,
                      unsigned int k, int deviceID, unsigned int capacityFactor,
@@ -290,6 +291,11 @@ namespace  aristos{
         unsigned int numNodes = nvshmem_n_pes();
         CUTE_CHECK_ERROR(cudaSetDevice(localRank));
 
+        int deviceSupportsMemoryPools = 0;
+        CUTE_CHECK_ERROR(cudaDeviceGetAttribute(&deviceSupportsMemoryPools,
+                               cudaDevAttrMemoryPoolsSupported, localRank));
+        assert(deviceSupportsMemoryPools);
+
         // Run Lysi
         // ...
         // generates the below
@@ -315,15 +321,15 @@ namespace  aristos{
         hostMoEConfig.bookKeepingLen = (numLocalExperts * numNeighbors * 2) + numNeighbors + numExperts + (numNeighbors * 2);
         CUTE_CHECK_ERROR(cudaMallocAsync(&bookKeeping,
                                     sizeof(specType)*hostMoEConfig.bookKeepingLen,
-                                    cudaStreamDefault));
+                                    aristosStream));
         //TODO init with host memcpy?
         hostMoEConfig.numPublisherBlocks = maxActiveBlocks - GEMMBlocks;
         hostMoEConfig.worldSize = numNeighbors;
         hostMoEConfig.bookKeeping = bookKeeping;
         hostMoEConfig.sHeap = static_cast<cuda::std::byte*>(sHeap);
-        CUTE_CHECK_ERROR(cudaMemcpyToSymbol(moeConfig,
-                                            &hostMoEConfig, sizeof(Config)));
-        CUTE_CHECK_ERROR(cudaStreamSynchronize(cudaStreamDefault));
+        CUTE_CHECK_ERROR(cudaMemcpyToSymbolAsync(moeConfig,
+                                            &hostMoEConfig, sizeof(Config), 0, cudaMemcpyHostToDevice, aristosStream));
+        CUTE_CHECK_ERROR(cudaStreamSynchronize(aristosStream));
         CUTE_CHECK_LAST();
     }
 
@@ -337,9 +343,10 @@ namespace  aristos{
     void aristosFinalize(){
         assert(isInitialized);
         isInitialized = false;
-        CUTE_CHECK_ERROR(cudaFree(hostMoEConfig.bookKeeping));
+        CUTE_CHECK_ERROR(cudaFreeAsync(hostMoEConfig.bookKeeping, aristosStream));
         nvshmem_free(hostMoEConfig.sHeap);
         nvshmem_finalize();
+        CUTE_CHECK_ERROR(cudaStreamSynchronize(aristosStream));
         CUTE_CHECK_LAST();
     }
 }
@@ -404,7 +411,6 @@ __global__ void benchTen(int* foo, bool shouldPersist = false){
     }
 }
 
-#include <condition_variable>
 int main() {
     std::array<int, 4> a = {{0,1,2,3}};
     void* pp = static_cast<void*>(a.begin());
