@@ -21,7 +21,7 @@ namespace aristos{
     extern constexpr unsigned int blockSize = 128; // 256 is too high, since a SM can only hold <= 2048 threads
     extern constexpr unsigned int blockSizeWarp = 4; // 128 / 32
     /// empirical threshold of threads to saturate NVLink bandwidth for one transfer
-    extern constexpr unsigned int NVLinkThreshold = 2048;
+    extern constexpr unsigned int NVLinkThreshold = 4096;
     extern constexpr unsigned int superBlockSize = NVLinkThreshold / blockSize;
 
     namespace cg = cooperative_groups;
@@ -118,8 +118,25 @@ namespace aristos{
         unsigned int peerStripeLength;
         unsigned int intraPeerIndex;
         unsigned int firstPeer;
+        unsigned int numSuperBlocks;
+        unsigned int numSubBlocks;
+        unsigned int p2pLogHead;
+        unsigned int superBlockID;
+        bool isLastSubBlock;
+        bool isFirstSubBlock;
+        unsigned int lastSubBlockID;
         specType* syncGrid;
         specType* checkpoints;
+
+        CUTE_DEVICE
+        static decltype(auto) getLocalBlockID(auto const& numPublisherBlocks){
+            return blockIdx.x - (gridDim.x - numPublisherBlocks);
+        }
+
+        CUTE_DEVICE
+        static decltype(auto) getLastLocalBlockID(){
+            return gridDim.x - 1;
+        }
 
         CUTE_DEVICE
         PublisherConfig() = default; // Circumvents warning about 'initializing shared variables'
@@ -131,17 +148,19 @@ namespace aristos{
             peerStripeLength = cute::ceil_div(1UL, blocksToPeers);
             intraPeerIndex = aristos::grid::blockID() - ((aristos::grid::blockID() / blocksToPeers) * blocksToPeers);
             firstPeer = static_cast<int>(aristos::grid::blockID() / blocksToPeers);
+            numSuperBlocks = (c.numPublisherBlocks - 1) / superBlockSize;
+            p2pLogHead = 0;
+            superBlockID = localBlockID / superBlockSize;
+            numSubBlocks = superBlockSize;
+            lastSubBlockID = ((superBlockID + 1) * superBlockSize) - 1;
+            if(localBlockID >= ((numSuperBlocks - 1)*superBlockSize)){
+                superBlockID = (numSuperBlocks - 1);
+                numSubBlocks = (c.numPublisherBlocks - 1) - ((numSuperBlocks - 1) * superBlockSize);
+                lastSubBlockID = PublisherConfig::getLastLocalBlockID();
+            }
+            isLastSubBlock = localBlockID == lastSubBlockID;
+            isFirstSubBlock = localBlockID == (superBlockID*numSubBlocks);
         };
-
-        CUTE_DEVICE
-        static decltype(auto) getLocalBlockID(auto const& numPublisherBlocks){
-            return blockIdx.x - (gridDim.x - numPublisherBlocks);
-        }
-
-        CUTE_DEVICE
-        static decltype(auto) getLastLocalBlockID(){
-            return gridDim.x - 1;
-        }
 
         CUTE_DEVICE
         void dump(){
