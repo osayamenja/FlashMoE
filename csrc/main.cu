@@ -195,41 +195,46 @@ __global__ void benchLoad(CUTE_GRID_CONSTANT const int iter, unsigned int* sync_
     }
 }
 
-__global__ void benchAtomics(CUTE_GRID_CONSTANT const int iter, unsigned int* flag, bool shouldPersist = false){
+__global__ void benchAtomics(CUTE_GRID_CONSTANT const int iter, unsigned int* flag, bool skip = false, bool shouldPersist = false){
     // initialization
+    using Nano = cuda::std::chrono::duration<double, cuda::std::nano>;
     cuda::std::atomic_flag stopFlag(false);
+    unsigned int* pUnderTest = flag;
+    __shared__ unsigned int sharedFlag;
     if(shouldPersist){
         cuda::associate_access_property(flag, cuda::access_property::persisting{});
         cuda::associate_access_property(&stopFlag, cuda::access_property::persisting{});
+        cuda::associate_access_property(&sharedFlag, cuda::access_property::persisting{});
+        pUnderTest = &sharedFlag;
     }
-    auto start = cuda::std::chrono::high_resolution_clock::now();
-    auto end = cuda::std::chrono::high_resolution_clock::now();
-    auto elapsed_seconds{end - start};
-    size_t a_flag = 0, a_cas = 0, a_or = 0, a_and = 0;
+    __syncthreads();
+    atomicExch(&sharedFlag, 0);
+    uint64_t start, end;
+    Nano a_flag = Nano::zero(), a_cas = Nano::zero(), a_or = Nano::zero(), a_and = Nano::zero();
     CUTE_UNROLL
     for(int i = 0; i < iter; ++i){
-        start = cuda::std::chrono::high_resolution_clock::now();
+        asm volatile("mov.u64 %0, %%globaltimer;": "=l"(start)::);
         stopFlag.test();
-        elapsed_seconds = cuda::std::chrono::high_resolution_clock::now() - start;
-        a_flag += cuda::std::chrono::duration_cast<cuda::std::chrono::microseconds>(elapsed_seconds).count();
+        asm volatile("mov.u64 %0, %%globaltimer;": "=l"(end)::);
+        a_flag += static_cast<cuda::std::chrono::duration<double, cuda::std::nano>>(end - start);
 
-        start = cuda::std::chrono::high_resolution_clock::now();
-        atomicCAS(flag, 0, 0);
-        elapsed_seconds = cuda::std::chrono::high_resolution_clock::now() - start;
-        a_cas += cuda::std::chrono::duration_cast<cuda::std::chrono::microseconds>(elapsed_seconds).count();
+        asm volatile("mov.u64 %0, %%globaltimer;": "=l"(start)::);
+        atomicCAS(pUnderTest, 0, 0);
+        asm volatile("mov.u64 %0, %%globaltimer;": "=l"(end)::);
+        a_cas += static_cast<cuda::std::chrono::duration<double, cuda::std::nano>>(end - start);
 
-        start = cuda::std::chrono::high_resolution_clock::now();
-        atomicOr(flag, 0U);
-        elapsed_seconds = cuda::std::chrono::high_resolution_clock::now() - start;
-        a_or += cuda::std::chrono::duration_cast<cuda::std::chrono::microseconds>(elapsed_seconds).count();
+        asm volatile("mov.u64 %0, %%globaltimer;": "=l"(start)::);
+        atomicOr(pUnderTest, 0U);
+        asm volatile("mov.u64 %0, %%globaltimer;": "=l"(end)::);
+        a_or += static_cast<cuda::std::chrono::duration<double, cuda::std::nano>>(end - start);
 
-        start = cuda::std::chrono::high_resolution_clock::now();
-        atomicAnd(flag, 1U);
-        elapsed_seconds = cuda::std::chrono::high_resolution_clock::now() - start;
-        a_and += cuda::std::chrono::duration_cast<cuda::std::chrono::microseconds>(elapsed_seconds).count();
+        asm volatile("mov.u64 %0, %%globaltimer;": "=l"(start)::);
+        atomicAnd(pUnderTest, 1U);
+        asm volatile("mov.u64 %0, %%globaltimer;": "=l"(end)::);
+        a_and += static_cast<cuda::std::chrono::duration<double, cuda::std::nano>>(end - start);
 
     }
-    using BlockReduce = cub::BlockReduce<size_t, THREADS_PER_BLOCK>;
+    using BlockReduce = cub::BlockReduce<Nano, THREADS_PER_BLOCK>;
     __shared__ typename BlockReduce::TempStorage temp_storage;
 
     a_flag = BlockReduce(temp_storage).Reduce(a_flag, cub::Max());
@@ -237,19 +242,19 @@ __global__ void benchAtomics(CUTE_GRID_CONSTANT const int iter, unsigned int* fl
     a_or = BlockReduce(temp_storage).Reduce(a_or, cub::Max());
     a_and = BlockReduce(temp_storage).Reduce(a_and, cub::Max());
 
-    if(aristos::block::threadID() == 0){
+    if(aristos::block::threadID() == 0 && !skip){
         printf("Block Id is %u, a_flag: {T: %f, V: %d}, a_cas: {T: %f, V:%u}, a_or: {T: %f, V:%u}, a_and: {T: %f, V: %u},"
-               "persist: %s\n",
+               "isShared: %s\n",
                aristos::grid::blockID(),
-               a_flag / (iter*1.0),
+               (a_flag / (iter*1.0)).count(),
                stopFlag.test(),
-               a_cas/(iter*1.0),
-               atomicCAS(flag, 0, 0),
-               a_or / (iter * 1.0),
-               atomicOr(flag, 0U),
-               a_and/(iter*1.0),
-               atomicAnd(flag, 1U),
-               (shouldPersist)? "Yes" : "No");
+               (a_cas/(iter*1.0)).count(),
+               atomicCAS(pUnderTest, 0, 0),
+               (a_or / (iter * 1.0)).count(),
+               atomicOr(pUnderTest, 0U),
+               (a_and/(iter*1.0)).count(),
+               atomicAnd(pUnderTest, 1U),
+               (__isShared(pUnderTest))? "Yes" : "No");
     }
 }
 
@@ -373,10 +378,11 @@ T* getTokenPointer(T* const& addr, unsigned int const& peer, unsigned int const&
     return addr + ((peer * peerStride) + (stage * stageStride) + (cell * cellStride) + (token * tokenStride));
 }
 
-__global__ void benchTen(int* foo, bool shouldPersist = false){
-    auto start = cuda::std::chrono::high_resolution_clock::now();
-    auto elapsed_seconds{cuda::std::chrono::high_resolution_clock::now() - start};
-    size_t cute_t = 0, raw_t = 0;
+__global__ void benchTen(unsigned int* foo, bool skip = false, bool shouldPersist = false){
+    uint64_t start = 0, end = 0;
+    using Nano = cuda::std::chrono::duration<double, cuda::std::nano>;
+    Nano cute_t = Nano::zero();
+    Nano raw_t = Nano::zero();
     auto t = cute::make_tensor(cute::make_gmem_ptr(foo), cute::make_shape(peers, cute::make_shape(cute::make_shape(stages, cells), tokens)), cute::LayoutRight{});
     if(shouldPersist){
         cuda::associate_access_property(foo, cuda::access_property::persisting{});
@@ -384,42 +390,71 @@ __global__ void benchTen(int* foo, bool shouldPersist = false){
 
     CUTE_UNROLL
     for(unsigned int i = 0; i < 1000; ++i){
-        start = cuda::std::chrono::high_resolution_clock::now();
+        asm volatile("mov.u64 %0, %%globaltimer;": "=l"(start)::);
         &t(0, cute::make_coord(cute::make_coord(0,1),0));
-        elapsed_seconds = cuda::std::chrono::high_resolution_clock::now() - start;
-        cute_t += cuda::std::chrono::duration_cast<cuda::std::chrono::microseconds>(elapsed_seconds).count();
+        asm volatile("mov.u64 %0, %%globaltimer;": "=l"(end)::);
+        cute_t += static_cast<cuda::std::chrono::duration<double, cuda::std::nano>>(end - start);
 
-        start = cuda::std::chrono::high_resolution_clock::now();
+        asm volatile("mov.u64 %0, %%globaltimer;": "=l"(start)::);
         getTokenPointer(foo, 0, 0, 1, 0);
-        elapsed_seconds = cuda::std::chrono::high_resolution_clock::now() - start;
-        raw_t += cuda::std::chrono::duration_cast<cuda::std::chrono::microseconds>(elapsed_seconds).count();
+        asm volatile("mov.u64 %0, %%globaltimer;": "=l"(end)::);
+        raw_t += static_cast<cuda::std::chrono::duration<double, cuda::std::nano>>(end - start);
     }
 
-    using BlockReduce = cub::BlockReduce<size_t, THREADS_PER_BLOCK>;
+    using BlockReduce = cub::BlockReduce<Nano, THREADS_PER_BLOCK>;
     __shared__ typename BlockReduce::TempStorage temp_storage;
 
     cute_t = BlockReduce(temp_storage).Reduce(cute_t, cub::Max());
     raw_t = BlockReduce(temp_storage).Reduce(raw_t, cub::Max());
-    if(aristos::block::threadID() == 0){
-        printf("Block Id is %u, cute_t: {T: %f, V: %d}, raw_t: {T: %f, V:%d} "
+    if(aristos::block::threadID() == 0 && !skip){
+        printf("Block Id is %u, cute_t: {T: %f, V: %d, Micro: %f}, raw_t: {T: %f, V:%d, Micro: %f} "
                "persist: %s\n",
                aristos::block::threadID(),
-               cute_t / (1000*1.0),
+               (cute_t / (1000*1.0)).count(),
                t(0, cute::make_coord(cute::make_coord(0,1),0)),
-               raw_t / (1000*1.0),
+               static_cast<cuda::std::chrono::duration<double, cuda::std::micro>>(cute_t/(1000*1.0)).count(),
+               (raw_t / (1000*1.0)).count(),
                *getTokenPointer(foo, 0, 0, 1, 0),
+               static_cast<cuda::std::chrono::duration<double, cuda::std::micro>>(raw_t/(1000*1.0)).count(),
                (shouldPersist)? "Yes" : "No");
+    }
+}
+
+__global__ void benchClock(){
+    size_t raw_t = 0, other = 0;
+    CUTE_UNROLL
+    for(unsigned int i = 0; i < 1000; ++i){
+        if(!aristos::block::threadID()) {
+            uint64_t start, end;
+            asm volatile("mov.u64 %0, %%globaltimer;": "=l"(start)::);
+            asm volatile("mov.u64 %0, %%globaltimer;": "=l"(end)::);
+            other += cuda::std::chrono::duration_cast<cuda::std::chrono::microseconds>(cuda::std::chrono::nanoseconds(end - start)).count();
+            raw_t += end - start;
+        }
+    }
+
+    //using BlockReduce = cub::BlockReduce<size_t, THREADS_PER_BLOCK>;
+    //__shared__ typename BlockReduce::TempStorage temp_storage;
+
+    //raw_t = BlockReduce(temp_storage).Reduce(raw_t, cub::Max());
+    if(!aristos::block::threadID()){
+        printf("Block Id is %u, raw_t: {T: %f}, other: {T: %f}\n",
+               aristos::grid::blockID(),
+               raw_t / (1000*1.0),
+               other / (1000*1.0));
     }
 }
 
 int main() {
     std::array<int, 4> a = {{0,1,2,3}};
-    void* pp = static_cast<void*>(a.begin());
-    int* p;
-    CUTE_CHECK_ERROR(cudaMallocAsync(&p, sizeof(int)*a.size(), cudaStreamDefault));
-    CUTE_CHECK_ERROR(cudaMemcpyAsync(p, a.cbegin(), sizeof(int)*a.size(), cudaMemcpyHostToDevice, cudaStreamDefault));
+    unsigned int* p;
+    CUTE_CHECK_ERROR(cudaMallocAsync(&p, sizeof(unsigned int)*a.size(), cudaStreamDefault));
+    CUTE_CHECK_ERROR(cudaMemcpyAsync(p, a.cbegin(), sizeof(unsigned int)*a.size(), cudaMemcpyHostToDevice, cudaStreamDefault));
     CUTE_CHECK_ERROR(cudaStreamSynchronize(cudaStreamDefault));
-    benchTen<<<1, THREADS_PER_BLOCK>>>(p);
-    benchTen<<<1, THREADS_PER_BLOCK>>>(p, true);
+    for(int i = 0; i < 20; ++i){
+        benchAtomics<<<16, THREADS_PER_BLOCK>>>(1000, p, true);
+    }
+    benchAtomics<<<16, THREADS_PER_BLOCK>>>(1000, p, false);
+    benchAtomics<<<16, THREADS_PER_BLOCK>>>(1000, p, false, true);
     CUTE_CHECK_LAST();
 }

@@ -20,14 +20,6 @@ namespace aristos::publisher{
     __device__ unsigned int logTailSyncStages = 1U;
 
     CUTE_DEVICE
-    void tryUntilSignal(){
-        while(atomicLoad(&stillExecuting) && atomicLoad(&doorbell) == 0){
-            /// Mitigate frivolous consumption of memory bandwidth
-            __nanosleep(2);
-        }
-    }
-
-    CUTE_DEVICE
     void awaitBaton(unsigned int const& tag){
         while(atomicLoad(&baton) != tag){
             __nanosleep(2);
@@ -52,7 +44,6 @@ namespace aristos::publisher{
         __syncthreads();
 
         while(atomicLoad(&stillExecuting)){
-            tryUntilSignal();
             awaitBaton(aristos::block::warpID());
             /// Optimistically complete data transfers without interruption.
             while(atomicLoad(&doorbell) > 0){
