@@ -23,106 +23,6 @@
 #define THREADS_PER_WARP 32
 #define THREADS_PER_BLOCK 256
 
-__global__ void aristos_sandbox(int *destination, const int my_pe, const int n_pes, const bool skip = true) {
-    cuda::std::array<int, 4>activations{{my_pe + 1, 2,my_pe + 3, 4}};
-    int n_elems = 2;
-    int k = 0;
-    const auto start{cuda::std::chrono::high_resolution_clock::now()};
-    for(int i = 0; i < n_pes; ++i){
-        for(uint j = 0; j < n_elems; ++j){
-            destination[j] = activations[k++];
-        }
-        nvshmemx_int_put_block((destination + ((my_pe+1)*n_elems)),
-                        destination,
-                        n_elems,
-                        (i % n_pes));
-    }
-    const auto end{cuda::std::chrono::high_resolution_clock::now()};
-    const cuda::std::chrono::duration<double> elapsed_seconds{end - start};
-
-    if (!skip && cute::thread(0)){
-        printf("PE %d.t0 Elapsed time is %lld\n", my_pe,
-               cuda::std::chrono::duration_cast<cuda::std::chrono::microseconds>(elapsed_seconds).count());
-    }
-    __syncthreads();
-}
-void nvshmem_test(){
-    std::cout << "Hello, World!" << std::endl;
-    int my_pe_node;
-    std::array<int, 6> msg{};
-    cudaStream_t stream;
-
-    nvshmem_init();
-    my_pe_node = nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE);
-    int my_pe = nvshmem_my_pe();
-    int n_pe = nvshmem_n_pes();
-    int dev_count;
-    CUTE_CHECK_ERROR(cudaGetDeviceCount(&dev_count));
-    cudaDeviceProp prop{};
-    CUTE_CHECK_ERROR(cudaGetDeviceProperties(&prop, my_pe_node % dev_count));
-    int clockrate;
-    CUTE_CHECK_ERROR(cudaDeviceGetAttribute(&clockrate, cudaDevAttrClockRate, my_pe_node));
-
-    fprintf(stderr, "mype: %d mype_node: %d device name: %s bus id: %d n_pes: %d\n", my_pe, my_pe_node,
-            prop.name, prop.pciBusID, n_pe);
-    cudaSetDevice(my_pe_node);
-    cudaStreamCreate(&stream);
-
-    auto destination_void = nvshmem_calloc(msg.size(), sizeof(int));
-    auto destination = static_cast<int*>(destination_void);
-
-    for (int i = 0; i < 5; ++i) {
-        aristos_sandbox<<<1, 1>>>(destination, my_pe, n_pe);
-        CUTE_CHECK_ERROR(cudaPeekAtLastError());
-    }
-    aristos_sandbox<<<1, 1>>>(destination, my_pe, n_pe, false);
-    CUTE_CHECK_ERROR(cudaPeekAtLastError());
-    CUTE_CHECK_ERROR(cudaMemcpyAsync(msg.data(), destination, msg.size() * sizeof(int), cudaMemcpyDeviceToHost, stream));
-    cudaStreamSynchronize(stream);
-    cudaDeviceSynchronize();
-    std::stringstream result_stream;
-    result_stream << "PE " << nvshmem_my_pe() << " buffer: { ";
-    for(auto i: msg){
-        result_stream << i << ", ";
-    }
-    result_stream << "}\n";
-    std::cout << std::string(result_stream.str());
-    nvshmem_free(destination);
-    nvshmem_finalize();
-}
-
-__global__ void memory_heterogeneity(void* symmetric,  uint64_t* flags, int my_pe){
-    // Arrange
-    const int peer = !my_pe;
-    constexpr int k = 2;
-    constexpr int n_tok = 2;
-    constexpr int total_mem = n_tok + k;
-    auto* scratchpad = static_cast<cute::half_t*>(symmetric);
-    auto* scratchpad_begin = scratchpad + (my_pe*total_mem);
-    scratchpad_begin[0] = cute::half_t(0.67);
-    scratchpad_begin[1] = cute::half_t(0.02);
-    auto* trailer = static_cast<uint_fast16_t*>(static_cast<void*>((scratchpad_begin + n_tok)));
-    trailer[0] = 2;
-    trailer[1] = 5;
-    constexpr uint64_t set_flag = 1;
-
-    // Send
-    nvshmemx_putmem_signal_nbi_block(static_cast<void*>(scratchpad_begin),
-                              static_cast<void*>(scratchpad_begin),
-                              (total_mem * 2),
-                              (flags + my_pe),
-                              set_flag,
-                              NVSHMEM_SIGNAL_SET,
-                              peer);
-    nvshmem_signal_wait_until((flags + my_pe), NVSHMEM_CMP_EQ, set_flag);
-
-    // Reconstitute
-    auto* floats = scratchpad + (peer*total_mem);
-    cute::print("Received floats: %f, %f", floats[0].operator float(), floats[1].operator float());
-    auto* r_trailers = static_cast<uint_fast16_t*>(static_cast<void*>(floats + n_tok));
-    cute::print("Received trailers: %d, %d", r_trailers[0], r_trailers[1]);
-}
-
 __device__ __constant__ cuda::atomic<unsigned int, cuda::thread_scope_device> last{1};
 
 #define SEQ 23U
@@ -420,31 +320,6 @@ __global__ void benchTen(unsigned int* foo, bool skip = false, bool shouldPersis
     }
 }
 
-__global__ void benchClock(){
-    size_t raw_t = 0, other = 0;
-    CUTE_UNROLL
-    for(unsigned int i = 0; i < 1000; ++i){
-        if(!aristos::block::threadID()) {
-            uint64_t start, end;
-            asm volatile("mov.u64 %0, %%globaltimer;": "=l"(start)::);
-            asm volatile("mov.u64 %0, %%globaltimer;": "=l"(end)::);
-            other += cuda::std::chrono::duration_cast<cuda::std::chrono::microseconds>(cuda::std::chrono::nanoseconds(end - start)).count();
-            raw_t += end - start;
-        }
-    }
-
-    //using BlockReduce = cub::BlockReduce<size_t, THREADS_PER_BLOCK>;
-    //__shared__ typename BlockReduce::TempStorage temp_storage;
-
-    //raw_t = BlockReduce(temp_storage).Reduce(raw_t, cub::Max());
-    if(!aristos::block::threadID()){
-        printf("Block Id is %u, raw_t: {T: %f}, other: {T: %f}\n",
-               aristos::grid::blockID(),
-               raw_t / (1000*1.0),
-               other / (1000*1.0));
-    }
-}
-
 __device__ unsigned int testStages = 0;
 __global__ void benchBarrier(unsigned int* b, cuda::barrier<cuda::thread_scope_device>* bar, unsigned int n, bool skip = false, bool persist = false){
     using Nano = cuda::std::chrono::duration<double, cuda::std::nano>;
@@ -462,15 +337,16 @@ __global__ void benchBarrier(unsigned int* b, cuda::barrier<cuda::thread_scope_d
         uint64_t start = 0, end = 0;
         asm volatile("mov.u64 %0, %%globaltimer;": "=l"(start)::);
         if(!aristos::block::threadID()){
+            auto nextStage = aristos::atomicLoad(&testStages) + 1;
             /// Arrive
-            if((atomicAdd(b, 1U) + 1) == n*(aristos::atomicLoad(&testStages) + 1)){
+            if((atomicAdd(b, 1U) + 1) == n * nextStage){
                 atomicAdd(&testStages, 1U);
                 /// Could execute completion function here
             }
             else{
                 /// You could do some other task prior to waiting
                 /// Wait
-                while(aristos::atomicLoad(b) != n*aristos::atomicLoad(&testStages)){
+                while(aristos::atomicLoad(&testStages) != nextStage){
                     __nanosleep(2);
                 }
                 /// Could execute completion function here
@@ -503,7 +379,7 @@ __global__ void benchBarrier(unsigned int* b, cuda::barrier<cuda::thread_scope_d
 }
 
 int main() {
-    auto size = 64;
+    auto size = 256;
     unsigned int* p;
     cuda::barrier<cuda::thread_scope_device>* b;
     auto host_b = new cuda::barrier<cuda::thread_scope_device>{size};

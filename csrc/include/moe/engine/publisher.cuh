@@ -11,13 +11,13 @@
 
 namespace aristos::publisher{
     __device__ __inline__ unsigned int doorbell = 0U;
-    __device__ __inline__ unsigned int blockade = 1U;
+    __device__ __inline__ unsigned int blockade = 0U;
     __device__ __inline__ unsigned int logHead = 0U;
     __device__ __inline__ unsigned int logTail = 0U;
     /// Nifty gadget enabling round-robin queue access
     __device__ __inline__ unsigned int baton = 0U;
-    __device__ __inline__ unsigned int syncStages = 1U;
-    __device__ __inline__ unsigned int logTailSyncStages = 1U;
+    __device__ __inline__ unsigned int syncStages = 0U;
+    __device__ __inline__ unsigned int logTailSyncStages = 0U;
 
     CUTE_DEVICE
     void awaitBaton(unsigned int const& tag){
@@ -85,8 +85,8 @@ namespace aristos::publisher{
                                               splitNumTokensBytes, moeConfig.peerTranslation[peer]);
                     }
                     if(!aristos::block::threadID()){
-                        auto currentStage = atomicLoad(&syncStages);
-                        if(atomicAdd(publisherConfig.syncGrid + peer, 1U) == (moeConfig.numPublisherBlocks * currentStage)){
+                        auto nextStage = atomicLoad(&syncStages) + 1;
+                        if((atomicAdd(publisherConfig.syncGrid + peer, 1U) + 1) == (moeConfig.numPublisherBlocks * nextStage)){
                             // I am the last
                             atomicDec(&doorbell, 1U);
                             atomicAdd(&logHead, 2U);
@@ -100,14 +100,12 @@ namespace aristos::publisher{
                         }
                         else{
                             /// Await the last publishing block to update queue head and doorbell
-                            while(atomicLoad(&syncStages) != syncStages + 1){
+                            while(atomicLoad(&syncStages) != nextStage){
                                 __nanosleep(2);
                             }
                         }
                     }
-                    else{
-                        __syncthreads();
-                    }
+                    __syncwarp();
                 }
             }
         }
@@ -205,17 +203,23 @@ namespace aristos::publisher{
                                               splitNumTokensBytes, moeConfig.peerTranslation[peer]);
                     }
                     if(!aristos::block::threadID()){
-                        if(atomicAdd(publisherConfig.syncGrid + peer, 1U) == (moeConfig.numPublisherBlocks * (syncStages + 1))){
+                        auto nextStage = atomicLoad(&syncStages) + 1;
+                        if((atomicAdd(publisherConfig.syncGrid + peer, 1U) + 1) == (moeConfig.numPublisherBlocks * nextStage)){
                             atomicAdd(&syncStages, 1U);
                             nvshmemx_signal_op(moeConfig.flags + moeConfig.rank,
                                                constructSignal(moeConfig.sequenceNumber, aristos::processed),
                                                NVSHMEM_SIGNAL_SET,
                                                moeConfig.peerTranslation[peer]);
                         }
+                        else{
+                            while(atomicLoad(&syncStages) != nextStage){
+                                __nanosleep(2);
+                            }
+                        }
                     }
-                    else{
-                        __syncthreads();
-                    }
+                    /// Empirical benchmarks show that using below gives 1.5x better performance
+                    /// than without or even sync warp. It remains a mystery why this is the case.
+                    __syncthreads();
                 }
                 else{
                     atomicAdd(&publisherConfig.p2pLogHead, 2U);
@@ -247,8 +251,8 @@ namespace aristos::publisher{
 
     CUTE_DEVICE
     void batchNotify(const specType& peerIndex, const specType& numPackets){
-        auto currentStage = atomicLoad(&logTailSyncStages);
-        if(atomicAdd(&blockade, 1U) == moeConfig.numResultChunks * currentStage){
+        auto nextStage = atomicLoad(&logTailSyncStages) + 1;
+        if((atomicAdd(&blockade, 1U) + 1) == moeConfig.numResultChunks * nextStage){
             moeConfig.publisherLog[logTail++] = peerIndex;
             moeConfig.publisherLog[logTail++] = numPackets;
             /// Eagerly notify doorbell
@@ -256,7 +260,7 @@ namespace aristos::publisher{
             atomicAdd(&logTailSyncStages, 1U);
         }
         else{
-            while(atomicLoad(&logTailSyncStages) != currentStage + 1){
+            while(atomicLoad(&logTailSyncStages) != nextStage){
                 __nanosleep(2);
             }
         }
