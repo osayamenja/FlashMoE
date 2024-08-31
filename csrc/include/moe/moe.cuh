@@ -52,7 +52,7 @@ namespace aristos{
 
     //TODO add launch bounds
     template<Matrix M, Tensor T>
-    __global__ void forward(M const& activations, T const& expertsWeights, M const& gateWeights,
+    __forceinline__ __global__ void forward(M const& activations, T const& expertsWeights, M const& gateWeights,
                             M gateOutput, M mappingTensor, M sharedSpec) {
         persistHotPointers();
         gate(activations, gateWeights, gateOutput);
@@ -77,7 +77,7 @@ namespace aristos{
         }
     }
 
-    __global__ void backward(){
+    __forceinline__ __global__ void backward(){
 
     }
 }

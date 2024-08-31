@@ -209,10 +209,10 @@ __global__ void benchAtomics(CUTE_GRID_CONSTANT const int iter, unsigned int* fl
     }
     __syncthreads();
     atomicExch(&sharedFlag, 0);
-    uint64_t start, end;
     Nano a_flag = Nano::zero(), a_cas = Nano::zero(), a_or = Nano::zero(), a_and = Nano::zero();
     CUTE_UNROLL
     for(int i = 0; i < iter; ++i){
+        uint64_t start, end;
         asm volatile("mov.u64 %0, %%globaltimer;": "=l"(start)::);
         stopFlag.test();
         asm volatile("mov.u64 %0, %%globaltimer;": "=l"(end)::);
@@ -268,27 +268,27 @@ namespace  aristos{
     bool isInitialized = false;
     cudaStream_t aristosStream = cudaStreamPerThread;
     Config hostMoEConfig;
-    void aristosInit(unsigned int seqLen, unsigned int embedDim, unsigned int hiddenProjDim,
-                     unsigned int k, int deviceID, unsigned int capacityFactor,
-                     unsigned int numExperts) {
+    void aristosInit(const unsigned int& seqLen, const unsigned int& embedDim, const unsigned int& hiddenProjDim,
+                     const unsigned int& k, const unsigned int& capacityFactor,
+                     const unsigned int& numExperts) {
         assert(!isInitialized);
         isInitialized = true;
         int numSMs = 0;
-        CUTE_CHECK_ERROR(cudaDeviceGetAttribute(&numSMs, cudaDevAttrMultiProcessorCount, deviceID));
 
         int numBlocksPerSM = 0;
-        int minCommunicatorBlocks = 2;
+        constexpr int minCommunicatorBlocks = 2;
         int localRank = 0;
         int computeCapability = 0;
         CUTE_CHECK_ERROR(cudaGetDevice(&localRank));
-        auto GEMMBlocks = cute::ceil_div(seqLen, bM) * cute::ceil_div(hiddenProjDim, bN);
-        auto minBlocks = GEMMBlocks + minCommunicatorBlocks;
+        CUTE_CHECK_ERROR(cudaDeviceGetAttribute(&numSMs, cudaDevAttrMultiProcessorCount, localRank));
+        const auto GEMMBlocks = cute::ceil_div(seqLen, bM) * cute::ceil_div(hiddenProjDim, bN);
+        const auto minBlocks = GEMMBlocks + minCommunicatorBlocks;
         CUTE_CHECK_ERROR(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
                 &numBlocksPerSM,
                 occupancyTestKernel<bM, bN, bK, bP>,
                 blockSize,
                 sizeof(aristos::maxPrecision) * ((bK * bP) * (bM + bN))));
-        int maxActiveBlocks = numBlocksPerSM * numSMs;
+        const int maxActiveBlocks = numBlocksPerSM * numSMs;
         assert(minBlocks <= maxActiveBlocks);
         int deviceSupportsMemoryPools = 0;
         CUTE_CHECK_ERROR(cudaDeviceGetAttribute(&deviceSupportsMemoryPools,
@@ -312,11 +312,11 @@ namespace  aristos{
 
         // Allocate Symmetric Heap + Flags
         auto trailer = k + 2U;
-        size_t payload = aristos::Config::getCapacity(seqLen, numExperts, capacityFactor, k)
+        size_t payload = Config::getCapacity(seqLen, numExperts, capacityFactor, k)
                          * (embedDim + trailer);
-        size_t heapBytes = numNeighbors * aristos::stages * aristos::numCells * payload;
-        heapBytes += numNeighbors * (sizeof(aristos::flagsType) / sizeof(aristos::maxPrecision));
-        auto sHeap = nvshmem_calloc(heapBytes, sizeof(aristos::maxPrecision));
+        size_t heapBytes = numNeighbors * stages * numCells * payload;
+        heapBytes += numNeighbors * (sizeof(flagsType) / sizeof(maxPrecision));
+        auto sHeap = nvshmem_calloc(heapBytes, sizeof(maxPrecision));
 
         // Final Initialization
         hostMoEConfig = Config();
@@ -379,7 +379,6 @@ T* getTokenPointer(T* const& addr, unsigned int const& peer, unsigned int const&
 }
 
 __global__ void benchTen(unsigned int* foo, bool skip = false, bool shouldPersist = false){
-    uint64_t start = 0, end = 0;
     using Nano = cuda::std::chrono::duration<double, cuda::std::nano>;
     Nano cute_t = Nano::zero();
     Nano raw_t = Nano::zero();
@@ -390,6 +389,7 @@ __global__ void benchTen(unsigned int* foo, bool skip = false, bool shouldPersis
 
     CUTE_UNROLL
     for(unsigned int i = 0; i < 1000; ++i){
+        uint64_t start = 0, end = 0;
         asm volatile("mov.u64 %0, %%globaltimer;": "=l"(start)::);
         &t(0, cute::make_coord(cute::make_coord(0,1),0));
         asm volatile("mov.u64 %0, %%globaltimer;": "=l"(end)::);
@@ -445,16 +445,82 @@ __global__ void benchClock(){
     }
 }
 
-int main() {
-    std::array<int, 4> a = {{0,1,2,3}};
-    unsigned int* p;
-    CUTE_CHECK_ERROR(cudaMallocAsync(&p, sizeof(unsigned int)*a.size(), cudaStreamDefault));
-    CUTE_CHECK_ERROR(cudaMemcpyAsync(p, a.cbegin(), sizeof(unsigned int)*a.size(), cudaMemcpyHostToDevice, cudaStreamDefault));
-    CUTE_CHECK_ERROR(cudaStreamSynchronize(cudaStreamDefault));
-    for(int i = 0; i < 20; ++i){
-        benchAtomics<<<16, THREADS_PER_BLOCK>>>(1000, p, true);
+__device__ unsigned int testStages = 0;
+__global__ void benchBarrier(unsigned int* b, cuda::barrier<cuda::thread_scope_device>* bar, unsigned int n, bool skip = false, bool persist = false){
+    using Nano = cuda::std::chrono::duration<double, cuda::std::nano>;
+    Nano bar_ptr = Nano::zero();
+    Nano bar_obj = Nano::zero();
+    if(persist){
+        cuda::associate_access_property(b, cuda::access_property::persisting{});
+        cuda::associate_access_property(&testStages, cuda::access_property::persisting{});
+        cuda::associate_access_property(bar, cuda::access_property::persisting{});
     }
-    benchAtomics<<<16, THREADS_PER_BLOCK>>>(1000, p, false);
-    benchAtomics<<<16, THREADS_PER_BLOCK>>>(1000, p, false, true);
+
+    constexpr auto iter = 1024;
+    CUTE_UNROLL
+    for(unsigned int i = 0; i < iter; ++i){
+        uint64_t start = 0, end = 0;
+        asm volatile("mov.u64 %0, %%globaltimer;": "=l"(start)::);
+        if(!aristos::block::threadID()){
+            /// Arrive
+            if((atomicAdd(b, 1U) + 1) == n*(aristos::atomicLoad(&testStages) + 1)){
+                atomicAdd(&testStages, 1U);
+                /// Could execute completion function here
+            }
+            else{
+                /// You could do some other task prior to waiting
+                /// Wait
+                while(aristos::atomicLoad(b) != n*aristos::atomicLoad(&testStages)){
+                    __nanosleep(2);
+                }
+                /// Could execute completion function here
+            }
+        }
+        __syncthreads();
+        asm volatile("mov.u64 %0, %%globaltimer;": "=l"(end)::);
+        bar_ptr += static_cast<cuda::std::chrono::duration<double, cuda::std::nano>>(end - start);
+    }
+
+    CUTE_UNROLL
+    for(unsigned int i = 0; i < iter; ++i){
+        uint64_t start = 0, end = 0;
+        asm volatile("mov.u64 %0, %%globaltimer;": "=l"(start)::);
+        if(!aristos::block::threadID()){
+            bar->arrive_and_wait();
+        }
+        __syncthreads();
+        asm volatile("mov.u64 %0, %%globaltimer;": "=l"(end)::);
+        bar_obj += static_cast<cuda::std::chrono::duration<double, cuda::std::nano>>(end - start);
+    }
+
+    if(!aristos::block::threadID() && !skip){
+        printf("Block Id is %u, bar_ptr: {T: %f}, bar_obj: {T: %f}, persist: %s\n",
+               aristos::grid::blockID(),
+               static_cast<cuda::std::chrono::duration<double, cuda::std::micro>>(bar_ptr/(iter*1.0)).count(),
+               static_cast<cuda::std::chrono::duration<double, cuda::std::micro>>(bar_obj/(iter*1.0)).count(),
+               (persist)? "Yes" : "No");
+    }
+}
+
+int main() {
+    auto size = 64;
+    unsigned int* p;
+    cuda::barrier<cuda::thread_scope_device>* b;
+    auto host_b = new cuda::barrier<cuda::thread_scope_device>{size};
+    CUTE_CHECK_ERROR(cudaMallocAsync(&b, sizeof(cuda::barrier<cuda::thread_scope_device>), cudaStreamPerThread));
+    CUTE_CHECK_ERROR(cudaMallocAsync(&p, sizeof(unsigned int), cudaStreamPerThread));
+    CUTE_CHECK_ERROR(cudaMemcpyAsync(b, host_b, sizeof(cuda::barrier<cuda::thread_scope_device>), cudaMemcpyHostToDevice, cudaStreamPerThread));
+    CUTE_CHECK_ERROR(cudaMemsetAsync(p, 0, sizeof(unsigned int), cudaStreamPerThread));
     CUTE_CHECK_LAST();
+
+    CUTE_UNROLL
+    for(int i = 0; i < 16; ++i){
+        benchBarrier<<<size, THREADS_PER_BLOCK>>>(p, b, size, true);
+    }
+    benchBarrier<<<size, THREADS_PER_BLOCK>>>(p, b, size, false);
+    benchBarrier<<<size, THREADS_PER_BLOCK>>>(p, b, size, false, true);
+    CUTE_CHECK_LAST();
+    CUTE_CHECK_ERROR(cudaFreeAsync(p, cudaStreamPerThread));
+    CUTE_CHECK_ERROR(cudaFreeAsync(b, cudaStreamPerThread));
+    free(host_b);
 }

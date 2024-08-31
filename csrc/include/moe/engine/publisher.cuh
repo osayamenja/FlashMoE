@@ -10,14 +10,14 @@
 #include "../definition/values.cuh"
 
 namespace aristos::publisher{
-    __device__ unsigned int doorbell = 0U;
-    __device__ unsigned int blockade = 1U;
-    __device__ unsigned int logHead = 0U;
-    __device__ unsigned int logTail = 0U;
+    __device__ __inline__ unsigned int doorbell = 0U;
+    __device__ __inline__ unsigned int blockade = 1U;
+    __device__ __inline__ unsigned int logHead = 0U;
+    __device__ __inline__ unsigned int logTail = 0U;
     /// Nifty gadget enabling round-robin queue access
-    __device__ unsigned int baton = 0U;
-    __device__ unsigned int syncStages = 1U;
-    __device__ unsigned int logTailSyncStages = 1U;
+    __device__ __inline__ unsigned int baton = 0U;
+    __device__ __inline__ unsigned int syncStages = 1U;
+    __device__ __inline__ unsigned int logTailSyncStages = 1U;
 
     CUTE_DEVICE
     void awaitBaton(unsigned int const& tag){
