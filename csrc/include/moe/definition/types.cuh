@@ -18,7 +18,7 @@ namespace aristos{
     extern constexpr unsigned int bN = 128;
     extern constexpr unsigned int bK = 8;
     extern constexpr unsigned int bP = 1; // pipeline stages, have to use 1 due to shared mem constraints
-    extern constexpr unsigned int blockSize = 128; // 256 is too high, since a SM can only hold <= 2048 threads
+    extern constexpr unsigned int blockSize = 128; // 256 is too high, since SM can only hold at most 2048 threads
     extern constexpr unsigned int blockSizeWarp = 4; // 128 / 32
     /// empirical threshold of threads to saturate NVLink bandwidth for one transfer
     extern constexpr unsigned int NVLinkThreshold = 4096;

@@ -19,6 +19,8 @@
 #include <cub/cub.cuh>
 #include <cute/tensor.hpp>
 #include <cute/config.hpp>
+#include "cutlass/gemm/dispatch_policy.hpp"
+#include "cutlass/gemm/collective/collective_mma.hpp"
 
 #define THREADS_PER_WARP 32
 #define THREADS_PER_BLOCK 256
@@ -26,95 +28,25 @@
 __device__ __constant__ cuda::atomic<unsigned int, cuda::thread_scope_device> last{1};
 
 #define SEQ 23U
-__global__ void benchLoad(CUTE_GRID_CONSTANT const int iter, unsigned int* sync_p, bool shouldPersist = false){
-    if(aristos::grid::threadID() == 0){
-        printf("Initial Value is %u\n", sync_p[0]);
-    }
-    // initialization
-    if(shouldPersist){
-        cuda::associate_access_property(&last, cuda::access_property::persisting{});
-        cuda::associate_access_property(&sync_p, cuda::access_property::persisting{});
-    }
-    cuda::atomic_ref<unsigned int, cuda::thread_scope_device> loader(*sync_p);
-    if(shouldPersist){
-        cuda::associate_access_property(&loader, cuda::access_property::persisting{});
-    }
-
-    auto start = cuda::std::chrono::high_resolution_clock::now();
-    auto end = cuda::std::chrono::high_resolution_clock::now();
-    auto elapsed_seconds{end - start};
-    size_t half_cas = 0, a_add = 0, a_cas = 0, freq_at = 0, a_or = 0;
-    /*auto t = aristos::grid_tid();
-    auto tt = t;*/
-    CUTE_UNROLL
-    for(int i = 0; i < iter; ++i){
-        start = cuda::std::chrono::high_resolution_clock::now();
-        atomicAdd(sync_p, 0U); // equivalent to a load
-        elapsed_seconds = cuda::std::chrono::high_resolution_clock::now() - start;
-        a_add += cuda::std::chrono::duration_cast<cuda::std::chrono::microseconds>(elapsed_seconds).count();
-
-        start = cuda::std::chrono::high_resolution_clock::now();
-        atomicCAS(sync_p, 0U, 0U); // equivalent to a load
-        elapsed_seconds = cuda::std::chrono::high_resolution_clock::now() - start;
-        a_cas += cuda::std::chrono::duration_cast<cuda::std::chrono::microseconds>(elapsed_seconds).count();
-
-        start = cuda::std::chrono::high_resolution_clock::now();
-        cuda::atomic_ref<unsigned int, cuda::thread_scope_device>(*sync_p).load();
-        elapsed_seconds = cuda::std::chrono::high_resolution_clock::now() - start;
-        freq_at += cuda::std::chrono::duration_cast<cuda::std::chrono::microseconds>(elapsed_seconds).count();
-
-        start = cuda::std::chrono::high_resolution_clock::now();
-        atomicOr(sync_p, 0U);
-        elapsed_seconds = cuda::std::chrono::high_resolution_clock::now() - start;
-        a_or += cuda::std::chrono::duration_cast<cuda::std::chrono::microseconds>(elapsed_seconds).count();
-    }
-    // Specialize BlockReduce for a 1D block of 128 threads of type int
-    using BlockReduce = cub::BlockReduce<size_t, THREADS_PER_BLOCK>;
-    __shared__ typename BlockReduce::TempStorage temp_storage;
-
-    half_cas = BlockReduce(temp_storage).Reduce(half_cas, cub::Max());
-    a_add = BlockReduce(temp_storage).Reduce(a_add, cub::Max());
-    a_or = BlockReduce(temp_storage).Reduce(a_or, cub::Max());
-    a_cas = BlockReduce(temp_storage).Reduce(a_cas, cub::Max());
-    freq_at = BlockReduce(temp_storage).Reduce(freq_at, cub::Max());
-
-    if(aristos::block::threadID() == 0){
-        printf("Block Id is %u, a_add: {T: %f, V:%u}, "
-               "a_cas: {T: %f, V: %u}, a_or: {T: %f, V: %u}, freq_at: {T: %f, V: %u},"
-               "persist: %s\n",
-               aristos::grid::blockID(),
-               a_add/(iter*1.0),
-               atomicAdd(sync_p, 0U),
-               a_cas/(iter*1.0),
-               atomicCAS(sync_p, 0U, 0U),
-               a_or/(iter*1.0),
-               atomicOr(sync_p, 0U),
-               freq_at/(iter*1.0),
-               cuda::atomic_ref<unsigned int, cuda::thread_scope_device>(*sync_p).load(),
-               (shouldPersist)? "Yes" : "No");
-    }
-}
-
 __global__ void benchAtomics(CUTE_GRID_CONSTANT const int iter, unsigned int* flag, bool skip = false, bool shouldPersist = false){
     // initialization
     using Nano = cuda::std::chrono::duration<double, cuda::std::nano>;
-    cuda::std::atomic_flag stopFlag(false);
     unsigned int* pUnderTest = flag;
     __shared__ unsigned int sharedFlag;
     if(shouldPersist){
         cuda::associate_access_property(flag, cuda::access_property::persisting{});
-        cuda::associate_access_property(&stopFlag, cuda::access_property::persisting{});
         cuda::associate_access_property(&sharedFlag, cuda::access_property::persisting{});
         pUnderTest = &sharedFlag;
     }
     __syncthreads();
     atomicExch(&sharedFlag, 0);
     Nano a_flag = Nano::zero(), a_cas = Nano::zero(), a_or = Nano::zero(), a_and = Nano::zero();
+    cuda::atomic_ref<unsigned int, cuda::thread_scope_device> aFlag (*pUnderTest);
     CUTE_UNROLL
     for(int i = 0; i < iter; ++i){
         uint64_t start, end;
         asm volatile("mov.u64 %0, %%globaltimer;": "=l"(start)::);
-        stopFlag.test();
+        aFlag.load();
         asm volatile("mov.u64 %0, %%globaltimer;": "=l"(end)::);
         a_flag += static_cast<cuda::std::chrono::duration<double, cuda::std::nano>>(end - start);
 
@@ -147,7 +79,7 @@ __global__ void benchAtomics(CUTE_GRID_CONSTANT const int iter, unsigned int* fl
                "isShared: %s\n",
                aristos::grid::blockID(),
                (a_flag / (iter*1.0)).count(),
-               stopFlag.test(),
+               aFlag.load(),
                (a_cas/(iter*1.0)).count(),
                atomicCAS(pUnderTest, 0, 0),
                (a_or / (iter * 1.0)).count(),
@@ -376,6 +308,68 @@ __global__ void benchBarrier(unsigned int* b, cuda::barrier<cuda::thread_scope_d
                static_cast<cuda::std::chrono::duration<double, cuda::std::micro>>(bar_obj/(iter*1.0)).count(),
                (persist)? "Yes" : "No");
     }
+}
+
+template <class DispatchPolicy,
+        class TMMA, class TiledCopyA, class TiledCopyB,
+                class ElementA = cute::half_t, class ElementB = cute::half_t,
+        class ElementC = cute::half_t,unsigned int stages = 1>
+__global__ void processorSpec(DispatchPolicy dispatchPolicy, ElementA* A,
+                              ElementA* B, ElementC* C,
+                              TMMA tmma, TiledCopyA tca, TiledCopyB tcb,
+                              const int& M, const int& N, const int& K){
+    using namespace cute;
+    using ProblemShape = decltype(make_shape(M, N, K));
+    using StrideA = Underscore;
+    using StrideB = Underscore;
+    using StrideC = Underscore;
+    using tiledMma = TMMA;
+    using GmemCopyA = TiledCopyA;
+    using SmemLayoutAtomA = decltype(
+    composition(Swizzle<1,2,3>{},
+                Layout<Shape<Int<aristos::bM>, Int<aristos::bK>>>{}));
+    using SmemCopyAtomA = Copy_Atom<SM75_U32x4_LDSM_N, ElementA>;
+    using TransformA = identity; // upcast from fp8 to fp16
+    using GmemCopyB = TiledCopyB;
+    using SmemLayoutAtomB = decltype(
+    composition(Swizzle<1,2,3>{},
+                Layout<Shape<Int<aristos::bN>, Int<aristos::bK>>>{}));
+    using SmemCopyAtomB = Copy_Atom<SM75_U32x4_LDSM_N, ElementB>;
+    using TransformB = identity; // upcast from fp8 to fp16
+    using CollectiveMainloop = typename cutlass::gemm::collective::CollectiveMma<
+            DispatchPolicy,
+            ProblemShape,
+            ElementA,
+            StrideA,
+            ElementB,
+            StrideB,
+            tiledMma,
+            GmemCopyA,
+            SmemLayoutAtomA,
+            SmemCopyAtomA,
+            TransformA,
+            GmemCopyB,
+            SmemLayoutAtomB,
+            SmemCopyAtomB,
+            TransformB>;
+    auto problemShape = ProblemShape{};
+    auto ctaTiler = make_shape(aristos::bM, aristos::bN, aristos::bK);
+    auto ma = make_tensor(make_gmem_ptr(A), select<0,2>(problemShape), StrideA{});
+    auto mb = make_tensor(make_gmem_ptr(B), select<1,2>(problemShape), StrideB{});
+    auto mc = make_tensor(make_gmem_ptr(C), select<0,1>(problemShape), StrideC{});
+    auto altGridDimX = cute::ceil_div(get<0>(problemShape), cute::get<0>(ctaTiler));
+    auto cta_coord = make_coord((blockIdx.x % altGridDimX), (blockIdx.x / altGridDimX), _);
+    auto gA = local_tile(ma, ctaTiler, cta_coord, Step<_1, X,_1>{});
+    auto gB = local_tile(mb, ctaTiler, cta_coord, Step< X,_1,_1>{});
+    auto gC = local_tile(mc, ctaTiler, cta_coord, Step<_1,_1, X>{});
+    auto k_tile_iter = cute::make_coord_iterator(size<2>(gA));
+    int k_tile_count = size<2>(gA);
+    auto accum = partition_fragment_C(tmma, Shape<Int<aristos::bM>, Int<aristos::bN>>{});
+    clear(accum);
+    extern __shared__ cuda::std::byte sharedBuf[];
+    
+    CollectiveMainloop  expert;
+    expert(accum, gA, gB, accum, k_tile_iter, k_tile_count, Underscore{}, threadIdx.x, sharedBuf);
 }
 
 int main() {
