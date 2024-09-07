@@ -8,7 +8,7 @@ import numpy as np
 from typing import Callable, Dict, Set, Tuple, List, Final
 
 from scipy.cluster.hierarchy import DisjointSet
-from sortedcontainers import SortedSet
+from sortedcontainers import SortedSet, SortedDict
 from lazy_streams import stream
 
 
@@ -347,7 +347,8 @@ def lysi_group(a: np.ndarray, obj: Callable[[Dict[str, float]], float],
                all_reduce_buffer_size: int,
                workers: List[Worker],
                expert_workload: list,
-               gamma_args: Dict[str, int]) -> List[Set[int]]:
+               gamma_args: Dict[str, int],
+               do_pareto_sweep=False) -> List[Set[int]]:
     lower_bound_num_groups_ar: Final[int] = 2
     invalid_groups: Set[int] = set()
     for worker in workers:
@@ -400,72 +401,136 @@ def lysi_group(a: np.ndarray, obj: Callable[[Dict[str, float]], float],
                                     gamma_val=gamma_init,
                                     neighbors=a[i].tolist())})
 
+    limbo = None
     while len(global_candidate_edges) > 0:
         candidate_edge = global_candidate_edges.pop(0)
-        if not groups.connected(candidate_edge.node1, candidate_edge.node2):
-            n1 = candidate_edge.node1
-            n2 = candidate_edge.node2
-            group_n1 = groups[n1]
-            group_n2 = groups[n2]
+        if groups.connected(candidate_edge.node1, candidate_edge.node2):
+            continue
 
+        n1 = candidate_edge.node1
+        n2 = candidate_edge.node2
+        group_n1 = groups[n1]
+        group_n2 = groups[n2]
+
+        e = global_external_edges[-1]
+        if groups[e.node1] == group_n1 and groups[e.node2] == group_n2 and len(global_external_edges) > 1:
+            limbo = e
+
+        while (len(global_external_edges) > 0
+               and (groups.connected(e.node1, e.node2)
+                    or (groups[e.node1] == group_n1 and groups[e.node2] == group_n2))):
+            global_external_edges.pop()
             e = global_external_edges[-1]
-            while groups.connected(e.node1, e.node2):
-                global_external_edges.pop()
-                e = global_external_edges[-1]
 
-            n_groups = len(group_info) - len(invalid_groups)
-            if group_n1 in invalid_groups and group_n2 in invalid_groups:
-                if group_info[group_n1].memCapacity + group_info[group_n2].memCapacity >= len(expert_workload):
-                    n_groups += 1
-            elif group_n1 not in invalid_groups and group_n2 not in invalid_groups:
-                n_groups -= 1
+        n_groups = len(group_info) - len(invalid_groups)
+        if group_n1 in invalid_groups and group_n2 in invalid_groups:
+            if group_info[group_n1].memCapacity + group_info[group_n2].memCapacity >= len(expert_workload):
+                n_groups += 1
+        elif group_n1 not in invalid_groups and group_n2 not in invalid_groups:
+            n_groups -= 1
 
-            a_r_args[Group.NUM_GROUPS] = n_groups
-            a_r_args[Group.BOTTLENECK_TIME] = all_reduce_bottleneck_time(alpha=a.item((e.node1, e.node2, 0)),
-                                                                         beta=a.item((e.node1, e.node2, 1)),
-                                                                         buffer_size=all_reduce_buffer_size,
-                                                                         num_participants=a_r_args[Group.NUM_GROUPS])
+        a_r_args[Group.NUM_GROUPS] = n_groups
+        a_r_args[Group.BOTTLENECK_TIME] = all_reduce_bottleneck_time(alpha=a.item((e.node1, e.node2, 0)),
+                                                                     beta=a.item((e.node1, e.node2, 1)),
+                                                                     buffer_size=all_reduce_buffer_size,
+                                                                     num_participants=a_r_args[Group.NUM_GROUPS])
 
-            should_merge = group_info[group_n1].evaluate_merge(neighbor_group=group_info[group_n2],
-                                                               all_reduce_func_args=a_r_args,
-                                                               gamma_args=gamma_args,
-                                                               p2p_buffer=p2p_buffer_size)
-            if should_merge:
-                groups.merge(group_n1, group_n2)
-                if group_n1 == groups[group_n1]:
-                    parent_group = group_n1
-                    child_group = group_n2
-                else:
-                    parent_group = group_n2
-                    child_group = group_n1
+        should_merge = group_info[group_n1].evaluate_merge(neighbor_group=group_info[group_n2],
+                                                           all_reduce_func_args=a_r_args,
+                                                           gamma_args=gamma_args,
+                                                           p2p_buffer=p2p_buffer_size)
+        if should_merge:
+            limbo = None
+            groups.merge(group_n1, group_n2)
+            if group_n1 == groups[group_n1]:
+                parent_group = group_n1
+                child_group = group_n2
+            else:
+                parent_group = group_n2
+                child_group = group_n1
 
-                effective_world_size = gamma_args[Group.EFFECTIVE_WORLD]
-                if group_info[parent_group].memCapacity + group_info[child_group].memCapacity >= len(expert_workload):
-                    if parent_group in invalid_groups:
-                        invalid_groups.discard(parent_group)
-                        effective_world_size += group_info[parent_group].num_nodes()
-                    if child_group in invalid_groups:
-                        invalid_groups.discard(child_group)
-                        effective_world_size += group_info[child_group].num_nodes()
-                else:
+            effective_world_size = gamma_args[Group.EFFECTIVE_WORLD]
+            # Constraint
+            if group_info[parent_group].memCapacity + group_info[child_group].memCapacity >= len(expert_workload):
+                if parent_group in invalid_groups:
+                    invalid_groups.discard(parent_group)
+                    effective_world_size += group_info[parent_group].num_nodes()
+                if child_group in invalid_groups:
                     invalid_groups.discard(child_group)
-                gamma_args[Group.EFFECTIVE_WORLD] = effective_world_size
-                merged_group = group_info[parent_group].subsume_group(child=group_info[child_group])
-                group_info.update({parent_group: merged_group})
-                group_info.pop(child_group)
+                    effective_world_size += group_info[child_group].num_nodes()
+            else:
+                invalid_groups.discard(child_group)
+            gamma_args[Group.EFFECTIVE_WORLD] = effective_world_size
+            merged_group = group_info[parent_group].subsume_group(child=group_info[child_group])
+            group_info.update({parent_group: merged_group})
+            group_info.pop(child_group)
 
-    result: List[Set[int]] = []
-    for subset in groups.subsets():
-        selected = next(iter(subset))
-        if groups[selected] not in invalid_groups:
-            result.append(subset)
+        if limbo is not None:
+            global_external_edges.add(limbo)
+
+    # Post-processing
+    for g in group_info.keys():
+        if g in invalid_groups:
+            group_info.pop(g)
+
+    if do_pareto_sweep and len(group_info) > 1:
+        sorted_groups = sorted(group_info.items(), key=lambda x: x[1].get_current_objective())
+        omega = gamma_args[Group.EFFECTIVE_WORLD]
+        sg_i = -1
+        mutated_moe_obj = sorted_groups[0][1].get_current_objective()
+        while len(group_info) > 1:
+            max_group = sorted_groups[sg_i][1]
+            mutated_moe_obj = ((mutated_moe_obj * omega) / (omega - max_group.num_nodes()))
+
+            # Obtain correct AR edge
+            index = -1
+            ar_edge = global_external_edges[-1]
+
+            while ar_edge.node1 in max_group.internalNodes or ar_edge.node2 in max_group.internalNodes:
+                index -= 1
+                ar_edge = global_external_edges[index]
+
+            a_r_args[Group.NUM_GROUPS] = len(group_info) - 1
+            a_r_args[Group.BOTTLENECK_TIME] = all_reduce_bottleneck_time(
+                alpha=a.item((ar_edge.node1, ar_edge.node2, 0)),
+                beta=a.item((ar_edge.node1, ar_edge.node2, 1)),
+                buffer_size=all_reduce_buffer_size,
+                num_participants=a_r_args[Group.NUM_GROUPS])
+
+            mutated_ar_obj = all_reduce_func(a_r_args)
+            if (mutated_moe_obj + mutated_ar_obj) > max_group.get_current_objective():
+                break
+
+            # Commit to mutation
+            # Iterating over these again :(
+            stale_edge = global_external_edges[-1]
+            while stale_edge.node1 in max_group.internalNodes or stale_edge.node2 in max_group.internalNodes:
+                global_external_edges.pop()
+            group_info.pop(sorted_groups[sg_i][0])
+            # > Next max group
+            sg_i -= -1
+            # > Update Omega
+            omega = omega - max_group.num_nodes()
+
+        # Restore state
+        ar_edge = global_external_edges[-1]
+        a_r_args[Group.NUM_GROUPS] = len(group_info)
+        a_r_args[Group.BOTTLENECK_TIME] = all_reduce_bottleneck_time(alpha=a.item((ar_edge.node1, ar_edge.node2, 0)),
+                                                                     beta=a.item((ar_edge.node1, ar_edge.node2, 1)),
+                                                                     buffer_size=all_reduce_buffer_size,
+                                                                     num_participants=a_r_args[Group.NUM_GROUPS])
+
+    result: List = []
+    for g in group_info.keys():
+        result.append(groups.subset(g))
     return result
 
 
 def is_net_improvement(obj_1: float, obj_2: float, obj_1_2: float) -> bool:
     if math.isinf(obj_1) and math.isinf(obj_2):
         return True
-    return (obj_1_2 * (1 / obj_1 + 1 / obj_2)) <= 2
+    return (obj_1_2 * (1 / obj_1 + 1 / obj_2)) <= (min((max(obj_1, obj_2) / min(obj_1, obj_2)) + 1, 16))
+    # sqrt(n*(n+1))
 
 
 def p2p_transfer_time(alpha: float, beta: float, buffer_size: float) -> float:
@@ -521,6 +586,7 @@ def best_fit(budget: Expert, ss: SortedSet) -> Expert:
 
 
 def lysi_assign(workers: List[Worker], experts: List[Expert]) -> Dict[Worker, Set[int]]:
+    # TODO make assignment stable or ordered nicely
     mem_capacity: Dict[Worker, int] = dict()
     for worker1 in workers:
         mem_capacity.update({worker1: worker1.mem_capacity})
@@ -614,7 +680,7 @@ if __name__ == '__main__':
     for ii in range(adjacency.shape[0]):
         g_workers.append(Worker(ii, real_flops, mem))
 
-    n_exp = 32
+    n_exp = 256
     exp = []
     ml_experts = []
     exp_flops = 16 * 4 * 2048 * (1024 ** 2)
