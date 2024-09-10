@@ -119,6 +119,7 @@ namespace aristos::publisher{
         if(!aristos::grid::blockID()){
             remoteLogHead = 0;
             publisherConfig = PublisherConfig(moeConfig);
+            CUTE_UNROLL
             for(unsigned int i = 0; i < moeConfig.worldSize; ++i){
                 isRemote[i] = nvshmem_ptr(moeConfig.sHeap, moeConfig.peerTranslation[i]) == NULL;
             }
@@ -159,6 +160,7 @@ namespace aristos::publisher{
         __shared__ PublisherConfig publisherConfig;
         if(!aristos::grid::blockID()){
             publisherConfig = PublisherConfig(moeConfig);
+            CUTE_UNROLL
             for(unsigned int i = 0; i < moeConfig.worldSize; ++i){
                 isP2P[i] = nvshmem_ptr(moeConfig.sHeap, moeConfig.peerTranslation[i]) != NULL;
             }

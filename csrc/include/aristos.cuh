@@ -2,11 +2,13 @@
 // Created by Jonathan on 7/8/24.
 //
 
+#define ARISTOS_INLINE __forceinline__
 #ifndef ARISTOS_CUH
 #define ARISTOS_CUH
 
 #include "moe/moe.cuh"
 #include "moe/engine/subscriber.cuh"
+#include "moe/engine/decider/decider.cuh"
 #include "moe/algorithm/algorithm.cuh"
 #include "moe/util/indexing.cuh"
 #include "moe/definition/tensor.cuh"

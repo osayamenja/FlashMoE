@@ -73,6 +73,11 @@ add_executable(csrc main.cu
         include/moe/definition/memory_layout.cuh
         include/moe/util/atomics.cuh
         include/moe/definition/values.cuh
+        include/moe/engine/decider/decider.cuh
+        include/moe/engine/decider/comps/edge.cuh
+        include/moe/engine/decider/comps/expert.cuh
+        include/moe/engine/decider/comps/group.cuh
+        include/moe/engine/decider/comps/worker.cuh
 )
 
 # add dependencies

@@ -19,8 +19,8 @@
 #include <cub/cub.cuh>
 #include <cute/tensor.hpp>
 #include <cute/config.hpp>
-#include "cutlass/gemm/dispatch_policy.hpp"
-#include "cutlass/gemm/collective/collective_mma.hpp"
+#include <cutlass/gemm/dispatch_policy.hpp>
+#include <cutlass/gemm/collective/collective_mma.hpp>
 
 #define THREADS_PER_WARP 32
 #define THREADS_PER_BLOCK 256
@@ -106,7 +106,6 @@ namespace  aristos{
         assert(!isInitialized);
         isInitialized = true;
         int numSMs = 0;
-
         int numBlocksPerSM = 0;
         constexpr int minCommunicatorBlocks = 2;
         int localRank = 0;
@@ -127,7 +126,7 @@ namespace  aristos{
                                                 cudaDevAttrMemoryPoolsSupported, localRank));
         assert(deviceSupportsMemoryPools);
         CUTE_CHECK_ERROR(cudaDeviceGetAttribute(&computeCapability, cudaDevAttrComputeCapabilityMajor, localRank));
-        /// Due to CUTLASS: https://github.com/NVIDIA/cutlass/blob/main/README.md
+        /// Due to NVSHMEM: https://docs.nvidia.com/nvshmem/release-notes-install-guide/install-guide/abstract.html#hardware-requirements
         assert(computeCapability >= 7);
 
         // Good to go! Let's do some initialization
@@ -167,8 +166,8 @@ namespace  aristos{
         hostMoEConfig.sHeap = static_cast<cuda::std::byte*>(sHeap);
         CUTE_CHECK_ERROR(cudaMemcpyToSymbolAsync(moeConfig,
                                             &hostMoEConfig, sizeof(Config), 0, cudaMemcpyHostToDevice, aristosStream));
+        CUTE_CHECK_ERROR(cudaPeekAtLastError());
         CUTE_CHECK_ERROR(cudaStreamSynchronize(aristosStream));
-        CUTE_CHECK_LAST();
     }
 
     void forwardHost(){
@@ -184,8 +183,8 @@ namespace  aristos{
         CUTE_CHECK_ERROR(cudaFreeAsync(hostMoEConfig.bookKeeping, aristosStream));
         nvshmem_free(hostMoEConfig.sHeap);
         nvshmem_finalize();
+        CUTE_CHECK_ERROR(cudaPeekAtLastError());
         CUTE_CHECK_ERROR(cudaStreamSynchronize(aristosStream));
-        CUTE_CHECK_LAST();
     }
 }
 

@@ -20,4 +20,7 @@ namespace aristos{
         return atomicOr(addr, 0U);
     }
 }
+namespace aristos::barrier{
+
+}
 #endif //CSRC_ATOMICS_CUH
