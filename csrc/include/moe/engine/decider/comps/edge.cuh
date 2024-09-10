@@ -80,7 +80,7 @@ struct std::hash<aristos::Edge>
     __forceinline__
     std::size_t operator()(const aristos::Edge& e) const noexcept
     {
-        return std::hash<unsigned int>{}(e.node1) ^ (std::hash<unsigned int>{}(e.node2) << 1);
+        return e.node1 ^ e.node2 << 1;
     }
 };
 

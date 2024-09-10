@@ -1,6 +1,6 @@
-//
-// Created by Jonathan on 7/5/24.
-//
+/******************************************************************************
+ * Copyright (c) 2024, Osayamen Jonathan Aimuyo.
+ ******************************************************************************/
 
 #ifndef ARISTOS_MOE_CUH
 #define ARISTOS_MOE_CUH

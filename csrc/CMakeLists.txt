@@ -78,6 +78,8 @@ add_executable(csrc main.cu
         include/moe/engine/decider/comps/expert.cuh
         include/moe/engine/decider/comps/group.cuh
         include/moe/engine/decider/comps/worker.cuh
+        include/moe/engine/decider/comps/args.cuh
+        include/moe/engine/decider/comps/functions.cuh
 )
 
 # add dependencies

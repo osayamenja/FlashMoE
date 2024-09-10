@@ -2,7 +2,6 @@
 // Created by Jonathan on 7/8/24.
 //
 
-#define ARISTOS_INLINE __forceinline__
 #ifndef ARISTOS_CUH
 #define ARISTOS_CUH
 
