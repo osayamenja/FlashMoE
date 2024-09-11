@@ -16,12 +16,14 @@
 #include "comps/worker.cuh"
 
 namespace aristos::decider{
-    CUTE_HOST
+    /// Generates DP-EP groups [D,G] -> Devices to Groups
+    __forceinline__
     std::vector<int> group(){
 
     }
 
-    CUTE_HOST
+    /// Generates EP spec [E,D] -> Experts to Devices
+    __forceinline__
     std::vector<int> assign(){
 
     }

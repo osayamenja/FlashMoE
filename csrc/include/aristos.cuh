@@ -10,6 +10,7 @@
 #include "moe/engine/decider/decider.cuh"
 #include "moe/algorithm/algorithm.cuh"
 #include "moe/util/indexing.cuh"
+#include "moe/util/debug.cuh"
 #include "moe/definition/tensor.cuh"
 #include "moe/engine/publisher.cuh"
 #include "moe/definition/types.cuh"

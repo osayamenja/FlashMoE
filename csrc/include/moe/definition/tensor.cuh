@@ -11,7 +11,7 @@
 namespace aristos{
     template<typename V>
     concept TensorValueType = requires(V v){
-        {V(0)} -> std::same_as<V>;
+        {V(0)} -> cuda::std::same_as<V>;
     };
 
     template<typename T>

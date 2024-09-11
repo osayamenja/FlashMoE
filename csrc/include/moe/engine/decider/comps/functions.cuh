@@ -15,5 +15,11 @@ namespace aristos{
                *((static_cast<double>(a.totalExpertCost) / static_cast<double>(a.totalDeviceRate))
                + (a.commFreq * a.intraCommunicationCost))) + a.allReduceTime;
     }
+
+    __forceinline__
+    double allReduceT(const ARArgs& a){
+        ///https://link.springer.com/content/pdf/10.1007/978-3-540-24685-5_1.pdf
+        return 2.0 * (a.numGroups - 1) * a.bottleneckTime;
+    }
 }
 #endif //CSRC_FUNCTIONS_CUH
