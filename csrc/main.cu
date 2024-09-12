@@ -38,8 +38,7 @@ __global__ void benchAtomics(CUTE_GRID_CONSTANT const int iter, unsigned int* fl
     __shared__ unsigned int sharedFlag;
     if(shouldPersist){
         cuda::associate_access_property(flag, cuda::access_property::persisting{});
-        cuda::associate_access_property(&sharedFlag, cuda::access_property::persisting{});
-        pUnderTest = &sharedFlag;
+        //pUnderTest = &sharedFlag;
     }
     __syncthreads();
     atomicExch(&sharedFlag, 0);
@@ -81,15 +80,15 @@ __global__ void benchAtomics(CUTE_GRID_CONSTANT const int iter, unsigned int* fl
         printf("Block Id is %u, a_flag: {T: %f, V: %d}, a_cas: {T: %f, V:%u}, a_or: {T: %f, V:%u}, a_and: {T: %f, V: %u},"
                "isShared: %s\n",
                aristos::grid::blockID(),
-               (a_flag / (iter*1.0)).count(),
+               static_cast<cuda::std::chrono::duration<double, cuda::std::micro>>(a_flag / (iter*1.0)).count(),
                aFlag.load(),
-               (a_cas/(iter*1.0)).count(),
+               static_cast<cuda::std::chrono::duration<double, cuda::std::micro>>(a_cas/(iter*1.0)).count(),
                atomicCAS(pUnderTest, 0, 0),
-               (a_or / (iter * 1.0)).count(),
+               static_cast<cuda::std::chrono::duration<double, cuda::std::micro>>(a_or / (iter * 1.0)).count(),
                atomicOr(pUnderTest, 0U),
-               (a_and/(iter*1.0)).count(),
+               static_cast<cuda::std::chrono::duration<double, cuda::std::micro>>(a_and/(iter*1.0)).count(),
                atomicAnd(pUnderTest, 1U),
-               (__isShared(pUnderTest))? "Yes" : "No");
+               (shouldPersist)? "Yes" : "No");
     }
 }
 
@@ -264,7 +263,7 @@ __global__ void benchBarrier(unsigned int* b, cuda::barrier<cuda::thread_scope_d
         cuda::associate_access_property(&testStages, cuda::access_property::persisting{});
         cuda::associate_access_property(bar, cuda::access_property::persisting{});
     }
-
+    /*aristos::barrier::init(n, persist);*/
     constexpr auto iter = 1024;
     CUTE_UNROLL
     for(unsigned int i = 0; i < iter; ++i){
@@ -285,6 +284,7 @@ __global__ void benchBarrier(unsigned int* b, cuda::barrier<cuda::thread_scope_d
                 }
                 /// Could execute completion function here
             }
+            /*aristos::barrier::wait(aristos::barrier::arrive());*/
         }
         __syncthreads();
         asm volatile("mov.u64 %0, %%globaltimer;": "=l"(end)::);
@@ -375,7 +375,7 @@ __global__ void processorSpec(DispatchPolicy dispatchPolicy, ElementA* A,
 }
 
 int main() {
-    auto size = 256;
+    auto size = 64;
     unsigned int* p;
     cuda::barrier<cuda::thread_scope_device>* b;
     auto host_b = new cuda::barrier<cuda::thread_scope_device>{size};

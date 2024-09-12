@@ -18,6 +18,7 @@ namespace aristos{
 
     template<typename C, typename V> requires StreamableContainer<C, V>
     void printContainer(const C& c){
+        //TODO use printf
         std::stringstream outStream;
         std::cout << '[';
         for (auto& i : c)

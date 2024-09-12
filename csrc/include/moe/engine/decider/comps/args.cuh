@@ -36,7 +36,7 @@ namespace aristos{
 
         __forceinline__ static double p2pTransferTime(const double& alpha,
                                                       const double& beta,
-                                                      const unsigned int& bufferSize){
+                                                      const double& bufferSize){
             return alpha + (beta * bufferSize);
         }
 

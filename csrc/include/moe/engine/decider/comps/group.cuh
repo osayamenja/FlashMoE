@@ -90,6 +90,18 @@ namespace aristos{
         __forceinline__
         double evalP2PTime(Group& neighbor, const unsigned int& numNodes){
             auto maxP2PTime = 0.0;
+            for(const auto& node: internalNodes){
+                maxP2PTime = std::max(maxP2PTime,
+                                      ObjArgs::p2pTransferTime(p2pTimes[node].first + neighbor.p2pTimes[node].first,
+                                                               p2pTimes[node].second + neighbor.p2pTimes[node].second,
+                                                               objArgs.p2pBuffer / static_cast<double>(numNodes)));
+            }
+            for(const auto& node: neighbor.internalNodes){
+                maxP2PTime = std::max(maxP2PTime,
+                                      ObjArgs::p2pTransferTime(p2pTimes[node].first + neighbor.p2pTimes[node].first,
+                                                               p2pTimes[node].second + neighbor.p2pTimes[node].second,
+                                                               objArgs.p2pBuffer / static_cast<double>(numNodes)));
+            }
         }
 
         __forceinline__
