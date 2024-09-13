@@ -1,10 +1,6 @@
-//
-// Created by osayamen on 9/8/24.
-//
 /******************************************************************************
- * Copyright (c) 2024, Osayamen Jonathan Aimuyo.
+ * Copyright (c) 09/08/2024, Osayamen Jonathan Aimuyo.
  ******************************************************************************/
-
 #ifndef CSRC_GROUP_CUH
 #define CSRC_GROUP_CUH
 #include <unordered_set>
@@ -32,24 +28,6 @@ namespace aristos{
         unsigned int worldSize;
         double cachedObjective;
         double cachedAllReduceTime;
-
-        __forceinline__
-        unsigned int numNodes(){
-            return internalNodes.size();
-        }
-
-        __forceinline__
-        double getCurrentObjective(){
-            return (currentObjective - allReduceTime) + cachedAllReduceTime;
-        }
-
-        __forceinline__
-        void updateVisited(const unsigned int& neighborID,
-                           const unsigned int& myState,
-                           const unsigned int& neighborState){
-            // I dislike the unnecessary construction of a 'pair' object per insertion
-            visited.try_emplace(neighborID, std::pair{myState, neighborState});
-        }
 
         __forceinline__
         bool shouldMerge(Group& neighbor, const ARArgs& arArgs, const unsigned int& effectiveW){
@@ -86,29 +64,67 @@ namespace aristos{
             return policy(getCurrentObjective(), neighbor.getCurrentObjective(), cachedObjective);
         }
 
-        /// Dynamic Programming magic
         __forceinline__
-        double evalP2PTime(Group& neighbor, const unsigned int& numNodes){
-            auto maxP2PTime = 0.0;
-            for(const auto& node: internalNodes){
-                maxP2PTime = std::max(maxP2PTime,
-                                      ObjArgs::p2pTransferTime(p2pTimes[node].first + neighbor.p2pTimes[node].first,
-                                                               p2pTimes[node].second + neighbor.p2pTimes[node].second,
-                                                               objArgs.p2pBuffer / static_cast<double>(numNodes)));
-            }
-            for(const auto& node: neighbor.internalNodes){
-                maxP2PTime = std::max(maxP2PTime,
-                                      ObjArgs::p2pTransferTime(p2pTimes[node].first + neighbor.p2pTimes[node].first,
-                                                               p2pTimes[node].second + neighbor.p2pTimes[node].second,
-                                                               objArgs.p2pBuffer / static_cast<double>(numNodes)));
-            }
+        void subsume(const Group& neighbor){
+            updateP2PTime(neighbor);
+            internalNodes.insert(neighbor.internalNodes.cbegin(), neighbor.internalNodes.cend());
+            currentObjective = cachedObjective;
+            memCapacity += neighbor.memCapacity;
+            deviceRate += neighbor.deviceRate;
+            allReduceTime = cachedAllReduceTime;
         }
 
-        __forceinline__
-        bool optimizingPolicy(const double& obj1, const double& obj2, const double& obj1_2) const{
-            return (std::isinf(obj1) && std::isinf(obj2))? true :
-            (obj1_2 * (1 / obj1 + 1/obj2)) <= (std::min((std::max(obj1, obj2) / std::min(obj1, obj2)) + 1, clamp));
-        }
+        private:
+            /// Complementary Dynamic Programming magic
+            __forceinline__
+            void updateP2PTime(const Group& neighbor){
+                auto constexpr len = p2pTimes.size();
+                for(int i = 0; i < len; i++){
+                    p2pTimes[i] = std::pair{p2pTimes[i].first + neighbor.p2pTimes[i].first,
+                                            p2pTimes[i].second + neighbor.p2pTimes[i].second};
+                }
+            }
+            /// Dynamic Programming magic yielding complexity O(|self| + |neighbor|)
+            /// rather than O(|self| * |neighbor|).
+            __forceinline__
+            double evalP2PTime(Group& neighbor, const unsigned int& numNodes){
+                auto maxP2PTime = 0.0;
+                for(const auto& node: internalNodes){
+                    maxP2PTime = std::max(maxP2PTime,
+                                          ObjArgs::p2pTransferTime(p2pTimes[node].first + neighbor.p2pTimes[node].first,
+                                                                   p2pTimes[node].second + neighbor.p2pTimes[node].second,
+                                                                   objArgs.p2pBuffer / static_cast<double>(numNodes)));
+                }
+                for(const auto& node: neighbor.internalNodes){
+                    maxP2PTime = std::max(maxP2PTime,
+                                          ObjArgs::p2pTransferTime(p2pTimes[node].first + neighbor.p2pTimes[node].first,
+                                                                   p2pTimes[node].second + neighbor.p2pTimes[node].second,
+                                                                   objArgs.p2pBuffer / static_cast<double>(numNodes)));
+                }
+                return maxP2PTime;
+            }
+            __forceinline__
+            unsigned int numNodes(){
+                return internalNodes.size();
+            }
+
+            __forceinline__
+            double getCurrentObjective(){
+                return (currentObjective - allReduceTime) + cachedAllReduceTime;
+            }
+
+            __forceinline__
+            void updateVisited(const unsigned int& neighborID,
+                               const unsigned int& myState,
+                               const unsigned int& neighborState){
+                // I dislike the unnecessary construction of a 'pair' object per insertion
+                visited.try_emplace(neighborID, std::pair{myState, neighborState});
+            }
     };
+    __forceinline__
+    bool optimizingPolicy(const double& obj1, const double& obj2, const double& obj1_2){
+        return (std::isinf(obj1) && std::isinf(obj2))? true :
+               (obj1_2 * (1 / obj1 + 1/obj2)) <= (std::min((std::max(obj1, obj2) / std::min(obj1, obj2)) + 1, clamp));
+    }
 }
 #endif //CSRC_GROUP_CUH

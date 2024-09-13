@@ -122,7 +122,10 @@ target_compile_options(csrc
         $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<BOOL:${NVCC_THREADS}>>:-t4>]]
         $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-Xfatbin -compress-all>
         $<$<COMPILE_LANGUAGE:CUDA>:-Xptxas -v>
-        $<$<COMPILE_LANGUAGE:CUDA>:-t4>
+        $<$<COMPILE_LANGUAGE:CUDA>:-t0>
+        # Release config
+        $<$<COMPILE_LANGUAGE:CUDA>:-O3>
+        $<$<COMPILE_LANGUAGE:CUDA>:-Xptxas -O3>
         # Required to support std::tuple in device code
         $<$<BOOL:True>:$<$<COMPILE_LANGUAGE:CUDA>:SHELL:--expt-relaxed-constexpr>>
 )

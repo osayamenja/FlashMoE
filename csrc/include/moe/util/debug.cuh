@@ -16,7 +16,10 @@ namespace aristos{
     concept StreamableContainer = Streamable<S>
                                   && (std::same_as<C, std::conditional_t<k == 0, std::vector<S>, std::array<S, k>>>);
 
-    template<typename C, typename V> requires StreamableContainer<C, V>
+    /// For some container c,
+    /// Use like printContainer<decltype(c),decltype(c)::value_type>(c) for non-array
+    /// otherwise, printContainer<decltype(c),decltype(c)::value_type, c.size()>(c)
+    template<typename C, typename V, unsigned int k=0> requires StreamableContainer<C, V, k>
     void printContainer(const C& c){
         //TODO use printf
         std::stringstream outStream;

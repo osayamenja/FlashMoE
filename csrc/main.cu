@@ -24,6 +24,7 @@
 #include <cute/config.hpp>
 #include <cutlass/gemm/dispatch_policy.hpp>
 #include <cutlass/gemm/collective/collective_mma.hpp>
+#include <boost/pending/disjoint_sets.hpp>
 
 #define THREADS_PER_WARP 32
 #define THREADS_PER_BLOCK 256
@@ -375,7 +376,7 @@ __global__ void processorSpec(DispatchPolicy dispatchPolicy, ElementA* A,
 }
 
 int main() {
-    auto size = 64;
+    /*auto size = 64;
     unsigned int* p;
     cuda::barrier<cuda::thread_scope_device>* b;
     auto host_b = new cuda::barrier<cuda::thread_scope_device>{size};
@@ -394,5 +395,28 @@ int main() {
     CUTE_CHECK_LAST();
     CUTE_CHECK_ERROR(cudaFreeAsync(p, cudaStreamPerThread));
     CUTE_CHECK_ERROR(cudaFreeAsync(b, cudaStreamPerThread));
-    free(host_b);
+    free(host_b);*/
+
+    /// Necessary to use path halving to ensure amortized "practical constant" time
+    using djs = boost::disjoint_sets_with_storage<boost::identity_property_map,
+    boost::identity_property_map, boost::find_with_path_halving>;
+    auto constexpr n = 4;
+    djs groups(n);
+    for(int i = 0; i < n; ++i){
+        groups.make_set(i);
+    }
+    auto p = groups.parents();
+    std::cout << "Before Merges: ";
+    aristos::printContainer<decltype(p), decltype(p)::value_type>(p);
+    std::cout << std::endl;
+    groups.link(0, 1);
+    std::cout << "Merged 0 and 1: ";
+    p = groups.parents();
+    aristos::printContainer<decltype(p), decltype(p)::value_type>(p);
+    std::cout << std::endl;
+    groups.link(2, 3);
+    std::cout << "Merged 2 and 3: ";
+    p = groups.parents();
+    aristos::printContainer<decltype(p), decltype(p)::value_type>(p);
+    std::cout << std::endl;
 }

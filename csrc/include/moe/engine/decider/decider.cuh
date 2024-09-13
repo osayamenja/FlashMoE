@@ -19,7 +19,6 @@ namespace aristos::decider{
     /// Generates DP-EP groups [D,G] -> Devices to Groups
     __forceinline__
     std::vector<int> group(){
-
     }
 
     /// Generates EP spec [E,D] -> Experts to Devices
