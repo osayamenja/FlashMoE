@@ -400,23 +400,32 @@ int main() {
     /// Necessary to use path halving to ensure amortized "practical constant" time
     using djs = boost::disjoint_sets_with_storage<boost::identity_property_map,
     boost::identity_property_map, boost::find_with_path_halving>;
-    auto constexpr n = 4;
+    auto constexpr n = 5;
     djs groups(n);
     for(int i = 0; i < n; ++i){
         groups.make_set(i);
     }
     auto p = groups.parents();
     std::cout << "Before Merges: ";
-    aristos::printContainer<decltype(p), decltype(p)::value_type>(p);
+    aristos::printContainer(p);
     std::cout << std::endl;
     groups.link(0, 1);
     std::cout << "Merged 0 and 1: ";
     p = groups.parents();
-    aristos::printContainer<decltype(p), decltype(p)::value_type>(p);
+    aristos::printContainer(p);
     std::cout << std::endl;
     groups.link(2, 3);
     std::cout << "Merged 2 and 3: ";
     p = groups.parents();
-    aristos::printContainer<decltype(p), decltype(p)::value_type>(p);
+    aristos::printContainer(p);
     std::cout << std::endl;
+
+    std::unordered_map<decltype(p)::value_type, std::vector<int>> sets{};
+    for(int i = 0; i < n; ++i){
+        sets[p[i]].push_back(i);
+    }
+
+    aristos::printMapCV(sets);
+    std::cout << ']' << std::endl;
+    std::cout << aristos::Streamable<decltype(sets)::key_type> << std::endl;
 }
