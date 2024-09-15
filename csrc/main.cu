@@ -16,7 +16,6 @@
 #include <host/nvshmemx_api.h>
 
 #include "include/aristos.cuh"
-#include <cooperative_groups.h>
 #include <functional>
 #include <queue>
 

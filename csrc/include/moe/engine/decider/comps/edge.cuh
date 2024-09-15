@@ -18,7 +18,8 @@ namespace aristos{
         unsigned int node2;
         float weight;
 
-        Edge(unsigned int _node1,unsigned int _node2, float _weight):
+        /// Order is important!
+        Edge(unsigned int _node1, unsigned int _node2, float _weight):
         node1(_node1), node2(_node2), weight(_weight){}
 
         __forceinline__
@@ -65,11 +66,23 @@ namespace aristos{
             return *this > other || *this == other;
         }
 
-        [[nodiscard]] std::string toString() const {
+        __forceinline__
+        std::string toString() const {
             return "{"
                    "\"weight\": " + std::to_string(weight)
                    + ", \"node1\": " + std::to_string(node1)
                    + ", \"node2\": " + std::to_string(node2) + "}";
+        }
+
+        __forceinline__
+        bool isLimboEdge() const{
+            /// Define a self-edge with zero weight as limbo or null edge
+            return node1 == node2 && weight == 0.0;
+        }
+
+        __forceinline__
+        static Edge limboEdge() {
+            return {0,0,0.0};
         }
     };
 }

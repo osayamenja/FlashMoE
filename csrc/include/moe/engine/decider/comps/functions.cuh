@@ -10,7 +10,7 @@ namespace aristos{
     __inline__ double clamp;
     __forceinline__
     double obj(const ObjArgs& a){
-        return (a.groupMemCapacity < a.numExperts)?
+        return (a.groupMemCapacity < a.totalExpertMemoryDemand) ?
         std::numeric_limits<double>::infinity() :
                (ObjArgs::getGamma(a.globalMoEStages, a.effectiveWorld)
                *((static_cast<double>(a.totalExpertCost) / static_cast<double>(a.totalDeviceRate))

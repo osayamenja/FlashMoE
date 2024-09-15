@@ -8,18 +8,36 @@
 #include "functions.cuh"
 namespace aristos{
     struct Group{
-        std::unordered_map<unsigned int, std::pair<unsigned int, unsigned int>> visited;
-        std::vector<std::pair<unsigned int, unsigned int>> p2pTimes;
-        std::unordered_set<unsigned int> internalNodes;
+        std::unordered_map<unsigned int, std::pair<unsigned int, unsigned int>> visited{};
+        /// Dynamic Programming State
+        std::vector<std::pair<double, double>> p2pTimes{};
+        std::unordered_set<unsigned int> internalNodes{};
         unsigned int id;
         unsigned int memCapacity;
-        unsigned int deviceRate;
-        double allReduceTime;
+        unsigned long deviceRate;
+        double allReduceTime{};
         ObjArgs objArgs;
-        double currentObjective;
+        double currentObjective{};
         unsigned int worldSize;
-        double cachedObjective;
-        double cachedAllReduceTime;
+        double cachedObjective{};
+        double cachedAllReduceTime{};
+
+        Group(const unsigned int& _id, const unsigned int& _mem, const unsigned long& _rate,
+              const unsigned int& _world, ObjArgs _args,
+              const std::vector<std::pair<double, double>>& dp):
+              id(_id), memCapacity(_mem), deviceRate(_rate),
+              objArgs(_args),worldSize(_world){
+            internalNodes.insert(id);
+            p2pTimes = dp;
+        }
+
+        __forceinline__ void construct(const double& art, const unsigned int& effective){
+            objArgs.groupMemCapacity = memCapacity;
+            objArgs.effectiveWorld = effective;
+            objArgs.allReduceTime = allReduceTime = art;
+            objArgs.totalDeviceRate = deviceRate;
+            currentObjective = obj(objArgs);
+        }
 
         __forceinline__
         bool shouldMerge(Group& neighbor, const ARArgs& arArgs, const unsigned int& effectiveW){
@@ -36,11 +54,11 @@ namespace aristos{
             objArgs.effectiveWorld = effectiveW;
             /// Simulate the event of both groups merging and compute its objective
             auto cachedEffectiveWorld = objArgs.effectiveWorld;
-            if(memCapacity + neighbor.memCapacity >= objArgs.numExperts){
-                if(objArgs.effectiveWorld < worldSize && memCapacity < objArgs.numExperts){
+            if(memCapacity + neighbor.memCapacity >= objArgs.totalExpertMemoryDemand){
+                if(objArgs.effectiveWorld < worldSize && memCapacity < objArgs.totalExpertMemoryDemand){
                     objArgs.effectiveWorld += numNodes();
                 }
-                if(objArgs.effectiveWorld < worldSize && neighbor.memCapacity < objArgs.numExperts){
+                if(objArgs.effectiveWorld < worldSize && neighbor.memCapacity < objArgs.totalExpertMemoryDemand){
                     objArgs.effectiveWorld += numNodes();
                 }
             }
@@ -50,6 +68,7 @@ namespace aristos{
             cachedAllReduceTime = allReduceT(arArgs);
             neighbor.cachedAllReduceTime = cachedAllReduceTime;
             objArgs.intraCommunicationCost = evalP2PTime(neighbor, numNodes() + neighbor.numNodes());
+            objArgs.allReduceTime = cachedAllReduceTime;
 
             cachedObjective = neighbor.cachedObjective = obj(objArgs);
             objArgs.effectiveWorld = cachedEffectiveWorld;
@@ -64,6 +83,19 @@ namespace aristos{
             memCapacity += neighbor.memCapacity;
             deviceRate += neighbor.deviceRate;
             allReduceTime = cachedAllReduceTime;
+        }
+
+        __forceinline__
+        unsigned int numNodes() const{
+            return internalNodes.size();
+        }
+
+        __forceinline__
+        bool operator>(const Group& other){
+            if(floatEqual(getCurrentObjective(), other.getCurrentObjective())){
+                return id > other.id;
+            }
+            return getCurrentObjective() > other.getCurrentObjective();
         }
 
         private:
@@ -94,10 +126,6 @@ namespace aristos{
                                                                    objArgs.p2pBuffer / static_cast<double>(numNodes)));
                 }
                 return maxP2PTime;
-            }
-            __forceinline__
-            unsigned int numNodes() const{
-                return internalNodes.size();
             }
 
             __forceinline__

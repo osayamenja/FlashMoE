@@ -7,10 +7,11 @@
 namespace aristos{
     struct Expert{
         unsigned int id;
-        unsigned int cost;
+        unsigned long cost;
+        unsigned int memoryDemand;
 
-        Expert(unsigned int _id, unsigned int _cost):
-                id(_id), cost(_cost){};
+        Expert(unsigned int _id, unsigned long _cost, unsigned int _mem):
+                id(_id), cost(_cost), memoryDemand(_mem){};
 
         __forceinline__
         bool operator==(const Expert& other) const {
@@ -46,7 +47,8 @@ namespace aristos{
         std::string toString() const {
             return "{\n\t"
                    "\"id\": " + std::to_string(id)
-                   + ",\n\t\"ComputeCost\": " + std::to_string(cost) + ",\n\t}";
+                   + ",\n\t\"ComputeCost\": " + std::to_string(cost) + ",\n\t"
+                   + ",\n\t\"MemoryDemand\": " + std::to_string(memoryDemand) + ",\n\t}";
         }
 
     };
