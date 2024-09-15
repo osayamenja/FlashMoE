@@ -7,15 +7,7 @@
 #include "args.cuh"
 #include "functions.cuh"
 namespace aristos{
-    __inline__ double clamp;
-    template <typename F, typename A, typename P>
-    requires std::regular_invocable<F, ObjArgs>
-            && std::regular_invocable<A, ARArgs>
-            && std::regular_invocable<P, double, double, double>
     struct Group{
-        F objectiveFunction;
-        A reduceTimeFunction;
-        P policy;
         std::unordered_map<unsigned int, std::pair<unsigned int, unsigned int>> visited;
         std::vector<std::pair<unsigned int, unsigned int>> p2pTimes;
         std::unordered_set<unsigned int> internalNodes;
@@ -55,13 +47,13 @@ namespace aristos{
             objArgs.totalDeviceRate = deviceRate + neighbor.deviceRate;
             objArgs.groupMemCapacity = memCapacity + neighbor.memCapacity;
 
-            cachedAllReduceTime = reduceTimeFunction(arArgs);
+            cachedAllReduceTime = allReduceT(arArgs);
             neighbor.cachedAllReduceTime = cachedAllReduceTime;
             objArgs.intraCommunicationCost = evalP2PTime(neighbor, numNodes() + neighbor.numNodes());
 
-            cachedObjective = neighbor.cachedObjective = objectiveFunction(objArgs);
+            cachedObjective = neighbor.cachedObjective = obj(objArgs);
             objArgs.effectiveWorld = cachedEffectiveWorld;
-            return policy(getCurrentObjective(), neighbor.getCurrentObjective(), cachedObjective);
+            return optimizingPolicy(getCurrentObjective(), neighbor.getCurrentObjective(), cachedObjective);
         }
 
         __forceinline__
@@ -78,7 +70,7 @@ namespace aristos{
             /// Complementary Dynamic Programming magic
             __forceinline__
             void updateP2PTime(const Group& neighbor){
-                auto constexpr len = p2pTimes.size();
+                auto const len = p2pTimes.size();
                 for(int i = 0; i < len; i++){
                     p2pTimes[i] = std::pair{p2pTimes[i].first + neighbor.p2pTimes[i].first,
                                             p2pTimes[i].second + neighbor.p2pTimes[i].second};
@@ -87,7 +79,7 @@ namespace aristos{
             /// Dynamic Programming magic yielding complexity O(|self| + |neighbor|)
             /// rather than O(|self| * |neighbor|).
             __forceinline__
-            double evalP2PTime(Group& neighbor, const unsigned int& numNodes){
+            double evalP2PTime(Group& neighbor, const unsigned int& numNodes) const{
                 auto maxP2PTime = 0.0;
                 for(const auto& node: internalNodes){
                     maxP2PTime = std::max(maxP2PTime,
@@ -104,12 +96,12 @@ namespace aristos{
                 return maxP2PTime;
             }
             __forceinline__
-            unsigned int numNodes(){
+            unsigned int numNodes() const{
                 return internalNodes.size();
             }
 
             __forceinline__
-            double getCurrentObjective(){
+            double getCurrentObjective() const{
                 return (currentObjective - allReduceTime) + cachedAllReduceTime;
             }
 
@@ -121,10 +113,5 @@ namespace aristos{
                 visited.try_emplace(neighborID, std::pair{myState, neighborState});
             }
     };
-    __forceinline__
-    bool optimizingPolicy(const double& obj1, const double& obj2, const double& obj1_2){
-        return (std::isinf(obj1) && std::isinf(obj2))? true :
-               (obj1_2 * (1 / obj1 + 1/obj2)) <= (std::min((std::max(obj1, obj2) / std::min(obj1, obj2)) + 1, clamp));
-    }
 }
 #endif //CSRC_GROUP_CUH

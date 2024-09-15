@@ -18,6 +18,7 @@
 #include "include/aristos.cuh"
 #include <cooperative_groups.h>
 #include <functional>
+#include <queue>
 
 #include <cub/cub.cuh>
 #include <cute/tensor.hpp>
@@ -99,10 +100,9 @@ __global__ void occupancyTestKernel(){
     __shared__ float sharedB[cute::cosize_v<decltype(cute::make_layout(cute::make_shape(cute::Int<bN>{}, cute::Int<bK>{}, cute::Int<bP>{})))>];
 }
 
-namespace  aristos{
+namespace aristos{
     bool isInitialized = false;
     cudaStream_t aristosStream = cudaStreamPerThread;
-    Config hostMoEConfig;
     void aristosInit(const unsigned int& seqLen, const unsigned int& embedDim, const unsigned int& hiddenProjDim,
                      const unsigned int& k, const unsigned int& capacityFactor,
                      const unsigned int& numExperts) {
@@ -375,6 +375,14 @@ __global__ void processorSpec(DispatchPolicy dispatchPolicy, ElementA* A,
     expert(accum, gA, gB, accum, k_tile_iter, k_tile_count, Underscore{}, threadIdx.x, sharedBuf);
 }
 
+template<typename T>
+void pop_println(std::string_view rem, T& pq)
+{
+    std::cout << rem << ": ";
+    for (; !pq.empty(); pq.pop())
+        std::cout << pq.top().toString() << ' ';
+    std::cout << '\n';
+}
 int main() {
     /*auto size = 64;
     unsigned int* p;
@@ -398,7 +406,7 @@ int main() {
     free(host_b);*/
 
     /// Necessary to use path halving to ensure amortized "practical constant" time
-    using djs = boost::disjoint_sets_with_storage<boost::identity_property_map,
+    /*using djs = boost::disjoint_sets_with_storage<boost::identity_property_map,
     boost::identity_property_map, boost::find_with_path_halving>;
     auto constexpr n = 5;
     djs groups(n);
@@ -427,5 +435,11 @@ int main() {
 
     aristos::printMapCV(sets);
     std::cout << ']' << std::endl;
-    std::cout << aristos::Streamable<decltype(sets)::key_type> << std::endl;
+    std::cout << aristos::Streamable<decltype(sets)::key_type> << std::endl;*/
+
+    const std::vector data = {{aristos::Edge(0,1,0.3), aristos::Edge(0,2,0.2)}};
+    std::priority_queue q(data.begin(), data.end(), std::greater<>());
+    pop_println("Min Priority Queue", q);
+    auto b = data[1] > data[0];
+    std::cout << b << std::endl;
 }

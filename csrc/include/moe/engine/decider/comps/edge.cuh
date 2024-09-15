@@ -22,9 +22,9 @@ namespace aristos{
         node1(_node1), node2(_node2), weight(_weight){}
 
         __forceinline__
-        unsigned int getNeighbor(const unsigned int& other){
+        unsigned int getNeighbor(const unsigned int& other) const {
             assert(node1 == other || node2 == other);
-            return (node1 = other)? node2 : node1;
+            return (node1 == other)? node2 : node1;
         }
 
         __forceinline__
@@ -65,11 +65,11 @@ namespace aristos{
             return *this > other || *this == other;
         }
 
-        std::string toString(){
-            return "{\n\t"
+        [[nodiscard]] std::string toString() const {
+            return "{"
                    "\"weight\": " + std::to_string(weight)
-                   + ",\n\t\"node1\": " + std::to_string(node1) + ",\n\t}"
-                   + ",\n\t\"node2\": " + std::to_string(node2) + ",\n\t}";
+                   + ", \"node1\": " + std::to_string(node1)
+                   + ", \"node2\": " + std::to_string(node2) + "}";
         }
     };
 }

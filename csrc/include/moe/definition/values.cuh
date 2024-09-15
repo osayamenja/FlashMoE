@@ -10,5 +10,6 @@
 namespace aristos{
     __constant__ Config moeConfig{};
     __device__ AtomicBoolType stillExecuting = 1;
+    Config hostMoEConfig;
 }
 #endif //CSRC_VALUES_CUH

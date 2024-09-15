@@ -46,7 +46,7 @@ namespace aristos{
 
         /// For debugging
         __forceinline__
-        std::string toString(){
+        std::string toString() const {
             return "{\n\t"
                    "\"id\": " + std::to_string(id)
                    + ",\n\t\"rate\": " + std::to_string(processingRate) + ",\n\t}"

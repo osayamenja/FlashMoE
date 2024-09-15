@@ -55,6 +55,13 @@ namespace aristos{
         unsigned int cellStride;
         unsigned int tokenStride;
         unsigned int bookKeepingLen;
+        unsigned int numLayers;
+        unsigned int globalBatch;
+        unsigned int redAmount;
+        unsigned int miniBatch;
+        unsigned int moeFreq;
+        unsigned int p2pBuffer;
+        unsigned int gradBuffer;
 
         CUTE_HOST_DEVICE
         Config() = default;

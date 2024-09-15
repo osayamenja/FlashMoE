@@ -41,12 +41,10 @@ namespace aristos{
         }
 
         __forceinline__
-        static unsigned int getGlobalMoEStages(const unsigned int& globalBatch,
-                                               const unsigned int& numLayers,
-                                               const unsigned int& moeFreq,
-                                               const unsigned int& redAmount,
-                                               const unsigned int& miniBatch){
-            return redAmount * (globalBatch/miniBatch) * (numLayers/moeFreq);
+        static unsigned int getGlobalMoEStages(){
+            return hostMoEConfig.redAmount *
+            (hostMoEConfig.globalBatch/hostMoEConfig.miniBatch)
+            * (hostMoEConfig.numLayers/hostMoEConfig.moeFreq);
         }
 
         __forceinline__
