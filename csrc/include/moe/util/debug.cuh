@@ -20,7 +20,7 @@ namespace aristos{
     };
 
     /// For some container c,
-    /// Use like printContainer<c.size()>(c) for non-array; otherwise, printContainer(c)
+    /// Use like printContainer<c.size()>(c) for array; otherwise, printContainer(c)
     template<unsigned int k=0, typename C> requires StreamableContainer<C, k>
     void printContainer(const C& c) {
         std::stringstream outStream;

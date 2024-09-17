@@ -25,6 +25,7 @@
 #include <cutlass/gemm/dispatch_policy.hpp>
 #include <cutlass/gemm/collective/collective_mma.hpp>
 #include <boost/pending/disjoint_sets.hpp>
+#include <set>
 
 #define THREADS_PER_WARP 32
 #define THREADS_PER_BLOCK 256
@@ -382,6 +383,7 @@ void pop_println(std::string_view rem, T& pq)
         std::cout << pq.top().toString() << ' ';
     std::cout << '\n';
 }
+
 int main() {
     /*auto size = 64;
     unsigned int* p;
@@ -404,7 +406,6 @@ int main() {
     CUTE_CHECK_ERROR(cudaFreeAsync(b, cudaStreamPerThread));
     free(host_b);*/
 
-    /// Necessary to use path halving to ensure amortized "practical constant" time
     /*using djs = boost::disjoint_sets_with_storage<boost::identity_property_map,
     boost::identity_property_map, boost::find_with_path_halving>;
     auto constexpr n = 5;
@@ -436,9 +437,30 @@ int main() {
     std::cout << ']' << std::endl;
     std::cout << aristos::Streamable<decltype(sets)::key_type> << std::endl;*/
 
-    const std::vector data = {{aristos::Edge(0,1,0.3), aristos::Edge(0,2,0.2)}};
-    std::priority_queue q(data.begin(), data.end(), std::greater<>());
-    pop_println("Min Priority Queue", q);
-    auto b = data[1] > data[0];
-    std::cout << b << std::endl;
+    /*std::array<aristos::Expert, 4> exps {{aristos::Expert(0, 3, 1),
+                                          aristos::Expert(1, 12, 1),
+                                          aristos::Expert(2, 6, 1),
+                                          aristos::Expert(3, 3, 1)}};
+    std::array<aristos::Worker, 4> workers {{aristos::Worker(0, 4, 4),
+                                             aristos::Worker(1, 8, 6),
+                                             aristos::Worker(2, 2, 6),
+                                             aristos::Worker(3, 2, 6)}};
+    std::array<std::string, 4> sv;
+    std::transform(workers.begin(), workers.end(), sv.begin(), [](aristos::Worker e){
+       return e.toString();
+    });
+    aristos::printContainer<sv.size()>(sv);
+    std::cout << std::endl << "Sorted 👇" << std::endl;
+    std::sort(workers.begin(), workers.end(), std::greater<>());
+    std::transform(workers.begin(), workers.end(), sv.begin(), [](aristos::Worker e){
+        return e.toString();
+    });
+    aristos::printContainer<sv.size()>(sv);*/
+    auto cmp = [](const aristos::Expert& lhs, const aristos::Expert& rhs){
+        return lhs.cost < rhs.cost;};
+    std::set<aristos::Expert, decltype(cmp)> t{{aristos::Expert(0, 3, 1),
+                                                aristos::Expert(1, 12, 1),
+                                                aristos::Expert(2, 6, 1),
+                                                aristos::Expert(3, 3, 1)}};
+    std::cout << (t.lower_bound(aristos::Expert(12)) == t.end()) << std::endl;
 }

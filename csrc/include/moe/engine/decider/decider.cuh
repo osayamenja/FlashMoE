@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <numeric>
 #include <queue>
+#include <set>
 #include <boost/pending/disjoint_sets.hpp>
 #include <cute/config.hpp>
 
@@ -19,15 +20,16 @@
 #include "comps/worker.cuh"
 
 namespace aristos::decider{
-    /// Generates DP-EP groups [D,G] -> Devices to Groups
+    /// Necessary to use path halving to ensure amortized "practical constant" time
     using DisjointSet = boost::disjoint_sets_with_storage<boost::identity_property_map,
             boost::identity_property_map, boost::find_with_path_halving>;
     using AdjMatrix = std::vector<std::vector<std::pair<double, double>>>;
+    /// Generates DP-EP groups [D,G] -> Devices to Groups
     __forceinline__
-    std::vector<size_t> group(const AdjMatrix& adjMatrix,
-                           const std::vector<Worker>& workers,
-                           const std::vector<Expert>& experts,
-                           bool doParetoSweep = false){
+    std::vector<size_t> decide(const AdjMatrix& adjMatrix,
+                               const std::vector<Worker>& workers,
+                               const std::vector<Expert>& experts,
+                               bool doParetoSweep = false){
         auto totalCost = 0U, totalMem = 0U;
         for(const auto& e: experts){
             totalCost += e.cost;
@@ -147,17 +149,62 @@ namespace aristos::decider{
                 groupInfo.erase(g.first);
             }
         }
-
-        if(doParetoSweep && groupInfo.size() > 1)[[unlikely]]{
-
-        }
         return groups.parents();
     }
 
     /// Generates EP spec [E,D] -> Experts to Devices
+    /// Assumes that the group satisfies memory constraints.
     __forceinline__
-    std::vector<int> assign(){
+    std::vector<unsigned int> assign(std::vector<Expert>& experts,
+                            std::vector<Worker>& workerGroup){
+        using CostComparator = decltype([](const aristos::Expert& lhs, const aristos::Expert& rhs){
+            return lhs.cost < rhs.cost;});
+        std::set<aristos::Expert, CostComparator> t(experts.cbegin(), experts.cend());
+        std::vector<unsigned int> assignment(experts.size());
+        auto totalCost = 0U, totalMem = 0U;
+        for(const auto& e: experts){
+            totalCost += e.cost;
+            totalMem += e.memoryDemand; // == experts.size()
+        }
+        auto wellDistributedCapacity = true;
+        auto reqCap = totalMem / workerGroup.size();
+        if(totalMem % workerGroup.size() != 0){
+            reqCap = int(std::ceil(static_cast<double>(totalMem) / static_cast<double>(workerGroup.size())));
+        }
+        auto totalRate = 0U;
+        for(const auto& w: workerGroup){
+            wellDistributedCapacity = wellDistributedCapacity && w.memoryCapacity >= reqCap;
+            totalRate += w.processingRate;
+        }
+        std::sort(experts.begin(), experts.end(), std::greater<>());
+        std::sort(workerGroup.begin(), workerGroup.end(), std::greater<>());
 
+        auto j = 0U;
+        while(!t.empty()){
+            auto budget = static_cast<unsigned int>(std::ceil(static_cast<double>(workerGroup[j].processingRate * totalCost) / static_cast<double>(totalRate)));
+            auto allocated = budget;
+            while(budget > 0 && workerGroup[j].memoryCapacity > 0 && !t.empty() > 0){
+                auto expertBudget = Expert(budget);
+                auto lower = t.lower_bound(expertBudget);
+                // Below is lower == t.end() ==> budget is greater than any existing individual demand
+                auto bestMatch = *std::prev(t.cend());
+                if(lower->cost == budget || lower == t.cbegin()){
+                    bestMatch = *lower;
+                }
+                else if (lower != t.cend()){
+                    bestMatch = Expert::closest(*lower, *t.upper_bound(expertBudget), budget);
+                }
+                assignment[bestMatch.id] = workerGroup[j].id;
+                workerGroup[j].memoryCapacity -= 1;
+                budget -= bestMatch.cost;
+            }
+            j = (j + 1) % workerGroup.size();
+            totalCost -= (allocated - budget);
+            if(workerGroup[j].memoryCapacity == 0 || wellDistributedCapacity){
+                totalRate -= workerGroup[j].processingRate;
+            }
+        }
+        return assignment;
     }
 }
 #endif //CSRC_DECIDER_CUH

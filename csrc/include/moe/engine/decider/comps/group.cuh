@@ -91,11 +91,16 @@ namespace aristos{
         }
 
         __forceinline__
-        bool operator>(const Group& other){
+        bool operator>(const Group& other) const{
             if(floatEqual(getCurrentObjective(), other.getCurrentObjective())){
                 return id > other.id;
             }
             return getCurrentObjective() > other.getCurrentObjective();
+        }
+
+        __forceinline__
+        bool operator==(const Group& other) const{
+            return id == other.id;
         }
 
         private:

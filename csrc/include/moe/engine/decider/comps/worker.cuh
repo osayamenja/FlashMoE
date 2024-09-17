@@ -47,21 +47,10 @@ namespace aristos{
         /// For debugging
         __forceinline__
         std::string toString() const {
-            return "{\n\t"
-                   "\"id\": " + std::to_string(id)
-                   + ",\n\t\"rate\": " + std::to_string(processingRate) + ",\n\t}"
-                   + ",\n\t\"cap\": " + std::to_string(memoryCapacity) + ",\n\t}";
+            return "{\"id\": " + std::to_string(id)
+                   + ", \"rate\": " + std::to_string(processingRate)
+                   + ", \"cap\": " + std::to_string(memoryCapacity) + "}";
         }
     };
 }
-
-template<>
-struct std::hash<aristos::Worker>
-{
-    __forceinline__
-    std::size_t operator()(const aristos::Worker& w) const noexcept
-    {
-        return w.id;
-    }
-};
 #endif //CSRC_WORKER_CUH

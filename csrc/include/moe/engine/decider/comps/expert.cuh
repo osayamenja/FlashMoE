@@ -8,10 +8,16 @@ namespace aristos{
     struct Expert{
         unsigned int id;
         unsigned long cost;
-        unsigned int memoryDemand;
+        unsigned int memoryDemand = 1; // experimental feature for heterogeneous experts
 
-        Expert(unsigned int _id, unsigned long _cost, unsigned int _mem):
-                id(_id), cost(_cost), memoryDemand(_mem){};
+        Expert(unsigned int _id, unsigned long _cost):
+                id(_id), cost(_cost){};
+
+        /// Sentinel
+        explicit Expert(unsigned long _cost){
+            cost = _cost;
+            id = 0;
+        }
 
         __forceinline__
         bool operator==(const Expert& other) const {
@@ -45,22 +51,14 @@ namespace aristos{
 
         __forceinline__
         std::string toString() const {
-            return "{\n\t"
-                   "\"id\": " + std::to_string(id)
-                   + ",\n\t\"ComputeCost\": " + std::to_string(cost) + ",\n\t"
-                   + ",\n\t\"MemoryDemand\": " + std::to_string(memoryDemand) + ",\n\t}";
+            return "{\"id\": " + std::to_string(id)
+                   + ", \"ComputeCost\": " + std::to_string(cost)
+                   + ", \"MemoryDemand\": " + std::to_string(memoryDemand) + "}";
         }
 
+        __forceinline__ static Expert closest(const Expert& left, const Expert& right, unsigned int val){
+            return (std::abs(int(left.cost) - int(val)) <= std::abs(int(right.cost) - int(val))? left : right);
+        }
     };
 }
-
-template<>
-struct std::hash<aristos::Expert>
-{
-    __forceinline__
-    std::size_t operator()(const aristos::Expert& x) const noexcept
-    {
-        return x.id;
-    }
-};
 #endif //CSRC_EXPERT_CUH
