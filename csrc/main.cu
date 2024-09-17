@@ -456,11 +456,64 @@ int main() {
         return e.toString();
     });
     aristos::printContainer<sv.size()>(sv);*/
-    auto cmp = [](const aristos::Expert& lhs, const aristos::Expert& rhs){
-        return lhs.cost < rhs.cost;};
-    std::set<aristos::Expert, decltype(cmp)> t{{aristos::Expert(0, 3, 1),
-                                                aristos::Expert(1, 12, 1),
-                                                aristos::Expert(2, 6, 1),
-                                                aristos::Expert(3, 3, 1)}};
-    std::cout << (t.lower_bound(aristos::Expert(12)) == t.end()) << std::endl;
+    auto constexpr dim = 4U;
+    auto constexpr intraWidth = 4.0;
+
+    aristos::decider::AdjMatrix A(dim);
+    std::pair<double, double> constexpr intraBW = {0.0, 1}; // (ms, ms/MB)
+    std::pair<double, double> constexpr interBW = {0.03, 0.054};
+
+    CUTE_UNROLL
+    for(int i = 0; i < dim; ++i){
+        A[i] = std::vector<std::pair<double, double>>(dim);
+        CUTE_UNROLL
+        for(int j = 0; j < dim; ++j){
+            if(i == j )[[unlikely]]
+                continue;
+            if(int(std::floor(j / static_cast<double>(intraWidth)) == int(std::floor(i / static_cast<double>(intraWidth))))){
+                // intra node partitions
+                A[i][j] = intraBW;
+            }
+            else{
+                A[i][j] = interBW;
+            }
+        }
+    }
+
+    auto const A100Rate = static_cast<unsigned long>(std::ceil(0.43 * 312UL * 1E9));
+    auto constexpr deviceMem = 16U;
+    std::vector<aristos::Worker> w;
+    CUTE_UNROLL
+    for(int i = 0; i < dim; ++i){
+        w.emplace_back(i, 1, deviceMem);
+    }
+
+    auto constexpr nExp = 16U;
+    std::vector<aristos::Expert> e;
+    //TODO KiloFLOPs
+    unsigned long constexpr expC = 16L * 4L * 2048L * (1024L * 1024L);
+    CUTE_UNROLL
+    for(int i = 0; i < nExp; ++i){
+        e.emplace_back(i, 1);
+    }
+
+    aristos::hostMoEConfig = aristos::Config();
+    aristos::hostMoEConfig.redAmount = 1;
+    aristos::hostMoEConfig.globalBatch = 256;
+    aristos::hostMoEConfig.miniBatch = 64;
+    aristos::hostMoEConfig.numLayers = 24;
+    aristos::hostMoEConfig.p2pBuffer = 1; // MB
+    aristos::hostMoEConfig.gradBuffer = 1;
+    aristos::hostMoEConfig.moeFreq = 24; // every other layer
+
+    auto spec = aristos::decider::decide(A, w, e);
+    auto s = aristos::subsets(spec);
+    aristos::printMapCV(s);
+    auto g = s.begin()->second;
+    std::vector<aristos::Worker> wG;
+    for(int i = 0; i < g.size(); ++i){
+        wG.emplace_back(g[i], w[i].processingRate, w[i].memoryCapacity);
+    }
+    auto assignment = aristos::decider::assign(e, wG);
+    aristos::printContainer(assignment);
 }

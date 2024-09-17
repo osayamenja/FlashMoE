@@ -74,7 +74,7 @@ namespace aristos{
 
         __forceinline__
         static unsigned int getGlobalMoEStages(){
-            return hostMoEConfig.redAmount *
+            return (2 + hostMoEConfig.redAmount) *
             (hostMoEConfig.globalBatch/hostMoEConfig.miniBatch)
             * (hostMoEConfig.numLayers/hostMoEConfig.moeFreq);
         }

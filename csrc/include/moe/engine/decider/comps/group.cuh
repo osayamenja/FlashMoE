@@ -41,13 +41,14 @@ namespace aristos{
 
         __forceinline__
         bool shouldMerge(Group& neighbor, const ARArgs& arArgs, const unsigned int& effectiveW){
-            auto prevState = visited.at(neighbor.id);
-            if(visited.contains(neighbor.id) &&
-            prevState.first == numNodes() && prevState.second == neighbor.numNodes()){
-                /// We have evaluated and rejected this group previously.
-                /// Neither of our states has changed since our last encounter,
-                /// thus we bypass the expensive evaluation procedure and proactively reject again.
-                return false;
+            if(visited.contains(neighbor.id)){
+                auto prevState = visited.at(neighbor.id);
+                if(prevState.first == numNodes() && prevState.second == neighbor.numNodes()){
+                    /// We have evaluated and rejected this group previously.
+                    /// Neither of our states has changed since our last encounter,
+                    /// thus we bypass the expensive evaluation procedure and proactively reject again.
+                    return false;
+                }
             }
             updateVisited(neighbor.id, numNodes(), neighbor.numNodes());
             /// Update from global state

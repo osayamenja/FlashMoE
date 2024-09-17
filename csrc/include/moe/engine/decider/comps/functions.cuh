@@ -23,8 +23,15 @@ namespace aristos{
         return 2.0 * (a.numGroups - 1) * a.bottleneckTime;
     }
 
+    template<aristos::Stability s=STABLE>
     __forceinline__
     bool optimizingPolicy(const double& obj1, const double& obj2, const double& obj1_2){
+        return (std::isinf(obj1) && std::isinf(obj2))? true :
+               (obj1_2 <= std::max(obj1, obj2));
+    }
+    template<>
+    __forceinline__
+    bool optimizingPolicy<EXPERIMENTAL>(const double& obj1, const double& obj2, const double& obj1_2){
         return (std::isinf(obj1) && std::isinf(obj2))? true :
                (obj1_2 * (1 / obj1 + 1/obj2)) <= (std::min((std::max(obj1, obj2) / std::min(obj1, obj2)) + 1, clamp));
     }

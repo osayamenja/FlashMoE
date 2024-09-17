@@ -120,7 +120,7 @@ target_compile_options(csrc
         $<$<CONFIG:Debug>:-O0;-g;>
         $<$<AND:$<BOOL:${NVSHMEM_VERBOSE}>,$<COMPILE_LANGUAGE:CUDA>>:-Xptxas -v>
         $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Debug>>:-O0;-g;-G>
-        $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<BOOL:${NVCC_THREADS}>>:-t4>
+        $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<BOOL:${NVCC_THREADS}>>:-t0>
         $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-Xfatbin -compress-all>
         $<$<COMPILE_LANGUAGE:CUDA>:-Xptxas -v>
         #[[$<$<COMPILE_LANGUAGE:CUDA>:-t0>

@@ -14,7 +14,7 @@ namespace aristos{
 
     template<typename C, unsigned int k=0>
     concept StreamableContainer = requires(C c){
-        Streamable<typename decltype(c)::value_type>
+        requires Streamable<typename decltype(c)::value_type>
                 && (std::same_as<C, std::vector<typename decltype(c)::value_type>>
                 || ( k > 0 && std::same_as<C, std::array<typename decltype(c)::value_type, k>>));
     };

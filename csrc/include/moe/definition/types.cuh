@@ -55,6 +55,7 @@ namespace aristos{
         unsigned int cellStride;
         unsigned int tokenStride;
         unsigned int bookKeepingLen;
+        /// Decider's deps
         unsigned int numLayers;
         unsigned int globalBatch;
         unsigned int redAmount;

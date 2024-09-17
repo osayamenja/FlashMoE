@@ -30,7 +30,7 @@ namespace aristos::decider{
                                const std::vector<Worker>& workers,
                                const std::vector<Expert>& experts,
                                bool doParetoSweep = false){
-        auto totalCost = 0U, totalMem = 0U;
+        size_t totalCost = 0U, totalMem = 0U;
         for(const auto& e: experts){
             totalCost += e.cost;
             totalMem += e.memoryDemand;
@@ -46,13 +46,15 @@ namespace aristos::decider{
         std::priority_queue<Edge> externalEdges;
         auto groupInfo = std::unordered_map<unsigned int, Group>{};
         auto effectiveWorld = workers.size() - infeasibleGroups.size();
+        CUTE_UNROLL
         for(int i = 0; i < adjMatrix.size(); ++i) {
             auto dp = std::vector<std::pair<double, double>>(adjMatrix.size());
-            for (int j = 0; j < adjMatrix.size(); ++i) {
-                auto alpha = adjMatrix[i][j].first;
-                auto beta = adjMatrix[i][j].second;
+            CUTE_UNROLL
+            for (int j = 0; j < adjMatrix.size(); ++j) {
                 dp[j] = {0.0, 0.0};
                 if (i != j)[[likely]] {
+                    auto alpha = adjMatrix[i][j].first;
+                    auto beta = adjMatrix[i][j].second;
                     candidateEdges.push(Edge(i, j,
                                              ObjArgs::p2pTransferTime(alpha, beta,
                                                                       hostMoEConfig.p2pBuffer)));
@@ -161,7 +163,7 @@ namespace aristos::decider{
             return lhs.cost < rhs.cost;});
         std::set<aristos::Expert, CostComparator> t(experts.cbegin(), experts.cend());
         std::vector<unsigned int> assignment(experts.size());
-        auto totalCost = 0U, totalMem = 0U;
+        size_t totalCost = 0U, totalMem = 0U;
         for(const auto& e: experts){
             totalCost += e.cost;
             totalMem += e.memoryDemand; // == experts.size()
