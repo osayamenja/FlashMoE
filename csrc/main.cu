@@ -5,11 +5,10 @@
 #include <array>
 #include <atomic>
 
-#include <cuda_runtime.h>
-#include <cuda/std/array>
 #include <cuda/std/chrono>
 #include <cuda/atomic>
 #include <cuda/barrier>
+#include <cuda_runtime.h>
 
 #include <nvshmemx.h>
 #include <nvshmem.h>
@@ -71,45 +70,46 @@ __global__ void benchAtomics(CUTE_GRID_CONSTANT const int iter, unsigned int* fl
 
     }
     using BlockReduce = cub::BlockReduce<Nano, THREADS_PER_BLOCK>;
-    __shared__ typename BlockReduce::TempStorage temp_storage;
+    __shared__ BlockReduce::TempStorage temp_storage;
 
     a_flag = BlockReduce(temp_storage).Reduce(a_flag, cub::Max());
     a_cas = BlockReduce(temp_storage).Reduce(a_cas, cub::Max());
     a_or = BlockReduce(temp_storage).Reduce(a_or, cub::Max());
     a_and = BlockReduce(temp_storage).Reduce(a_and, cub::Max());
+    cuda::std::chrono::duration_cast<cuda::std::chrono::microseconds, double>(a_flag);
 
     if(aristos::block::threadID() == 0 && !skip){
         printf("Block Id is %u, a_flag: {T: %f, V: %d}, a_cas: {T: %f, V:%u}, a_or: {T: %f, V:%u}, a_and: {T: %f, V: %u},"
                "isShared: %s\n",
                aristos::grid::blockID(),
-               static_cast<cuda::std::chrono::duration<double, cuda::std::micro>>(a_flag / (iter*1.0)).count(),
+               cuda::std::chrono::duration_cast<cuda::std::chrono::duration<double, cuda::std::micro>>(a_flag / (iter*1.0)).count(),
                aFlag.load(),
-               static_cast<cuda::std::chrono::duration<double, cuda::std::micro>>(a_cas/(iter*1.0)).count(),
+               cuda::std::chrono::duration_cast<cuda::std::chrono::duration<double, cuda::std::micro>>(a_cas/(iter*1.0)).count(),
                atomicCAS(pUnderTest, 0, 0),
-               static_cast<cuda::std::chrono::duration<double, cuda::std::micro>>(a_or / (iter * 1.0)).count(),
+               cuda::std::chrono::duration_cast<cuda::std::chrono::duration<double, cuda::std::micro>>(a_or/(iter*1.0)).count(),
                atomicOr(pUnderTest, 0U),
-               static_cast<cuda::std::chrono::duration<double, cuda::std::micro>>(a_and/(iter*1.0)).count(),
+               cuda::std::chrono::duration_cast<cuda::std::chrono::duration<double, cuda::std::micro>>(a_and/(iter*1.0)).count(),
                atomicAnd(pUnderTest, 1U),
                (shouldPersist)? "Yes" : "No");
     }
 }
 
 template<unsigned int bM=128, unsigned int bN=128, unsigned int bK=8, unsigned int bP=3>
-__global__ void occupancyTestKernel(){
+__global__ void __maxnreg__(aristos::maxRegsPerThread) occupancyTestKernel(){
     __shared__ float sharedA[cute::cosize_v<decltype(cute::make_layout(cute::make_shape(cute::Int<bM>{}, cute::Int<bK>{}, cute::Int<bP>{})))>];
     __shared__ float sharedB[cute::cosize_v<decltype(cute::make_layout(cute::make_shape(cute::Int<bN>{}, cute::Int<bK>{}, cute::Int<bP>{})))>];
 }
 
 namespace aristos{
     bool isInitialized = false;
-    cudaStream_t aristosStream = cudaStreamPerThread;
+    extern __inline__ int blocksPerSM = 0;
+    auto aristosStream = cudaStreamPerThread;
     void aristosInit(const unsigned int& seqLen, const unsigned int& embedDim, const unsigned int& hiddenProjDim,
                      const unsigned int& k, const unsigned int& capacityFactor,
                      const unsigned int& numExperts) {
         assert(!isInitialized);
         isInitialized = true;
         int numSMs = 0;
-        int numBlocksPerSM = 0;
         constexpr int minCommunicatorBlocks = 2;
         int localRank = 0;
         int computeCapability = 0;
@@ -118,11 +118,11 @@ namespace aristos{
         const auto GEMMBlocks = cute::ceil_div(seqLen, bM) * cute::ceil_div(hiddenProjDim, bN);
         const auto minBlocks = GEMMBlocks + minCommunicatorBlocks;
         CUTE_CHECK_ERROR(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-                &numBlocksPerSM,
+                &blocksPerSM,
                 occupancyTestKernel<bM, bN, bK, bP>,
                 blockSize,
-                sizeof(aristos::maxPrecision) * ((bK * bP) * (bM + bN))));
-        const int maxActiveBlocks = numBlocksPerSM * numSMs;
+                0));
+        const int maxActiveBlocks = blocksPerSM * numSMs;
         assert(minBlocks <= maxActiveBlocks);
         int deviceSupportsMemoryPools = 0;
         CUTE_CHECK_ERROR(cudaDeviceGetAttribute(&deviceSupportsMemoryPools,
@@ -246,10 +246,10 @@ __global__ void benchTen(unsigned int* foo, bool skip = false, bool shouldPersis
                aristos::block::threadID(),
                (cute_t / (1000*1.0)).count(),
                t(0, cute::make_coord(cute::make_coord(0,1),0)),
-               static_cast<cuda::std::chrono::duration<double, cuda::std::micro>>(cute_t/(1000*1.0)).count(),
+               cuda::std::chrono::duration_cast<cuda::std::chrono::duration<double, cuda::std::micro>>(cute_t/(1000*1.0)).count(),
                (raw_t / (1000*1.0)).count(),
                *getTokenPointer(foo, 0, 0, 1, 0),
-               static_cast<cuda::std::chrono::duration<double, cuda::std::micro>>(raw_t/(1000*1.0)).count(),
+               cuda::std::chrono::duration_cast<cuda::std::chrono::duration<double, cuda::std::micro>>(raw_t/(1000*1.0)).count(),
                (shouldPersist)? "Yes" : "No");
     }
 }
@@ -260,9 +260,9 @@ __global__ void benchBarrier(unsigned int* b, cuda::barrier<cuda::thread_scope_d
     Nano bar_ptr = Nano::zero();
     Nano bar_obj = Nano::zero();
     if(persist){
-        cuda::associate_access_property(b, cuda::access_property::persisting{});
-        cuda::associate_access_property(&testStages, cuda::access_property::persisting{});
-        cuda::associate_access_property(bar, cuda::access_property::persisting{});
+        associate_access_property(b, cuda::access_property::persisting{});
+        associate_access_property(&testStages, cuda::access_property::persisting{});
+        associate_access_property(bar, cuda::access_property::persisting{});
     }
     /*aristos::barrier::init(n, persist);*/
     constexpr auto iter = 1024;
@@ -307,9 +307,9 @@ __global__ void benchBarrier(unsigned int* b, cuda::barrier<cuda::thread_scope_d
     if(!aristos::block::threadID() && !skip){
         printf("Block Id is %u, bar_ptr: {T: %f}, bar_obj: {T: %f}, persist: %s\n",
                aristos::grid::blockID(),
-               static_cast<cuda::std::chrono::duration<double, cuda::std::micro>>(bar_ptr/(iter*1.0)).count(),
-               static_cast<cuda::std::chrono::duration<double, cuda::std::micro>>(bar_obj/(iter*1.0)).count(),
-               (persist)? "Yes" : "No");
+               cuda::std::chrono::duration_cast<cuda::std::chrono::duration<double, cuda::std::micro>>(bar_ptr / (iter*1.0)).count(),
+               cuda::std::chrono::duration_cast<cuda::std::chrono::duration<double, cuda::std::micro>>(bar_obj / (iter*1.0)).count(),
+               persist? "Yes" : "No");
     }
 }
 
@@ -376,7 +376,7 @@ __global__ void processorSpec(DispatchPolicy dispatchPolicy, ElementA* A,
 }
 
 template<typename T>
-void pop_println(std::string_view rem, T& pq)
+void pop_println(const std::string_view& rem, T& pq)
 {
     std::cout << rem << ": ";
     for (; !pq.empty(); pq.pop())
@@ -404,7 +404,16 @@ int main() {
     CUTE_CHECK_LAST();
     CUTE_CHECK_ERROR(cudaFreeAsync(p, cudaStreamPerThread));
     CUTE_CHECK_ERROR(cudaFreeAsync(b, cudaStreamPerThread));
+    CUTE_CHECK_ERROR(cudaStreamSynchronize(cudaStreamPerThread));
     free(host_b);*/
+
+    CUTE_CHECK_ERROR(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+                &aristos::blocksPerSM,
+                occupancyTestKernel<aristos::bM, aristos::bN, aristos::bK, aristos::bP>,
+                aristos::blockSize,
+                0));
+
+    printf("Max active blocks is %u", aristos::blocksPerSM);
 
     /*using djs = boost::disjoint_sets_with_storage<boost::identity_property_map,
     boost::identity_property_map, boost::find_with_path_halving>;
@@ -456,7 +465,7 @@ int main() {
         return e.toString();
     });
     aristos::printContainer<sv.size()>(sv);*/
-    auto constexpr dim = 4U;
+    /*auto constexpr dim = 4U;
     auto constexpr intraWidth = 4.0;
 
     aristos::decider::AdjMatrix A(dim);
@@ -513,7 +522,7 @@ int main() {
     std::vector<aristos::Worker> wG;
     for(int i = 0; i < g.size(); ++i){
         wG.emplace_back(g[i], w[i].processingRate, w[i].memoryCapacity);
-    }
-    auto assignment = aristos::decider::assign(e, wG);
-    aristos::printContainer(assignment);
+    }*/
+    /*auto assignment = aristos::decider::assign(e, wG);
+    aristos::printContainer(assignment);*/
 }

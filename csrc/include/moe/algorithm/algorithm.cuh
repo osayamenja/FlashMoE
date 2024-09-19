@@ -8,7 +8,6 @@
 // Heap things
 #include <cuda/std/__algorithm/make_heap.h>
 #include <cuda/std/__algorithm/pop_heap.h>
-#include <cuda/std/concepts>
 #include "../definition/tensor.cuh"
 #include "../util/indexing.cuh"
 #include "../definition/values.cuh"

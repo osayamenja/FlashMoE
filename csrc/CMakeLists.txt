@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.27)
 
-# Set compilers and obtain compute capability, assuming the running process sees homogenous GPUs
+# Set compilers and obtain compute capability, assuming the running process sees homogeneous GPUs
 # Add COMMAND_ECHO STDOUT to see the commands in standard out
 execute_process(COMMAND "which" "g++"
         COMMAND_ERROR_IS_FATAL ANY
@@ -17,7 +17,6 @@ execute_process(COMMAND "nvidia-smi" "--id=0" "--query-gpu=compute_cap" "--forma
 string(REGEX REPLACE "(\.[0-9])" "0" COMPUTE_CAPABILITY ${COMPUTE_CAPABILITY})
 message(STATUS "GPU 0 Compute Capability: ${COMPUTE_CAPABILITY}")
 
-#set(ENV{CPM_SOURCE_CACHE} "${CMAKE_CURRENT_SOURCE_DIR}/cmake/deps")
 set(ENV{CUTLASS_NVCC_ARCHS} "${COMPUTE_CAPABILITY}")
 set(CMAKE_CXX_COMPILER "${CPP_COMP_PATH}" CACHE PATH "g++ Compiler Path")
 set(CMAKE_C_COMPILER "${C_COMP_PATH}" CACHE PATH "gcc Compiler Path")
@@ -31,9 +30,9 @@ if(NOT ${CMAKE_SYSTEM_PROCESSOR} MATCHES "^aarch64")
     set(ARISTOS_CUDA_CXX_FLAGS "${ARISTOS_CUDA_CXX_FLAGS} -m64")
 endif ()
 set(ARISTOS_CUDA_CXX_FLAGS "${ARISTOS_CUDA_CXX_FLAGS} -Wno-unknown-pragmas")
-set(ARISTOS_CUDA_CXX_FLAGS "${ARISTOS_CUDA_CXX_FLAGS} -Wno-switch")
+set(ARISTOS_CUDA_CXX_FLAGS "${ARISTOS_CUDA_CXX_FLAGS} -Wno-switch -Wformat=2")
 set(ARISTOS_CUDA_CXX_FLAGS "${ARISTOS_CUDA_CXX_FLAGS} -Wno-unused-but-set-parameter")
-set(ARISTOS_CUDA_CXX_FLAGS "${ARISTOS_CUDA_CXX_FLAGS} -Wno-sign-compare")
+set(ARISTOS_CUDA_CXX_FLAGS "${ARISTOS_CUDA_CXX_FLAGS} -Wno-sign-compare -v")
 # Silence nvtx deprecation warning from legacy version used in libtorch
 
 set(CMAKE_CXX_STANDARD 20)
@@ -54,11 +53,6 @@ include(CheckCompilerFlag)
 check_compiler_flag(CUDA -t4 NVCC_THREADS)
 
 find_package(CUDAToolkit REQUIRED)
-
-#MathDx business
-set(NvidiaCutlass_ROOT $ENV{CUTLASS_PATH})
-set(cublasdx_CUTLASS_ROOT $ENV{CUTLASS_PATH})
-find_package(mathdx REQUIRED COMPONENTS cublasdx CONFIG)
 
 add_executable(csrc main.cu
         include/moe/engine/subscriber.cuh
@@ -83,9 +77,15 @@ add_executable(csrc main.cu
         include/moe/util/debug.cuh
         include/moe/engine/decider/comps/niche.cuh
 )
+set_target_properties(csrc PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+        CUDA_RESOLVE_DEVICE_SYMBOLS   ON
+)
 
 # add dependencies
 #TODO Pin versions for release build and use main for debug
+set(ENV{CPM_SOURCE_CACHE} "./cmake/cache")
+set(ENV{CCCL_ENABLE_UNSTABLE} ON)
 include(cmake/CPM.cmake)
 ## This will automatically clone CCCL from GitHub and make the exported cmake targets available
 CPMAddPackage(
@@ -93,40 +93,50 @@ CPMAddPackage(
         GITHUB_REPOSITORY nvidia/cccl
         GIT_TAG main # Fetches the latest commit on the main branch
 )
+if(CCCL_ADDED)
+    target_link_libraries(csrc PRIVATE CCCL::CCCL)
+endif()
 
-#Libtorch business
-find_package(Torch REQUIRED)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
-
-target_link_libraries(csrc PRIVATE CCCL::CCCL)
-
-set_target_properties(csrc PROPERTIES
-        CUDA_SEPARABLE_COMPILATION ON
-        CUDA_RESOLVE_DEVICE_SYMBOLS   ON
+#CUTLASS business
+CPMAddPackage(
+        NAME CUTLASS
+        GITHUB_REPOSITORY nvidia/cutlass
+        GIT_TAG main
+        DOWNLOAD_ONLY TRUE
+        OPTIONS
+        "CUTLASS_NVCC_ARCHS=${COMPUTE_CAPABILITY}"
 )
+if(CUTLASS_ADDED)
+    # header-only
+    target_include_directories(csrc SYSTEM PRIVATE "${CUTLASS_SOURCE_DIR}/include")
+endif ()
 
 ## NVSHMEM Business
 set(NVSHMEM_HOME "$ENV{NVSHMEM_HOME}")
 find_package(NVSHMEM REQUIRED HINTS ${NVSHMEM_HOME}/lib/cmake/nvshmem)
 add_library(nvshmem_host ALIAS nvshmem::nvshmem_host)
 add_library(nvshmem_device ALIAS nvshmem::nvshmem_device)
-target_link_libraries(csrc PUBLIC nvshmem_host nvshmem_device)
-target_link_libraries(csrc PUBLIC CUDA::cudart CUDA::cuda_driver CUDA::cublas CUDA::nvtx3 mathdx::cublasdx
-        "${TORCH_LIBRARIES}")
+target_link_libraries(csrc PRIVATE nvshmem_host nvshmem_device)
+
+#target_link_libraries(csrc PUBLIC CUDA::cudart CUDA::cuda_driver CUDA::cublas CUDA::nvtx3 mathdx::cublasdx "${TORCH_LIBRARIES}")
+target_link_libraries(csrc PRIVATE CUDA::cudart CUDA::cuda_driver CUDA::cublas CUDA::nvtx3)
 target_link_libraries(csrc PRIVATE atomic)
 
-target_compile_options(csrc
-        PRIVATE
-        $<$<CONFIG:Debug>:-O0;-g;>
-        $<$<AND:$<BOOL:${NVSHMEM_VERBOSE}>,$<COMPILE_LANGUAGE:CUDA>>:-Xptxas -v>
-        $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Debug>>:-O0;-g;-G>
-        $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<BOOL:${NVCC_THREADS}>>:-t0>
+target_compile_options(csrc PRIVATE
         $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-Xfatbin -compress-all>
         $<$<COMPILE_LANGUAGE:CUDA>:-Xptxas -v>
-        #[[$<$<COMPILE_LANGUAGE:CUDA>:-t0>
-        # Release config
-        $<$<COMPILE_LANGUAGE:CUDA>:-O3>
-        $<$<COMPILE_LANGUAGE:CUDA>:-Xptxas -O3>]]
+        $<$<COMPILE_LANGUAGE:CUDA>:-t0>
         # Required to support std::tuple in device code
         $<$<BOOL:True>:$<$<COMPILE_LANGUAGE:CUDA>:SHELL:--expt-relaxed-constexpr>>
 )
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    target_compile_options(csrc PRIVATE
+            $<$<COMPILE_LANGUAGE:CXX>:-O0;-g;>
+            $<$<COMPILE_LANGUAGE:CUDA>:-O0; -g; -G>
+    )
+elseif(CMAKE_BUILD_TYPE STREQUAL "Release")
+    target_compile_options(csrc PRIVATE
+            $<$<COMPILE_LANGUAGE:CUDA>:-O3>
+            $<$<COMPILE_LANGUAGE:CUDA>:-Xptxas -O3>
+    )
+endif ()
