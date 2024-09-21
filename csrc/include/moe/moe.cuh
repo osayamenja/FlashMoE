@@ -14,6 +14,7 @@
 #include "engine/processor.cuh"
 #include "definition/values.cuh"
 #include <cuda/annotated_ptr>
+#include "util/config.cuh"
 
 namespace aristos{
     CUTE_DEVICE
@@ -50,9 +51,9 @@ namespace aristos{
         topKMask(activations);
     }
 
-    //TODO add launch bounds
     template<Matrix M, Tensor T>
-    __global__ void __maxnreg__(maxRegsPerThread) forward(M const& activations, T const& expertsWeights, M const& gateWeights,
+    __global__ void ARISTOS_LAUNCH_BOUNDS
+    forward(M const& activations, T const& expertsWeights, M const& gateWeights,
                             M gateOutput, M mappingTensor, M sharedSpec) {
         persistHotPointers();
         gate(activations, gateWeights, gateOutput);
@@ -77,7 +78,8 @@ namespace aristos{
         }
     }
 
-    __global__ void __maxnreg__(maxRegsPerThread) backward(){
+    __global__ void __launch_bounds__(blockSize, MIN_BLOCKS_PER_SM)
+    backward(){
 
     }
 }

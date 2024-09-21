@@ -4,6 +4,8 @@
 #include <iostream>
 #include <array>
 #include <atomic>
+#include <unistd.h>
+#include <sys/wait.h>
 
 #include <cuda/std/chrono>
 #include <cuda/atomic>
@@ -100,6 +102,7 @@ __global__ void __maxnreg__(aristos::maxRegsPerThread) occupancyTestKernel(){
     __shared__ float sharedB[cute::cosize_v<decltype(cute::make_layout(cute::make_shape(cute::Int<bN>{}, cute::Int<bK>{}, cute::Int<bP>{})))>];
 }
 
+#define SUPPORTED = 1;
 namespace aristos{
     bool isInitialized = false;
     extern __inline__ int blocksPerSM = 0;
@@ -136,7 +139,7 @@ namespace aristos{
         // initialize NVSHMEM
         nvshmem_init();
         CUTE_CHECK_ERROR(cudaSetDevice(localRank));
-        // Run Lysi
+        // Run decider
         // ...
         // generates the below
         unsigned int numNeighbors = 0;
@@ -145,14 +148,15 @@ namespace aristos{
         std::vector<specType> translation{};
 
         // Allocate Symmetric Heap + Flags
-        auto trailer = k + 2U;
-        size_t payload = Config::getCapacity(seqLen, numExperts, capacityFactor, k)
+        const auto trailer = k + 2U;
+        const size_t payload = Config::getCapacity(seqLen, numExperts, capacityFactor, k)
                          * (embedDim + trailer);
         size_t heapBytes = numNeighbors * stages * numCells * payload;
         heapBytes += numNeighbors * (sizeof(flagsType) / sizeof(maxPrecision));
-        auto sHeap = nvshmem_calloc(heapBytes, sizeof(maxPrecision));
-
-        // Final Initialization
+        /// Allocates aligned memory
+        const auto sHeap = nvshmem_align(16, heapBytes*sizeof(maxPrecision));
+        //TODO memset symmetric heap?
+        //Final Initialization
         hostMoEConfig = Config();
         unsigned int* bookKeeping;
         /// pubQueueLen -> Multiplied by 2 to simulate pair: {index, numTokens}
@@ -407,14 +411,6 @@ int main() {
     CUTE_CHECK_ERROR(cudaStreamSynchronize(cudaStreamPerThread));
     free(host_b);*/
 
-    CUTE_CHECK_ERROR(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-                &aristos::blocksPerSM,
-                occupancyTestKernel<aristos::bM, aristos::bN, aristos::bK, aristos::bP>,
-                aristos::blockSize,
-                0));
-
-    printf("Max active blocks is %u", aristos::blocksPerSM);
-
     /*using djs = boost::disjoint_sets_with_storage<boost::identity_property_map,
     boost::identity_property_map, boost::find_with_path_halving>;
     auto constexpr n = 5;
@@ -444,33 +440,34 @@ int main() {
 
     aristos::printMapCV(sets);
     std::cout << ']' << std::endl;
-    std::cout << aristos::Streamable<decltype(sets)::key_type> << std::endl;*/
+    std::cout << aristos::Streamable<decltype(sets)::key_type> << std::endl;
 
-    /*std::array<aristos::Expert, 4> exps {{aristos::Expert(0, 3, 1),
-                                          aristos::Expert(1, 12, 1),
-                                          aristos::Expert(2, 6, 1),
-                                          aristos::Expert(3, 3, 1)}};
+    std::array<aristos::Expert, 4> exps {{aristos::Expert(0, 3),
+                                          aristos::Expert(1, 12),
+                                          aristos::Expert(2, 6),
+                                          aristos::Expert(3, 3)}};
     std::array<aristos::Worker, 4> workers {{aristos::Worker(0, 4, 4),
                                              aristos::Worker(1, 8, 6),
                                              aristos::Worker(2, 2, 6),
                                              aristos::Worker(3, 2, 6)}};
     std::array<std::string, 4> sv;
-    std::transform(workers.begin(), workers.end(), sv.begin(), [](aristos::Worker e){
+    std::ranges::transform(workers.begin(), workers.end(), sv.begin(), [](const aristos::Worker& e){
        return e.toString();
     });
     aristos::printContainer<sv.size()>(sv);
     std::cout << std::endl << "Sorted 👇" << std::endl;
-    std::sort(workers.begin(), workers.end(), std::greater<>());
-    std::transform(workers.begin(), workers.end(), sv.begin(), [](aristos::Worker e){
+    std::ranges::sort(workers, std::greater<>());
+    std::ranges::transform(workers.begin(), workers.end(), sv.begin(), [](const aristos::Worker& e){
         return e.toString();
     });
     aristos::printContainer<sv.size()>(sv);*/
-    /*auto constexpr dim = 4U;
+    printf("Number of blocks per SM %u\n", aristos::blocksPerSM);
+    auto constexpr dim = 4U;
     auto constexpr intraWidth = 4.0;
 
-    aristos::decider::AdjMatrix A(dim);
-    std::pair<double, double> constexpr intraBW = {0.0, 1}; // (ms, ms/MB)
-    std::pair<double, double> constexpr interBW = {0.03, 0.054};
+    AdjMatrix A(dim);
+    std::pair constexpr intraBW = {0.0, 1}; // (ms, ms/MB)
+    std::pair constexpr interBW = {0.03, 0.054};
 
     CUTE_UNROLL
     for(int i = 0; i < dim; ++i){
@@ -479,7 +476,7 @@ int main() {
         for(int j = 0; j < dim; ++j){
             if(i == j )[[unlikely]]
                 continue;
-            if(int(std::floor(j / static_cast<double>(intraWidth)) == int(std::floor(i / static_cast<double>(intraWidth))))){
+            if(static_cast<int>(std::floor(j / static_cast<double>(intraWidth)) == static_cast<int>(std::floor(i / static_cast<double>(intraWidth))))){
                 // intra node partitions
                 A[i][j] = intraBW;
             }
@@ -515,14 +512,33 @@ int main() {
     aristos::hostMoEConfig.gradBuffer = 1;
     aristos::hostMoEConfig.moeFreq = 24; // every other layer
 
-    auto spec = aristos::decider::decide(A, w, e);
-    auto s = aristos::subsets(spec);
-    aristos::printMapCV(s);
-    auto g = s.begin()->second;
+    const auto spec = aristos::decider::decide(A, w, e.size(), e.size());
+    const auto g = aristos::subsets(spec, 0);
+    aristos::printContainer(g);
     std::vector<aristos::Worker> wG;
     for(int i = 0; i < g.size(); ++i){
         wG.emplace_back(g[i], w[i].processingRate, w[i].memoryCapacity);
-    }*/
-    /*auto assignment = aristos::decider::assign(e, wG);
-    aristos::printContainer(assignment);*/
+    }
+    const auto assignment = aristos::decider::assign(e, wG);
+    aristos::printContainer(assignment);
+
+    int fd[2];
+    assert(pipe(fd) != -1);
+    const pid_t pid = fork();
+    assert(pid >= 0);
+    if (pid == 0) {
+        close(fd[1]);
+        int msg; //nvtx3::message
+        read(fd[0], &msg, sizeof(msg));
+        std::cout << "Child received " << msg << std::endl;
+        close(fd[0]);
+        _Exit(0);
+    }
+    close(fd[0]);
+    auto buf = 34;
+    write(fd[1], &buf, sizeof(int));
+    close(fd[1]);
+    wait(&buf);
+    std::cout << "Child status is: " << buf << std::endl;
 }
+

@@ -18,27 +18,23 @@
 #include "comps/expert.cuh"
 #include "comps/group.cuh"
 #include "comps/worker.cuh"
+#include "mellanox/dpcp.h"
 
+using AdjMatrix = std::vector<std::vector<std::pair<double, double>>>;
 namespace aristos::decider{
     /// Necessary to use path halving to ensure amortized "practical constant" time
     using DisjointSet = boost::disjoint_sets_with_storage<boost::identity_property_map,
             boost::identity_property_map, boost::find_with_path_halving>;
-    using AdjMatrix = std::vector<std::vector<std::pair<double, double>>>;
     /// Generates DP-EP groups [D,G] -> Devices to Groups
     __forceinline__
     std::vector<size_t> decide(const AdjMatrix& adjMatrix,
                                const std::vector<Worker>& workers,
-                               const std::vector<Expert>& experts,
+                               const unsigned long& totalExpertCost,
+                               const unsigned int& totalExpertMem,
                                bool doParetoSweep = false){
-        size_t totalCost = 0U, totalMem = 0U;
-        for(const auto& e: experts){
-            totalCost += e.cost;
-            totalMem += e.memoryDemand;
-        }
-
         auto infeasibleGroups = std::unordered_set<unsigned int>{};
         for(const auto& w: workers){
-            if(w.memoryCapacity < totalMem)
+            if(w.memoryCapacity < totalExpertMem)
                 infeasibleGroups.insert(w.id);
         }
         DisjointSet groups(workers.size());
@@ -68,17 +64,17 @@ namespace aristos::decider{
                                        workers[i].memoryCapacity,
                                        workers[i].processingRate,
                                        workers.size(),
-                                       ObjArgs(totalCost, effectiveWorld, totalMem),
+                                       ObjArgs(totalExpertCost, effectiveWorld, totalExpertMem),
                                        dp)});
         }
         auto extEdge = externalEdges.top();
         auto arArgs = ARArgs(adjMatrix[extEdge.node1][extEdge.node2].first,
                                adjMatrix[extEdge.node1][extEdge.node2].second,
                                effectiveWorld);
-        auto art = allReduceT(arArgs);
+        const auto art = allReduceT(arArgs);
         /// Second-pass group construction
-        for(auto& i : groupInfo){
-            i.second.construct(art, effectiveWorld);
+        for(auto& [i,g] : groupInfo){
+            g.construct(art, effectiveWorld);
         }
 
         auto limbo = Edge::limboEdge();
@@ -104,7 +100,7 @@ namespace aristos::decider{
                 externalEdges.pop();
                 extEdge = externalEdges.top();
             }
-            bool satisfiesConstraint = groupInfo.at(group1).memCapacity + groupInfo.at(group2).memCapacity >= totalMem;
+            bool satisfiesConstraint = groupInfo.at(group1).memCapacity + groupInfo.at(group2).memCapacity >= totalExpertMem;
             arArgs.numGroups = groupInfo.size() - infeasibleGroups.size();
             if(infeasibleGroups.contains(group1) && infeasibleGroups.contains(group2)){
                 if(satisfiesConstraint){
@@ -159,9 +155,10 @@ namespace aristos::decider{
     __forceinline__
     std::vector<unsigned int> assign(std::vector<Expert>& experts,
                             std::vector<Worker>& workerGroup){
-        using CostComparator = decltype([](const aristos::Expert& lhs, const aristos::Expert& rhs){
-            return lhs.cost < rhs.cost;});
-        std::set<aristos::Expert, CostComparator> t(experts.cbegin(), experts.cend());
+        using CostComparator = decltype([](const Expert& lhs, const Expert& rhs){
+            return lhs.cost == rhs.cost? lhs.id > rhs.id : lhs.cost < rhs.cost;
+        });
+        std::set<Expert, CostComparator> t(experts.cbegin(), experts.cend());
         std::vector<unsigned int> assignment(experts.size());
         size_t totalCost = 0U, totalMem = 0U;
         for(const auto& e: experts){
@@ -171,20 +168,20 @@ namespace aristos::decider{
         auto wellDistributedCapacity = true;
         auto reqCap = totalMem / workerGroup.size();
         if(totalMem % workerGroup.size() != 0){
-            reqCap = int(std::ceil(static_cast<double>(totalMem) / static_cast<double>(workerGroup.size())));
+            reqCap = static_cast<int>(std::ceil(static_cast<double>(totalMem) / static_cast<double>(workerGroup.size())));
         }
         auto totalRate = 0U;
         for(const auto& w: workerGroup){
             wellDistributedCapacity = wellDistributedCapacity && w.memoryCapacity >= reqCap;
             totalRate += w.processingRate;
         }
-        std::sort(experts.begin(), experts.end(), std::greater<>());
-        std::sort(workerGroup.begin(), workerGroup.end(), std::greater<>());
+        std::ranges::sort(experts.begin(), experts.end(), std::greater<>());
+        std::ranges::sort(workerGroup.begin(), workerGroup.end(), std::greater<>());
 
         auto j = 0U;
         while(!t.empty()){
             auto budget = static_cast<unsigned int>(std::ceil(static_cast<double>(workerGroup[j].processingRate * totalCost) / static_cast<double>(totalRate)));
-            auto allocated = budget;
+            const auto allocated = budget;
             while(budget > 0 && workerGroup[j].memoryCapacity > 0 && !t.empty() > 0){
                 auto expertBudget = Expert(budget);
                 auto lower = t.lower_bound(expertBudget);
@@ -197,6 +194,7 @@ namespace aristos::decider{
                     bestMatch = Expert::closest(*lower, *t.upper_bound(expertBudget), budget);
                 }
                 assignment[bestMatch.id] = workerGroup[j].id;
+                t.erase(bestMatch);
                 workerGroup[j].memoryCapacity -= 1;
                 budget -= bestMatch.cost;
             }

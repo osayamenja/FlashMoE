@@ -25,8 +25,6 @@ namespace aristos{
     extern constexpr unsigned int NVLinkThreshold = 4096;
     extern constexpr unsigned int superBlockSize = NVLinkThreshold / blockSize;
 
-    namespace cg = cooperative_groups;
-
     struct Config{
         cuda::std::byte* sHeap;
         flagsType* flags;
@@ -96,8 +94,8 @@ namespace aristos{
                 {};
 
         CUTE_HOST_DEVICE
-        static unsigned int getCapacity(const unsigned int _seqLen, const unsigned int _numExperts,
-                                        const unsigned int _capacityFactor, const unsigned int _k){
+        static unsigned int getCapacity(const unsigned int& _seqLen, const unsigned int& _numExperts,
+                                        const unsigned int& _capacityFactor, const unsigned int& _k){
             return cute::ceil_div(_seqLen, _numExperts) * _capacityFactor * _k;
         }
 

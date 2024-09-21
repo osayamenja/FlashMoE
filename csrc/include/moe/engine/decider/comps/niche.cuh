@@ -6,14 +6,16 @@
 #define CSRC_NICHE_CUH
 
 namespace aristos{
-    template<typename P, typename K = P::value_type>
     __forceinline__
-    std::unordered_map<K, std::vector<unsigned int>> subsets(const P& parents){
-        std::unordered_map<K, std::vector<unsigned int>> sets{};
+    std::vector<unsigned int> subsets(const std::vector<size_t>& parents, const unsigned int& myRank){
+        const auto myGroup = parents[myRank];
+        std::vector<unsigned int> platoon{};
         for(unsigned int i = 0; i < parents.size(); ++i){
-            sets[parents[i]].push_back(i);
+            if (parents[i] == myGroup) {
+                platoon.push_back(i);
+            }
         }
-        return sets;
+        return platoon;
     }
 
     template<typename T> requires std::equality_comparable<T>

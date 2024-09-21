@@ -10,7 +10,7 @@ namespace aristos{
         unsigned long cost;
         unsigned int memoryDemand = 1; // experimental feature for heterogeneous experts
 
-        Expert(unsigned int _id, unsigned long _cost):
+        Expert(const unsigned int& _id, const unsigned long& _cost):
                 id(_id), cost(_cost){};
 
         /// Sentinel

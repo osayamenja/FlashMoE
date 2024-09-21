@@ -27,7 +27,7 @@ namespace aristos{
         std::cout << '[';
         for (auto const &i: c)
             std::cout << ' ' << i << ",";
-        std::cout << ']';
+        std::cout << ']' << std::endl;
     }
 
     template<typename K, typename V, unsigned int k=0>

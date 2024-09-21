@@ -76,6 +76,8 @@ add_executable(csrc main.cu
         include/moe/engine/decider/comps/functions.cuh
         include/moe/util/debug.cuh
         include/moe/engine/decider/comps/niche.cuh
+        include/moe/util/config.cuh
+        include/moe/topo/topo.cuh
 )
 set_target_properties(csrc PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
