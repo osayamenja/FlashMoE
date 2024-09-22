@@ -37,7 +37,6 @@ namespace aristos{
         specType* peerTranslation;
         /// Expert parallel World Size
         unsigned int worldSize;
-        unsigned int capacity;
         unsigned long peerOffset;
         /// Expert parallel group rank
         unsigned int rank;
@@ -49,6 +48,7 @@ namespace aristos{
         unsigned int embedDim;
         unsigned int numPublisherBlocks;
         unsigned int numResultChunks;
+        unsigned int* capacity;
         unsigned int peerStride;
         unsigned int stageStride;
         unsigned int cellStride;
@@ -83,7 +83,6 @@ namespace aristos{
                 flags(_flags),
                 bookKeeping(_bookKeeping),
                 worldSize(_worldSize),
-                capacity(getCapacity(_seqLen, _numExperts, _capacityFactor, _k)),
                 rank(_rank),
                 sequenceNumber(_sequenceNumber),
                 seqLen(_seqLen),
@@ -184,16 +183,23 @@ namespace aristos{
     };
 
 
-    enum header : unsigned int {
+    CUTE_DEVICE
+    enum header : unsigned short {
         NOOP = 0,
         processed = 0,
         shouldProcess = 1,
         begin = 2
     };
 
-    CUTE_HOST_DEVICE
-    uint64_t constructSignal(unsigned long const& seqNo, header const& tag){
-        return seqNo + tag;
+    CUTE_DEVICE
+    enum putSignal : unsigned short {
+        sent = 1
+    };
+
+    template<typename E = header> requires cuda::std::is_integral_v<cuda::std::underlying_type_t<E>>
+    CUTE_DEVICE
+    uint64_t constructSignal(E const& signal, unsigned long const& tagAlong){
+        return tagAlong + signal;
     }
 }
 #endif //ARISTOS_TYPES_CUH

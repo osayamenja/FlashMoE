@@ -23,7 +23,7 @@ namespace aristos{
         double cachedAllReduceTime{};
 
         Group(const unsigned int& _id, const unsigned int& _mem, const unsigned long& _rate,
-              const unsigned int& _world, ObjArgs _args,
+              const unsigned int& _world, const ObjArgs& _args,
               const std::vector<std::pair<double, double>>& dp):
               id(_id), memCapacity(_mem), deviceRate(_rate),
               objArgs(_args),worldSize(_world){
@@ -42,8 +42,8 @@ namespace aristos{
         __forceinline__
         bool shouldMerge(Group& neighbor, const ARArgs& arArgs, const unsigned int& effectiveW){
             if(visited.contains(neighbor.id)){
-                auto prevState = visited.at(neighbor.id);
-                if(prevState.first == numNodes() && prevState.second == neighbor.numNodes()){
+                if(auto [myState, theirState] = visited.at(neighbor.id);
+                    myState == numNodes() && theirState == neighbor.numNodes()){
                     /// We have evaluated and rejected this group previously.
                     /// Neither of our states has changed since our last encounter,
                     /// thus we bypass the expensive evaluation procedure and proactively reject again.
@@ -54,7 +54,7 @@ namespace aristos{
             /// Update from global state
             objArgs.effectiveWorld = effectiveW;
             /// Simulate the event of both groups merging and compute its objective
-            auto cachedEffectiveWorld = objArgs.effectiveWorld;
+            const auto cachedEffectiveWorld = objArgs.effectiveWorld;
             if(memCapacity + neighbor.memCapacity >= objArgs.totalExpertMemoryDemand){
                 if(objArgs.effectiveWorld < worldSize && memCapacity < objArgs.totalExpertMemoryDemand){
                     objArgs.effectiveWorld += numNodes();
@@ -117,7 +117,7 @@ namespace aristos{
             /// Dynamic Programming magic yielding complexity O(|self| + |neighbor|)
             /// rather than O(|self| * |neighbor|).
             __forceinline__
-            double evalP2PTime(Group& neighbor, const unsigned int& numNodes) const{
+            double evalP2PTime(const Group& neighbor, const unsigned int& numNodes) const{
                 auto maxP2PTime = 0.0;
                 for(const auto& node: internalNodes){
                     maxP2PTime = std::max(maxP2PTime,

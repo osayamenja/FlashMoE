@@ -35,7 +35,6 @@ namespace aristos::subscriber{
                                                       NVSHMEM_CMP_LT, default_val);
         }while(n_received_pes == 0 && (optimism_factor > 0 || (clk::now() - snapshot_now) < timeout_duration));
 
-        CUTE_UNROLL
         for(uint i = 0; i < n_received_pes; ++i){
             auto index = indices[i];
             if(flags[index] == NOOP){

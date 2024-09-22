@@ -18,7 +18,6 @@
 #include "comps/expert.cuh"
 #include "comps/group.cuh"
 #include "comps/worker.cuh"
-#include "mellanox/dpcp.h"
 
 using AdjMatrix = std::vector<std::vector<std::pair<double, double>>>;
 namespace aristos::decider{
@@ -175,7 +174,6 @@ namespace aristos::decider{
             wellDistributedCapacity = wellDistributedCapacity && w.memoryCapacity >= reqCap;
             totalRate += w.processingRate;
         }
-        std::ranges::sort(experts.begin(), experts.end(), std::greater<>());
         std::ranges::sort(workerGroup.begin(), workerGroup.end(), std::greater<>());
 
         auto j = 0U;
@@ -185,7 +183,7 @@ namespace aristos::decider{
             while(budget > 0 && workerGroup[j].memoryCapacity > 0 && !t.empty() > 0){
                 auto expertBudget = Expert(budget);
                 auto lower = t.lower_bound(expertBudget);
-                // Below is lower == t.end() ==> budget is greater than any existing individual demand
+                // Below is when lower == t.end() ==> budget is greater than any existing individual demand
                 auto bestMatch = *std::prev(t.cend());
                 if(lower->cost == budget || lower == t.cbegin()){
                     bestMatch = *lower;

@@ -108,7 +108,7 @@ namespace aristos{
     extern __inline__ int blocksPerSM = 0;
     auto aristosStream = cudaStreamPerThread;
     void aristosInit(const unsigned int& seqLen, const unsigned int& embedDim, const unsigned int& hiddenProjDim,
-                     const unsigned int& k, const unsigned int& capacityFactor,
+                     const unsigned int& k, const unsigned int& capacityFactor, const unsigned int& globalWorld,
                      const unsigned int& numExperts) {
         assert(!isInitialized);
         isInitialized = true;
@@ -117,6 +117,7 @@ namespace aristos{
         int localRank = 0;
         int computeCapability = 0;
         CUTE_CHECK_ERROR(cudaGetDevice(&localRank));
+        CUTE_CHECK_ERROR(cudaSetDevice(localRank));
         CUTE_CHECK_ERROR(cudaDeviceGetAttribute(&numSMs, cudaDevAttrMultiProcessorCount, localRank));
         const auto GEMMBlocks = cute::ceil_div(seqLen, bM) * cute::ceil_div(hiddenProjDim, bN);
         const auto minBlocks = GEMMBlocks + minCommunicatorBlocks;
@@ -138,7 +139,12 @@ namespace aristos{
         // Good to go! Let's do some initialization
         // initialize NVSHMEM
         nvshmem_init();
-        CUTE_CHECK_ERROR(cudaSetDevice(localRank));
+        // Allocate Symmetric Heap + Flags
+        const size_t heapBytes = (4 * seqLen * (embedDim + k + 2)) + globalWorld * (sizeof(flagsType) / sizeof(maxPrecision));
+        const auto sHeap = nvshmem_align(16, std::max(heapBytes*sizeof(maxPrecision),
+            std::max((globalWorld + 2) * BETA_BUFFER * sizeof(size_t), 2 * globalWorld * (globalWorld + 1) * sizeof(size_t))));
+
+
         // Run decider
         // ...
         // generates the below
@@ -147,14 +153,7 @@ namespace aristos{
         std::vector<specType> parallelSpec{};
         std::vector<specType> translation{};
 
-        // Allocate Symmetric Heap + Flags
-        const auto trailer = k + 2U;
-        const size_t payload = Config::getCapacity(seqLen, numExperts, capacityFactor, k)
-                         * (embedDim + trailer);
-        size_t heapBytes = numNeighbors * stages * numCells * payload;
-        heapBytes += numNeighbors * (sizeof(flagsType) / sizeof(maxPrecision));
         /// Allocates aligned memory
-        const auto sHeap = nvshmem_align(16, heapBytes*sizeof(maxPrecision));
         //TODO memset symmetric heap?
         //Final Initialization
         hostMoEConfig = Config();
@@ -202,13 +201,12 @@ extern constexpr int cells = 2;
 extern constexpr int capacity = 1;
 extern constexpr int k = 0;
 extern constexpr int embedDim = 0;
-extern constexpr int tokens = capacity * (embedDim + k + 1);
+extern constexpr int tokens = capacity * (embedDim + k + 2);
 
 extern constexpr int peerStride = stages * cells * tokens;
 extern constexpr int stageStride = cells * tokens;
 extern constexpr int cellStride = tokens;
-extern constexpr int tokenStride = (embedDim + k + 1);
-extern constexpr int finalTokenStride = (embedDim + 1);
+extern constexpr int tokenStride = (embedDim + k + 2);
 
 template<typename T>
 CUTE_DEVICE
@@ -410,7 +408,6 @@ int main() {
     CUTE_CHECK_ERROR(cudaFreeAsync(b, cudaStreamPerThread));
     CUTE_CHECK_ERROR(cudaStreamSynchronize(cudaStreamPerThread));
     free(host_b);*/
-
     /*using djs = boost::disjoint_sets_with_storage<boost::identity_property_map,
     boost::identity_property_map, boost::find_with_path_halving>;
     auto constexpr n = 5;
@@ -522,6 +519,7 @@ int main() {
     const auto assignment = aristos::decider::assign(e, wG);
     aristos::printContainer(assignment);
 
+    /// TODO tomorrow, Invoke CUTLASS test kernel instead of executing subprocess
     int fd[2];
     assert(pipe(fd) != -1);
     const pid_t pid = fork();
