@@ -5,6 +5,7 @@
 #ifndef ARISTOS_TYPES_CUH
 #define ARISTOS_TYPES_CUH
 
+#define ARISTOS_BLOCK_SIZE 128
 namespace aristos{
     using maxPrecision = float;
     using specType = unsigned int;
@@ -48,7 +49,7 @@ namespace aristos{
         unsigned int embedDim;
         unsigned int numPublisherBlocks;
         unsigned int numResultChunks;
-        unsigned int* capacity;
+        unsigned int capacity;
         unsigned int peerStride;
         unsigned int stageStride;
         unsigned int cellStride;
@@ -100,7 +101,7 @@ namespace aristos{
 
 
         CUTE_HOST_DEVICE
-        void dump(){
+        void dump() const {
             printf("{\n\t"
                    "\"Capacity\": %u,\n\t"
                    "\"E\": %u,\n\t"
@@ -120,10 +121,6 @@ namespace aristos{
     /// Owned by a block
     struct PublisherConfig{
         unsigned int localBlockID;
-        unsigned long blocksToPeers;
-        unsigned int peerStripeLength;
-        unsigned int intraPeerIndex;
-        unsigned int firstPeer;
         unsigned int numSuperBlocks;
         unsigned int numSubBlocks;
         unsigned int p2pLogHead;
@@ -148,12 +145,8 @@ namespace aristos{
         PublisherConfig() = default; // Circumvents warning about 'initializing shared variables'
 
         CUTE_DEVICE
-        PublisherConfig(const Config& c){
+        explicit PublisherConfig(const Config& c){
             localBlockID = PublisherConfig::getLocalBlockID(c.numPublisherBlocks);
-            blocksToPeers = max((gridDim.z - 1) * (gridDim.x * gridDim.y) / c.worldSize, 1);
-            peerStripeLength = cute::ceil_div(1UL, blocksToPeers);
-            intraPeerIndex = aristos::grid::blockID() - ((aristos::grid::blockID() / blocksToPeers) * blocksToPeers);
-            firstPeer = static_cast<int>(aristos::grid::blockID() / blocksToPeers);
             numSuperBlocks = (c.numPublisherBlocks - 1) / superBlockSize;
             p2pLogHead = 0;
             superBlockID = localBlockID / superBlockSize;
@@ -166,24 +159,20 @@ namespace aristos{
             }
             isLastSubBlock = localBlockID == lastSubBlockID;
             isFirstSubBlock = localBlockID == (superBlockID*numSubBlocks);
+            syncGrid = c.bookKeeping;
+            checkpoints = c.bookKeeping;
         };
 
         CUTE_DEVICE
-        void dump(){
+        void dump() const{
             printf("{\n\t"
                    "\"BlockID\": %u,\n\t"
-                   "\"LocalBlockID\": %u,\n\t"
-                   "\"BlocksToPeers\": %lu,\n\t"
-                   "\"FirstPeer\": %u,\n\t"
-                   "\"IntraPeerIndex\": %u,\n\t"
-                   "\"PeerStripeLength\": %u,\n\t",
-                   aristos::grid::blockID(), localBlockID, blocksToPeers, firstPeer, intraPeerIndex,
-                   peerStripeLength);
+                   "\"LocalBlockID\": %u,\n\t",
+                   aristos::grid::blockID(), localBlockID);
         }
     };
 
 
-    CUTE_DEVICE
     enum header : unsigned short {
         NOOP = 0,
         processed = 0,
@@ -191,14 +180,13 @@ namespace aristos{
         begin = 2
     };
 
-    CUTE_DEVICE
     enum putSignal : unsigned short {
         sent = 1
     };
 
     template<typename E = header> requires cuda::std::is_integral_v<cuda::std::underlying_type_t<E>>
     CUTE_DEVICE
-    uint64_t constructSignal(E const& signal, unsigned long const& tagAlong){
+    uint64_t constructSignal(unsigned long const& tagAlong, E const& signal){
         return tagAlong + signal;
     }
 }

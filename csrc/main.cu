@@ -26,7 +26,6 @@
 #include <cutlass/gemm/dispatch_policy.hpp>
 #include <cutlass/gemm/collective/collective_mma.hpp>
 #include <boost/pending/disjoint_sets.hpp>
-#include <set>
 
 #define THREADS_PER_WARP 32
 #define THREADS_PER_BLOCK 256
@@ -97,7 +96,7 @@ __global__ void benchAtomics(CUTE_GRID_CONSTANT const int iter, unsigned int* fl
 }
 
 template<unsigned int bM=128, unsigned int bN=128, unsigned int bK=8, unsigned int bP=3>
-__global__ void __maxnreg__(aristos::maxRegsPerThread) occupancyTestKernel(){
+__global__ void occupancyTestKernel(){
     __shared__ float sharedA[cute::cosize_v<decltype(cute::make_layout(cute::make_shape(cute::Int<bM>{}, cute::Int<bK>{}, cute::Int<bP>{})))>];
     __shared__ float sharedB[cute::cosize_v<decltype(cute::make_layout(cute::make_shape(cute::Int<bN>{}, cute::Int<bK>{}, cute::Int<bP>{})))>];
 }
@@ -142,7 +141,7 @@ namespace aristos{
         // Allocate Symmetric Heap + Flags
         const size_t heapBytes = (4 * seqLen * (embedDim + k + 2)) + globalWorld * (sizeof(flagsType) / sizeof(maxPrecision));
         const auto sHeap = nvshmem_align(16, std::max(heapBytes*sizeof(maxPrecision),
-            std::max((globalWorld + 2) * BETA_BUFFER * sizeof(size_t), 2 * globalWorld * (globalWorld + 1) * sizeof(size_t))));
+            std::max(globalWorld * (BETA_BUFFER + 2) * sizeof(size_t), 2 * globalWorld * (globalWorld + 1) * sizeof(size_t))));
 
 
         // Run decider
@@ -483,7 +482,7 @@ int main() {
         }
     }
 
-    auto const A100Rate = static_cast<unsigned long>(std::ceil(0.43 * 312UL * 1E9));
+    auto const A100Rate = static_cast<unsigned long>(std::ceil(19UL * 1E12));
     auto constexpr deviceMem = 16U;
     std::vector<aristos::Worker> w;
     CUTE_UNROLL
@@ -520,6 +519,7 @@ int main() {
     aristos::printContainer(assignment);
 
     /// TODO tomorrow, Invoke CUTLASS test kernel instead of executing subprocess
+    /// TODO remove ibgda and compile with libfabric and compare performance
     int fd[2];
     assert(pipe(fd) != -1);
     const pid_t pid = fork();

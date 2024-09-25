@@ -10,5 +10,5 @@
 #if __CUDA_ARCH__ == 700
     #define MIN_BLOCKS_PER_SM 12
 #endif
-#define ARISTOS_LAUNCH_BOUNDS __launch_bounds__(blockSize, MIN_BLOCKS_PER_SM)
+#define ARISTOS_LAUNCH_BOUNDS __launch_bounds__(aristos::blockSize, MIN_BLOCKS_PER_SM)
 #endif //CONFIG_CUH

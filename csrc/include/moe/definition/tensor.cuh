@@ -5,7 +5,6 @@
 #ifndef ARISTOS_TENSOR_CUH
 #define ARISTOS_TENSOR_CUH
 
-#include <cuda/std/concepts>
 #include <cute/tensor.hpp>
 
 namespace aristos{
@@ -22,8 +21,7 @@ namespace aristos{
 
     template<typename M>
     concept Matrix = requires(M m){
-        requires Tensor<M>;
-        requires cute::rank(m.layout()) == 2;
+        requires Tensor<M> && cute::rank<0>(m) == 1 && cute::rank<1>(m) == 1;
     };
 }
 

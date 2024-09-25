@@ -2,13 +2,15 @@ cmake_minimum_required(VERSION 3.27)
 
 # Set compilers and obtain compute capability, assuming the running process sees homogeneous GPUs
 # Add COMMAND_ECHO STDOUT to see the commands in standard out
-execute_process(COMMAND "which" "g++"
-        COMMAND_ERROR_IS_FATAL ANY
-        OUTPUT_VARIABLE CPP_COMP_PATH
-        OUTPUT_STRIP_TRAILING_WHITESPACE)
-execute_process(COMMAND "which" "gcc"
-        COMMAND_ERROR_IS_FATAL ANY
-        OUTPUT_VARIABLE C_COMP_PATH OUTPUT_STRIP_TRAILING_WHITESPACE)
+if(DEFINED $ENV{NERSC_HOST})
+    execute_process(COMMAND "which" "g++"
+            COMMAND_ERROR_IS_FATAL ANY
+            OUTPUT_VARIABLE CPP_COMP_PATH
+            OUTPUT_STRIP_TRAILING_WHITESPACE)
+    execute_process(COMMAND "which" "gcc"
+            COMMAND_ERROR_IS_FATAL ANY
+            OUTPUT_VARIABLE C_COMP_PATH OUTPUT_STRIP_TRAILING_WHITESPACE)
+endif ()
 execute_process(COMMAND "nvidia-smi" "--id=0" "--query-gpu=compute_cap" "--format=csv,noheader"
         COMMAND_ERROR_IS_FATAL ANY
         OUTPUT_VARIABLE COMPUTE_CAPABILITY
@@ -18,19 +20,17 @@ string(REGEX REPLACE "(\.[0-9])" "0" COMPUTE_CAPABILITY ${COMPUTE_CAPABILITY})
 message(STATUS "GPU 0 Compute Capability: ${COMPUTE_CAPABILITY}")
 
 set(ENV{CUTLASS_NVCC_ARCHS} "${COMPUTE_CAPABILITY}")
-set(CMAKE_CXX_COMPILER "${CPP_COMP_PATH}" CACHE PATH "g++ Compiler Path")
-set(CMAKE_C_COMPILER "${C_COMP_PATH}" CACHE PATH "gcc Compiler Path")
 
 project(csrc CUDA CXX)
 
 # flags
-set(ARISTOS_CUDA_CXX_FLAGS "${ARISTOS_CUDA_CXX_FLAGS} -Wall -Wextra")
+set(ARISTOS_CUDA_CXX_FLAGS "${ARISTOS_CUDA_CXX_FLAGS} -Wall -Wextra -Wsuggest-attribute=const")
 set(ARISTOS_CUDA_CXX_FLAGS "${ARISTOS_CUDA_CXX_FLAGS} -fno-strict-aliasing")
 if(NOT ${CMAKE_SYSTEM_PROCESSOR} MATCHES "^aarch64")
     set(ARISTOS_CUDA_CXX_FLAGS "${ARISTOS_CUDA_CXX_FLAGS} -m64")
 endif ()
-set(ARISTOS_CUDA_CXX_FLAGS "${ARISTOS_CUDA_CXX_FLAGS} -Wno-unknown-pragmas")
-set(ARISTOS_CUDA_CXX_FLAGS "${ARISTOS_CUDA_CXX_FLAGS} -Wno-switch -Wformat=2")
+set(ARISTOS_CUDA_CXX_FLAGS "${ARISTOS_CUDA_CXX_FLAGS} -Wno-unknown-pragmas -Wnull-dereference")
+set(ARISTOS_CUDA_CXX_FLAGS "${ARISTOS_CUDA_CXX_FLAGS} -Wno-switch -Wfloat-equal -Wduplicated-branches -Wformat=2")
 set(ARISTOS_CUDA_CXX_FLAGS "${ARISTOS_CUDA_CXX_FLAGS} -Wno-unused-but-set-parameter")
 set(ARISTOS_CUDA_CXX_FLAGS "${ARISTOS_CUDA_CXX_FLAGS} -Wno-sign-compare -v")
 # Silence nvtx deprecation warning from legacy version used in libtorch
@@ -133,12 +133,13 @@ target_compile_options(csrc PRIVATE
 )
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_compile_options(csrc PRIVATE
-            $<$<COMPILE_LANGUAGE:CXX>:-O0;-g;>
+            $<$<COMPILE_LANGUAGE:CXX>:-Og;-g;>
             $<$<COMPILE_LANGUAGE:CUDA>:-O0; -g; -G>
     )
 elseif(CMAKE_BUILD_TYPE STREQUAL "Release")
     target_compile_options(csrc PRIVATE
-            $<$<COMPILE_LANGUAGE:CUDA>:-O3>
+            $<$<COMPILE_LANGUAGE:CXX>:-O3>
+            $<$<COMPILE_LANGUAGE:CUDA>:-O3 --use_fast_math>
             $<$<COMPILE_LANGUAGE:CUDA>:-Xptxas -O3>
     )
 endif ()

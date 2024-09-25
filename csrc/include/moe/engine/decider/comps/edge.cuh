@@ -5,10 +5,11 @@
 #ifndef CSRC_EDGE_CUH
 #define CSRC_EDGE_CUH
 
+#include <cstdlib>
 namespace aristos{
     // Source for floatEqual: https://stackoverflow.com/a/253874
     __forceinline__
-    bool floatEqual(float a, float b){
+    bool floatEqual(const float& a, const float& b){
         return cuda::std::abs(a - b) <=
                ( (cuda::std::abs(a) > cuda::std::abs(b) ? cuda::std::abs(b) : cuda::std::abs(a)) * cuda::std::numeric_limits<float>::epsilon());
     }
@@ -19,7 +20,7 @@ namespace aristos{
         float weight;
 
         /// Order is important!
-        Edge(unsigned int _node1, unsigned int _node2, float _weight):
+        Edge(const unsigned int& _node1, const unsigned int& _node2, const float& _weight):
         node1(_node1), node2(_node2), weight(_weight){}
 
         __forceinline__
@@ -77,7 +78,7 @@ namespace aristos{
         __forceinline__
         bool isLimboEdge() const{
             /// Define a self-edge with zero weight as limbo or null edge
-            return node1 == node2 && weight == 0.0;
+            return node1 == node2 && floatEqual(weight, 0.0);
         }
 
         __forceinline__

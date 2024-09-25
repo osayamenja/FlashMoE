@@ -37,7 +37,7 @@ namespace aristos::publisher{
             publisherConfig = PublisherConfig(moeConfig);
             CUTE_UNROLL
             for(unsigned int i = 0; i < moeConfig.worldSize; ++i){
-                isRemote[i] = nvshmem_ptr(moeConfig.sHeap, moeConfig.peerTranslation[i]) == NULL;
+                isRemote[i] = nvshmem_ptr(moeConfig.sHeap, moeConfig.peerTranslation[i]) == nullptr;
             }
         }
         __threadfence_block();
@@ -121,7 +121,7 @@ namespace aristos::publisher{
             publisherConfig = PublisherConfig(moeConfig);
             CUTE_UNROLL
             for(unsigned int i = 0; i < moeConfig.worldSize; ++i){
-                isRemote[i] = nvshmem_ptr(moeConfig.sHeap, moeConfig.peerTranslation[i]) == NULL;
+                isRemote[i] = nvshmem_ptr(moeConfig.sHeap, moeConfig.peerTranslation[i]) == nullptr;
             }
         }
         __threadfence_block();
@@ -162,7 +162,7 @@ namespace aristos::publisher{
             publisherConfig = PublisherConfig(moeConfig);
             CUTE_UNROLL
             for(unsigned int i = 0; i < moeConfig.worldSize; ++i){
-                isP2P[i] = nvshmem_ptr(moeConfig.sHeap, moeConfig.peerTranslation[i]) != NULL;
+                isP2P[i] = nvshmem_ptr(moeConfig.sHeap, moeConfig.peerTranslation[i]) != nullptr;
             }
         }
         __threadfence_block();
