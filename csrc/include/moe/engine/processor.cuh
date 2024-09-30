@@ -5,8 +5,6 @@
 #ifndef ARISTOS_COMPUTE_CUH
 #define ARISTOS_COMPUTE_CUH
 
-// GEMM stuff
-
 namespace aristos::processor{
     CUTE_DEVICE
     void start(){

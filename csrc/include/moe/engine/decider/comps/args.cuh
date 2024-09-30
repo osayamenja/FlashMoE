@@ -17,7 +17,7 @@ namespace aristos{
         unsigned int numGroups;
 
         ARArgs(const double& _alpha, const double& _beta,
-               const unsigned int& _n): bufferSize(hostMoEConfig.gradBuffer){
+               const unsigned int& _n, const unsigned int& gradBuffer): bufferSize(gradBuffer){
             ringAlpha = _alpha;
             ringBeta = _beta;
             numGroups = _n;
@@ -57,12 +57,13 @@ namespace aristos{
         unsigned int p2pBuffer;
 
         ObjArgs(const unsigned long& _totalCost,
-                const unsigned int& _effW, const unsigned int& _totalMem) :
+                const unsigned int& _effW, const unsigned int& _totalMem,
+                const ModelConfig& m) :
                 totalExpertCost(_totalCost),
                 totalExpertMemoryDemand(_totalMem), effectiveWorld(_effW){
-            globalMoEStages = getGlobalMoEStages();
+            globalMoEStages = getGlobalMoEStages(m);
             intraCommunicationCost = 0.0;
-            p2pBuffer = hostMoEConfig.p2pBuffer;
+            p2pBuffer = m.p2pBuffer;
             commFreq = p2pFreq;
         }
 
@@ -73,10 +74,10 @@ namespace aristos{
         }
 
         __forceinline__
-        static unsigned int getGlobalMoEStages(){
-            return (2 + hostMoEConfig.redAmount) *
-            (hostMoEConfig.globalBatch/hostMoEConfig.miniBatch)
-            * (hostMoEConfig.numLayers/hostMoEConfig.moeFreq);
+        static unsigned int getGlobalMoEStages(const ModelConfig& m){
+            return (2 + m.redAmount) *
+            (m.globalBatch/m.miniBatch)
+            * (m.numLayers/m.moeFreq);
         }
 
         /// 𝜸 from the paper

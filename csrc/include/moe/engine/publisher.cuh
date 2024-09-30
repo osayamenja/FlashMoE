@@ -9,13 +9,16 @@
 #include "../definition/memory_layout.cuh"
 #include "../definition/values.cuh"
 
+#define BATON_LEADER 0U
+
 namespace aristos::publisher{
+    //TODO use nvstd::function to abstract nvshmem communication operations
     __device__ __inline__ unsigned int doorbell = 0U;
     __device__ __inline__ unsigned int blockade = 0U;
     __device__ __inline__ unsigned int logHead = 0U;
     __device__ __inline__ unsigned int logTail = 0U;
     /// Nifty gadget enabling round-robin queue access
-    __device__ __inline__ unsigned int baton = 0U;
+    __device__ __inline__ unsigned int baton = BATON_LEADER;
     __device__ __inline__ unsigned int syncStages = 0U;
     __device__ __inline__ unsigned int logTailSyncStages = 0U;
 
@@ -33,7 +36,7 @@ namespace aristos::publisher{
         __shared__ unsigned int warpsWidth;
         __shared__ extern bool isRemote[];
         if(!aristos::block::threadID()){
-            warpsWidth = blockSizeWarp * moeConfig.numPublisherBlocks;
+            warpsWidth = ARISTOS_BLOCK_SIZE_WARP * moeConfig.numP2PPublisherBlocks;
             publisherConfig = PublisherConfig(moeConfig);
             CUTE_UNROLL
             for(unsigned int i = 0; i < moeConfig.worldSize; ++i){
@@ -52,7 +55,7 @@ namespace aristos::publisher{
                 /// however, predicated instruction execution due to warp divergence allegedly
                 /// nullifies any purported performance gains of thread-level parallelism, thus we use a warp.
                 auto peer = atomicLoad((moeConfig.publisherLog + logHead));
-                auto numTokensBytes = moeConfig.publisherLog[logHead + 1] * moeConfig.tokenStride;
+                auto numTokensBytes = moeConfig.publisherLog[logHead + 1] * (moeConfig.embedDim + moeConfig.k + 2);
                 if(isRemote[peer]){
                     if(!aristos::warp::laneID()){
                         atomicDec(&doorbell, 1U);
@@ -61,8 +64,8 @@ namespace aristos::publisher{
                         atomicAdd(&publisherConfig.checkpoints[peer], moeConfig.publisherLog[logHead + 1]);
                         atomicExch(&baton, ((aristos::block::warpID() + 1) % warpsWidth));
                     }
-                    nvshmemx_putmem_signal_nbi_warp(getTokenPointer(moeConfig.rank, 1, receiveCell, publisherConfig.checkpoints[peer]),
-                                                    getTokenPointer(peer, 1, sendCell, publisherConfig.checkpoints[peer]),
+                    nvshmemx_putmem_signal_nbi_warp(getTokenPointer(moeConfig.rank, 1, RECEIVE_CELL, publisherConfig.checkpoints[peer]),
+                                                    getTokenPointer(peer, 1, SEND_CELL, publisherConfig.checkpoints[peer]),
                                                     numTokensBytes, moeConfig.flags + moeConfig.rank,
                                                     constructSignal(moeConfig.sequenceNumber, header::processed),
                                                     NVSHMEM_SIGNAL_SET, peer);
@@ -72,21 +75,21 @@ namespace aristos::publisher{
                     if(!aristos::warp::laneID()){
                         atomicExch(&baton, ((aristos::block::warpID() + 1) % warpsWidth));
                     }
-                    auto splitNumTokensBytes = cute::ceil_div(numTokensBytes, moeConfig.numPublisherBlocks);
-                    if(publisherConfig.localBlockID == moeConfig.numPublisherBlocks - 1 && numTokensBytes % moeConfig.numPublisherBlocks != 0){
+                    auto splitNumTokensBytes = cute::ceil_div(numTokensBytes, moeConfig.numP2PPublisherBlocks);
+                    if(publisherConfig.localBlockID == moeConfig.numP2PPublisherBlocks - 1 && numTokensBytes % moeConfig.numP2PPublisherBlocks != 0){
                         /// Residual chunk
-                        nvshmemx_putmem_block((getTokenPointer(moeConfig.rank, 1, receiveCell, publisherConfig.checkpoints[peer]) + (publisherConfig.localBlockID * splitNumTokensBytes)),
-                                              (getTokenPointer(peer, 1, sendCell, publisherConfig.checkpoints[peer]) + (publisherConfig.localBlockID * splitNumTokensBytes)),
+                        nvshmemx_putmem_block((getTokenPointer(moeConfig.rank, 1, RECEIVE_CELL, publisherConfig.checkpoints[peer]) + (publisherConfig.localBlockID * splitNumTokensBytes)),
+                                              (getTokenPointer(peer, 1, SEND_CELL, publisherConfig.checkpoints[peer]) + (publisherConfig.localBlockID * splitNumTokensBytes)),
                                               (numTokensBytes - (splitNumTokensBytes * (publisherConfig.numSubBlocks - 1))), moeConfig.peerTranslation[peer]);
                     }
                     else{
-                        nvshmemx_putmem_block((getTokenPointer(moeConfig.rank, 1, receiveCell, publisherConfig.checkpoints[peer]) + (publisherConfig.localBlockID * splitNumTokensBytes)),
-                                              (getTokenPointer(peer, 1, sendCell, publisherConfig.checkpoints[peer]) + (publisherConfig.localBlockID * splitNumTokensBytes)),
+                        nvshmemx_putmem_block((getTokenPointer(moeConfig.rank, 1, RECEIVE_CELL, publisherConfig.checkpoints[peer]) + (publisherConfig.localBlockID * splitNumTokensBytes)),
+                                              (getTokenPointer(peer, 1, SEND_CELL, publisherConfig.checkpoints[peer]) + (publisherConfig.localBlockID * splitNumTokensBytes)),
                                               splitNumTokensBytes, moeConfig.peerTranslation[peer]);
                     }
                     if(!aristos::block::threadID()){
                         auto nextStage = atomicLoad(&syncStages) + 1;
-                        if((atomicAdd(publisherConfig.syncGrid + peer, 1U) + 1) == (moeConfig.numPublisherBlocks * nextStage)){
+                        if((atomicAdd(publisherConfig.syncGrid + peer, 1U) + 1) == (moeConfig.numP2PPublisherBlocks * nextStage)){
                             // I am the last
                             atomicDec(&doorbell, 1U);
                             atomicAdd(&logHead, 2U);
@@ -132,17 +135,17 @@ namespace aristos::publisher{
             while(atomicLoad(&doorbell) > 0){
                 auto peer = atomicLoad((moeConfig.publisherLog + logHead));
                 if(isRemote[peer]){
-                    auto numTokensBytes = moeConfig.publisherLog[logHead + 1] * moeConfig.tokenStride;
+                    auto numTokensBytes = moeConfig.publisherLog[logHead + 1] * (moeConfig.embedDim + moeConfig.k + 2);
                     if(!aristos::warp::laneID()){
                         atomicDec(&doorbell, 1U);
                         atomicAdd(&remoteLogHead, 2U);
                         /// Advance token pointer
                         atomicAdd(&publisherConfig.checkpoints[peer], moeConfig.publisherLog[logHead + 1]);
                         /// Eager baton exchange
-                        atomicExch(&baton, ((aristos::block::warpID() + 1) % blockSizeWarp));
+                        atomicExch(&baton, ((aristos::block::warpID() + 1) % ARISTOS_BLOCK_SIZE_WARP));
                     }
-                    nvshmemx_putmem_signal_nbi_warp(getTokenPointer(moeConfig.rank, 1, receiveCell, publisherConfig.checkpoints[peer]),
-                                                    getTokenPointer(peer, 1, sendCell, publisherConfig.checkpoints[peer]),
+                    nvshmemx_putmem_signal_nbi_warp(getTokenPointer(moeConfig.rank, 1, RECEIVE_CELL, publisherConfig.checkpoints[peer]),
+                                                    getTokenPointer(peer, 1, SEND_CELL, publisherConfig.checkpoints[peer]),
                                                     numTokensBytes, moeConfig.flags + moeConfig.rank,
                                                     constructSignal(moeConfig.sequenceNumber, header::processed),
                                                     NVSHMEM_SIGNAL_SET, moeConfig.peerTranslation[peer]);
@@ -173,7 +176,7 @@ namespace aristos::publisher{
                 auto logHeadSnapshot = atomicLoad(&publisherConfig.p2pLogHead);
                 auto peer = atomicLoad((moeConfig.publisherLog + logHeadSnapshot));
                 if(isP2P[peer]){
-                    auto numTokensBytes = moeConfig.publisherLog[logHeadSnapshot + 1] * moeConfig.tokenStride;
+                    auto numTokensBytes = moeConfig.publisherLog[logHeadSnapshot + 1] * (moeConfig.embedDim + moeConfig.k + 2);
                     auto splitNumTokensBytes = cute::ceil_div(numTokensBytes, publisherConfig.numSubBlocks);
                     /// Leader thread of the super block takes care of business
                     if(publisherConfig.isFirstSubBlock && !aristos::block::threadID()){
@@ -186,27 +189,27 @@ namespace aristos::publisher{
                     }
                     if(numTokensBytes % publisherConfig.numSubBlocks != 0 && publisherConfig.isLastSubBlock){
                         /// Residual chunk
-                        nvshmemx_putmem_block((getTokenPointer(moeConfig.rank, 1,receiveCell,
+                        nvshmemx_putmem_block((getTokenPointer(moeConfig.rank, 1,RECEIVE_CELL,
                                                                publisherConfig.checkpoints[peer])
                                                                + (publisherConfig.localBlockID * splitNumTokensBytes)),
-                                              (getTokenPointer(peer, 1, sendCell,
+                                              (getTokenPointer(peer, 1, SEND_CELL,
                                                                publisherConfig.checkpoints[peer])
                                                                + (publisherConfig.localBlockID * splitNumTokensBytes)),
                                               (numTokensBytes - (splitNumTokensBytes * (publisherConfig.numSubBlocks - 1))),
                                               moeConfig.peerTranslation[peer]);
                     }
                     else{
-                        nvshmemx_putmem_block((getTokenPointer(moeConfig.rank, 1,receiveCell,
+                        nvshmemx_putmem_block((getTokenPointer(moeConfig.rank, 1,RECEIVE_CELL,
                                                                publisherConfig.checkpoints[peer])
                                                                + (publisherConfig.localBlockID * splitNumTokensBytes)),
-                                              (getTokenPointer(peer, 1, sendCell,
+                                              (getTokenPointer(peer, 1, SEND_CELL,
                                                                publisherConfig.checkpoints[peer])
                                                                + (publisherConfig.localBlockID * splitNumTokensBytes)),
                                               splitNumTokensBytes, moeConfig.peerTranslation[peer]);
                     }
                     if(!aristos::block::threadID()){
                         auto nextStage = atomicLoad(&syncStages) + 1;
-                        if((atomicAdd(publisherConfig.syncGrid + peer, 1U) + 1) == (moeConfig.numPublisherBlocks * nextStage)){
+                        if((atomicAdd(publisherConfig.syncGrid + peer, 1U) + 1) == (moeConfig.numP2PPublisherBlocks * nextStage)){
                             atomicAdd(&syncStages, 1U);
                             nvshmemx_signal_op(moeConfig.flags + moeConfig.rank,
                                                constructSignal(moeConfig.sequenceNumber, aristos::processed),
@@ -233,14 +236,14 @@ namespace aristos::publisher{
     CUTE_DEVICE
     void start(){
         // broadcast()
-        if(moeConfig.numPublisherBlocks < ((NVLinkThreshold / blockSize) + 1)){
+        if(moeConfig.numP2PPublisherBlocks < ((ARISTOS_NVLINK_THRESHOLD / ARISTOS_BLOCK_SIZE) + 1)){
             /// number of threads is insufficient for remote specialization
             startSingularPublisher();
         }
         else{
             /// local publisher block 0 will service remote communication requests
             /// while other blocks will further specialize to serve parallel P2P, à la NVLink, transfers
-            if(!PublisherConfig::getLocalBlockID(moeConfig.numPublisherBlocks)){
+            if(!PublisherConfig::getLocalBlockID(moeConfig.numP2PPublisherBlocks)){
                 /// remote publisher
                 startPluralRemotePublisher();
             }

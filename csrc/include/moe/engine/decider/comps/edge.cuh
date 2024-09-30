@@ -8,19 +8,20 @@
 #include <cstdlib>
 namespace aristos{
     // Source for floatEqual: https://stackoverflow.com/a/253874
+    template<typename F> requires cuda::std::is_floating_point_v<F>
     __forceinline__
-    bool floatEqual(const float& a, const float& b){
+    bool floatEqual(const F& a, const F& b){
         return cuda::std::abs(a - b) <=
-               ( (cuda::std::abs(a) > cuda::std::abs(b) ? cuda::std::abs(b) : cuda::std::abs(a)) * cuda::std::numeric_limits<float>::epsilon());
+               ( (cuda::std::abs(a) > cuda::std::abs(b) ? cuda::std::abs(b) : cuda::std::abs(a)) * cuda::std::numeric_limits<F>::epsilon());
     }
 
     struct Edge{
         unsigned int node1;
         unsigned int node2;
-        float weight;
+        double weight;
 
         /// Order is important!
-        Edge(const unsigned int& _node1, const unsigned int& _node2, const float& _weight):
+        Edge(const unsigned int& _node1, const unsigned int& _node2, const double& _weight):
         node1(_node1), node2(_node2), weight(_weight){}
 
         __forceinline__

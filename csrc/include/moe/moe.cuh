@@ -14,7 +14,6 @@
 #include "engine/processor.cuh"
 #include "definition/values.cuh"
 #include <cuda/annotated_ptr>
-#include "util/config.cuh"
 
 namespace aristos{
     CUTE_DEVICE
@@ -32,8 +31,8 @@ namespace aristos{
         /// Persist symmetric heap flags
         cuda::associate_access_property(moeConfig.flags,
                                         cuda::access_property(moeConfig.flags,
-                                                              moeConfig.worldSize*sizeof(flagsType),
-                                                              moeConfig.worldSize*sizeof(flagsType),
+                                                              STAGES*moeConfig.worldSize*sizeof(flagsType),
+                                                              STAGES*moeConfig.worldSize*sizeof(flagsType),
                                                               cuda::access_property::persisting{}));
         /// Persist book keeping state
         cuda::associate_access_property(moeConfig.bookKeeping,
@@ -52,17 +51,16 @@ namespace aristos{
     }
 
     template<Matrix M, Tensor T>
-    __global__ void ARISTOS_LAUNCH_BOUNDS
-    forward(M const& activations, T const& expertsWeights, M const& gateWeights,
+    __global__ void forward(M const& activations, T const& expertsWeights, M const& gateWeights,
                             M gateOutput, M mappingTensor, M sharedSpec) {
         persistHotPointers();
         gate(activations, gateWeights, gateOutput);
         tokenToPeers(gateOutput, sharedSpec, mappingTensor);
         /// mappingTensor (S, D)
 
-        if (blockIdx.x >= (gridDim.x - (moeConfig.numPublisherBlocks + 1))) {
+        if (blockIdx.x >= (gridDim.x - (moeConfig.numP2PPublisherBlocks + 1))) {
             /// Exclusive Subscribers get only one block
-            if(blockIdx.x == gridDim.x - (moeConfig.numPublisherBlocks + 1)){
+            if(blockIdx.x == gridDim.x - (moeConfig.numP2PPublisherBlocks + 1)){
                 // We are Subscribers explicitly and Publishers semantically
                 subscriber::start();
             }
@@ -78,8 +76,7 @@ namespace aristos{
         }
     }
 
-    __global__ void __launch_bounds__(blockSize, MIN_BLOCKS_PER_SM)
-    backward(){
+    __global__ void backward(){
 
     }
 }

@@ -87,7 +87,7 @@ set_target_properties(csrc PROPERTIES
 # add dependencies
 #TODO Pin versions for release build and use main for debug
 set(ENV{CPM_SOURCE_CACHE} "./cmake/cache")
-set(ENV{CCCL_ENABLE_UNSTABLE} ON)
+set(CCCL_ENABLE_UNSTABLE ON)
 include(cmake/CPM.cmake)
 ## This will automatically clone CCCL from GitHub and make the exported cmake targets available
 CPMAddPackage(

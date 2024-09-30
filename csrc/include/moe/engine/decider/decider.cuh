@@ -30,6 +30,7 @@ namespace aristos::decider{
                                const std::vector<Worker>& workers,
                                const unsigned long& totalExpertCost,
                                const unsigned int& totalExpertMem,
+                               const ModelConfig& modelConfig,
                                bool doParetoSweep = false){
         auto infeasibleGroups = std::unordered_set<unsigned int>{};
         for(const auto& w: workers){
@@ -50,11 +51,11 @@ namespace aristos::decider{
                 if (i != j)[[likely]] {
                     auto alpha = adjMatrix[i][j].first;
                     auto beta = adjMatrix[i][j].second;
-                    candidateEdges.push(Edge(i, j,
+                    candidateEdges.emplace(i, j,
                                              ObjArgs::p2pTransferTime(alpha, beta,
-                                                                      hostMoEConfig.p2pBuffer)));
-                    externalEdges.push(Edge(i, j, ARArgs::bottleneck(alpha, beta,
-                                                                     hostMoEConfig.gradBuffer, 2)));
+                                                                      modelConfig.p2pBuffer));
+                    externalEdges.emplace(i, j, ARArgs::bottleneck(alpha, beta,
+                                                                     modelConfig.gradBuffer, 2));
                     /// Invert the edge for the dp table
                     dp[j] = adjMatrix[j][i];
                 }
@@ -63,13 +64,13 @@ namespace aristos::decider{
                                        workers[i].memoryCapacity,
                                        workers[i].processingRate,
                                        workers.size(),
-                                       ObjArgs(totalExpertCost, effectiveWorld, totalExpertMem),
+                                       ObjArgs(totalExpertCost, effectiveWorld, totalExpertMem, modelConfig),
                                        dp)});
         }
         auto extEdge = externalEdges.top();
         auto arArgs = ARArgs(adjMatrix[extEdge.node1][extEdge.node2].first,
                                adjMatrix[extEdge.node1][extEdge.node2].second,
-                               effectiveWorld);
+                               effectiveWorld, modelConfig.gradBuffer);
         const auto art = allReduceT(arArgs);
         /// Second-pass group construction
         for(auto& [i,g] : groupInfo){
@@ -141,9 +142,9 @@ namespace aristos::decider{
         }
 
         /// Post-processing
-        for(const auto& g: groupInfo){
-            if(infeasibleGroups.contains(g.first)){
-                groupInfo.erase(g.first);
+        for(const auto& [i, _]: groupInfo){
+            if(infeasibleGroups.contains(i)){
+                groupInfo.erase(i);
             }
         }
         return groups.parents();

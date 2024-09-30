@@ -29,6 +29,7 @@
 
 #define THREADS_PER_WARP 32
 #define THREADS_PER_BLOCK 256
+#define NANO_TO_MICRO (cuda::std::nano::den / cuda::std::micro::den)
 
 __device__ __constant__ cuda::atomic<unsigned int, cuda::thread_scope_device> last{1};
 
@@ -104,7 +105,7 @@ __global__ void occupancyTestKernel(){
 #define SUPPORTED = 1;
 namespace aristos{
     bool isInitialized = false;
-    extern __inline__ int blocksPerSM = 0;
+    int blocksPerSM = 0;
     auto aristosStream = cudaStreamPerThread;
     void aristosInit(const unsigned int& seqLen, const unsigned int& embedDim, const unsigned int& hiddenProjDim,
                      const unsigned int& k, const unsigned int& capacityFactor, const unsigned int& globalWorld,
@@ -118,12 +119,12 @@ namespace aristos{
         CUTE_CHECK_ERROR(cudaGetDevice(&localRank));
         CUTE_CHECK_ERROR(cudaSetDevice(localRank));
         CUTE_CHECK_ERROR(cudaDeviceGetAttribute(&numSMs, cudaDevAttrMultiProcessorCount, localRank));
-        const auto GEMMBlocks = cute::ceil_div(seqLen, bM) * cute::ceil_div(hiddenProjDim, bN);
+        const auto GEMMBlocks = cute::ceil_div(seqLen, ARISTOS_M_BATCH) * cute::ceil_div(hiddenProjDim, ARISTOS_N_BATCH);
         const auto minBlocks = GEMMBlocks + minCommunicatorBlocks;
         CUTE_CHECK_ERROR(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
                 &blocksPerSM,
-                occupancyTestKernel<bM, bN, bK, bP>,
-                blockSize,
+                occupancyTestKernel<ARISTOS_M_BATCH, ARISTOS_N_BATCH, ARISTOS_K_BATCH, ARISTOS_PIPELINE_STAGES>,
+                ARISTOS_BLOCK_SIZE,
                 0));
         const int maxActiveBlocks = blocksPerSM * numSMs;
         assert(minBlocks <= maxActiveBlocks);
@@ -136,14 +137,6 @@ namespace aristos{
         assert(computeCapability >= 7);
 
         // Good to go! Let's do some initialization
-        // initialize NVSHMEM
-        nvshmem_init();
-        // Allocate Symmetric Heap + Flags
-        const size_t heapBytes = (4 * seqLen * (embedDim + k + 2)) + globalWorld * (sizeof(flagsType) / sizeof(maxPrecision));
-        const auto sHeap = nvshmem_align(16, std::max(heapBytes*sizeof(maxPrecision),
-            std::max(globalWorld * (BETA_BUFFER + 2) * sizeof(size_t), 2 * globalWorld * (globalWorld + 1) * sizeof(size_t))));
-
-
         // Run decider
         // ...
         // generates the below
@@ -151,6 +144,13 @@ namespace aristos{
         unsigned int numLocalExperts = 0;
         std::vector<specType> parallelSpec{};
         std::vector<specType> translation{};
+
+        // initialize NVSHMEM
+        nvshmem_init();
+        // Allocate Symmetric Heap + Flags
+        const size_t heapBytes = (4 * seqLen * (embedDim + k + 2)) + (STAGES * numNeighbors * (sizeof(flagsType) / sizeof(maxPrecision)));
+        const auto sHeap = nvshmem_align(16, std::max(heapBytes*sizeof(maxPrecision),
+            std::max(globalWorld * (BETA_BUFFER + 2) * sizeof(size_t), 2 * globalWorld * (globalWorld + 1) * sizeof(size_t))));
 
         /// Allocates aligned memory
         //TODO memset symmetric heap?
@@ -165,7 +165,7 @@ namespace aristos{
                                     sizeof(specType)*hostMoEConfig.bookKeepingLen,
                                     aristosStream));
         //TODO init with host memcpy?
-        hostMoEConfig.numPublisherBlocks = maxActiveBlocks - GEMMBlocks;
+        hostMoEConfig.numP2PPublisherBlocks = maxActiveBlocks - GEMMBlocks;
         hostMoEConfig.worldSize = numNeighbors;
         hostMoEConfig.bookKeeping = bookKeeping;
         hostMoEConfig.sHeap = static_cast<cuda::std::byte*>(sHeap);
@@ -331,13 +331,13 @@ __global__ void processorSpec(DispatchPolicy dispatchPolicy, ElementA* A,
     using GmemCopyA = TiledCopyA;
     using SmemLayoutAtomA = decltype(
     composition(Swizzle<1,2,3>{},
-                Layout<Shape<Int<aristos::bM>, Int<aristos::bK>>>{}));
+                Layout<Shape<Int<ARISTOS_M_BATCH>, Int<ARISTOS_K_BATCH>>>{}));
     using SmemCopyAtomA = Copy_Atom<SM75_U32x4_LDSM_N, ElementA>;
     using TransformA = identity; // upcast from fp8 to fp16
     using GmemCopyB = TiledCopyB;
     using SmemLayoutAtomB = decltype(
     composition(Swizzle<1,2,3>{},
-                Layout<Shape<Int<aristos::bN>, Int<aristos::bK>>>{}));
+                Layout<Shape<Int<ARISTOS_N_BATCH>, Int<ARISTOS_K_BATCH>>>{}));
     using SmemCopyAtomB = Copy_Atom<SM75_U32x4_LDSM_N, ElementB>;
     using TransformB = identity; // upcast from fp8 to fp16
     using CollectiveMainloop = typename cutlass::gemm::collective::CollectiveMma<
@@ -357,7 +357,7 @@ __global__ void processorSpec(DispatchPolicy dispatchPolicy, ElementA* A,
             SmemCopyAtomB,
             TransformB>;
     auto problemShape = ProblemShape{};
-    auto ctaTiler = make_shape(aristos::bM, aristos::bN, aristos::bK);
+    auto ctaTiler = make_shape(ARISTOS_M_BATCH, ARISTOS_N_BATCH, ARISTOS_K_BATCH);
     auto ma = make_tensor(make_gmem_ptr(A), select<0,2>(problemShape), StrideA{});
     auto mb = make_tensor(make_gmem_ptr(B), select<1,2>(problemShape), StrideB{});
     auto mc = make_tensor(make_gmem_ptr(C), select<0,1>(problemShape), StrideC{});
@@ -368,7 +368,7 @@ __global__ void processorSpec(DispatchPolicy dispatchPolicy, ElementA* A,
     auto gC = local_tile(mc, ctaTiler, cta_coord, Step<_1,_1, X>{});
     auto k_tile_iter = cute::make_coord_iterator(size<2>(gA));
     int k_tile_count = size<2>(gA);
-    auto accum = partition_fragment_C(tmma, Shape<Int<aristos::bM>, Int<aristos::bN>>{});
+    auto accum = partition_fragment_C(tmma, Shape<Int<ARISTOS_M_BATCH>, Int<ARISTOS_N_BATCH>>{});
     clear(accum);
     extern __shared__ cuda::std::byte sharedBuf[];
     
@@ -376,13 +376,26 @@ __global__ void processorSpec(DispatchPolicy dispatchPolicy, ElementA* A,
     expert(accum, gA, gB, accum, k_tile_iter, k_tile_count, Underscore{}, threadIdx.x, sharedBuf);
 }
 
-template<typename T>
-void pop_println(const std::string_view& rem, T& pq)
-{
-    std::cout << rem << ": ";
-    for (; !pq.empty(); pq.pop())
-        std::cout << pq.top().toString() << ' ';
-    std::cout << '\n';
+__global__ void testAlign(float* result) {
+    extern __shared__ float remoteDurations[];
+    extern __shared__ int x[];
+    unsigned long int start, end;
+    remoteDurations[2*aristos::block::threadID()] = static_cast<float>(aristos::block::threadID()*(aristos::grid::blockID() + 1));
+    remoteDurations[2*aristos::block::threadID() + 1] = static_cast<float>(aristos::block::threadID()*(aristos::grid::blockID() + 1)) * 2.0f;
+    asm volatile("mov.u64 %0, %%globaltimer;": "=l"(start)::);
+    memcpy_async(cooperative_groups::this_thread_block(),
+                 result + aristos::grid::blockID()*2*ARISTOS_BLOCK_SIZE,
+                 remoteDurations,
+                 2*sizeof(float)*ARISTOS_BLOCK_SIZE);
+    cooperative_groups::wait_prior<1>(cooperative_groups::this_thread_block());
+    asm volatile("mov.u64 %0, %%globaltimer;": "=l"(end)::);
+    if (aristos::block::threadID() == 0) {
+        printf("Addr is %p, Latency is %fms, W is %f, raw is %fus\n",
+            remoteDurations,
+            cuda::std::chrono::duration_cast<Milli>(static_cast<Nano>(end - start)).count(),
+            cuda::std::chrono::duration<double>(end - start).count(),
+            static_cast<double>(end - start) / NANO_TO_MICRO);
+    }
 }
 
 int main() {
@@ -457,7 +470,7 @@ int main() {
         return e.toString();
     });
     aristos::printContainer<sv.size()>(sv);*/
-    printf("Number of blocks per SM %u\n", aristos::blocksPerSM);
+    /*printf("Number of blocks per SM %u\n", aristos::blocksPerSM);
     auto constexpr dim = 4U;
     auto constexpr intraWidth = 4.0;
 
@@ -537,6 +550,52 @@ int main() {
     write(fd[1], &buf, sizeof(int));
     close(fd[1]);
     wait(&buf);
-    std::cout << "Child status is: " << buf << std::endl;
+    std::cout << "Child status is: " << buf << std::endl;*/
+    /*float* f;
+    constexpr unsigned int nb = 2;
+    constexpr auto arrSize = nb*2*ARISTOS_BLOCK_SIZE;
+    std::array<float, arrSize/2> res1{};
+    std::array<float, arrSize/2> res2{};
+    CUTE_CHECK_ERROR(cudaMallocAsync(&f, nb*2*sizeof(float)*ARISTOS_BLOCK_SIZE, cudaStreamPerThread));
+    CUTE_CHECK_ERROR(cudaStreamSynchronize(cudaStreamPerThread));
+    testAlign<<<2, ARISTOS_BLOCK_SIZE>>>(f);
+    CUTE_CHECK_LAST();
+    CUTE_CHECK_ERROR(cudaMemcpyAsync(res1.data(), f, sizeof(float)*arrSize/2, cudaMemcpyDeviceToHost, cudaStreamPerThread));
+    CUTE_CHECK_ERROR(cudaMemcpyAsync(res2.data(), f + arrSize/2, sizeof(float)*arrSize/2, cudaMemcpyDeviceToHost, cudaStreamPerThread));
+    CUTE_CHECK_ERROR(cudaStreamSynchronize(cudaStreamPerThread));
+    CUTE_CHECK_LAST();
+    aristos::printContainer<arrSize/2>(res1);
+    aristos::printContainer<arrSize/2>(res2);*/
+
+    constexpr unsigned int n = 1;
+    constexpr auto pr = 1;
+    constexpr auto nb = 1;
+    std::array<float, 2*n*n> adj{};
+    std::array<uint64_t, 2*n> misc{};
+    nvshmem_init();
+    CUTE_CHECK_ERROR(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
+    void* symHeap = nvshmem_align(16, n * (BETA_BUFFER + 2) * sizeof(size_t));
+    //void* symHeap = nvshmem_malloc(n * (BETA_BUFFER + 2) * sizeof(size_t)); 0.5 ms/MB
+    //auto* symHeap = nvshmem_calloc(n * (BETA_BUFFER + 2), sizeof(size_t));
+    std::cout << "Starting Topology Discovery..." << std::endl;
+    aristos::topology::discover<<<1, 256>>>(n, nvshmem_my_pe(), nb, pr, static_cast<float*>(symHeap),
+        static_cast<uint64_t*>(symHeap) + (n*BETA_BUFFER));
+    CUTE_CHECK_LAST();
+    CUTE_CHECK_ERROR(cudaMemcpyAsync(adj.data(), symHeap, 2*sizeof(float)*n*n, cudaMemcpyDeviceToHost, cudaStreamPerThread));
+    CUTE_CHECK_ERROR(cudaMemcpyAsync(misc.data(), static_cast<uint64_t*>(symHeap) + (n*BETA_BUFFER), 2*sizeof(uint64_t)*n, cudaMemcpyDeviceToHost, cudaStreamPerThread));
+    CUTE_CHECK_ERROR(cudaStreamSynchronize(cudaStreamPerThread));
+    nvshmem_free(symHeap);
+    nvshmem_finalize();
+    aristos::printContainer<2*n*n>(adj);
+    aristos::printContainer<2*n>(misc);
+
+    /*int l2 = 0;
+    int dev;
+    CUTE_CHECK_ERROR(cudaGetDevice(&dev));
+    CUTE_CHECK_ERROR(cudaSetDevice(dev));
+    CUTE_CHECK_ERROR(cudaDeviceGetAttribute(&l2, cudaDevAttrL2CacheSize, dev));
+    std::cout << "L2 size is " << l2 << std::endl;
+    CUTE_CHECK_ERROR(cudaDeviceGetAttribute(&l2, cudaDevAttrMaxPersistingL2CacheSize, dev));
+    std::cout << "L2 Persisting size is " << l2 << std::endl;*/
 }
 

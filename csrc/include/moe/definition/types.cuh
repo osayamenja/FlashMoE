@@ -5,7 +5,24 @@
 #ifndef ARISTOS_TYPES_CUH
 #define ARISTOS_TYPES_CUH
 
+#include <ostream>
+
 #define ARISTOS_BLOCK_SIZE 128
+#define ARISTOS_BLOCK_SIZE_WARP (128 / 32)
+#if 0
+#define REGS_PER_THREAD 32
+#endif
+/// empirical threshold of threads to saturate NVLink bandwidth for one transfer
+#define ARISTOS_NVLINK_THRESHOLD 4096
+#define ARISTOS_SUPER_BLOCK_SIZE (ARISTOS_NVLINK_THRESHOLD / ARISTOS_BLOCK_SIZE)
+
+// GEMM stuff
+#define ARISTOS_M_BATCH 128
+#define ARISTOS_N_BATCH 128
+#define ARISTOS_K_BATCH 8
+// pipeline stages; have to use 1 due to shared mem constraints
+#define ARISTOS_PIPELINE_STAGES 1
+
 namespace aristos{
     using maxPrecision = float;
     using specType = unsigned int;
@@ -14,19 +31,31 @@ namespace aristos{
     /// NVIDIA native atomics only accepting int types.
     using AtomicBoolType = unsigned int;
 
-    /// GEMM Block spec
-    extern constexpr unsigned int bM = 128;
-    extern constexpr unsigned int bN = 128;
-    extern constexpr unsigned int bK = 8;
-    extern constexpr unsigned int bP = 1; // pipeline stages; have to use 1 due to shared mem constraints
-    extern constexpr unsigned int blockSize = 128; // 256 is too high, since SM can only hold at most 2048 threads
-    extern constexpr unsigned int blockSizeWarp = 4; // 128 / 32
-    extern constexpr unsigned int maxRegsPerThread = 32; // Enforces that we approach max active blocks per SM
-    /// empirical threshold of threads to saturate NVLink bandwidth for one transfer
-    extern constexpr unsigned int NVLinkThreshold = 4096;
-    extern constexpr unsigned int superBlockSize = NVLinkThreshold / blockSize;
+    struct ModelConfig{
+        unsigned int numLayers;
+        unsigned int globalBatch;
+        unsigned int redAmount;
+        unsigned int miniBatch;
+        unsigned int moeFreq;
+        unsigned int p2pBuffer;
+        unsigned int gradBuffer;
+        ModelConfig() = default;
+        ModelConfig(unsigned int numLayers, unsigned int redAmount, unsigned int globalBatch,
+                    unsigned int miniBatch, unsigned int moeFreq,
+                    unsigned int p2PBuffer, unsigned int gradBuffer) :
+                    numLayers(numLayers), globalBatch(globalBatch),
+                    redAmount(redAmount), miniBatch(miniBatch), moeFreq(moeFreq),
+                    p2pBuffer(p2PBuffer), gradBuffer(gradBuffer) {}
 
-    struct Config{
+        friend std::ostream &operator<<(std::ostream &os, const ModelConfig &config) {
+            os << "numLayers: " << config.numLayers << " globalBatch: " << config.globalBatch << " redAmount: "
+               << config.redAmount << " miniBatch: " << config.miniBatch << " moeFreq: " << config.moeFreq
+               << " p2pBuffer: " << config.p2pBuffer << " gradBuffer: " << config.gradBuffer;
+            return os;
+        }
+    };
+
+    struct __align__(16) Config{
         cuda::std::byte* sHeap;
         flagsType* flags;
         specType* bookKeeping;
@@ -36,9 +65,6 @@ namespace aristos{
         specType* expertParallelSpec;
         /// len <= |D|
         specType* peerTranslation;
-        /// Expert parallel World Size
-        unsigned int worldSize;
-        unsigned long peerOffset;
         /// Expert parallel group rank
         unsigned int rank;
         unsigned long sequenceNumber;
@@ -46,23 +72,12 @@ namespace aristos{
         unsigned int numExperts;
         unsigned int numLocalExperts;
         unsigned int k;
+        unsigned int worldSize;
         unsigned int embedDim;
-        unsigned int numPublisherBlocks;
+        unsigned int numP2PPublisherBlocks;
         unsigned int numResultChunks;
         unsigned int capacity;
-        unsigned int peerStride;
-        unsigned int stageStride;
-        unsigned int cellStride;
-        unsigned int tokenStride;
         unsigned int bookKeepingLen;
-        /// Decider's deps
-        unsigned int numLayers;
-        unsigned int globalBatch;
-        unsigned int redAmount;
-        unsigned int miniBatch;
-        unsigned int moeFreq;
-        unsigned int p2pBuffer;
-        unsigned int gradBuffer;
 
         CUTE_HOST_DEVICE
         Config() = default;
@@ -71,10 +86,8 @@ namespace aristos{
         Config(cuda::std::byte* _symmetricHeap,
                flagsType* _flags,
                specType* _bookKeeping,
-               const unsigned int _worldSize,
                const unsigned int _rank,
                const unsigned long _sequenceNumber,
-               const unsigned int _capacityFactor,
                const unsigned int _k,
                const unsigned int _embedDim,
                const unsigned int _numExperts,
@@ -83,14 +96,13 @@ namespace aristos{
                 sHeap(_symmetricHeap),
                 flags(_flags),
                 bookKeeping(_bookKeeping),
-                worldSize(_worldSize),
                 rank(_rank),
                 sequenceNumber(_sequenceNumber),
                 seqLen(_seqLen),
                 numExperts(_numExperts),
                 numLocalExperts(_numLocalExperts),
                 k(_k), embedDim(_embedDim),
-                numResultChunks(cute::ceil_div(embedDim, bN))
+                numResultChunks(cute::ceil_div(embedDim, ARISTOS_N_BATCH))
                 {};
 
         CUTE_HOST_DEVICE
@@ -107,14 +119,13 @@ namespace aristos{
                    "\"E\": %u,\n\t"
                    "\"localE\": %u,\n\t"
                    "\"H\": %u,\n\t"
-                   "\"PeerOffset\": %lu,\n\t"
+                   "\"World\": %u,\n\t"
                    "\"Rank\": %u,\n\t"
                    "\"SB\": %u,\n\t"
                    "\"SequenceNumber\": %lu,\n\t"
-                   "\"WorldSize\": %u,\n\t"
                    "\"k\": %u\n}\n",
-                   capacity, numExperts, numLocalExperts, embedDim, peerOffset,
-                   rank, seqLen, sequenceNumber, worldSize, k);
+                   capacity, numExperts, numLocalExperts, embedDim, worldSize,
+                   rank, seqLen, sequenceNumber, k);
         }
     };
 
@@ -127,13 +138,12 @@ namespace aristos{
         unsigned int superBlockID;
         bool isLastSubBlock;
         bool isFirstSubBlock;
-        unsigned int lastSubBlockID;
         specType* syncGrid;
         specType* checkpoints;
 
         CUTE_DEVICE
-        static decltype(auto) getLocalBlockID(auto const& numPublisherBlocks){
-            return blockIdx.x - (gridDim.x - numPublisherBlocks);
+        static decltype(auto) getLocalBlockID(auto const& numP2PBlocks){
+            return blockIdx.x - (gridDim.x - numP2PBlocks);
         }
 
         CUTE_DEVICE
@@ -146,15 +156,16 @@ namespace aristos{
 
         CUTE_DEVICE
         explicit PublisherConfig(const Config& c){
-            localBlockID = PublisherConfig::getLocalBlockID(c.numPublisherBlocks);
-            numSuperBlocks = (c.numPublisherBlocks - 1) / superBlockSize;
+            localBlockID = PublisherConfig::getLocalBlockID(c.numP2PPublisherBlocks);
+            numSuperBlocks = (c.numP2PPublisherBlocks - 1) / ARISTOS_SUPER_BLOCK_SIZE;
             p2pLogHead = 0;
-            superBlockID = localBlockID / superBlockSize;
-            numSubBlocks = superBlockSize;
-            lastSubBlockID = ((superBlockID + 1) * superBlockSize) - 1;
-            if(localBlockID >= ((numSuperBlocks - 1)*superBlockSize)){
+            superBlockID = localBlockID / ARISTOS_SUPER_BLOCK_SIZE;
+            numSubBlocks = ARISTOS_SUPER_BLOCK_SIZE;
+            unsigned int lastSubBlockID = ((superBlockID + 1) * ARISTOS_SUPER_BLOCK_SIZE) - 1;
+            // last super block with more sub-blocks
+            if(localBlockID >= ((numSuperBlocks - 1)*ARISTOS_SUPER_BLOCK_SIZE)){
                 superBlockID = (numSuperBlocks - 1);
-                numSubBlocks = (c.numPublisherBlocks - 1) - ((numSuperBlocks - 1) * superBlockSize);
+                numSubBlocks = (c.numP2PPublisherBlocks - 1) - ((numSuperBlocks - 1) * ARISTOS_SUPER_BLOCK_SIZE);
                 lastSubBlockID = PublisherConfig::getLastLocalBlockID();
             }
             isLastSubBlock = localBlockID == lastSubBlockID;
@@ -173,6 +184,7 @@ namespace aristos{
     };
 
 
+    __device__
     enum header : unsigned short {
         NOOP = 0,
         processed = 0,
@@ -180,6 +192,7 @@ namespace aristos{
         begin = 2
     };
 
+    __device__
     enum putSignal : unsigned short {
         sent = 1
     };
