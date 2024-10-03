@@ -29,7 +29,7 @@ set(ARISTOS_CUDA_CXX_FLAGS "${ARISTOS_CUDA_CXX_FLAGS} -fno-strict-aliasing")
 if(NOT ${CMAKE_SYSTEM_PROCESSOR} MATCHES "^aarch64")
     set(ARISTOS_CUDA_CXX_FLAGS "${ARISTOS_CUDA_CXX_FLAGS} -m64")
 endif ()
-set(ARISTOS_CUDA_CXX_FLAGS "${ARISTOS_CUDA_CXX_FLAGS} -Wno-unknown-pragmas -Wnull-dereference")
+set(ARISTOS_CUDA_CXX_FLAGS "${ARISTOS_CUDA_CXX_FLAGS} -Wno-unknown-pragmas -Wnull-dereference -Wnarrowing")
 set(ARISTOS_CUDA_CXX_FLAGS "${ARISTOS_CUDA_CXX_FLAGS} -Wno-switch -Wfloat-equal -Wduplicated-branches -Wformat=2")
 set(ARISTOS_CUDA_CXX_FLAGS "${ARISTOS_CUDA_CXX_FLAGS} -Wno-unused-but-set-parameter")
 set(ARISTOS_CUDA_CXX_FLAGS "${ARISTOS_CUDA_CXX_FLAGS} -Wno-sign-compare -v")
@@ -113,6 +113,15 @@ if(CUTLASS_ADDED)
     target_include_directories(csrc SYSTEM PRIVATE "${CUTLASS_SOURCE_DIR}/include")
 endif ()
 
+CPMAddPackage(
+        NAME SPDLOG
+        GITHUB_REPOSITORY gabime/spdlog
+        VERSION 1.14.1
+)
+if(SPDLOG_ADDED)
+    target_link_libraries(csrc PRIVATE spdlog::spdlog)
+endif ()
+
 ## NVSHMEM Business
 set(NVSHMEM_HOME "$ENV{NVSHMEM_HOME}")
 find_package(NVSHMEM REQUIRED HINTS ${NVSHMEM_HOME}/lib/cmake/nvshmem)
@@ -127,7 +136,7 @@ target_link_libraries(csrc PRIVATE atomic)
 target_compile_options(csrc PRIVATE
         $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-Xfatbin -compress-all>
         $<$<COMPILE_LANGUAGE:CUDA>:-Xptxas -v>
-        $<$<COMPILE_LANGUAGE:CUDA>:-t0>
+        $<$<COMPILE_LANGUAGE:CUDA>:-t0; --generate-line-info>
         # Required to support std::tuple in device code
         $<$<BOOL:True>:$<$<COMPILE_LANGUAGE:CUDA>:SHELL:--expt-relaxed-constexpr>>
 )
@@ -139,7 +148,7 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
 elseif(CMAKE_BUILD_TYPE STREQUAL "Release")
     target_compile_options(csrc PRIVATE
             $<$<COMPILE_LANGUAGE:CXX>:-O3>
-            $<$<COMPILE_LANGUAGE:CUDA>:-O3 --use_fast_math>
+            $<$<COMPILE_LANGUAGE:CUDA>:-O3>
             $<$<COMPILE_LANGUAGE:CUDA>:-Xptxas -O3>
     )
 endif ()

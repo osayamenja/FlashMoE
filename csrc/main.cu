@@ -1,9 +1,11 @@
 /******************************************************************************
  * Copyright (c) 2024, Osayamen Jonathan Aimuyo.
  ******************************************************************************/
+#include <climits>
 #include <iostream>
 #include <array>
 #include <atomic>
+#include <thread>
 #include <unistd.h>
 #include <sys/wait.h>
 
@@ -20,12 +22,15 @@
 #include <functional>
 #include <queue>
 
+#include <cooperative_groups/memcpy_async.h>
 #include <cub/cub.cuh>
 #include <cute/tensor.hpp>
 #include <cute/config.hpp>
 #include <cutlass/gemm/dispatch_policy.hpp>
 #include <cutlass/gemm/collective/collective_mma.hpp>
 #include <boost/pending/disjoint_sets.hpp>
+#include <spdlog/spdlog.h>
+#include <spdlog/fmt/bundled/ranges.h>
 
 #define THREADS_PER_WARP 32
 #define THREADS_PER_BLOCK 256
@@ -112,51 +117,48 @@ namespace aristos{
                      const unsigned int& numExperts) {
         assert(!isInitialized);
         isInitialized = true;
-        int numSMs = 0;
-        constexpr int minCommunicatorBlocks = 2;
-        int localRank = 0;
-        int computeCapability = 0;
-        CUTE_CHECK_ERROR(cudaGetDevice(&localRank));
-        CUTE_CHECK_ERROR(cudaSetDevice(localRank));
-        CUTE_CHECK_ERROR(cudaDeviceGetAttribute(&numSMs, cudaDevAttrMultiProcessorCount, localRank));
+        int cudaDevAttribute = 0;
+        int dev = 0;
+        CUTE_CHECK_ERROR(cudaGetDevice(&dev));
+        CUTE_CHECK_ERROR(cudaDeviceGetAttribute(&cudaDevAttribute, cudaDevAttrMultiProcessorCount, dev));
+        //TODO make below flexible to tiling
         const auto GEMMBlocks = cute::ceil_div(seqLen, ARISTOS_M_BATCH) * cute::ceil_div(hiddenProjDim, ARISTOS_N_BATCH);
-        const auto minBlocks = GEMMBlocks + minCommunicatorBlocks;
         CUTE_CHECK_ERROR(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
                 &blocksPerSM,
                 occupancyTestKernel<ARISTOS_M_BATCH, ARISTOS_N_BATCH, ARISTOS_K_BATCH, ARISTOS_PIPELINE_STAGES>,
                 ARISTOS_BLOCK_SIZE,
                 0));
-        const int maxActiveBlocks = blocksPerSM * numSMs;
-        assert(minBlocks <= maxActiveBlocks);
-        int deviceSupportsMemoryPools = 0;
-        CUTE_CHECK_ERROR(cudaDeviceGetAttribute(&deviceSupportsMemoryPools,
-                                                cudaDevAttrMemoryPoolsSupported, localRank));
-        assert(deviceSupportsMemoryPools);
-        CUTE_CHECK_ERROR(cudaDeviceGetAttribute(&computeCapability, cudaDevAttrComputeCapabilityMajor, localRank));
+        const int maxActiveBlocks = blocksPerSM * cudaDevAttribute;
+        assert(GEMMBlocks + 2 <= maxActiveBlocks);
+        CUTE_CHECK_ERROR(cudaDeviceGetAttribute(&cudaDevAttribute,
+                                                cudaDevAttrMemoryPoolsSupported, dev));
+        assert(cudaDevAttribute);
+        CUTE_CHECK_ERROR(cudaDeviceGetAttribute(&cudaDevAttribute, cudaDevAttrComputeCapabilityMajor, dev));
         /// Due to NVSHMEM: https://docs.nvidia.com/nvshmem/release-notes-install-guide/install-guide/abstract.html#hardware-requirements
-        assert(computeCapability >= 7);
+        assert(cudaDevAttribute >= 7);
 
         // Good to go! Let's do some initialization
         // Run decider
         // ...
         // generates the below
-        unsigned int numNeighbors = 0;
-        unsigned int numLocalExperts = 0;
+        const unsigned int numLocalExperts = 0;
         std::vector<specType> parallelSpec{};
         std::vector<specType> translation{};
+        const unsigned int numNeighbors = translation.size();
 
         // initialize NVSHMEM
         nvshmem_init();
+        CUTE_CHECK_ERROR(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
         // Allocate Symmetric Heap + Flags
-        const size_t heapBytes = (4 * seqLen * (embedDim + k + 2)) + (STAGES * numNeighbors * (sizeof(flagsType) / sizeof(maxPrecision)));
-        const auto sHeap = nvshmem_align(16, std::max(heapBytes*sizeof(maxPrecision),
-            std::max(globalWorld * (BETA_BUFFER + 2) * sizeof(size_t), 2 * globalWorld * (globalWorld + 1) * sizeof(size_t))));
-
+        size_t heapBytes = ((4 * seqLen * (embedDim + k + 2))*sizeof(maxPrecision)) + (STAGES * numNeighbors * sizeof(flagsType));
+        heapBytes = std::max(heapBytes, globalWorld * (BETA_BUFFER + ((2*globalWorld + 1)*sizeof(double))));
         /// Allocates aligned memory
-        //TODO memset symmetric heap?
+        const auto sHeap = nvshmem_align(HEAP_ALIGNMENT, heapBytes);
+        CUTE_CHECK_ERROR(cudaMemsetAsync(sHeap, 0, heapBytes, aristosStream));
+
         //Final Initialization
         hostMoEConfig = Config();
-        unsigned int* bookKeeping;
+        specType* bookKeeping;
         /// pubQueueLen -> Multiplied by 2 to simulate pair: {index, numTokens}
         /// + translationLen + shardSpecLen +
         /// syncVectorLen -> {syncGrid, checkpoints}
@@ -164,8 +166,10 @@ namespace aristos{
         CUTE_CHECK_ERROR(cudaMallocAsync(&bookKeeping,
                                     sizeof(specType)*hostMoEConfig.bookKeepingLen,
                                     aristosStream));
+        CUTE_CHECK_ERROR(cudaMemsetAsync(bookKeeping, 0, hostMoEConfig.bookKeepingLen, aristosStream));
+
         //TODO init with host memcpy?
-        hostMoEConfig.numP2PPublisherBlocks = maxActiveBlocks - GEMMBlocks;
+        hostMoEConfig.numP2PPublisherBlocks = maxActiveBlocks - GEMMBlocks - 1;
         hostMoEConfig.worldSize = numNeighbors;
         hostMoEConfig.bookKeeping = bookKeeping;
         hostMoEConfig.sHeap = static_cast<cuda::std::byte*>(sHeap);
@@ -398,7 +402,27 @@ __global__ void testAlign(float* result) {
     }
 }
 
+CUTE_DEVICE
+double reduce(const double& val, BlockReduce::TempStorage* temp) {
+    return BlockReduce(*temp).Reduce(val, cub::Max());
+}
+
+__global__ void testCub() {
+    __shared__ BlockReduce::TempStorage temp_storage;
+    double result = 0;
+    CUTE_UNROLL
+    for (uint i = 0; i < 1024; ++i) {
+        result = reduce(aristos::block::threadID()*2.0, &temp_storage);
+        assert( result == (blockDim.x - 1)*2.0);
+    }
+    if (aristos::block::threadID() == 0) {
+        printf("Result is %f", result);
+    }
+}
+
 int main() {
+    char username[HOST_NAME_MAX];
+    getlogin_r(username, HOST_NAME_MAX);
     /*auto size = 64;
     unsigned int* p;
     cuda::barrier<cuda::thread_scope_device>* b;
@@ -567,35 +591,49 @@ int main() {
     aristos::printContainer<arrSize/2>(res1);
     aristos::printContainer<arrSize/2>(res2);*/
 
-    constexpr unsigned int n = 1;
-    constexpr auto pr = 1;
-    constexpr auto nb = 1;
-    std::array<float, 2*n*n> adj{};
-    std::array<uint64_t, 2*n> misc{};
+    /// Initialization
     nvshmem_init();
-    CUTE_CHECK_ERROR(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
-    void* symHeap = nvshmem_align(16, n * (BETA_BUFFER + 2) * sizeof(size_t));
-    //void* symHeap = nvshmem_malloc(n * (BETA_BUFFER + 2) * sizeof(size_t)); 0.5 ms/MB
-    //auto* symHeap = nvshmem_calloc(n * (BETA_BUFFER + 2), sizeof(size_t));
-    std::cout << "Starting Topology Discovery..." << std::endl;
-    aristos::topology::discover<<<1, 256>>>(n, nvshmem_my_pe(), nb, pr, static_cast<float*>(symHeap),
-        static_cast<uint64_t*>(symHeap) + (n*BETA_BUFFER));
+    const int n = nvshmem_n_pes();
+    std::vector<double> adj(2*n*n);
+    std::vector<uint64_t> misc(n);
+    const int localRank = nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE);
+
+    /// Logging
+    cudaDeviceProp prop{};
+    int dev_count = 0;
+    CUTE_CHECK_ERROR(cudaGetDeviceCount(&dev_count));
+    CUTE_CHECK_ERROR(cudaGetDeviceProperties(&prop, localRank));
+    spdlog::set_pattern(std::string("[").append(std::string(username))
+    .append(":Rank ").append(std::to_string(localRank)).append("] [%c] [%^%l%$] %v"));
+    spdlog::info("Starting Topology Discovery...");
+    spdlog::info("GlobalRank: {}, LocalRank: {}, Device: {}, Bus ID: {}, Devices: {}",
+        nvshmem_my_pe(), localRank, prop.name, prop.pciBusID, dev_count);
+
+    CUTE_CHECK_ERROR(cudaSetDevice(localRank));
+    const size_t heapBytes = n * (BETA_BUFFER + ((2*n + 1)*sizeof(double)));
+    void* symHeap = nvshmem_align(16, heapBytes);
+    CUTE_CHECK_ERROR(cudaMemset(symHeap, 0, heapBytes));
+    CUTE_CHECK_ERROR(cudaPeekAtLastError());
+    /// Pointer orchestration
+    static_assert(sizeof(aristos::flagsType) == sizeof(uint64_t));
+    auto* flags = static_cast<uint64_t*>(symHeap) + adj.size();
+    auto* results = static_cast<double*>(symHeap);
+    auto* sHeap = results + adj.size() + n;
+    const auto pr = localRank + 1;
+    aristos::topology::discover<<<1, ARISTOS_BLOCK_SIZE>>>(n, nvshmem_my_pe(), pr, sHeap, flags, results);
+    CUTE_CHECK_ERROR(cudaPeekAtLastError());
+
+    /// Epilogue
+    CUTE_CHECK_ERROR(cudaMemcpy(adj.data(), results, adj.size()*sizeof(decltype(adj)::value_type), cudaMemcpyDeviceToHost));
+    CUTE_CHECK_ERROR(cudaMemcpy(misc.data(), flags, sizeof(uint64_t)*n, cudaMemcpyDeviceToHost));
     CUTE_CHECK_LAST();
-    CUTE_CHECK_ERROR(cudaMemcpyAsync(adj.data(), symHeap, 2*sizeof(float)*n*n, cudaMemcpyDeviceToHost, cudaStreamPerThread));
-    CUTE_CHECK_ERROR(cudaMemcpyAsync(misc.data(), static_cast<uint64_t*>(symHeap) + (n*BETA_BUFFER), 2*sizeof(uint64_t)*n, cudaMemcpyDeviceToHost, cudaStreamPerThread));
-    CUTE_CHECK_ERROR(cudaStreamSynchronize(cudaStreamPerThread));
+    for (int i = 0; i < n; ++i) {
+        adj[(2*i*(n + 1)) + 1] = adj[(2*i*(n + 1))] = 0.0;
+    }
+    spdlog::set_level(spdlog::level::debug);
+    spdlog::debug("Adjacency Matrix {::f}", adj);
+    spdlog::debug("Rates {}", misc);
     nvshmem_free(symHeap);
     nvshmem_finalize();
-    aristos::printContainer<2*n*n>(adj);
-    aristos::printContainer<2*n>(misc);
-
-    /*int l2 = 0;
-    int dev;
-    CUTE_CHECK_ERROR(cudaGetDevice(&dev));
-    CUTE_CHECK_ERROR(cudaSetDevice(dev));
-    CUTE_CHECK_ERROR(cudaDeviceGetAttribute(&l2, cudaDevAttrL2CacheSize, dev));
-    std::cout << "L2 size is " << l2 << std::endl;
-    CUTE_CHECK_ERROR(cudaDeviceGetAttribute(&l2, cudaDevAttrMaxPersistingL2CacheSize, dev));
-    std::cout << "L2 Persisting size is " << l2 << std::endl;*/
 }
 

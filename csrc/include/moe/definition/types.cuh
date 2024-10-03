@@ -40,9 +40,9 @@ namespace aristos{
         unsigned int p2pBuffer;
         unsigned int gradBuffer;
         ModelConfig() = default;
-        ModelConfig(unsigned int numLayers, unsigned int redAmount, unsigned int globalBatch,
-                    unsigned int miniBatch, unsigned int moeFreq,
-                    unsigned int p2PBuffer, unsigned int gradBuffer) :
+        ModelConfig(const unsigned int& numLayers, const unsigned int& redAmount, const unsigned int& globalBatch,
+                    const unsigned int& miniBatch, const unsigned int& moeFreq,
+                    const unsigned int& p2PBuffer, const unsigned int& gradBuffer) :
                     numLayers(numLayers), globalBatch(globalBatch),
                     redAmount(redAmount), miniBatch(miniBatch), moeFreq(moeFreq),
                     p2pBuffer(p2PBuffer), gradBuffer(gradBuffer) {}
@@ -193,13 +193,13 @@ namespace aristos{
     };
 
     __device__
-    enum putSignal : unsigned short {
+    enum putSignal : uint64_t {
         sent = 1
     };
 
     template<typename E = header> requires cuda::std::is_integral_v<cuda::std::underlying_type_t<E>>
     CUTE_DEVICE
-    uint64_t constructSignal(unsigned long const& tagAlong, E const& signal){
+    uint64_t constructSignal(uint64_t const& tagAlong, E const& signal){
         return tagAlong + signal;
     }
 }

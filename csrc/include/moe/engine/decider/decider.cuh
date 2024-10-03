@@ -42,10 +42,8 @@ namespace aristos::decider{
         std::priority_queue<Edge> externalEdges;
         auto groupInfo = std::unordered_map<unsigned int, Group>{};
         auto effectiveWorld = workers.size() - infeasibleGroups.size();
-        CUTE_UNROLL
         for(int i = 0; i < adjMatrix.size(); ++i) {
             auto dp = std::vector<std::pair<double, double>>(adjMatrix.size());
-            CUTE_UNROLL
             for (int j = 0; j < adjMatrix.size(); ++j) {
                 dp[j] = {0.0, 0.0};
                 if (i != j)[[likely]] {

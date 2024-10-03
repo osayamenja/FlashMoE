@@ -16,6 +16,8 @@
 #define SEND_CELL 0
 #define RECEIVE_CELL 1
 
+#define HEAP_ALIGNMENT 16
+
 namespace aristos{
     CUTE_DEVICE
     cuda::std::byte* getTokenPointer(unsigned int const& peer, unsigned int const& stage, unsigned int const& cell, unsigned int const& token){

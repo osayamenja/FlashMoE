@@ -8,11 +8,10 @@
 namespace aristos{
     __forceinline__
     std::vector<unsigned int> subsets(const std::vector<size_t>& parents, const unsigned int& myRank){
-        const auto myGroup = parents[myRank];
         std::vector<unsigned int> platoon{};
         for(unsigned int i = 0; i < parents.size(); ++i){
-            if (parents[i] == myGroup) {
-                platoon.push_back(i);
+            if (parents[i] == parents[myRank]) {
+                platoon.emplace_back(i);
             }
         }
         return platoon;
