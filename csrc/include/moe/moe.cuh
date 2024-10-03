@@ -16,32 +16,6 @@
 #include <cuda/annotated_ptr>
 
 namespace aristos{
-    CUTE_DEVICE
-    void persistHotPointers(){
-        /// Persist global interrupt
-        cuda::associate_access_property(&stillExecuting, cuda::access_property::persisting{});
-        /// Persist publisher notifiers
-        cuda::associate_access_property(&publisher::doorbell, cuda::access_property::persisting{});
-        cuda::associate_access_property(&publisher::blockade, cuda::access_property::persisting{});
-        cuda::associate_access_property(&publisher::logHead, cuda::access_property::persisting{});
-        cuda::associate_access_property(&publisher::logTail, cuda::access_property::persisting{});
-        cuda::associate_access_property(&publisher::baton, cuda::access_property::persisting{});
-        cuda::associate_access_property(&publisher::syncStages, cuda::access_property::persisting{});
-
-        /// Persist symmetric heap flags
-        cuda::associate_access_property(moeConfig.flags,
-                                        cuda::access_property(moeConfig.flags,
-                                                              STAGES*moeConfig.worldSize*sizeof(flagsType),
-                                                              STAGES*moeConfig.worldSize*sizeof(flagsType),
-                                                              cuda::access_property::persisting{}));
-        /// Persist book keeping state
-        cuda::associate_access_property(moeConfig.bookKeeping,
-                                        cuda::access_property(moeConfig.bookKeeping,
-                                                              sizeof(specType) * moeConfig.bookKeepingLen,
-                                                              sizeof(specType)* moeConfig.bookKeepingLen,
-                                                              cuda::access_property::persisting{}));
-    }
-
     template<Matrix M>
     CUTE_DEVICE
     void gate(M const& activations, M const& weights, M routing){
@@ -53,7 +27,6 @@ namespace aristos{
     template<Matrix M, Tensor T>
     __global__ void forward(M const& activations, T const& expertsWeights, M const& gateWeights,
                             M gateOutput, M mappingTensor, M sharedSpec) {
-        persistHotPointers();
         gate(activations, gateWeights, gateOutput);
         tokenToPeers(gateOutput, sharedSpec, mappingTensor);
         /// mappingTensor (S, D)

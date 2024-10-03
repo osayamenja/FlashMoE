@@ -30,12 +30,6 @@ namespace aristos::topology{
         return buffer + (slot * BETA_BUFFER);
     }
 
-    /// We scramble the communicating peer to prevent congestion
-    CUTE_DEVICE
-    decltype(auto) getPeer(const int& currentPeer, const int& rank, const int& n) {
-        return (((currentPeer - rank) % n) + n) % n;
-    }
-
     /// Fused memcpy and memset.
     /// Note, M cannot be any of function types, incomplete types, or bit-field.
     template<cuda::std::byte setValue=cuda::std::byte{0}, typename M>
@@ -67,7 +61,7 @@ namespace aristos::topology{
         CUTE_UNROLL
         for (unsigned int j = 0; j < TOPO_LOOP_TRIP; ++j) {
             asm volatile("mov.u64 %0, %%globaltimer;": "=l"(start)::);
-            put(advancePtr(sHeap, rank) + (lBid * buf), advancePtr(sHeap, rank) + (lBid * buf), (rank != peer) * buf, peer);
+            put(advancePtr(sHeap, rank) + (lBid * buf), advancePtr(sHeap, rank) + (lBid * buf), buf, peer);
             asm volatile("mov.u64 %0, %%globaltimer;": "=l"(end)::);
             duration += (end - start) / static_cast<double>(TOPO_LOOP_TRIP*NANO_TO_MILLI);
         }
@@ -82,7 +76,7 @@ namespace aristos::topology{
         CUTE_UNROLL
         for (unsigned int j = 0; j < TOPO_LOOP_TRIP; ++j) {
             asm volatile("mov.u64 %0, %%globaltimer;": "=l"(start)::);
-            put(advancePtr(sHeap, rank) + (lBid * buf), advancePtr(sHeap, rank) + (lBid * buf), (rank != peer) * buf, peer);
+            put(advancePtr(sHeap, rank) + (lBid * buf), advancePtr(sHeap, rank) + (lBid * buf), buf, peer);
             asm volatile("mov.u64 %0, %%globaltimer;": "=l"(end)::);
             duration += (end - start)/ static_cast<double>(TOPO_LOOP_TRIP*NANO_TO_MILLI);
         }
@@ -95,10 +89,10 @@ namespace aristos::topology{
     }
 
     CUTE_DEVICE
-    void singularBuilder(void* scratchpad, const int& n, const int& rank, const unsigned long& processingRate,
+    void singularBuilder(void* scratchpad, const unsigned int& n, const unsigned int& rank, const unsigned long& processingRate,
         double* sHeap, double* results, uint64_t* flags) {
-        for (int i = 0; i < n; ++i) {
-            measureTransfer(rank, sHeap, static_cast<double*>(scratchpad), getPeer(i, rank, n),
+        for (unsigned int i = 1U; i < n; ++i) {
+            measureTransfer(rank, sHeap, static_cast<double*>(scratchpad), (rank + i) % n,
                 block::threadID, nvshmemx_putmem_block);
         }
         __threadfence_block();
@@ -111,18 +105,19 @@ namespace aristos::topology{
         __threadfence_block();
 
         // Signal my vector, including FLOPs, to others
-        for (int i = 0; i < n; ++i) {
+        for (unsigned int i = 1U; i < n; ++i) {
             nvshmemx_double_put_signal_nbi_block(results + (2*rank*n),
                     results + (2*rank*n),
-                    (getPeer(i, rank, n) != rank) * 2*n, flags + rank,
-                    constructSignal(processingRate, sent), NVSHMEM_SIGNAL_SET, getPeer(i, rank, n));
+                    2*n, flags + rank,
+                    constructSignal(processingRate, sent), NVSHMEM_SIGNAL_SET, (rank + i) % n);
         }
 
         // await responses from other GPUs
         if (block::threadID() == 0) {
+            static_cast<int*>(scratchpad)[rank] = 1; // Do not wait for me
             nvshmem_uint64_wait_until_all(flags, n, static_cast<int*>(scratchpad), NVSHMEM_CMP_GT, sent);
-            for (unsigned int i = 0U; i < n; ++i) {
-                flags[i] -= sent;
+            for (unsigned int i = 1U; i < n; ++i) {
+                flags[(rank  + i) % n] -= sent;
             }
         }
     }
@@ -268,17 +263,10 @@ namespace aristos::topology{
 
     /// Build Adjacency Matrix
     __global__ void discover(CUTE_GRID_CONSTANT const int n, CUTE_GRID_CONSTANT const int rank,
-        const unsigned long processingRate, double* sHeap, uint64_t* flags,
-        double* results) {
-        assert(blockDim.x <= ARISTOS_BLOCK_SIZE);
+        CUTE_GRID_CONSTANT const bool remotePresent, const unsigned long processingRate,
+        double* sHeap, uint64_t* flags, double* results) {
+        assert(blockDim.x <= ARISTOS_BLOCK_SIZE + 1);
         assert(blockDim.y * blockDim.z == 1);
-        /// Persist relevant data in cache
-        /// Parition the below among threads
-        /*associate_access_property(advancePtr(sHeap, rank), cuda::access_property(advancePtr(sHeap, rank),
-            BETA_BUFFER, BETA_BUFFER, cuda::access_property::persisting{}));*/
-        /*associate_access_property(flags, cuda::access_property(flags,
-            n*sizeof(uint64_t), n*sizeof(uint64_t), cuda::access_property::persisting{}));
-        associate_access_property(&publisher::blockade, cuda::access_property::persisting{});*/
 
         // Align to 16 bytes for optimal copy performance.
         // However, empirical results show identical performance (1.024 𝜇s) for 128 threads copying 256 floats,
@@ -296,19 +284,19 @@ namespace aristos::topology{
             if (block::threadID() == 0) {
                 numPeers = 0;
                 peers = static_cast<unsigned int*>(static_cast<void*>(scratchpad + 2*n));
-                /// Block 0 gets remote peers while others get proximal peers
+                /// Block 0 gets remote peers, if present; otherwise; joins the others in getting proximal peers
                 for(unsigned int i = 0U; i < n; ++i) {
-                    bool b = nvshmem_ptr(sHeap, i) == nullptr;
-                    b = (blockIdx.x > 0) * !b + b * (blockIdx.x == 0);
-                    peers[numPeers] = !b * peers[numPeers] + i * b;
-                    numPeers += b;
+                    if (const bool b = nvshmem_ptr(results, i);
+                        (!b && blockIdx.x > 0) || ((!remotePresent && !b ) || (remotePresent && (b && blockIdx.x == 0)))) {
+                        peers[numPeers++] = i;
+                    }
                 }
             }
             __threadfence_block();
+            __syncthreads();
             /// local publisher block 0 will service remote communication requests
             /// while other blocks will further specialize to serve parallel P2P, à la NVLink, transfers
-            /// TODO if no remote then everyone does P2P
-            if(!PublisherConfig::getLocalBlockID(blockDim.x)){
+            if(!PublisherConfig::getLocalBlockID(blockDim.x) && remotePresent){
                 /// remote publisher
                 pluralRemoteBuilder(scratchpad, n, rank, processingRate, sHeap, flags);
             }

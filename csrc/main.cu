@@ -620,16 +620,21 @@ int main() {
     auto* results = static_cast<double*>(symHeap);
     auto* sHeap = results + adj.size() + n;
     const auto pr = localRank + 1;
-    aristos::topology::discover<<<1, ARISTOS_BLOCK_SIZE>>>(n, nvshmem_my_pe(), pr, sHeap, flags, results);
+    const auto remotePresent = [&n, &symHeap] {
+        for (int i = 0; i< n; ++i) {
+            if (nvshmem_ptr(symHeap, i) == nullptr) return true;
+        }
+        return false;
+    };
+
+    aristos::topology::discover<<<1, ARISTOS_BLOCK_SIZE>>>(n, nvshmem_my_pe(), remotePresent(),
+        pr, sHeap, flags, results);
     CUTE_CHECK_ERROR(cudaPeekAtLastError());
 
     /// Epilogue
     CUTE_CHECK_ERROR(cudaMemcpy(adj.data(), results, adj.size()*sizeof(decltype(adj)::value_type), cudaMemcpyDeviceToHost));
     CUTE_CHECK_ERROR(cudaMemcpy(misc.data(), flags, sizeof(uint64_t)*n, cudaMemcpyDeviceToHost));
     CUTE_CHECK_LAST();
-    for (int i = 0; i < n; ++i) {
-        adj[(2*i*(n + 1)) + 1] = adj[(2*i*(n + 1))] = 0.0;
-    }
     spdlog::set_level(spdlog::level::debug);
     spdlog::debug("Adjacency Matrix {::f}", adj);
     spdlog::debug("Rates {}", misc);
