@@ -9,7 +9,7 @@
 #include "moe/engine/subscriber.cuh"
 #include "moe/engine/decider/decider.cuh"
 #include "moe/engine/decider/decider.cuh"
-#include "moe/topo/topo.cuh"
+#include "topo/topo.cuh"
 #include "moe/algorithm/algorithm.cuh"
 #include "moe/util/indexing.cuh"
 #include "moe/util/config.cuh"

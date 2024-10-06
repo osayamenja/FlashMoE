@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.27)
 
 # Set compilers and obtain compute capability, assuming the running process sees homogeneous GPUs
 # Add COMMAND_ECHO STDOUT to see the commands in standard out
-if(DEFINED $ENV{NERSC_HOST})
+if(DEFINED ENV{NERSC_HOST})
     execute_process(COMMAND "which" "g++"
             COMMAND_ERROR_IS_FATAL ANY
             OUTPUT_VARIABLE CPP_COMP_PATH
@@ -10,6 +10,8 @@ if(DEFINED $ENV{NERSC_HOST})
     execute_process(COMMAND "which" "gcc"
             COMMAND_ERROR_IS_FATAL ANY
             OUTPUT_VARIABLE C_COMP_PATH OUTPUT_STRIP_TRAILING_WHITESPACE)
+    set(CMAKE_CXX_COMPILER ${CPP_COMP_PATH})
+    set(CMAKE_C_COMPILER ${C_COMP_PATH})
 endif ()
 execute_process(COMMAND "nvidia-smi" "--id=0" "--query-gpu=compute_cap" "--format=csv,noheader"
         COMMAND_ERROR_IS_FATAL ANY
@@ -77,7 +79,7 @@ add_executable(csrc main.cu
         include/moe/util/debug.cuh
         include/moe/engine/decider/comps/niche.cuh
         include/moe/util/config.cuh
-        include/moe/topo/topo.cuh
+        include/topo/topo.cuh
 )
 set_target_properties(csrc PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
@@ -114,9 +116,20 @@ if(CUTLASS_ADDED)
 endif ()
 
 CPMAddPackage(
+        NAME FMT
+        GITHUB_REPOSITORY fmtlib/fmt
+        GIT_TAG 11.0.2
+        DOWNLOAD_ONLY
+)
+if(FMT_ADDED)
+    target_include_directories(csrc SYSTEM PRIVATE "${FMT_SOURCE_DIR}/include")
+endif ()
+
+CPMAddPackage(
         NAME SPDLOG
         GITHUB_REPOSITORY gabime/spdlog
         VERSION 1.14.1
+        OPTIONS "SPDLOG_FMT_EXTERNAL 1"
 )
 if(SPDLOG_ADDED)
     target_link_libraries(csrc PRIVATE spdlog::spdlog)
@@ -128,6 +141,14 @@ find_package(NVSHMEM REQUIRED HINTS ${NVSHMEM_HOME}/lib/cmake/nvshmem)
 add_library(nvshmem_host ALIAS nvshmem::nvshmem_host)
 add_library(nvshmem_device ALIAS nvshmem::nvshmem_device)
 target_link_libraries(csrc PRIVATE nvshmem_host nvshmem_device)
+# Link Cray's GPU-accelerated MPICH library
+if(DEFINED ENV{LINK_GTL} AND DEFINED ENV{NERSC_HOST} AND "$ENV{NERSC_HOST}" STREQUAL "perlmutter")
+    find_library(GTL
+            NAMES libmpi_gtl_cuda.so.0
+            HINTS /opt/cray/pe/lib64/
+            REQUIRED)
+    target_link_libraries(csrc PRIVATE "${GTL}")
+endif ()
 
 #target_link_libraries(csrc PUBLIC CUDA::cudart CUDA::cuda_driver CUDA::cublas CUDA::nvtx3 mathdx::cublasdx "${TORCH_LIBRARIES}")
 target_link_libraries(csrc PRIVATE CUDA::cudart CUDA::cuda_driver CUDA::cublas CUDA::nvtx3)

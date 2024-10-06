@@ -9,7 +9,7 @@
 #include "../definition/memory_layout.cuh"
 #include "../definition/values.cuh"
 
-#define BATON_LEADER 0U
+#define GRAND_MASTER 0U
 
 namespace aristos::publisher{
     //TODO use nvstd::function to abstract nvshmem communication operations
@@ -18,7 +18,7 @@ namespace aristos::publisher{
     __device__ __inline__ unsigned int logHead = 0U;
     __device__ __inline__ unsigned int logTail = 0U;
     /// Nifty gadget enabling round-robin queue access
-    __device__ __inline__ unsigned int baton = BATON_LEADER;
+    __device__ __inline__ unsigned int baton = GRAND_MASTER;
     __device__ __inline__ unsigned int syncStages = 0U;
     __device__ __inline__ unsigned int logTailSyncStages = 0U;
 

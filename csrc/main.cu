@@ -2,12 +2,9 @@
  * Copyright (c) 2024, Osayamen Jonathan Aimuyo.
  ******************************************************************************/
 #include <climits>
+#include <cstdio>
 #include <iostream>
 #include <array>
-#include <atomic>
-#include <thread>
-#include <unistd.h>
-#include <sys/wait.h>
 
 #include <cuda/std/chrono>
 #include <cuda/atomic>
@@ -19,8 +16,6 @@
 #include <host/nvshmemx_api.h>
 
 #include "include/aristos.cuh"
-#include <functional>
-#include <queue>
 
 #include <cooperative_groups/memcpy_async.h>
 #include <cub/cub.cuh>
@@ -28,9 +23,10 @@
 #include <cute/config.hpp>
 #include <cutlass/gemm/dispatch_policy.hpp>
 #include <cutlass/gemm/collective/collective_mma.hpp>
-#include <boost/pending/disjoint_sets.hpp>
+
+#include <fmt/ranges.h>
+#include <fmt/core.h>
 #include <spdlog/spdlog.h>
-#include <spdlog/fmt/bundled/ranges.h>
 
 #define THREADS_PER_WARP 32
 #define THREADS_PER_BLOCK 256
@@ -402,27 +398,79 @@ __global__ void testAlign(float* result) {
     }
 }
 
-CUTE_DEVICE
-double reduce(const double& val, BlockReduce::TempStorage* temp) {
-    return BlockReduce(*temp).Reduce(val, cub::Max());
-}
+__forceinline__
+void testTopologyDiscovery() {
+    char hostname[HOST_NAME_MAX];
+    gethostname(hostname, HOST_NAME_MAX);
+     /// Initialization
+    nvshmem_init();
+    const int n = nvshmem_n_pes();
+    const unsigned int ax = 2*n*n;
+    const int localRank = nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE);
 
-__global__ void testCub() {
-    __shared__ BlockReduce::TempStorage temp_storage;
-    double result = 0;
-    CUTE_UNROLL
-    for (uint i = 0; i < 1024; ++i) {
-        result = reduce(aristos::block::threadID()*2.0, &temp_storage);
-        assert( result == (blockDim.x - 1)*2.0);
+    /// Logging
+    cudaDeviceProp prop{};
+    int dev_count = 0;
+    CUTE_CHECK_ERROR(cudaGetDeviceCount(&dev_count));
+    CUTE_CHECK_ERROR(cudaGetDeviceProperties(&prop, localRank));
+    spdlog::set_pattern(std::string("[").append(std::string(hostname))
+    .append(":Rank ").append(std::to_string(localRank)).append("] [%c] [%^%l%$] %v"));
+    spdlog::info("Starting Topology Discovery...");
+    spdlog::info("GlobalRank: {}, LocalRank: {}, Device: {}, Bus ID: {}, Devices: {}",
+        nvshmem_my_pe(), localRank, prop.name, prop.pciBusID, dev_count);
+
+    CUTE_CHECK_ERROR(cudaSetDevice(localRank));
+    const size_t heapBytes = n * (BETA_BUFFER + ((2*n + 1)*sizeof(double)));
+    void* symHeap = nvshmem_align(16, heapBytes);
+    CUTE_CHECK_ERROR(cudaMemset(symHeap, 0, heapBytes));
+    CUTE_CHECK_ERROR(cudaPeekAtLastError());
+    /// Pointer orchestration
+    static_assert(sizeof(aristos::flagsType) == sizeof(uint64_t));
+    auto* results = static_cast<double*>(symHeap);
+    auto* flags = static_cast<uint64_t*>(symHeap) + ax;
+    auto* sHeap = static_cast<double*>(symHeap) + ax + n;
+    const auto pr = nvshmem_my_pe() + 1;
+    const auto remotePresent = [&n, &symHeap] {
+        for (int i = 0; i< n; ++i) {
+            if (nvshmem_ptr(symHeap, i) == nullptr) return true;
+        }
+        return false;
+    };
+
+    aristos::topology::discover<<<2, ARISTOS_BLOCK_SIZE>>>(n, nvshmem_my_pe(), remotePresent(),
+        pr, sHeap, flags, results + 2*nvshmem_my_pe()*n);
+    CUTE_CHECK_ERROR(cudaPeekAtLastError());
+    void* adjMatrix = malloc((ax + n) * sizeof(double));
+
+    /// Epilogue
+    CUTE_CHECK_ERROR(cudaMemcpy(adjMatrix, symHeap, (ax + n)*sizeof(double), cudaMemcpyDeviceToHost));
+    CUTE_CHECK_LAST();
+    auto* adjPtr = static_cast<double*>(adjMatrix);
+    std::vector<std::array<double, 2>> temp(n);
+    std::vector<aristos::flagsType> temp_f(n);
+    auto* file = std::fopen(std::string("adjMatrix_Rank")
+        .append(std::to_string(nvshmem_my_pe())).append(".txt").c_str(), "w");
+    fmt::print(file, "----> {} processes pair-wise (𝛼 ms, 𝛽 ms/MB) costs <------\n", n);
+    for (uint i = 0; i < n; ++i){
+        for (uint j = 0; j < 2*n; j+=2){
+            temp[j/2] = {adjPtr[(i*2*n) + j], adjPtr[(i*2*n) + j + 1]};
+        }
+        fmt::print(file, "Rank {}: {:::.2e}\n", i, temp);
     }
-    if (aristos::block::threadID() == 0) {
-        printf("Result is %f", result);
+    static_assert(sizeof(aristos::flagsType) == sizeof(double));
+    auto* flagsPtr = static_cast<aristos::flagsType*>(adjMatrix) + ax;
+    for (uint i = 0; i < n; ++i)
+    {
+        temp_f[i] = flagsPtr[i];
     }
+    fmt::print(file, "Rank {} Flags: {}\n", nvshmem_my_pe(), temp_f);
+    std::fclose(file);
+    nvshmem_free(symHeap);
+    free(adjMatrix);
+    nvshmem_finalize();
 }
 
 int main() {
-    char username[HOST_NAME_MAX];
-    getlogin_r(username, HOST_NAME_MAX);
     /*auto size = 64;
     unsigned int* p;
     cuda::barrier<cuda::thread_scope_device>* b;
@@ -575,70 +623,7 @@ int main() {
     close(fd[1]);
     wait(&buf);
     std::cout << "Child status is: " << buf << std::endl;*/
-    /*float* f;
-    constexpr unsigned int nb = 2;
-    constexpr auto arrSize = nb*2*ARISTOS_BLOCK_SIZE;
-    std::array<float, arrSize/2> res1{};
-    std::array<float, arrSize/2> res2{};
-    CUTE_CHECK_ERROR(cudaMallocAsync(&f, nb*2*sizeof(float)*ARISTOS_BLOCK_SIZE, cudaStreamPerThread));
-    CUTE_CHECK_ERROR(cudaStreamSynchronize(cudaStreamPerThread));
-    testAlign<<<2, ARISTOS_BLOCK_SIZE>>>(f);
-    CUTE_CHECK_LAST();
-    CUTE_CHECK_ERROR(cudaMemcpyAsync(res1.data(), f, sizeof(float)*arrSize/2, cudaMemcpyDeviceToHost, cudaStreamPerThread));
-    CUTE_CHECK_ERROR(cudaMemcpyAsync(res2.data(), f + arrSize/2, sizeof(float)*arrSize/2, cudaMemcpyDeviceToHost, cudaStreamPerThread));
-    CUTE_CHECK_ERROR(cudaStreamSynchronize(cudaStreamPerThread));
-    CUTE_CHECK_LAST();
-    aristos::printContainer<arrSize/2>(res1);
-    aristos::printContainer<arrSize/2>(res2);*/
-
-    /// Initialization
-    nvshmem_init();
-    const int n = nvshmem_n_pes();
-    std::vector<double> adj(2*n*n);
-    std::vector<uint64_t> misc(n);
-    const int localRank = nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE);
-
-    /// Logging
-    cudaDeviceProp prop{};
-    int dev_count = 0;
-    CUTE_CHECK_ERROR(cudaGetDeviceCount(&dev_count));
-    CUTE_CHECK_ERROR(cudaGetDeviceProperties(&prop, localRank));
-    spdlog::set_pattern(std::string("[").append(std::string(username))
-    .append(":Rank ").append(std::to_string(localRank)).append("] [%c] [%^%l%$] %v"));
-    spdlog::info("Starting Topology Discovery...");
-    spdlog::info("GlobalRank: {}, LocalRank: {}, Device: {}, Bus ID: {}, Devices: {}",
-        nvshmem_my_pe(), localRank, prop.name, prop.pciBusID, dev_count);
-
-    CUTE_CHECK_ERROR(cudaSetDevice(localRank));
-    const size_t heapBytes = n * (BETA_BUFFER + ((2*n + 1)*sizeof(double)));
-    void* symHeap = nvshmem_align(16, heapBytes);
-    CUTE_CHECK_ERROR(cudaMemset(symHeap, 0, heapBytes));
-    CUTE_CHECK_ERROR(cudaPeekAtLastError());
-    /// Pointer orchestration
-    static_assert(sizeof(aristos::flagsType) == sizeof(uint64_t));
-    auto* flags = static_cast<uint64_t*>(symHeap) + adj.size();
-    auto* results = static_cast<double*>(symHeap);
-    auto* sHeap = results + adj.size() + n;
-    const auto pr = localRank + 1;
-    const auto remotePresent = [&n, &symHeap] {
-        for (int i = 0; i< n; ++i) {
-            if (nvshmem_ptr(symHeap, i) == nullptr) return true;
-        }
-        return false;
-    };
-
-    aristos::topology::discover<<<1, ARISTOS_BLOCK_SIZE>>>(n, nvshmem_my_pe(), remotePresent(),
-        pr, sHeap, flags, results);
-    CUTE_CHECK_ERROR(cudaPeekAtLastError());
-
-    /// Epilogue
-    CUTE_CHECK_ERROR(cudaMemcpy(adj.data(), results, adj.size()*sizeof(decltype(adj)::value_type), cudaMemcpyDeviceToHost));
-    CUTE_CHECK_ERROR(cudaMemcpy(misc.data(), flags, sizeof(uint64_t)*n, cudaMemcpyDeviceToHost));
-    CUTE_CHECK_LAST();
-    spdlog::set_level(spdlog::level::debug);
-    spdlog::debug("Adjacency Matrix {::f}", adj);
-    spdlog::debug("Rates {}", misc);
-    nvshmem_free(symHeap);
-    nvshmem_finalize();
+    testTopologyDiscovery();
+    return 0;
 }
 
