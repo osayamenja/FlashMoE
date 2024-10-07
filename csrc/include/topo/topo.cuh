@@ -48,14 +48,14 @@ namespace aristos::topology{
         ull_t start, end;
         double duration = 0.0;
         bool isResidual = alphaBuf % nb != 0 && lBid == nb - 1;
-        size_t splitAlphaBuf = (lBid * cute::ceil_div(alphaBuf, nb) < alphaBuf) *
+        size_t buf = (lBid * cute::ceil_div(alphaBuf, nb) < alphaBuf) *
                 (!isResidual * cute::ceil_div(alphaBuf, nb)
                 + isResidual * (alphaBuf - (cute::ceil_div(alphaBuf, nb) * (nb - 1))));
         /// Alpha cost: ms
         CUTE_UNROLL
         for (unsigned int j = 0; j < TOPO_LOOP_TRIP; ++j) {
             asm volatile("mov.u64 %0, %%globaltimer;": "=l"(start)::);
-            put(advancePtr(sHeap, rank) + (lBid * splitAlphaBuf), advancePtr(sHeap, rank) + (lBid * splitAlphaBuf), splitAlphaBuf, peer);
+            put(advancePtr(sHeap, rank) + (lBid * buf), advancePtr(sHeap, rank) + (lBid * buf), buf, peer);
             asm volatile("mov.u64 %0, %%globaltimer;": "=l"(end)::);
             duration += (end - start) / static_cast<double>(TOPO_LOOP_TRIP*NANO_TO_MILLI);
         }
@@ -64,21 +64,21 @@ namespace aristos::topology{
         }
         duration = 0.0;
         isResidual = betaBuf % nb != 0 && lBid == nb - 1;
-        size_t splitBetaBuf = (lBid * cute::ceil_div(betaBuf, nb) < betaBuf) * (!isResidual * cute::ceil_div(betaBuf, nb)
+        buf = (lBid * cute::ceil_div(betaBuf, nb) < betaBuf) * (!isResidual * cute::ceil_div(betaBuf, nb)
                + isResidual * (betaBuf - (cute::ceil_div(betaBuf, nb) * (nb - 1))));
         ///Beta Cost: ms/MB
         CUTE_UNROLL
         for (unsigned int j = 0; j < TOPO_LOOP_TRIP; ++j) {
             asm volatile("mov.u64 %0, %%globaltimer;": "=l"(start)::);
-            put(advancePtr(sHeap, rank) + (lBid * splitBetaBuf), advancePtr(sHeap, rank) + (lBid * splitBetaBuf), splitBetaBuf, peer);
+            put(advancePtr(sHeap, rank) + (lBid * buf), advancePtr(sHeap, rank) + (lBid * buf), buf, peer);
             asm volatile("mov.u64 %0, %%globaltimer;": "=l"(end)::);
             duration += (end - start)/ static_cast<double>(TOPO_LOOP_TRIP*NANO_TO_MILLI);
         }
         if(id() == 0) {
             // Compute beta using slope intercept equation
-            remoteDurations[2*peerIdx + 1] = ((duration - remoteDurations[2*peerIdx]) / (TO_MB(splitBetaBuf) - TO_MB(splitAlphaBuf)));
+            remoteDurations[2*peerIdx + 1] = ((duration - remoteDurations[2*peerIdx]) / (TO_MB(betaBuf) - TO_MB(alphaBuf)));
             // Compute alpha and apply abs for spurious negatives
-            remoteDurations[2*peerIdx] = fabs(remoteDurations[2*peerIdx] - (TO_MB(splitAlphaBuf) * remoteDurations[2*peerIdx + 1]));
+            remoteDurations[2*peerIdx] = fabs(remoteDurations[2*peerIdx] - (TO_MB(alphaBuf) * remoteDurations[2*peerIdx + 1]));
         }
     }
 
@@ -131,9 +131,9 @@ namespace aristos::topology{
             results[2*peers[i]] = static_cast<double*>(scratchpad)[2*i];
             results[2*peers[i] + 1] = static_cast<double*>(scratchpad)[2*i + 1];
         }
-        __threadfence_block();
+        __threadfence();
 
-        // Barrier ensures our vector is complete before sending to neighbors.
+        // Ensures our vector is complete before sending to neighbors.
         if (!block::threadID()) {
             atomicAdd(&publisher::blockade, 1);
             while (atomicLoad(&publisher::blockade) != 2) {
@@ -152,40 +152,41 @@ namespace aristos::topology{
 
     CUTE_DEVICE
     void pluralP2PBuilder(void* scratchpad,const unsigned int* peers, const unsigned int& n, const unsigned int& rank,
-        const unsigned long& processingRate, const unsigned int numPeers, double* sHeap, double* results, uint64_t* flags) {
+        const unsigned long& processingRate, const unsigned int numPeers, const bool& remotePresent,
+        double* sHeap, double* results, uint64_t* flags) {
         __shared__ unsigned int localBlockIdx;
         for (unsigned int i = 1U; i < numPeers; ++i) {
             measureTransfer(rank, sHeap, static_cast<double*>(scratchpad),
                 peers[(i + rank) % numPeers], block::threadID, nvshmemx_putmem_block,
-                (i + rank) % numPeers, blockIdx.x - (numPeers < n), gridDim.x - (numPeers < n));
+                (i + rank) % numPeers, blockIdx.x - remotePresent, gridDim.x - remotePresent);
         }
-        if (!block::threadID()) {
-            localBlockIdx = blockIdx.x - (numPeers < n);
-        }
-        __threadfence_block();
-        __syncthreads();
         /// All-Reduce to get max transfer time across blocks
         /// Reusing concepts from publisher
         // Wait our turn
         if (!block::threadID()) {
+            localBlockIdx = blockIdx.x - remotePresent;
             publisher::awaitBaton(localBlockIdx);
         }
+        __threadfence_block();
         __syncthreads();
         /// Update the global buffer with my values via max reduction
+        /// Intra-block slicing
         auto slice = cute::ceil_div(numPeers, ARISTOS_BLOCK_SIZE);
         auto bookend = min(slice * (block::threadID() + 1), numPeers);
         for (unsigned int i = block::threadID() * slice; i < bookend; ++i) {
             results[2*peers[i]] = fmax(static_cast<double*>(scratchpad)[2*i], results[2*peers[i]]);
             results[2*peers[i] + 1] = fmax(static_cast<double*>(scratchpad)[2*i + 1], results[2*peers[i] + 1]);
         }
+        // Ensures a device-wide consistent view of our global memory writes
+        __threadfence();
 
         if (!block::threadID()) {
             // pass the baton
-            atomicExch(&publisher::baton, (localBlockIdx + 1) % (gridDim.x - (numPeers < n)));
+            atomicExch(&publisher::baton, (localBlockIdx + 1) % (gridDim.x - remotePresent));
             // Await baton to circle back, at this point the reduction is complete, and we are free to go
             publisher::awaitBaton(localBlockIdx);
-            /// Critical that the initiating process has id GRAND_MASTER for the below to be correct
-            if(localBlockIdx == GRAND_MASTER){
+            /// Critical that the initiating block has id GRAND_MASTER for the below to be correct
+            if(remotePresent && localBlockIdx == GRAND_MASTER){
                 // unblock remote publisher
                 atomicAdd(&publisher::blockade, 1);
                 while (atomicLoad(&publisher::blockade) != 2) {
@@ -193,13 +194,13 @@ namespace aristos::topology{
                 }
             }
             // Unblock sibling blocks
-            atomicExch(&publisher::baton, (localBlockIdx + 1) % (gridDim.x - (numPeers < n)));
+            atomicExch(&publisher::baton, (localBlockIdx + 1) % (gridDim.x - remotePresent));
         }
         // Ensures all threads are done
-        __threadfence_block();
         __syncthreads();
         // Signal our vector, including FLOPs, to others
-        slice = cute::ceil_div(numPeers, gridDim.x - (numPeers < n));
+        // Inter-block slicing
+        slice = cute::ceil_div(numPeers, gridDim.x - remotePresent);
         bookend = min(slice * (localBlockIdx + 1), numPeers);
         for(unsigned int i = slice * localBlockIdx; i < bookend; ++i){
             nvshmemx_double_put_signal_nbi_block(results, results,
@@ -208,7 +209,9 @@ namespace aristos::topology{
                                              NVSHMEM_SIGNAL_SET, peers[i]);
         }
 
-        if (localBlockIdx == 0 && !block::threadID()) {
+        // The last block awaits results
+        // Most likely this block will not partake in the above thus, they would do the below in parallel
+        if (blockIdx.x == (gridDim.x - 1) && !block::threadID()) {
             memset(scratchpad, 0, sizeof(int)*n);
             static_cast<int*>(scratchpad)[rank] = 1;
             nvshmem_uint64_wait_until_all(flags, n, static_cast<int*>(scratchpad), NVSHMEM_CMP_GT, sent);
@@ -243,28 +246,29 @@ namespace aristos::topology{
             if (block::threadID() == 0) {
                 apply_access_property(&publisher::blockade, sizeof(decltype(publisher::blockade)),
                     cuda::access_property::persisting{});
+                apply_access_property(&publisher::baton, sizeof(decltype(publisher::baton)),
+                    cuda::access_property::persisting{});
                 numPeers = 0;
                 peers = static_cast<unsigned int*>(static_cast<void*>(scratchpad + 2*n));
-                /// Block 0 gets remote peers, if present; otherwise; joins the others in getting proximal peers
+                /// Block 0 gets remote peers, if present; otherwise, joins the others in getting proximal peers
                 for(unsigned int i = 0U; i < n; ++i) {
-                    if (const bool b = nvshmem_ptr(results, i);
+                    if (const bool b = nvshmem_ptr(results, i) == nullptr;
                         (!b && blockIdx.x > 0) || ((!remotePresent && !b ) || (remotePresent && (b && blockIdx.x == 0)))) {
                         peers[numPeers++] = i;
                     }
                 }
             }
-            assert(0);
             __threadfence_block();
             __syncthreads();
             /// local publisher block 0 will service remote communication requests
             /// while other blocks will further specialize to serve parallel P2P, à la NVLink, transfers
-            if(!PublisherConfig::getLocalBlockID(blockDim.x) && remotePresent){
+            if(!blockIdx.x && remotePresent){
                 /// remote publisher
                 pluralRemoteBuilder(scratchpad, peers, n, rank, processingRate, numPeers, sHeap, results, flags);
             }
             else{
                 /// P2P publisher only at most one super block
-                pluralP2PBuilder(scratchpad, peers, n, rank, processingRate, numPeers, sHeap, results, flags);
+                pluralP2PBuilder(scratchpad, peers, n, rank, processingRate, numPeers, remotePresent, sHeap, results, flags);
             }
         }
     }

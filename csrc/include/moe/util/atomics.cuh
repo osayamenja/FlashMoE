@@ -10,10 +10,8 @@
 
 namespace aristos{
     template<typename B>
-    concept AtomicType = requires(B b){
-        requires cuda::std::same_as<B, int> ||
-                cuda::std::same_as<B, unsigned int> || cuda::std::same_as<B, unsigned long long int>;
-    };
+    concept AtomicType = cuda::std::same_as<B, int> || cuda::std::same_as<B, unsigned int>
+    || cuda::std::same_as<B, unsigned long long int>;
 
     /// Empirical benchmarks shows atomicCAS is the fastest at scale
     template<typename T> requires AtomicType<T>

@@ -437,7 +437,7 @@ void testTopologyDiscovery() {
         return false;
     };
 
-    aristos::topology::discover<<<2, ARISTOS_BLOCK_SIZE>>>(n, nvshmem_my_pe(), remotePresent(),
+    aristos::topology::discover<<<32, ARISTOS_BLOCK_SIZE>>>(n, nvshmem_my_pe(), remotePresent(),
         pr, sHeap, flags, results + 2*nvshmem_my_pe()*n);
     CUTE_CHECK_ERROR(cudaPeekAtLastError());
     void* adjMatrix = malloc((ax + n) * sizeof(double));
@@ -463,6 +463,7 @@ void testTopologyDiscovery() {
     {
         temp_f[i] = flagsPtr[i];
     }
+    temp_f[nvshmem_my_pe()] = pr;
     fmt::print(file, "Rank {} Flags: {}\n", nvshmem_my_pe(), temp_f);
     std::fclose(file);
     nvshmem_free(symHeap);
