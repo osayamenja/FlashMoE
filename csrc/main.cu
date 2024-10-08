@@ -471,90 +471,19 @@ void testTopologyDiscovery() {
     nvshmem_finalize();
 }
 
-int main() {
-    /*auto size = 64;
-    unsigned int* p;
-    cuda::barrier<cuda::thread_scope_device>* b;
-    auto host_b = new cuda::barrier<cuda::thread_scope_device>{size};
-    CUTE_CHECK_ERROR(cudaMallocAsync(&b, sizeof(cuda::barrier<cuda::thread_scope_device>), cudaStreamPerThread));
-    CUTE_CHECK_ERROR(cudaMallocAsync(&p, sizeof(unsigned int), cudaStreamPerThread));
-    CUTE_CHECK_ERROR(cudaMemcpyAsync(b, host_b, sizeof(cuda::barrier<cuda::thread_scope_device>), cudaMemcpyHostToDevice, cudaStreamPerThread));
-    CUTE_CHECK_ERROR(cudaMemsetAsync(p, 0, sizeof(unsigned int), cudaStreamPerThread));
-    CUTE_CHECK_LAST();
-
-    CUTE_UNROLL
-    for(int i = 0; i < 16; ++i){
-        benchBarrier<<<size, THREADS_PER_BLOCK>>>(p, b, size, true);
-    }
-    benchBarrier<<<size, THREADS_PER_BLOCK>>>(p, b, size, false);
-    benchBarrier<<<size, THREADS_PER_BLOCK>>>(p, b, size, false, true);
-    CUTE_CHECK_LAST();
-    CUTE_CHECK_ERROR(cudaFreeAsync(p, cudaStreamPerThread));
-    CUTE_CHECK_ERROR(cudaFreeAsync(b, cudaStreamPerThread));
-    CUTE_CHECK_ERROR(cudaStreamSynchronize(cudaStreamPerThread));
-    free(host_b);*/
-    /*using djs = boost::disjoint_sets_with_storage<boost::identity_property_map,
-    boost::identity_property_map, boost::find_with_path_halving>;
-    auto constexpr n = 5;
-    djs groups(n);
-    for(int i = 0; i < n; ++i){
-        groups.make_set(i);
-    }
-    auto p = groups.parents();
-    std::cout << "Before Merges: ";
-    aristos::printContainer(p);
-    std::cout << std::endl;
-    groups.link(0, 1);
-    std::cout << "Merged 0 and 1: ";
-    p = groups.parents();
-    aristos::printContainer(p);
-    std::cout << std::endl;
-    groups.link(2, 3);
-    std::cout << "Merged 2 and 3: ";
-    p = groups.parents();
-    aristos::printContainer(p);
-    std::cout << std::endl;
-
-    std::unordered_map<decltype(p)::value_type, std::vector<int>> sets{};
-    for(int i = 0; i < n; ++i){
-        sets[p[i]].push_back(i);
-    }
-
-    aristos::printMapCV(sets);
-    std::cout << ']' << std::endl;
-    std::cout << aristos::Streamable<decltype(sets)::key_type> << std::endl;
-
-    std::array<aristos::Expert, 4> exps {{aristos::Expert(0, 3),
-                                          aristos::Expert(1, 12),
-                                          aristos::Expert(2, 6),
-                                          aristos::Expert(3, 3)}};
-    std::array<aristos::Worker, 4> workers {{aristos::Worker(0, 4, 4),
-                                             aristos::Worker(1, 8, 6),
-                                             aristos::Worker(2, 2, 6),
-                                             aristos::Worker(3, 2, 6)}};
-    std::array<std::string, 4> sv;
-    std::ranges::transform(workers.begin(), workers.end(), sv.begin(), [](const aristos::Worker& e){
-       return e.toString();
-    });
-    aristos::printContainer<sv.size()>(sv);
-    std::cout << std::endl << "Sorted 👇" << std::endl;
-    std::ranges::sort(workers, std::greater<>());
-    std::ranges::transform(workers.begin(), workers.end(), sv.begin(), [](const aristos::Worker& e){
-        return e.toString();
-    });
-    aristos::printContainer<sv.size()>(sv);*/
-    /*printf("Number of blocks per SM %u\n", aristos::blocksPerSM);
-    auto constexpr dim = 4U;
+__host__
+void testDecider() {
+    using clk = std::chrono::high_resolution_clock;
+    auto end = std::chrono::duration<double>::zero();
+    auto constexpr dim = 4096U;
     auto constexpr intraWidth = 4.0;
 
     AdjMatrix A(dim);
-    std::pair constexpr intraBW = {0.0, 1}; // (ms, ms/MB)
-    std::pair constexpr interBW = {0.03, 0.054};
+    std::pair constexpr intraBW = {6.59e-4, 2.72e-2}; // (ms, ms/MB)
+    std::pair constexpr interBW = {1.12e-02, 5e-02}; // (ms, ms/MB)
 
-    CUTE_UNROLL
     for(int i = 0; i < dim; ++i){
         A[i] = std::vector<std::pair<double, double>>(dim);
-        CUTE_UNROLL
         for(int j = 0; j < dim; ++j){
             if(i == j )[[unlikely]]
                 continue;
@@ -568,63 +497,45 @@ int main() {
         }
     }
 
-    auto const A100Rate = static_cast<unsigned long>(std::ceil(19UL * 1E12));
     auto constexpr deviceMem = 16U;
+    auto constexpr deviceGigaFlopsPerMs = static_cast<unsigned int>(0.43*312U * (1e9 / (1024*1024*1024)));
     std::vector<aristos::Worker> w;
-    CUTE_UNROLL
     for(int i = 0; i < dim; ++i){
-        w.emplace_back(i, 1, deviceMem);
+        w.emplace_back(i, deviceGigaFlopsPerMs, deviceMem);
     }
 
-    auto constexpr nExp = 16U;
+    auto constexpr nExp = 4096U;
+    auto constexpr expertGigaFlops = 128U; // Giga == 2^30
     std::vector<aristos::Expert> e;
-    //TODO KiloFLOPs
-    unsigned long constexpr expC = 16L * 4L * 2048L * (1024L * 1024L);
-    CUTE_UNROLL
     for(int i = 0; i < nExp; ++i){
-        e.emplace_back(i, 1);
+        e.emplace_back(i, expertGigaFlops);
     }
+    // GPT-3 350M MoE
+    const auto m = aristos::ModelConfig(24, 1, 256, 4, 24, 16, 512);
 
-    aristos::hostMoEConfig = aristos::Config();
-    aristos::hostMoEConfig.redAmount = 1;
-    aristos::hostMoEConfig.globalBatch = 256;
-    aristos::hostMoEConfig.miniBatch = 64;
-    aristos::hostMoEConfig.numLayers = 24;
-    aristos::hostMoEConfig.p2pBuffer = 1; // MB
-    aristos::hostMoEConfig.gradBuffer = 1;
-    aristos::hostMoEConfig.moeFreq = 24; // every other layer
+    auto start = clk::now();
+    aristos::decider::decide(A, w, e.size()*expertGigaFlops, e.size(), m);
+    end = clk::now() - start;
+    const auto spec = aristos::decider::decide(A, w, e.size()*expertGigaFlops, e.size(), m);
+    fmt::println("Measured time for the Decider is {}s", end.count());
+    //fmt::println("Device to Groups: {}", spec);
 
-    const auto spec = aristos::decider::decide(A, w, e.size(), e.size());
     const auto g = aristos::subsets(spec, 0);
-    aristos::printContainer(g);
+
+    //fmt::println("Rank {} Group {}", 0, g);
     std::vector<aristos::Worker> wG;
     for(int i = 0; i < g.size(); ++i){
         wG.emplace_back(g[i], w[i].processingRate, w[i].memoryCapacity);
     }
+    start = clk::now();
     const auto assignment = aristos::decider::assign(e, wG);
-    aristos::printContainer(assignment);
+    end += clk::now() - start;
+    fmt::println("Total time is {}s", end.count());
+    //fmt::println("Experts to Devices {}", assignment);
+}
 
-    /// TODO tomorrow, Invoke CUTLASS test kernel instead of executing subprocess
-    /// TODO remove ibgda and compile with libfabric and compare performance
-    int fd[2];
-    assert(pipe(fd) != -1);
-    const pid_t pid = fork();
-    assert(pid >= 0);
-    if (pid == 0) {
-        close(fd[1]);
-        int msg; //nvtx3::message
-        read(fd[0], &msg, sizeof(msg));
-        std::cout << "Child received " << msg << std::endl;
-        close(fd[0]);
-        _Exit(0);
-    }
-    close(fd[0]);
-    auto buf = 34;
-    write(fd[1], &buf, sizeof(int));
-    close(fd[1]);
-    wait(&buf);
-    std::cout << "Child status is: " << buf << std::endl;*/
-    testTopologyDiscovery();
+int main() {
+    testDecider();
     return 0;
 }
 

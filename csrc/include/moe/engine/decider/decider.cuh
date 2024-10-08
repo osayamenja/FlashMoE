@@ -9,9 +9,9 @@
 #include <algorithm>
 #include <numeric>
 #include <queue>
+#include <ranges>
 #include <set>
 #include <boost/pending/disjoint_sets.hpp>
-#include <cute/config.hpp>
 
 #include "comps/edge.cuh"
 #include "comps/niche.cuh"
@@ -24,7 +24,9 @@ namespace aristos::decider{
     /// Necessary to use path halving to ensure amortized "practical constant" time
     using DisjointSet = boost::disjoint_sets_with_storage<boost::identity_property_map,
             boost::identity_property_map, boost::find_with_path_halving>;
-    /// Generates DP-EP groups [D,G] -> Devices to Groups
+    /// Generates DP-EP groups [D, G] -> Devices to Groups
+    /// Complexity 𝓞(|E|*log(|E|) + |V|(|V|-1)) => 𝓞(|V|^2*log(|V|^2)),
+    /// where |V| = |workers| and |E| = number of edges = |V|*(|V| - 1)
     __forceinline__
     std::vector<size_t> decide(const AdjMatrix& adjMatrix,
                                const std::vector<Worker>& workers,
@@ -47,8 +49,8 @@ namespace aristos::decider{
             for (int j = 0; j < adjMatrix.size(); ++j) {
                 dp[j] = {0.0, 0.0};
                 if (i != j)[[likely]] {
-                    auto alpha = adjMatrix[i][j].first;
-                    auto beta = adjMatrix[i][j].second;
+                    const auto alpha = adjMatrix[i][j].first;
+                    const auto beta = adjMatrix[i][j].second;
                     candidateEdges.emplace(i, j,
                                              ObjArgs::p2pTransferTime(alpha, beta,
                                                                       modelConfig.p2pBuffer));
@@ -71,13 +73,13 @@ namespace aristos::decider{
                                effectiveWorld, modelConfig.gradBuffer);
         const auto art = allReduceT(arArgs);
         /// Second-pass group construction
-        for(auto& [i,g] : groupInfo){
+        for(auto& g : std::views::values(groupInfo)){
             g.construct(art, effectiveWorld);
         }
 
         auto limbo = Edge::limboEdge();
         while (!candidateEdges.empty()){
-            auto candidate = candidateEdges.top();
+            const auto candidate = candidateEdges.top();
             candidateEdges.pop();
             auto group1 = groups.find_set(candidate.node1);
             auto group2 = groups.find_set(candidate.node2);
@@ -98,7 +100,7 @@ namespace aristos::decider{
                 externalEdges.pop();
                 extEdge = externalEdges.top();
             }
-            bool satisfiesConstraint = groupInfo.at(group1).memCapacity + groupInfo.at(group2).memCapacity >= totalExpertMem;
+            const bool satisfiesConstraint = groupInfo.at(group1).memCapacity + groupInfo.at(group2).memCapacity >= totalExpertMem;
             arArgs.numGroups = groupInfo.size() - infeasibleGroups.size();
             if(infeasibleGroups.contains(group1) && infeasibleGroups.contains(group2)){
                 if(satisfiesConstraint){
@@ -140,7 +142,7 @@ namespace aristos::decider{
         }
 
         /// Post-processing
-        for(const auto& [i, _]: groupInfo){
+        for(const auto& i: std::views::keys(groupInfo)){
             if(infeasibleGroups.contains(i)){
                 groupInfo.erase(i);
             }
@@ -148,8 +150,9 @@ namespace aristos::decider{
         return groups.parents();
     }
 
-    /// Generates EP spec [E,D] -> Experts to Devices
+    /// Generates EP spec [E, D] -> Experts to Devices
     /// Assumes that the group satisfies memory constraints.
+    /// Complexity 𝓞(|X|*log(|X|)), where |X| = |experts|
     __forceinline__
     std::vector<unsigned int> assign(std::vector<Expert>& experts,
                             std::vector<Worker>& workerGroup){

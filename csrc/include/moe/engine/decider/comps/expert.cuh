@@ -14,7 +14,7 @@ namespace aristos{
                 id(_id), cost(_cost){};
 
         /// Sentinel
-        explicit Expert(unsigned long _cost){
+        explicit Expert(const unsigned long& _cost){
             cost = _cost;
             id = 0;
         }

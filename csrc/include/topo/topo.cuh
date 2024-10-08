@@ -42,7 +42,7 @@ namespace aristos::topology{
     requires (cuda::std::is_invocable_r_v<unsigned int, ID>
         && cuda::std::is_invocable_r_v<void, Put, void*, const void*, size_t, int>)
     CUTE_DEVICE
-    void measureTransfer(const int& rank, double* sHeap, double* remoteDurations,
+    void measureTransfer(const unsigned int& rank, double* sHeap, double* remoteDurations,
         const int& peer, const ID& id, const Put& put, const unsigned int& peerIdx,
         const unsigned int& lBid = 0, const unsigned int& nb = 1) {
         ull_t start, end;
