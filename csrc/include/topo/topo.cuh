@@ -38,6 +38,15 @@ namespace aristos::topology{
         }
     }
 
+    CUTE_DEVICE
+    void subscribeAll(void* scratchpad, uint64_t* flags,  const unsigned int& n, const unsigned int& rank) {
+        static_cast<int*>(scratchpad)[rank] = 1; // Do not wait for me
+        nvshmem_uint64_wait_until_all(flags, n, static_cast<int*>(scratchpad), NVSHMEM_CMP_GT, sent);
+        for (unsigned int i = 1U; i < n; ++i) {
+            flags[(rank  + i) % n] -= sent;
+        }
+    }
+
     template<size_t betaBuf = BETA_BUFFER, size_t alphaBuf = ALPHA_BUFFER, typename ID, typename Put>
     requires (cuda::std::is_invocable_r_v<unsigned int, ID>
         && cuda::std::is_invocable_r_v<void, Put, void*, const void*, size_t, int>)
@@ -106,11 +115,7 @@ namespace aristos::topology{
 
         // await responses from other GPUs
         if (block::threadID() == 0) {
-            static_cast<int*>(scratchpad)[rank] = 1; // Do not wait for me
-            nvshmem_uint64_wait_until_all(flags, n, static_cast<int*>(scratchpad), NVSHMEM_CMP_GT, sent);
-            for (unsigned int i = 1U; i < n; ++i) {
-                flags[(rank  + i) % n] -= sent;
-            }
+            subscribeAll(scratchpad, flags, n, rank);
         }
     }
 
@@ -134,7 +139,8 @@ namespace aristos::topology{
         __threadfence();
 
         // Ensures our vector is complete before sending to neighbors.
-        if (!block::threadID()) {
+        // if num remote peers < n - 1, then we must await the contribution or our p2p siblings
+        if (!block::threadID() && numPeers < (n - 1)) {
             atomicAdd(&publisher::blockade, 1);
             while (atomicLoad(&publisher::blockade) != 2) {
                 __nanosleep(2);
@@ -154,6 +160,14 @@ namespace aristos::topology{
     void pluralP2PBuilder(void* scratchpad,const unsigned int* peers, const unsigned int& n, const unsigned int& rank,
         const unsigned long& processingRate, const unsigned int numPeers, const bool& remotePresent,
         double* sHeap, double* results, uint64_t* flags) {
+        // If num of other P2P peers == 0, then we adjourn early after conditional subscription
+        if (numPeers <= 1)[[unlikely]] {
+            if (blockIdx.x == (gridDim.x - 1) && !block::threadID()) {
+                //memset done prior to invocation
+                subscribeAll(scratchpad, flags, n, rank);
+            }
+            return;
+        }
         __shared__ unsigned int localBlockIdx;
         for (unsigned int i = 1U; i < numPeers; ++i) {
             measureTransfer(rank, sHeap, static_cast<double*>(scratchpad),
@@ -213,11 +227,7 @@ namespace aristos::topology{
         // Most likely this block will not partake in the above thus, they would do the below in parallel
         if (blockIdx.x == (gridDim.x - 1) && !block::threadID()) {
             memset(scratchpad, 0, sizeof(int)*n);
-            static_cast<int*>(scratchpad)[rank] = 1;
-            nvshmem_uint64_wait_until_all(flags, n, static_cast<int*>(scratchpad), NVSHMEM_CMP_GT, sent);
-            for (unsigned int i = 1U; i < n; ++i) {
-                flags[(rank  + i) % n] -= sent;
-            }
+            subscribeAll(scratchpad, flags, n, rank);
         }
     }
 
@@ -244,6 +254,7 @@ namespace aristos::topology{
             __shared__ unsigned int numPeers;
             __shared__ unsigned int* peers;
             if (block::threadID() == 0) {
+                memset(scratchpad, 0, sizeof(double)*2*n);
                 apply_access_property(&publisher::blockade, sizeof(decltype(publisher::blockade)),
                     cuda::access_property::persisting{});
                 apply_access_property(&publisher::baton, sizeof(decltype(publisher::baton)),

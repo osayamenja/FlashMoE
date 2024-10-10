@@ -407,6 +407,7 @@ void testTopologyDiscovery() {
     const int n = nvshmem_n_pes();
     const unsigned int ax = 2*n*n;
     const int localRank = nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE);
+    const int globalRank = nvshmem_my_pe();
 
     /// Logging
     cudaDeviceProp prop{};
@@ -417,7 +418,7 @@ void testTopologyDiscovery() {
     .append(":Rank ").append(std::to_string(localRank)).append("] [%c] [%^%l%$] %v"));
     spdlog::info("Starting Topology Discovery...");
     spdlog::info("GlobalRank: {}, LocalRank: {}, Device: {}, Bus ID: {}, Devices: {}",
-        nvshmem_my_pe(), localRank, prop.name, prop.pciBusID, dev_count);
+        globalRank, localRank, prop.name, prop.pciBusID, dev_count);
 
     CUTE_CHECK_ERROR(cudaSetDevice(localRank));
     const size_t heapBytes = n * (BETA_BUFFER + ((2*n + 1)*sizeof(double)));
@@ -429,17 +430,35 @@ void testTopologyDiscovery() {
     auto* results = static_cast<double*>(symHeap);
     auto* flags = static_cast<uint64_t*>(symHeap) + ax;
     auto* sHeap = static_cast<double*>(symHeap) + ax + n;
-    const auto pr = nvshmem_my_pe() + 1;
+    const auto pr = globalRank + 1;
     const auto remotePresent = [&n, &symHeap] {
         for (int i = 0; i< n; ++i) {
             if (nvshmem_ptr(symHeap, i) == nullptr) return true;
         }
         return false;
     };
-
-    aristos::topology::discover<<<32, ARISTOS_BLOCK_SIZE>>>(n, nvshmem_my_pe(), remotePresent(),
-        pr, sHeap, flags, results + 2*nvshmem_my_pe()*n);
-    CUTE_CHECK_ERROR(cudaPeekAtLastError());
+    const auto isRemotePresent = remotePresent();
+    constexpr auto skip = 32U;
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    constexpr unsigned int zeroVal = GRAND_MASTER;
+    float duration;
+    #pragma GCC unroll skip
+    for (uint i = 0; i < skip; ++i) {
+        aristos::topology::discover<<<ARISTOS_SUPER_BLOCK_SIZE, ARISTOS_BLOCK_SIZE>>>(n, globalRank, isRemotePresent,
+        pr, sHeap, flags, results + 2*globalRank*n);
+        CUTE_CHECK_ERROR(cudaMemcpyToSymbol(aristos::publisher::blockade, &zeroVal, sizeof(decltype(aristos::publisher::blockade))));
+        CUTE_CHECK_ERROR(cudaMemcpyToSymbol(aristos::publisher::baton, &zeroVal, sizeof(decltype(aristos::publisher::baton))));
+        CUTE_CHECK_ERROR(cudaMemset(flags, 0, n*sizeof(aristos::flagsType)));
+    }
+    CUTE_CHECK_ERROR(cudaMemset(symHeap, 0, sizeof(double)*ax));
+    CUTE_CHECK_ERROR(cudaEventRecord(start));
+    aristos::topology::discover<<<ARISTOS_SUPER_BLOCK_SIZE, ARISTOS_BLOCK_SIZE>>>(n, globalRank, isRemotePresent,
+        pr, sHeap, flags, results + 2*globalRank*n);
+    CUTE_CHECK_ERROR(cudaEventRecord(stop));
+    CUTE_CHECK_LAST();
+    cudaEventElapsedTime(&duration, start, stop);
     void* adjMatrix = malloc((ax + n) * sizeof(double));
 
     /// Epilogue
@@ -449,7 +468,7 @@ void testTopologyDiscovery() {
     std::vector<std::array<double, 2>> temp(n);
     std::vector<aristos::flagsType> temp_f(n);
     auto* file = std::fopen(std::string("adjMatrix_Rank")
-        .append(std::to_string(nvshmem_my_pe())).append(".txt").c_str(), "w");
+        .append(std::to_string(globalRank)).append(".txt").c_str(), "w");
     fmt::print(file, "----> {} processes pair-wise (𝛼 ms, 𝛽 ms/MB) costs <------\n", n);
     for (uint i = 0; i < n; ++i){
         for (uint j = 0; j < 2*n; j+=2){
@@ -459,12 +478,12 @@ void testTopologyDiscovery() {
     }
     static_assert(sizeof(aristos::flagsType) == sizeof(double));
     auto* flagsPtr = static_cast<aristos::flagsType*>(adjMatrix) + ax;
-    for (uint i = 0; i < n; ++i)
-    {
+    for (uint i = 0; i < n; ++i){
         temp_f[i] = flagsPtr[i];
     }
-    temp_f[nvshmem_my_pe()] = pr;
-    fmt::print(file, "Rank {} Flags: {}\n", nvshmem_my_pe(), temp_f);
+    temp_f[globalRank] = pr;
+    fmt::print(file, "Rank {} Flags: {}\n", globalRank, temp_f);
+    fmt::println(file, "Duration is {}ms", duration);
     std::fclose(file);
     nvshmem_free(symHeap);
     free(adjMatrix);
@@ -479,7 +498,7 @@ void testDecider() {
     auto constexpr intraWidth = 4.0;
 
     AdjMatrix A(dim);
-    std::pair constexpr intraBW = {6.59e-4, 2.72e-2}; // (ms, ms/MB)
+    std::pair constexpr intraBW = {4.35e-04, 1.29e-02}; // (ms, ms/MB)
     std::pair constexpr interBW = {1.12e-02, 5e-02}; // (ms, ms/MB)
 
     for(int i = 0; i < dim; ++i){
@@ -487,7 +506,7 @@ void testDecider() {
         for(int j = 0; j < dim; ++j){
             if(i == j )[[unlikely]]
                 continue;
-            if(static_cast<int>(std::floor(j / static_cast<double>(intraWidth)) == static_cast<int>(std::floor(i / static_cast<double>(intraWidth))))){
+            if(static_cast<int>(std::floor(j / static_cast<double>(intraWidth))) == static_cast<int>(std::floor(i / static_cast<double>(intraWidth)))){
                 // intra node partitions
                 A[i][j] = intraBW;
             }
@@ -535,7 +554,7 @@ void testDecider() {
 }
 
 int main() {
-    testDecider();
+    testTopologyDiscovery();
     return 0;
 }
 
