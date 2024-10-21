@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.27)
 
-# Set compilers and obtain compute capability, assuming the running process sees homogeneous GPUs
 # Add COMMAND_ECHO STDOUT to see the commands in standard out
+# WAR to use updated gcc on NERSC machines
 if(DEFINED ENV{NERSC_HOST})
     execute_process(COMMAND "which" "g++"
             COMMAND_ERROR_IS_FATAL ANY
@@ -13,15 +13,6 @@ if(DEFINED ENV{NERSC_HOST})
     set(CMAKE_CXX_COMPILER ${CPP_COMP_PATH})
     set(CMAKE_C_COMPILER ${C_COMP_PATH})
 endif ()
-execute_process(COMMAND "nvidia-smi" "--id=0" "--query-gpu=compute_cap" "--format=csv,noheader"
-        COMMAND_ERROR_IS_FATAL ANY
-        OUTPUT_VARIABLE COMPUTE_CAPABILITY
-        OUTPUT_STRIP_TRAILING_WHITESPACE)
-
-string(REGEX REPLACE "(\.[0-9])" "0" COMPUTE_CAPABILITY ${COMPUTE_CAPABILITY})
-message(STATUS "GPU 0 Compute Capability: ${COMPUTE_CAPABILITY}")
-
-set(ENV{CUTLASS_NVCC_ARCHS} "${COMPUTE_CAPABILITY}")
 
 project(csrc CUDA CXX)
 
@@ -86,11 +77,15 @@ set_target_properties(csrc PROPERTIES
         CUDA_RESOLVE_DEVICE_SYMBOLS   ON
 )
 
-# add dependencies
-#TODO Pin versions for release build and use main for debug
+string(SUBSTRING "${CMAKE_CUDA_ARCHITECTURES_NATIVE}" 0 2 COMPUTE_CAPABILITY) # xx-real -> xx
+message(STATUS "GPU 0 Compute Capability: ${COMPUTE_CAPABILITY}")
+set(ENV{CUTLASS_NVCC_ARCHS} "${COMPUTE_CAPABILITY}")
+
 set(ENV{CPM_SOURCE_CACHE} "./cmake/cache")
 set(CCCL_ENABLE_UNSTABLE ON)
 include(cmake/CPM.cmake)
+
+# add dependencies
 ## This will automatically clone CCCL from GitHub and make the exported cmake targets available
 CPMAddPackage(
         NAME CCCL
@@ -135,13 +130,14 @@ if(SPDLOG_ADDED)
     target_link_libraries(csrc PRIVATE spdlog::spdlog)
 endif ()
 
+target_link_libraries(csrc PRIVATE CUDA::cudart CUDA::cuda_driver CUDA::nvml CUDA::cublas CUDA::nvtx3)
+target_link_libraries(csrc PRIVATE atomic)
+
 ## NVSHMEM Business
-set(NVSHMEM_HOME "$ENV{NVSHMEM_HOME}")
-find_package(NVSHMEM REQUIRED HINTS ${NVSHMEM_HOME}/lib/cmake/nvshmem)
-add_library(nvshmem_host ALIAS nvshmem::nvshmem_host)
-add_library(nvshmem_device ALIAS nvshmem::nvshmem_device)
-target_link_libraries(csrc PRIVATE nvshmem_host nvshmem_device)
-# Link Cray's GPU-accelerated MPICH library
+find_package(NVSHMEM REQUIRED HINTS "$ENV{NVSHMEM_HOME}/lib/cmake/nvshmem")
+target_link_libraries(csrc PRIVATE nvshmem::nvshmem)
+
+# Link Cray's GPU-accelerated MPICH
 if(DEFINED ENV{LINK_GTL} AND DEFINED ENV{NERSC_HOST} AND "$ENV{NERSC_HOST}" STREQUAL "perlmutter")
     find_library(GTL
             NAMES libmpi_gtl_cuda.so.0
@@ -150,16 +146,11 @@ if(DEFINED ENV{LINK_GTL} AND DEFINED ENV{NERSC_HOST} AND "$ENV{NERSC_HOST}" STRE
     target_link_libraries(csrc PRIVATE "${GTL}")
 endif ()
 
-#target_link_libraries(csrc PUBLIC CUDA::cudart CUDA::cuda_driver CUDA::cublas CUDA::nvtx3 mathdx::cublasdx "${TORCH_LIBRARIES}")
-target_link_libraries(csrc PRIVATE CUDA::cudart CUDA::cuda_driver CUDA::cublas CUDA::nvtx3)
-target_link_libraries(csrc PRIVATE atomic)
-
 target_compile_options(csrc PRIVATE
         $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-Xfatbin -compress-all>
-        $<$<COMPILE_LANGUAGE:CUDA>:-Xptxas -v>
+        $<$<COMPILE_LANGUAGE:CUDA>:-Xptxas -v;--expt-relaxed-constexpr>
         $<$<COMPILE_LANGUAGE:CUDA>:-t0; --generate-line-info>
-        # Required to support std::tuple in device code
-        $<$<BOOL:True>:$<$<COMPILE_LANGUAGE:CUDA>:SHELL:--expt-relaxed-constexpr>>
+        $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-gencode=arch=compute_${COMPUTE_CAPABILITY},code=sm_${COMPUTE_CAPABILITY}>
 )
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_compile_options(csrc PRIVATE
@@ -171,5 +162,6 @@ elseif(CMAKE_BUILD_TYPE STREQUAL "Release")
             $<$<COMPILE_LANGUAGE:CXX>:-O3>
             $<$<COMPILE_LANGUAGE:CUDA>:-O3>
             $<$<COMPILE_LANGUAGE:CUDA>:-Xptxas -O3>
+            $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-gencode=arch=compute_${COMPUTE_CAPABILITY},code=lto_${COMPUTE_CAPABILITY}>
     )
 endif ()

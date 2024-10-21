@@ -209,88 +209,73 @@ extern constexpr int tokenStride = (embedDim + k + 2);
 
 template<typename T>
 CUTE_DEVICE
-T* getTokenPointer(T* const& addr, unsigned int const& peer, unsigned int const& stage, unsigned int const& cell, unsigned int const& token){
+T* getTokenPointer(T* const& __restrict__ addr, unsigned int const& peer, unsigned int const& stage, unsigned int const& cell, unsigned int const& token){
     return addr + ((peer * peerStride) + (stage * stageStride) + (cell * cellStride) + (token * tokenStride));
 }
 
-__global__ void benchTen(unsigned int* foo, bool skip = false, bool shouldPersist = false){
-    using Nano = cuda::std::chrono::duration<double, cuda::std::nano>;
-    Nano cute_t = Nano::zero();
-    Nano raw_t = Nano::zero();
-    auto t = cute::make_tensor(cute::make_gmem_ptr(foo), cute::make_shape(peers, cute::make_shape(cute::make_shape(stages, cells), tokens)), cute::LayoutRight{});
-    if(shouldPersist){
-        cuda::associate_access_property(foo, cuda::access_property::persisting{});
-    }
-
+__global__ void benchTen(unsigned int* foo, bool skip = false){
+    auto t = make_tensor(cute::make_gmem_ptr(foo), make_shape(peers, make_shape(cute::make_shape(stages, cells), tokens)), cute::LayoutRight{});
+    double cuteDuration = 0.0, rawDuration = 0.0;
     CUTE_UNROLL
-    for(unsigned int i = 0; i < 1000; ++i){
+    for(unsigned int i = 0; i < 1024; ++i){
         uint64_t start = 0, end = 0;
         asm volatile("mov.u64 %0, %%globaltimer;": "=l"(start)::);
-        &t(0, cute::make_coord(cute::make_coord(0,1),0));
+        &t(0, make_coord(cute::make_coord(0,1),0));
         asm volatile("mov.u64 %0, %%globaltimer;": "=l"(end)::);
-        cute_t += static_cast<cuda::std::chrono::duration<double, cuda::std::nano>>(end - start);
+        cuteDuration = static_cast<double>(end - start);
 
         asm volatile("mov.u64 %0, %%globaltimer;": "=l"(start)::);
         getTokenPointer(foo, 0, 0, 1, 0);
         asm volatile("mov.u64 %0, %%globaltimer;": "=l"(end)::);
-        raw_t += static_cast<cuda::std::chrono::duration<double, cuda::std::nano>>(end - start);
+        rawDuration = static_cast<double>(end - start);
     }
-
-    using BlockReduce = cub::BlockReduce<Nano, THREADS_PER_BLOCK>;
-    __shared__ typename BlockReduce::TempStorage temp_storage;
-
-    cute_t = BlockReduce(temp_storage).Reduce(cute_t, cub::Max());
-    raw_t = BlockReduce(temp_storage).Reduce(raw_t, cub::Max());
     if(aristos::block::threadID() == 0 && !skip){
-        printf("Block Id is %u, cute_t: {T: %f, V: %d, Micro: %f}, raw_t: {T: %f, V:%d, Micro: %f} "
-               "persist: %s\n",
+        printf("Block Id is %u, cute_t: {T: %f, V: %d}, raw_t: {T: %f, V:%d}\n",
                aristos::block::threadID(),
-               (cute_t / (1000*1.0)).count(),
-               t(0, cute::make_coord(cute::make_coord(0,1),0)),
-               cuda::std::chrono::duration_cast<cuda::std::chrono::duration<double, cuda::std::micro>>(cute_t/(1000*1.0)).count(),
-               (raw_t / (1000*1.0)).count(),
-               *getTokenPointer(foo, 0, 0, 1, 0),
-               cuda::std::chrono::duration_cast<cuda::std::chrono::duration<double, cuda::std::micro>>(raw_t/(1000*1.0)).count(),
-               (shouldPersist)? "Yes" : "No");
+               cuteDuration,
+               t(0, make_coord(cute::make_coord(0,1),0)),
+               rawDuration,
+               *getTokenPointer(foo, 0, 0, 1, 0));
     }
 }
 
-__device__ unsigned int testStages = 0;
-__global__ void benchBarrier(unsigned int* b, cuda::barrier<cuda::thread_scope_device>* bar, unsigned int n, bool skip = false, bool persist = false){
-    using Nano = cuda::std::chrono::duration<double, cuda::std::nano>;
-    Nano bar_ptr = Nano::zero();
-    Nano bar_obj = Nano::zero();
-    if(persist){
-        associate_access_property(b, cuda::access_property::persisting{});
-        associate_access_property(&testStages, cuda::access_property::persisting{});
-        associate_access_property(bar, cuda::access_property::persisting{});
-    }
-    /*aristos::barrier::init(n, persist);*/
+void testBenchTen() {
+    unsigned int* p;
+    constexpr std::array<unsigned int, 4> arr {{1234, 56, 78, 0}};
+    CUTE_CHECK_ERROR(cudaMalloc(&p, sizeof(unsigned int) * arr.size()));
+    CUTE_CHECK_ERROR(cudaMemcpy(p, arr.data(), sizeof(unsigned int) * arr.size(), cudaMemcpyHostToDevice));
+    benchTen<<<1,1>>>(p);
+    CUTE_CHECK_LAST();
+}
+
+__device__ unsigned int phases = 0U;
+__device__ unsigned int makeshiftBarrier = 0U;
+__global__ void benchBarrier(cuda::barrier<cuda::thread_scope_device>* __restrict__ bar,
+    CUTE_GRID_CONSTANT const unsigned int n, CUTE_GRID_CONSTANT const bool skip = false){
+    double makeshiftDuration = 0.0, quoDuration = 0.0;
     constexpr auto iter = 1024;
     CUTE_UNROLL
     for(unsigned int i = 0; i < iter; ++i){
         uint64_t start = 0, end = 0;
         asm volatile("mov.u64 %0, %%globaltimer;": "=l"(start)::);
         if(!aristos::block::threadID()){
-            auto nextStage = aristos::atomicLoad(&testStages) + 1;
             /// Arrive
-            if((atomicAdd(b, 1U) + 1) == n * nextStage){
-                atomicAdd(&testStages, 1U);
+            if(auto nextPhase = aristos::atomicLoad(&phases) + 1;
+                (atomicAdd(&makeshiftBarrier, 1U) + 1) == n * nextPhase){
+                atomicAdd(&phases, 1U);
                 /// Could execute completion function here
             }
             else{
                 /// You could do some other task prior to waiting
                 /// Wait
-                while(aristos::atomicLoad(&testStages) != nextStage){
-                    __nanosleep(2);
+                while(aristos::atomicLoad(&phases) != nextPhase){
                 }
                 /// Could execute completion function here
             }
-            /*aristos::barrier::wait(aristos::barrier::arrive());*/
         }
         __syncthreads();
         asm volatile("mov.u64 %0, %%globaltimer;": "=l"(end)::);
-        bar_ptr += static_cast<cuda::std::chrono::duration<double, cuda::std::nano>>(end - start);
+        makeshiftDuration += static_cast<double>(end - start) / static_cast<double>(iter*NANO_TO_MICRO);
     }
 
     CUTE_UNROLL
@@ -302,16 +287,30 @@ __global__ void benchBarrier(unsigned int* b, cuda::barrier<cuda::thread_scope_d
         }
         __syncthreads();
         asm volatile("mov.u64 %0, %%globaltimer;": "=l"(end)::);
-        bar_obj += static_cast<cuda::std::chrono::duration<double, cuda::std::nano>>(end - start);
+        quoDuration += static_cast<double>(end - start) / static_cast<double>(iter*NANO_TO_MICRO);
     }
 
-    if(!aristos::block::threadID() && !skip){
-        printf("Block Id is %u, bar_ptr: {T: %f}, bar_obj: {T: %f}, persist: %s\n",
-               aristos::grid::blockID(),
-               cuda::std::chrono::duration_cast<cuda::std::chrono::duration<double, cuda::std::micro>>(bar_ptr / (iter*1.0)).count(),
-               cuda::std::chrono::duration_cast<cuda::std::chrono::duration<double, cuda::std::micro>>(bar_obj / (iter*1.0)).count(),
-               persist? "Yes" : "No");
+    using BlockReduce = cub::BlockReduce<double, ARISTOS_BLOCK_SIZE>;
+    __shared__ BlockReduce::TempStorage temp_storage;
+
+    makeshiftDuration = BlockReduce(temp_storage).Reduce(makeshiftDuration, cub::Max());
+    quoDuration = BlockReduce(temp_storage).Reduce(quoDuration, cub::Max());
+    if(aristos::block::threadID() == 0 && !skip){
+        printf("Block Id is %u, makeshiftTime: {T: %f}, quoTime: {T: %f}\n", aristos::grid::blockID(),
+            makeshiftDuration, quoDuration);
     }
+}
+
+void testBenchBarrier() {
+    constexpr unsigned int n = 32;
+    cuda::barrier<cuda::thread_scope_device>* deviceBarrier;
+    const auto hostBarrier = new cuda::barrier<cuda::thread_scope_device>{n};
+    CUTE_CHECK_ERROR(cudaMalloc(&deviceBarrier, sizeof(cuda::barrier<cuda::thread_scope_device>)));
+    CUTE_CHECK_ERROR(cudaMemcpy(deviceBarrier, hostBarrier, sizeof(cuda::barrier<cuda::thread_scope_device>), cudaMemcpyHostToDevice));
+    benchBarrier<<<n, ARISTOS_BLOCK_SIZE>>>(deviceBarrier, n);
+    CUTE_CHECK_LAST();
+    delete hostBarrier;
+    cudaFree(deviceBarrier);
 }
 
 template <class DispatchPolicy,
@@ -444,7 +443,7 @@ void testTopologyDiscovery() {
     cudaEventCreate(&stop);
     constexpr unsigned int zeroVal = GRAND_MASTER;
     float duration;
-    #pragma GCC unroll skip
+    #pragma unroll
     for (uint i = 0; i < skip; ++i) {
         aristos::topology::discover<<<ARISTOS_SUPER_BLOCK_SIZE, ARISTOS_BLOCK_SIZE>>>(n, globalRank, isRemotePresent,
         pr, sHeap, flags, results + 2*globalRank*n);
@@ -554,7 +553,7 @@ void testDecider() {
 }
 
 int main() {
-    testTopologyDiscovery();
+    testBenchTen();
     return 0;
 }
 

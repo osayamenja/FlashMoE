@@ -142,9 +142,7 @@ namespace aristos::topology{
         // if num remote peers < n - 1, then we must await the contribution or our p2p siblings
         if (!block::threadID() && numPeers < (n - 1)) {
             atomicAdd(&publisher::blockade, 1);
-            while (atomicLoad(&publisher::blockade) != 2) {
-                __nanosleep(2);
-            }
+            while (atomicLoad(&publisher::blockade) != 2) {}
         }
         __syncthreads();
         slice = cute::ceil_div(numPeers, ARISTOS_BLOCK_SIZE_WARP);
@@ -203,9 +201,7 @@ namespace aristos::topology{
             if(remotePresent && localBlockIdx == GRAND_MASTER){
                 // unblock remote publisher
                 atomicAdd(&publisher::blockade, 1);
-                while (atomicLoad(&publisher::blockade) != 2) {
-                    __nanosleep(2);
-                }
+                while (atomicLoad(&publisher::blockade) != 2) {}
             }
             // Unblock sibling blocks
             atomicExch(&publisher::baton, (localBlockIdx + 1) % (gridDim.x - remotePresent));
