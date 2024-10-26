@@ -197,10 +197,11 @@ namespace aristos{
         sent = 1
     };
 
+    __constant__ uint64_t seqNo;
     template<typename E = header> requires cuda::std::is_integral_v<cuda::std::underlying_type_t<E>>
     CUTE_DEVICE
     uint64_t constructSignal(uint64_t const& tagAlong, E const& signal){
-        return tagAlong + signal;
+        return tagAlong + signal + seqNo;
     }
 }
 #endif //ARISTOS_TYPES_CUH

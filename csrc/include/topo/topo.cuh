@@ -12,6 +12,7 @@
 #define NANO_TO_MICRO (cuda::std::nano::den / cuda::std::micro::den)
 #define BYTE_MAX cuda::std::numeric_limits<cuda::std::underlying_type_t<cuda::std::byte>>::max()
 #define TO_MB(b) (static_cast<double>(b) / (1024.0f*1024.0f))
+#include "../moe/definition/types.cuh"
 
 using Nano = cuda::std::chrono::duration<float, cuda::std::nano>;
 using Milli = cuda::std::chrono::duration<float, cuda::std::milli>;
@@ -40,10 +41,11 @@ namespace aristos::topology{
 
     CUTE_DEVICE
     void subscribeAll(void* scratchpad, uint64_t* flags,  const unsigned int& n, const unsigned int& rank) {
+        // TODO parallelize using signal_wait_until
         static_cast<int*>(scratchpad)[rank] = 1; // Do not wait for me
-        nvshmem_uint64_wait_until_all(flags, n, static_cast<int*>(scratchpad), NVSHMEM_CMP_GT, sent);
+        nvshmem_uint64_wait_until_all(flags, n, static_cast<int*>(scratchpad), NVSHMEM_CMP_GT, sent + seqNo);
         for (unsigned int i = 1U; i < n; ++i) {
-            flags[(rank  + i) % n] -= sent;
+            flags[(rank  + i) % n] -= (sent + seqNo);
         }
     }
 
@@ -251,10 +253,6 @@ namespace aristos::topology{
             __shared__ unsigned int* peers;
             if (block::threadID() == 0) {
                 memset(scratchpad, 0, sizeof(double)*2*n);
-                apply_access_property(&publisher::blockade, sizeof(decltype(publisher::blockade)),
-                    cuda::access_property::persisting{});
-                apply_access_property(&publisher::baton, sizeof(decltype(publisher::baton)),
-                    cuda::access_property::persisting{});
                 numPeers = 0;
                 peers = static_cast<unsigned int*>(static_cast<void*>(scratchpad + 2*n));
                 /// Block 0 gets remote peers, if present; otherwise, joins the others in getting proximal peers

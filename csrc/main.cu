@@ -421,18 +421,19 @@ void testTopologyDiscovery() {
 
     CUTE_CHECK_ERROR(cudaSetDevice(localRank));
     const size_t heapBytes = n * (BETA_BUFFER + ((2*n + 1)*sizeof(double)));
-    void* symHeap = nvshmem_align(16, heapBytes);
-    CUTE_CHECK_ERROR(cudaMemset(symHeap, 0, heapBytes));
-    CUTE_CHECK_ERROR(cudaPeekAtLastError());
+    void* symHeap = nvshmem_calloc(heapBytes, sizeof(cuda::std::byte));
     /// Pointer orchestration
     static_assert(sizeof(aristos::flagsType) == sizeof(uint64_t));
-    auto* results = static_cast<double*>(symHeap);
+    // Navigate to our slice of the adjacency matrix
+    auto* results = static_cast<double*>(symHeap) + 2*globalRank*n;
+    // Starting index of flags array
     auto* flags = static_cast<uint64_t*>(symHeap) + ax;
+    // Starting index of heap
     auto* sHeap = static_cast<double*>(symHeap) + ax + n;
     const auto pr = globalRank + 1;
-    const auto remotePresent = [&n, &symHeap] {
+    const auto remotePresent = [&n, &results] {
         for (int i = 0; i< n; ++i) {
-            if (nvshmem_ptr(symHeap, i) == nullptr) return true;
+            if (nvshmem_ptr(results, i) == nullptr) return true;
         }
         return false;
     };
@@ -443,18 +444,22 @@ void testTopologyDiscovery() {
     cudaEventCreate(&stop);
     constexpr unsigned int zeroVal = GRAND_MASTER;
     float duration;
+    uint64_t hostSeqNo = 0U;
+    static_assert(sizeof(decltype(hostSeqNo)) == sizeof(decltype(aristos::seqNo)));
+    CUTE_CHECK_ERROR(cudaMemcpyToSymbol(aristos::seqNo, &hostSeqNo, sizeof(decltype(aristos::seqNo))));
     #pragma unroll
     for (uint i = 0; i < skip; ++i) {
         aristos::topology::discover<<<ARISTOS_SUPER_BLOCK_SIZE, ARISTOS_BLOCK_SIZE>>>(n, globalRank, isRemotePresent,
-        pr, sHeap, flags, results + 2*globalRank*n);
+        pr, sHeap, flags, results);
         CUTE_CHECK_ERROR(cudaMemcpyToSymbol(aristos::publisher::blockade, &zeroVal, sizeof(decltype(aristos::publisher::blockade))));
         CUTE_CHECK_ERROR(cudaMemcpyToSymbol(aristos::publisher::baton, &zeroVal, sizeof(decltype(aristos::publisher::baton))));
-        CUTE_CHECK_ERROR(cudaMemset(flags, 0, n*sizeof(aristos::flagsType)));
+        hostSeqNo = hostSeqNo + 1;
+        CUTE_CHECK_ERROR(cudaMemcpyToSymbol(aristos::seqNo, &hostSeqNo, sizeof(decltype(aristos::seqNo))));
     }
-    CUTE_CHECK_ERROR(cudaMemset(symHeap, 0, sizeof(double)*ax));
+    CUTE_CHECK_ERROR(cudaMemset(results, 0, sizeof(double)*ax));
     CUTE_CHECK_ERROR(cudaEventRecord(start));
     aristos::topology::discover<<<ARISTOS_SUPER_BLOCK_SIZE, ARISTOS_BLOCK_SIZE>>>(n, globalRank, isRemotePresent,
-        pr, sHeap, flags, results + 2*globalRank*n);
+        pr, sHeap, flags, results);
     CUTE_CHECK_ERROR(cudaEventRecord(stop));
     CUTE_CHECK_LAST();
     cudaEventElapsedTime(&duration, start, stop);
@@ -553,7 +558,7 @@ void testDecider() {
 }
 
 int main() {
-    testBenchTen();
+    testTopologyDiscovery();
     return 0;
 }
 
