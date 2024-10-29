@@ -456,7 +456,7 @@ void testTopologyDiscovery() {
         hostSeqNo = hostSeqNo + 1;
         CUTE_CHECK_ERROR(cudaMemcpyToSymbol(aristos::seqNo, &hostSeqNo, sizeof(decltype(aristos::seqNo))));
     }
-    CUTE_CHECK_ERROR(cudaMemset(results, 0, sizeof(double)*ax));
+    CUTE_CHECK_ERROR(cudaMemset(results, 0, sizeof(double)*2*n));
     CUTE_CHECK_ERROR(cudaEventRecord(start));
     aristos::topology::discover<<<ARISTOS_SUPER_BLOCK_SIZE, ARISTOS_BLOCK_SIZE>>>(n, globalRank, isRemotePresent,
         pr, sHeap, flags, results);

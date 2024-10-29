@@ -58,7 +58,7 @@ namespace aristos::topology{
         const unsigned int& lBid = 0, const unsigned int& nb = 1) {
         ull_t start, end;
         double duration = 0.0;
-        bool isResidual = alphaBuf % nb != 0 && lBid == nb - 1;
+        bool isResidual = alphaBuf % nb != 0 && alphaBuf > nb && lBid == nb - 1 ;
         size_t buf = (lBid * cute::ceil_div(alphaBuf, nb) < alphaBuf) *
                 (!isResidual * cute::ceil_div(alphaBuf, nb)
                 + isResidual * (alphaBuf - (cute::ceil_div(alphaBuf, nb) * (nb - 1))));
@@ -74,7 +74,7 @@ namespace aristos::topology{
             remoteDurations[peerIdx*2] = duration;
         }
         duration = 0.0;
-        isResidual = betaBuf % nb != 0 && lBid == nb - 1;
+        isResidual = betaBuf % nb != 0 && betaBuf > nb && lBid == nb - 1;
         buf = (lBid * cute::ceil_div(betaBuf, nb) < betaBuf) * (!isResidual * cute::ceil_div(betaBuf, nb)
                + isResidual * (betaBuf - (cute::ceil_div(betaBuf, nb) * (nb - 1))));
         ///Beta Cost: ms/MB
