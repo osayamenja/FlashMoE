@@ -11,7 +11,7 @@
 #include "algorithm/algorithm.cuh"
 #include "engine/publisher.cuh"
 #include "engine/subscriber.cuh"
-#include "engine/processor.cuh"
+#include "engine/processor/processor.cuh"
 #include "definition/values.cuh"
 #include <cuda/annotated_ptr>
 

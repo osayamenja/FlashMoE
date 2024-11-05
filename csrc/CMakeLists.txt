@@ -51,7 +51,7 @@ add_executable(csrc main.cu
         include/moe/engine/subscriber.cuh
         include/moe/moe.cuh
         include/aristos.cuh
-        include/moe/engine/processor.cuh
+        include/moe/engine/processor/processor.cuh
         include/moe/algorithm/algorithm.cuh
         include/moe/util/indexing.cuh
         include/moe/definition/tensor.cuh
@@ -71,6 +71,7 @@ add_executable(csrc main.cu
         include/moe/engine/decider/comps/niche.cuh
         include/moe/util/config.cuh
         include/topo/topo.cuh
+        include/moe/engine/processor/mmaConfig.cuh
 )
 set_target_properties(csrc PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
@@ -129,6 +130,20 @@ CPMAddPackage(
 if(SPDLOG_ADDED)
     target_link_libraries(csrc PRIVATE spdlog::spdlog)
 endif ()
+
+set(NvidiaCutlass_ROOT "${CUTLASS_SOURCE_DIR}")
+set(mathdx_CUTLASS_ROOT "${CUTLASS_SOURCE_DIR}")
+
+set(MATHDX_VER 24.08)
+set(MATHDX_URL_PREFIX "https://developer.download.nvidia.com/compute/cublasdx/redist/cublasdx")
+set(MATHDX_URL "${MATHDX_URL_PREFIX}/nvidia-mathdx-${MATHDX_VER}.0.tar.gz")
+CPMFindPackage(
+        NAME mathdx
+        VERSION "${MATHDX_VER}"
+        URL "${MATHDX_URL}"
+        FIND_PACKAGE_ARGUMENTS "REQUIRED COMPONENTS cublasdx CONFIG"
+)
+target_link_libraries(csrc PRIVATE mathdx::cublasdx)
 
 target_link_libraries(csrc PRIVATE CUDA::cudart CUDA::cuda_driver CUDA::nvml CUDA::cublas CUDA::nvtx3)
 target_link_libraries(csrc PRIVATE atomic)

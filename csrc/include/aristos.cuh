@@ -19,7 +19,8 @@
 #include "moe/definition/types.cuh"
 #include "moe/definition/memory_layout.cuh"
 #include "moe/util/atomics.cuh"
-#include "moe/engine/processor.cuh"
+#include "moe/engine/processor/mmaConfig.cuh"
+#include "moe/engine/processor/processor.cuh"
 #include "moe/definition/values.cuh"
 
 #endif //ARISTOS_CUH

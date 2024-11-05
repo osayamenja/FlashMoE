@@ -6,6 +6,8 @@
 #define CSRC_DEBUG_CUH
 
 #include <iostream>
+#include <typeinfo>
+#include <cxxabi.h>
 namespace aristos{
     template<typename S>
     concept Streamable = requires (S s){
@@ -52,6 +54,25 @@ namespace aristos{
             std::cout << "{" << i.first << ": " << i.second << "}, ";
         }
         std::cout << ']' << std::endl;
+    }
+
+    template<typename T>
+    void printType() {
+        // Get the mangled name
+        const char* mangledName = typeid(T).name();
+
+        // Demangle the name
+        int status;
+        char* demangledName = abi::__cxa_demangle(mangledName, nullptr, nullptr, &status);
+
+        // Print the demangled name
+        if (status == 0) {
+            std::cout << "Demangled name: " << demangledName << std::endl;
+        } else {
+            std::cerr << "Demangling failed!" << std::endl;
+        }
+        // Free the memory allocated by abi::__cxa_demangle
+        free(demangledName);
     }
 }
 #endif //CSRC_DEBUG_CUH

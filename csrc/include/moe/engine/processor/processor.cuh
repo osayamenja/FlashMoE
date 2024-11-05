@@ -5,6 +5,7 @@
 #ifndef ARISTOS_COMPUTE_CUH
 #define ARISTOS_COMPUTE_CUH
 
+#include "mmaConfig.cuh"
 namespace aristos::processor{
     CUTE_DEVICE
     void start(){
