@@ -20,8 +20,7 @@
 #define ARISTOS_M_BATCH 128
 #define ARISTOS_N_BATCH 128
 #define ARISTOS_K_BATCH 8
-// pipeline stages; have to use 1 due to shared mem constraints
-#define ARISTOS_PIPELINE_STAGES 1
+#define ARISTOS_PIPELINE_STAGES 2
 
 namespace aristos{
     using maxPrecision = float;

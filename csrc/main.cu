@@ -313,68 +313,6 @@ void testBenchBarrier() {
     cudaFree(deviceBarrier);
 }
 
-template <class DispatchPolicy,
-        class TMMA, class TiledCopyA, class TiledCopyB,
-                class ElementA = cute::half_t, class ElementB = cute::half_t,
-        class ElementC = cute::half_t,unsigned int stages = 1>
-__global__ void processorSpec(DispatchPolicy dispatchPolicy, ElementA* A,
-                              ElementA* B, ElementC* C,
-                              TMMA tmma, TiledCopyA tca, TiledCopyB tcb,
-                              const int& M, const int& N, const int& K){
-    using namespace cute;
-    using ProblemShape = decltype(make_shape(M, N, K));
-    using StrideA = Underscore;
-    using StrideB = Underscore;
-    using StrideC = Underscore;
-    using tiledMma = TMMA;
-    using GmemCopyA = TiledCopyA;
-    using SmemLayoutAtomA = decltype(
-    composition(Swizzle<1,2,3>{},
-                Layout<Shape<Int<ARISTOS_M_BATCH>, Int<ARISTOS_K_BATCH>>>{}));
-    using SmemCopyAtomA = Copy_Atom<SM75_U32x4_LDSM_N, ElementA>;
-    using TransformA = identity; // upcast from fp8 to fp16
-    using GmemCopyB = TiledCopyB;
-    using SmemLayoutAtomB = decltype(
-    composition(Swizzle<1,2,3>{},
-                Layout<Shape<Int<ARISTOS_N_BATCH>, Int<ARISTOS_K_BATCH>>>{}));
-    using SmemCopyAtomB = Copy_Atom<SM75_U32x4_LDSM_N, ElementB>;
-    using TransformB = identity; // upcast from fp8 to fp16
-    using CollectiveMainloop = typename cutlass::gemm::collective::CollectiveMma<
-            DispatchPolicy,
-            ProblemShape,
-            ElementA,
-            StrideA,
-            ElementB,
-            StrideB,
-            tiledMma,
-            GmemCopyA,
-            SmemLayoutAtomA,
-            SmemCopyAtomA,
-            TransformA,
-            GmemCopyB,
-            SmemLayoutAtomB,
-            SmemCopyAtomB,
-            TransformB>;
-    auto problemShape = ProblemShape{};
-    auto ctaTiler = make_shape(ARISTOS_M_BATCH, ARISTOS_N_BATCH, ARISTOS_K_BATCH);
-    auto ma = make_tensor(make_gmem_ptr(A), select<0,2>(problemShape), StrideA{});
-    auto mb = make_tensor(make_gmem_ptr(B), select<1,2>(problemShape), StrideB{});
-    auto mc = make_tensor(make_gmem_ptr(C), select<0,1>(problemShape), StrideC{});
-    auto altGridDimX = cute::ceil_div(get<0>(problemShape), cute::get<0>(ctaTiler));
-    auto cta_coord = make_coord((blockIdx.x % altGridDimX), (blockIdx.x / altGridDimX), _);
-    auto gA = local_tile(ma, ctaTiler, cta_coord, Step<_1, X,_1>{});
-    auto gB = local_tile(mb, ctaTiler, cta_coord, Step< X,_1,_1>{});
-    auto gC = local_tile(mc, ctaTiler, cta_coord, Step<_1,_1, X>{});
-    auto k_tile_iter = cute::make_coord_iterator(size<2>(gA));
-    int k_tile_count = size<2>(gA);
-    auto accum = partition_fragment_C(tmma, Shape<Int<ARISTOS_M_BATCH>, Int<ARISTOS_N_BATCH>>{});
-    clear(accum);
-    extern __shared__ cuda::std::byte sharedBuf[];
-    
-    CollectiveMainloop  expert;
-    expert(accum, gA, gB, accum, k_tile_iter, k_tile_count, Underscore{}, threadIdx.x, sharedBuf);
-}
-
 __global__ void testAlign(float* result) {
     extern __shared__ float remoteDurations[];
     extern __shared__ int x[];
