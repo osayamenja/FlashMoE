@@ -376,6 +376,7 @@ void testTopologyDiscovery() {
         return false;
     };
     const auto isRemotePresent = remotePresent();
+    const auto sharedSize = n * (sizeof(floatPair) + sizeof(unsigned int));
     constexpr auto skip = 32U;
     cudaEvent_t start, stop;
     cudaEventCreate(&start);
@@ -387,15 +388,15 @@ void testTopologyDiscovery() {
         sizeof(decltype(aristos::seqNo)), 0, cudaMemcpyHostToDevice, aristos::aristosStream));
     #pragma unroll
     for (uint i = 0; i < skip; ++i) {
-        aristos::topology::discover<<<ARISTOS_SUPER_BLOCK_SIZE, ARISTOS_BLOCK_SIZE>>>(n, globalRank, isRemotePresent,
+        aristos::topology::discover<<<ARISTOS_SUPER_BLOCK_SIZE, ARISTOS_BLOCK_SIZE, sharedSize, aristos::aristosStream>>>(n, globalRank, isRemotePresent,
         pr, sHeap, flags, results);
         hostSeqNo = hostSeqNo + 1;
         CUTE_CHECK_ERROR(cudaMemcpyToSymbolAsync(aristos::seqNo, &hostSeqNo, sizeof(decltype(aristos::seqNo)),
             0, cudaMemcpyHostToDevice, aristos::aristosStream));
     }
-    CUTE_CHECK_ERROR(cudaMemset(results, 0, sizeof(floatPair)*n));
+    CUTE_CHECK_ERROR(cudaMemsetAsync(results, 0, sizeof(floatPair)*n, aristos::aristosStream));
     CUTE_CHECK_ERROR(cudaEventRecord(start, aristos::aristosStream));
-    aristos::topology::discover<<<ARISTOS_SUPER_BLOCK_SIZE, ARISTOS_BLOCK_SIZE>>>(n, globalRank, isRemotePresent,
+    aristos::topology::discover<<<ARISTOS_SUPER_BLOCK_SIZE, ARISTOS_BLOCK_SIZE, sharedSize, aristos::aristosStream>>>(n, globalRank, isRemotePresent,
         pr, sHeap, flags, results);
     CUTE_CHECK_ERROR(cudaEventRecord(stop, aristos::aristosStream));
     CUTE_CHECK_LAST();

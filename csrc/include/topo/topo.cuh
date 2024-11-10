@@ -12,7 +12,7 @@
 #define NANO_TO_MICRO (cuda::std::nano::den / cuda::std::micro::den)
 #define BYTE_MAX cuda::std::numeric_limits<cuda::std::underlying_type_t<cuda::std::byte>>::max()
 #define TO_MB(b) (static_cast<float>(b) / (1024.0f*1024.0f))
-#define BETA_LIN (1024.0f * 1024.0f) // 1MB
+#define BETA_MB 1024.0f // 1GB
 #include "../moe/definition/types.cuh"
 #include <cuda/cmath>
 
@@ -26,7 +26,7 @@ struct floatPair {
 
     __device__ __forceinline__
     friend bool operator<(const floatPair &lhs, const floatPair &rhs) {
-        return cuda::std::fmaf(lhs.beta, BETA_LIN, lhs.alpha) < cuda::std::fmaf(rhs.beta, BETA_LIN, rhs.alpha);
+        return fmaf(lhs.beta, BETA_MB, lhs.alpha) < fmaf(rhs.beta, BETA_MB, rhs.alpha);
     }
 
     __device__ __forceinline__
