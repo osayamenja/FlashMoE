@@ -376,7 +376,7 @@ void testTopologyDiscovery() {
         return false;
     };
     const auto isRemotePresent = remotePresent();
-    constexpr auto skip = 0U;
+    constexpr auto skip = 32U;
     cudaEvent_t start, stop;
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
