@@ -126,14 +126,14 @@ namespace aristos::topology{
 
         // Signal my vector, including FLOPs, to others
         for (unsigned int i = 1U; i < n; ++i) {
-            nvshmemx_putmem_signal_nbi_block(results, results, n*sizeof(float2), flags + rank,
+            nvshmemx_putmem_signal_nbi_block(results, results, n*sizeof(floatPair), flags + rank,
                 constructSignal(processingRate, sent), NVSHMEM_SIGNAL_SET, (rank + i) % n);
         }
 
         // await responses from other GPUs
-        for (int i = block::threadID(); i < n; i += THREADS) {
-            nvshmem_signal_wait_until(flags + i, NVSHMEM_CMP_GT, sent + seqNo);
-            flags[i] -= sent + seqNo;
+        for (int i = block::threadID() + 1; i < n; i += THREADS) {
+            nvshmem_signal_wait_until(flags + (rank + i) % n, NVSHMEM_CMP_GT, sent + seqNo);
+            flags[(rank + i) % n] -= sent + seqNo;
         }
     }
 
@@ -164,7 +164,7 @@ namespace aristos::topology{
 
         // Signal our vector, including FLOPs, to others
         for (unsigned int i = block::threadID(); i < numPeers; i += THREADS) {
-            nvshmem_putmem_signal_nbi(results, results, n * sizeof(float2), flags + rank,
+            nvshmem_putmem_signal_nbi(results, results, n * sizeof(floatPair), flags + rank,
                     constructSignal(processingRate, sent), NVSHMEM_SIGNAL_SET, peers[i]);
         }
     }
@@ -216,7 +216,7 @@ namespace aristos::topology{
         // Inter-block slicing
         for(unsigned int i = localBlockIdx; i < numPeers; i += numP2PBlocks){
             nvshmemx_putmem_signal_nbi_block(results, results,
-                                             (peers[i] != rank) * sizeof(float2) * n, flags + rank,
+                                             (peers[i] != rank) * sizeof(floatPair) * n, flags + rank,
                                              constructSignal(processingRate, sent),
                                              NVSHMEM_SIGNAL_SET, peers[i]);
         }
@@ -236,7 +236,6 @@ namespace aristos::topology{
     __global__ void discover(CUTE_GRID_CONSTANT const int n, CUTE_GRID_CONSTANT const int rank,
         CUTE_GRID_CONSTANT const bool remotePresent, const unsigned long processingRate,
         cuda::std::byte* sHeap, uint64_t* flags, floatPair* results) {
-        // TODO convert measurement resolution to float and pack alpha and beta into float2 struct.
         assert(blockDim.x == ARISTOS_BLOCK_SIZE);
         assert(blockDim.y * blockDim.z == 1);
         assert(gridDim.x <= ARISTOS_SUPER_BLOCK_SIZE + remotePresent);
