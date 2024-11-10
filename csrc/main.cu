@@ -342,7 +342,7 @@ void testTopologyDiscovery() {
      /// Initialization
     nvshmem_init();
     const int n = nvshmem_n_pes();
-    const unsigned int ax = 2*n*n;
+    const unsigned int ax = n*n;
     const int localRank = nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE);
     const int globalRank = nvshmem_my_pe();
 
@@ -358,16 +358,16 @@ void testTopologyDiscovery() {
         globalRank, localRank, prop.name, prop.pciBusID, dev_count);
 
     CUTE_CHECK_ERROR(cudaSetDevice(localRank));
-    const size_t heapBytes = n * (BETA_BUFFER + ((2*n + 1)*sizeof(double)));
+    static_assert(sizeof(floatPair) == sizeof(aristos::flagsType));
+    const size_t heapBytes = n * (BETA_BUFFER + ((n + 1)*sizeof(floatPair)));
     void* symHeap = nvshmem_calloc(heapBytes, sizeof(cuda::std::byte));
     /// Pointer orchestration
-    static_assert(sizeof(aristos::flagsType) == sizeof(uint64_t));
     // Navigate to our slice of the adjacency matrix
-    auto* results = static_cast<double*>(symHeap) + 2*globalRank*n;
+    auto* results = static_cast<floatPair*>(symHeap) + globalRank*n;
     // Starting index of flags array
     auto* flags = static_cast<uint64_t*>(symHeap) + ax;
     // Starting index of heap
-    auto* sHeap = static_cast<double*>(symHeap) + ax + n;
+    auto* sHeap = CAST_TO(cuda::std::byte, flags + n);
     const auto pr = globalRank + 1;
     const auto remotePresent = [&n, &results] {
         for (int i = 0; i< n; ++i) {
@@ -376,50 +376,50 @@ void testTopologyDiscovery() {
         return false;
     };
     const auto isRemotePresent = remotePresent();
-    constexpr auto skip = 32U;
+    constexpr auto skip = 0U;
     cudaEvent_t start, stop;
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
-    constexpr unsigned int zeroVal = GRAND_MASTER;
     float duration;
     uint64_t hostSeqNo = 0U;
     static_assert(sizeof(decltype(hostSeqNo)) == sizeof(decltype(aristos::seqNo)));
-    CUTE_CHECK_ERROR(cudaMemcpyToSymbol(aristos::seqNo, &hostSeqNo, sizeof(decltype(aristos::seqNo))));
+    CUTE_CHECK_ERROR(cudaMemcpyToSymbolAsync(aristos::seqNo, &hostSeqNo,
+        sizeof(decltype(aristos::seqNo)), 0, cudaMemcpyHostToDevice, aristos::aristosStream));
     #pragma unroll
     for (uint i = 0; i < skip; ++i) {
         aristos::topology::discover<<<ARISTOS_SUPER_BLOCK_SIZE, ARISTOS_BLOCK_SIZE>>>(n, globalRank, isRemotePresent,
         pr, sHeap, flags, results);
-        CUTE_CHECK_ERROR(cudaMemcpyToSymbol(aristos::publisher::blockade, &zeroVal, sizeof(decltype(aristos::publisher::blockade))));
-        CUTE_CHECK_ERROR(cudaMemcpyToSymbol(aristos::publisher::baton, &zeroVal, sizeof(decltype(aristos::publisher::baton))));
         hostSeqNo = hostSeqNo + 1;
-        CUTE_CHECK_ERROR(cudaMemcpyToSymbol(aristos::seqNo, &hostSeqNo, sizeof(decltype(aristos::seqNo))));
+        CUTE_CHECK_ERROR(cudaMemcpyToSymbolAsync(aristos::seqNo, &hostSeqNo, sizeof(decltype(aristos::seqNo)),
+            0, cudaMemcpyHostToDevice, aristos::aristosStream));
     }
-    CUTE_CHECK_ERROR(cudaMemset(results, 0, sizeof(double)*2*n));
-    CUTE_CHECK_ERROR(cudaEventRecord(start));
+    CUTE_CHECK_ERROR(cudaMemset(results, 0, sizeof(floatPair)*n));
+    CUTE_CHECK_ERROR(cudaEventRecord(start, aristos::aristosStream));
     aristos::topology::discover<<<ARISTOS_SUPER_BLOCK_SIZE, ARISTOS_BLOCK_SIZE>>>(n, globalRank, isRemotePresent,
         pr, sHeap, flags, results);
-    CUTE_CHECK_ERROR(cudaEventRecord(stop));
+    CUTE_CHECK_ERROR(cudaEventRecord(stop, aristos::aristosStream));
     CUTE_CHECK_LAST();
     cudaEventElapsedTime(&duration, start, stop);
-    void* adjMatrix = malloc((ax + n) * sizeof(double));
+    auto* adjMatrix = static_cast<floatPair*>(malloc((ax + n) * sizeof(floatPair)));
 
     /// Epilogue
-    CUTE_CHECK_ERROR(cudaMemcpy(adjMatrix, symHeap, (ax + n)*sizeof(double), cudaMemcpyDeviceToHost));
+    CUTE_CHECK_ERROR(cudaMemcpyAsync(adjMatrix, symHeap, (ax + n)*sizeof(floatPair),
+        cudaMemcpyDeviceToHost, aristos::aristosStream));
     CUTE_CHECK_LAST();
-    auto* adjPtr = static_cast<double*>(adjMatrix);
-    std::vector<std::array<double, 2>> temp(n);
+
+    std::vector<std::array<float, 2>> temp(n);
     std::vector<aristos::flagsType> temp_f(n);
     auto* file = std::fopen(std::string("adjMatrix_Rank")
         .append(std::to_string(globalRank)).append(".txt").c_str(), "w");
     fmt::print(file, "----> {} processes pair-wise (𝛼 ms, 𝛽 ms/MB) costs <------\n", n);
     for (uint i = 0; i < n; ++i){
-        for (uint j = 0; j < 2*n; j+=2){
-            temp[j/2] = {adjPtr[(i*2*n) + j], adjPtr[(i*2*n) + j + 1]};
+        for (uint j = 0; j < n; ++j){
+            temp[j] = {adjMatrix[i*n + j].alpha, adjMatrix[i*n + j].beta};
         }
         fmt::print(file, "Rank {}: {:::.2e}\n", i, temp);
     }
-    static_assert(sizeof(aristos::flagsType) == sizeof(double));
-    auto* flagsPtr = static_cast<aristos::flagsType*>(adjMatrix) + ax;
+
+    auto* flagsPtr = CAST_TO(aristos::flagsType, adjMatrix + ax);
     for (uint i = 0; i < n; ++i){
         temp_f[i] = flagsPtr[i];
     }
@@ -430,6 +430,8 @@ void testTopologyDiscovery() {
     nvshmem_free(symHeap);
     free(adjMatrix);
     nvshmem_finalize();
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
 }
 
 __host__
