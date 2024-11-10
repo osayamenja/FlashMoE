@@ -11,228 +11,231 @@
 #define NANO_TO_MILLI (cuda::std::nano::den / cuda::std::milli::den)
 #define NANO_TO_MICRO (cuda::std::nano::den / cuda::std::micro::den)
 #define BYTE_MAX cuda::std::numeric_limits<cuda::std::underlying_type_t<cuda::std::byte>>::max()
-#define TO_MB(b) (static_cast<double>(b) / (1024.0f*1024.0f))
+#define TO_MB(b) (static_cast<float>(b) / (1024.0f*1024.0f))
+#define BETA_MB 1024.0f // 1GB
 #include "../moe/definition/types.cuh"
+#include <cuda/cmath>
 
 using Nano = cuda::std::chrono::duration<float, cuda::std::nano>;
 using Milli = cuda::std::chrono::duration<float, cuda::std::milli>;
 using ull_t = unsigned long long int;
+
+struct floatPair {
+    float alpha;
+    float beta;
+
+    __device__ __forceinline__
+    friend bool operator<(const floatPair &lhs, const floatPair &rhs) {
+        return fmaf(lhs.beta, BETA_MB, lhs.alpha) < fmaf(rhs.beta, BETA_MB, rhs.alpha);
+    }
+
+    __device__ __forceinline__
+    friend bool operator<=(const floatPair &lhs, const floatPair &rhs) {
+        return !(rhs < lhs);
+    }
+
+    __device__ __forceinline__
+    friend bool operator>(const floatPair &lhs, const floatPair &rhs) {
+        return rhs < lhs;
+    }
+
+    __device__ __forceinline__
+    friend bool operator>=(const floatPair &lhs, const floatPair &rhs) {
+        return !(lhs < rhs);
+    }
+
+    __device__ __forceinline__
+    friend bool operator==(const floatPair &lhs, const floatPair &rhs) {
+        return lhs.alpha == rhs.alpha
+               && lhs.beta == rhs.beta;
+    }
+
+    __device__ __forceinline__
+    friend bool operator!=(const floatPair &lhs, const floatPair &rhs) {
+        return !(lhs == rhs);
+    }
+};
+
 namespace aristos::topology{
-    template<typename T=void>
+    template<typename T>
+    requires(!cuda::std::is_same_v<T, void>)
     CUTE_DEVICE
     T* advancePtr(T* buffer, const unsigned int& slot) {
         return buffer + (slot * BETA_BUFFER);
-    }
-
-    /// Fused memcpy and memset.
-    /// Note, M cannot be any of function types, incomplete types, or bit-field.
-    template<cuda::std::byte setValue=cuda::std::byte{0}, typename M>
-    requires (!cuda::std::is_function_v<M> && cuda::std::to_integer<unsigned int>(setValue) <= BYTE_MAX)
-    CUTE_DEVICE
-    void memCopySet(M* dst, M* src, const unsigned int& beginIdx, const unsigned int& endIdx) {
-        for (unsigned int i = beginIdx; i < endIdx; ++i) {
-            dst[i] = src[i];
-            CUTE_UNROLL
-            for (unsigned int j = 0; j < sizeof(M); ++j) {
-                static_cast<cuda::std::byte*>(static_cast<void*>(src))[j + i*sizeof(M)] = setValue;
-            }
-        }
-    }
-
-    CUTE_DEVICE
-    void subscribeAll(void* scratchpad, uint64_t* flags,  const unsigned int& n, const unsigned int& rank) {
-        // TODO parallelize using signal_wait_until
-        static_cast<int*>(scratchpad)[rank] = 1; // Do not wait for me
-        nvshmem_uint64_wait_until_all(flags, n, static_cast<int*>(scratchpad), NVSHMEM_CMP_GT, sent + seqNo);
-        for (unsigned int i = 1U; i < n; ++i) {
-            flags[(rank  + i) % n] -= (sent + seqNo);
-        }
     }
 
     template<size_t betaBuf = BETA_BUFFER, size_t alphaBuf = ALPHA_BUFFER, typename ID, typename Put>
     requires (cuda::std::is_invocable_r_v<unsigned int, ID>
         && cuda::std::is_invocable_r_v<void, Put, void*, const void*, size_t, int>)
     CUTE_DEVICE
-    void measureTransfer(const unsigned int& rank, double* sHeap, double* remoteDurations,
+    void measureTransfer(const unsigned int& rank, cuda::std::byte* sHeap, floatPair* remoteDurations,
         const int& peer, const ID& id, const Put& put, const unsigned int& peerIdx,
         const unsigned int& lBid = 0, const unsigned int& nb = 1) {
         ull_t start, end;
-        double duration = 0.0;
+        float duration = 0.0;
         bool isResidual = alphaBuf % nb != 0 && alphaBuf > nb && lBid == nb - 1 ;
         size_t buf = (lBid * cute::ceil_div(alphaBuf, nb) < alphaBuf) *
                 (!isResidual * cute::ceil_div(alphaBuf, nb)
                 + isResidual * (alphaBuf - (cute::ceil_div(alphaBuf, nb) * (nb - 1))));
         /// Alpha cost: ms
-        CUTE_UNROLL
+        #pragma unroll
         for (unsigned int j = 0; j < TOPO_LOOP_TRIP; ++j) {
             asm volatile("mov.u64 %0, %%globaltimer;": "=l"(start)::);
             put(advancePtr(sHeap, rank) + (lBid * buf), advancePtr(sHeap, rank) + (lBid * buf), buf, peer);
             asm volatile("mov.u64 %0, %%globaltimer;": "=l"(end)::);
-            duration += (end - start) / static_cast<double>(TOPO_LOOP_TRIP*NANO_TO_MILLI);
+            duration += static_cast<float>(end - start) / static_cast<float>(TOPO_LOOP_TRIP*NANO_TO_MILLI);
         }
         if(id() == 0) {
-            remoteDurations[peerIdx*2] = duration;
+            remoteDurations[peerIdx].alpha = duration;
         }
         duration = 0.0;
         isResidual = betaBuf % nb != 0 && betaBuf > nb && lBid == nb - 1;
         buf = (lBid * cute::ceil_div(betaBuf, nb) < betaBuf) * (!isResidual * cute::ceil_div(betaBuf, nb)
                + isResidual * (betaBuf - (cute::ceil_div(betaBuf, nb) * (nb - 1))));
         ///Beta Cost: ms/MB
-        CUTE_UNROLL
+        #pragma unroll
         for (unsigned int j = 0; j < TOPO_LOOP_TRIP; ++j) {
             asm volatile("mov.u64 %0, %%globaltimer;": "=l"(start)::);
             put(advancePtr(sHeap, rank) + (lBid * buf), advancePtr(sHeap, rank) + (lBid * buf), buf, peer);
             asm volatile("mov.u64 %0, %%globaltimer;": "=l"(end)::);
-            duration += (end - start)/ static_cast<double>(TOPO_LOOP_TRIP*NANO_TO_MILLI);
+            duration += static_cast<float>(end - start) / static_cast<float>(TOPO_LOOP_TRIP*NANO_TO_MILLI);
         }
         if(id() == 0) {
             // Compute beta using slope intercept equation
-            remoteDurations[2*peerIdx + 1] = ((duration - remoteDurations[2*peerIdx]) / (TO_MB(betaBuf) - TO_MB(alphaBuf)));
+            remoteDurations[peerIdx].beta = ((duration - remoteDurations[peerIdx].alpha) / (TO_MB(betaBuf) - TO_MB(alphaBuf)));
             // Compute alpha and apply abs for spurious negatives
-            remoteDurations[2*peerIdx] = fabs(remoteDurations[2*peerIdx] - (TO_MB(alphaBuf) * remoteDurations[2*peerIdx + 1]));
+            remoteDurations[peerIdx].alpha = fabs(remoteDurations[peerIdx].alpha - (TO_MB(alphaBuf) * remoteDurations[peerIdx].beta));
         }
     }
 
     CUTE_DEVICE
-    void singularBuilder(void* scratchpad, const unsigned int& n, const unsigned int& rank, const unsigned long& processingRate,
-        double* sHeap, double* results, uint64_t* flags) {
+    void singularBuilder(floatPair* scratchpad, const unsigned int& n, const unsigned int& rank, const unsigned long& processingRate,
+        cuda::std::byte* sHeap, floatPair* results, uint64_t* flags) {
         for (unsigned int i = 1U; i < n; ++i) {
-            measureTransfer(rank, sHeap, static_cast<double*>(scratchpad), (rank + i) % n,
+            measureTransfer(rank, sHeap, scratchpad, (rank + i) % n,
                 block::threadID, nvshmemx_putmem_block, (rank + i) % n);
         }
         __threadfence_block();
         __syncthreads();
 
         /// Stage my row on the symmetric heap
-        const auto slice = cute::ceil_div(2*n, ARISTOS_BLOCK_SIZE);
-        memCopySet(results,static_cast<double*>(scratchpad),block::threadID() * slice,
-            min(slice * (block::threadID() + 1), 2U*n));
+        for (unsigned int i = block::threadID(); i < n; i += THREADS) {
+            results[i] = scratchpad[i];
+        }
         __threadfence_block();
 
         // Signal my vector, including FLOPs, to others
         for (unsigned int i = 1U; i < n; ++i) {
-            nvshmemx_double_put_signal_nbi_block(results, results, 2*n, flags + rank,
+            nvshmemx_putmem_signal_nbi_block(results, results, n*sizeof(floatPair), flags + rank,
                 constructSignal(processingRate, sent), NVSHMEM_SIGNAL_SET, (rank + i) % n);
         }
 
         // await responses from other GPUs
-        if (block::threadID() == 0) {
-            subscribeAll(scratchpad, flags, n, rank);
+        for (int i = block::threadID() + 1; i < n; i += THREADS) {
+            nvshmem_signal_wait_until(flags + (rank + i) % n, NVSHMEM_CMP_GT, sent + seqNo);
+            flags[(rank + i) % n] -= sent + seqNo;
         }
     }
 
     CUTE_DEVICE
-    void pluralRemoteBuilder(void* scratchpad, const unsigned int* peers, const unsigned int& n, const unsigned int& rank,
-        const unsigned long& processingRate, const unsigned int numPeers, double* sHeap, double* results, uint64_t* flags) {
+    void pluralRemoteBuilder(floatPair* scratchpad, const unsigned int* peers, const unsigned int& n, const unsigned int& rank,
+        const unsigned long& processingRate, const unsigned int numPeers, cuda::std::byte* sHeap, floatPair* results, uint64_t* flags) {
         for (unsigned int i = 0U; i < numPeers; ++i) {
-            measureTransfer(rank, sHeap, static_cast<double*>(scratchpad), peers[(i + rank) % numPeers],
+            measureTransfer(rank, sHeap, scratchpad, peers[(i + rank) % numPeers],
                 block::threadID, nvshmemx_putmem_block, (i + rank) % numPeers);
         }
         __threadfence_block();
         __syncthreads();
 
         /// Stage my row to the symmetric heap
-        auto slice = cute::ceil_div(numPeers, ARISTOS_BLOCK_SIZE);
-        auto bookend = min(slice * (block::threadID() + 1), numPeers);
-        for (unsigned int i = block::threadID() * slice; i < bookend; ++i) {
-            results[2*peers[i]] = static_cast<double*>(scratchpad)[2*i];
-            results[2*peers[i] + 1] = static_cast<double*>(scratchpad)[2*i + 1];
+        for (unsigned int i = block::threadID(); i < numPeers; i += THREADS) {
+            results[peers[i]] = scratchpad[i];
         }
         __threadfence();
+        __syncthreads();
 
         // Ensures our vector is complete before sending to neighbors.
-        // if num remote peers < n - 1, then we must await the contribution or our p2p siblings
+        // if num remote peers < n - 1, then we must await the contribution of our p2p siblings
         if (!block::threadID() && numPeers < (n - 1)) {
             atomicAdd(&publisher::blockade, 1);
-            while (atomicLoad(&publisher::blockade) != 2) {}
+            while (atomicLoad(&publisher::blockade) % gridDim.x != 0) {}
         }
         __syncthreads();
-        slice = cute::ceil_div(numPeers, ARISTOS_BLOCK_SIZE_WARP);
-        bookend = min(slice * (block::warpID() + 1), numPeers);
+
         // Signal our vector, including FLOPs, to others
-        for (unsigned int i = block::warpID() * slice; i < bookend; ++i) {
-            nvshmemx_double_put_signal_nbi_warp(results, results, 2*n, flags + rank,
+        for (unsigned int i = block::threadID(); i < numPeers; i += THREADS) {
+            nvshmem_putmem_signal_nbi(results, results, n * sizeof(floatPair), flags + rank,
                     constructSignal(processingRate, sent), NVSHMEM_SIGNAL_SET, peers[i]);
         }
     }
 
     CUTE_DEVICE
-    void pluralP2PBuilder(void* scratchpad,const unsigned int* peers, const unsigned int& n, const unsigned int& rank,
+    void pluralP2PBuilder(floatPair* scratchpad,const unsigned int* peers, const unsigned int& n, const unsigned int& rank,
         const unsigned long& processingRate, const unsigned int numPeers, const bool& remotePresent,
-        double* sHeap, double* results, uint64_t* flags) {
+        cuda::std::byte* sHeap, floatPair* results, uint64_t* flags) {
         // If num of other P2P peers == 0, then we adjourn early after conditional subscription
         if (numPeers <= 1)[[unlikely]] {
-            if (blockIdx.x == (gridDim.x - 1) && !block::threadID()) {
-                //memset done prior to invocation
-                subscribeAll(scratchpad, flags, n, rank);
+            if (blockIdx.x == (gridDim.x - 1)) {
+                for (int i = block::threadID() + 1; i < n; i += THREADS) {
+                    nvshmem_signal_wait_until(flags + (rank + i) % n, NVSHMEM_CMP_GT, sent + seqNo);
+                    flags[(rank + i) % n] -= sent + seqNo;
+                }
             }
             return;
         }
-        __shared__ unsigned int localBlockIdx;
+        const unsigned int localBlockIdx = blockIdx.x - remotePresent;
+        const unsigned int numP2PBlocks = gridDim.x - remotePresent;
+
         for (unsigned int i = 1U; i < numPeers; ++i) {
-            measureTransfer(rank, sHeap, static_cast<double*>(scratchpad),
-                peers[(i + rank) % numPeers], block::threadID, nvshmemx_putmem_block,
-                (i + rank) % numPeers, blockIdx.x - remotePresent, gridDim.x - remotePresent);
-        }
-        /// All-Reduce to get max transfer time across blocks
-        /// Reusing concepts from publisher
-        // Wait our turn
-        if (!block::threadID()) {
-            localBlockIdx = blockIdx.x - remotePresent;
-            publisher::awaitBaton(localBlockIdx);
+            measureTransfer(rank, sHeap, scratchpad, peers[(i + rank) % numPeers],
+                block::threadID, nvshmemx_putmem_block,
+                (i + rank) % numPeers, localBlockIdx, numP2PBlocks);
         }
         __threadfence_block();
         __syncthreads();
+
+        /// All-Reduce to get max transfer time across blocks
         /// Update the global buffer with my values via max reduction
         /// Intra-block slicing
-        auto slice = cute::ceil_div(numPeers, ARISTOS_BLOCK_SIZE);
-        auto bookend = min(slice * (block::threadID() + 1), numPeers);
-        for (unsigned int i = block::threadID() * slice; i < bookend; ++i) {
-            results[2*peers[i]] = fmax(static_cast<double*>(scratchpad)[2*i], results[2*peers[i]]);
-            results[2*peers[i] + 1] = fmax(static_cast<double*>(scratchpad)[2*i + 1], results[2*peers[i] + 1]);
+        for (unsigned int i = block::threadID(); i < numPeers; i += THREADS) {
+            cuda::std::ignore = cuda::atomic_ref<floatPair, cuda::thread_scope_device>{results[peers[i]]}
+                .fetch_max(scratchpad[i]);
         }
-        // Ensures a device-wide consistent view of our global memory writes
         __threadfence();
-
-        if (!block::threadID()) {
-            // pass the baton
-            atomicExch(&publisher::baton, (localBlockIdx + 1) % (gridDim.x - remotePresent));
-            // Await baton to circle back, at this point the reduction is complete, and we are free to go
-            publisher::awaitBaton(localBlockIdx);
-            /// Critical that the initiating block has id GRAND_MASTER for the below to be correct
-            if(remotePresent && localBlockIdx == GRAND_MASTER){
-                // unblock remote publisher
-                atomicAdd(&publisher::blockade, 1);
-                while (atomicLoad(&publisher::blockade) != 2) {}
-            }
-            // Unblock sibling blocks
-            atomicExch(&publisher::baton, (localBlockIdx + 1) % (gridDim.x - remotePresent));
-        }
-        // Ensures all threads are done
         __syncthreads();
+
+        // Synchronize across all blocks
+        // We do not use a block-wide barrier immediately afterward,
+        // because there is already one at the beginning of the succeeding cooperative put API.
+        if (!block::threadID()) {
+            atomicAdd(&publisher::blockade, 1);
+            while (atomicLoad(&publisher::blockade) % gridDim.x != 0) {}
+        }
+
         // Signal our vector, including FLOPs, to others
         // Inter-block slicing
-        slice = cute::ceil_div(numPeers, gridDim.x - remotePresent);
-        bookend = min(slice * (localBlockIdx + 1), numPeers);
-        for(unsigned int i = slice * localBlockIdx; i < bookend; ++i){
-            nvshmemx_double_put_signal_nbi_block(results, results,
-                                             (peers[i] != rank) * 2*n, flags + rank,
+        for(unsigned int i = localBlockIdx; i < numPeers; i += numP2PBlocks){
+            nvshmemx_putmem_signal_nbi_block(results, results,
+                                             (peers[i] != rank) * sizeof(floatPair) * n, flags + rank,
                                              constructSignal(processingRate, sent),
                                              NVSHMEM_SIGNAL_SET, peers[i]);
         }
 
         // The last block awaits results
         // Most likely this block will not partake in the above thus, they would do the below in parallel
-        if (blockIdx.x == (gridDim.x - 1) && !block::threadID()) {
-            memset(scratchpad, 0, sizeof(int)*n);
-            subscribeAll(scratchpad, flags, n, rank);
+        // Could potentially enlist more blocks if n > THREADS, but that's unlikely
+        if (blockIdx.x == (gridDim.x - 1)) {
+            for (int i = block::threadID() + 1; i < n; i += THREADS) {
+                nvshmem_signal_wait_until(flags + (rank + i) % n, NVSHMEM_CMP_GT, sent + seqNo);
+                flags[(rank + i) % n] -= sent + seqNo;
+            }
         }
     }
 
     /// Build Adjacency Matrix
     __global__ void discover(CUTE_GRID_CONSTANT const int n, CUTE_GRID_CONSTANT const int rank,
         CUTE_GRID_CONSTANT const bool remotePresent, const unsigned long processingRate,
-        double* sHeap, uint64_t* flags, double* results) {
+        cuda::std::byte* sHeap, uint64_t* flags, floatPair* results) {
         assert(blockDim.x == ARISTOS_BLOCK_SIZE);
         assert(blockDim.y * blockDim.z == 1);
         assert(gridDim.x <= ARISTOS_SUPER_BLOCK_SIZE + remotePresent);
@@ -240,8 +243,8 @@ namespace aristos::topology{
 
         // Align to 16 bytes for optimal copy performance.
         // However, empirical results show identical performance (1.024 𝜇s) for 128 threads copying 256 floats,
-        // which is a likely practical upper bound for 2*n.
-        extern __shared__ __align__(16) double scratchpad[];
+        // which is a likely practical upper bound for n.
+        extern __shared__ __align__(16) floatPair scratchpad[];
 
         if(gridDim.x == 1){
             /// number of blocks is insufficient for remote specialization
@@ -252,9 +255,8 @@ namespace aristos::topology{
             __shared__ unsigned int numPeers;
             __shared__ unsigned int* peers;
             if (block::threadID() == 0) {
-                memset(scratchpad, 0, sizeof(double)*2*n);
                 numPeers = 0;
-                peers = static_cast<unsigned int*>(static_cast<void*>(scratchpad + 2*n));
+                peers = static_cast<unsigned int*>(static_cast<void*>(scratchpad + n));
                 /// Block 0 gets remote peers, if present; otherwise, joins the others in getting proximal peers
                 for(unsigned int i = 0U; i < n; ++i) {
                     if (const bool b = nvshmem_ptr(results, i) == nullptr;
