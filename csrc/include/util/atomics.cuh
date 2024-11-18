@@ -17,7 +17,7 @@ namespace aristos{
     template<typename T> requires AtomicType<T>
     CUTE_DEVICE
     T atomicLoad(T* addr){
-        return atomicCAS(addr, 0U, 0U);
+        return atomicOr(addr, 0U);
     }
 }
 

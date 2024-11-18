@@ -48,30 +48,29 @@ check_compiler_flag(CUDA -t4 NVCC_THREADS)
 find_package(CUDAToolkit REQUIRED)
 
 add_executable(csrc main.cu
-        include/moe/engine/subscriber.cuh
+        include/engine/subscriber.cuh
         include/moe/moe.cuh
         include/aristos.cuh
-        include/moe/engine/processor/processor.cuh
-        include/moe/algorithm/algorithm.cuh
-        include/moe/util/indexing.cuh
-        include/moe/definition/tensor.cuh
-        include/moe/engine/publisher.cuh
-        include/moe/definition/types.cuh
-        include/moe/definition/memory_layout.cuh
-        include/moe/util/atomics.cuh
-        include/moe/definition/values.cuh
-        include/moe/engine/decider/decider.cuh
-        include/moe/engine/decider/comps/edge.cuh
-        include/moe/engine/decider/comps/expert.cuh
-        include/moe/engine/decider/comps/group.cuh
-        include/moe/engine/decider/comps/worker.cuh
-        include/moe/engine/decider/comps/args.cuh
-        include/moe/engine/decider/comps/functions.cuh
-        include/moe/util/debug.cuh
-        include/moe/engine/decider/comps/niche.cuh
-        include/moe/util/config.cuh
+        include/engine/processor/processor.cuh
+        include/algorithm/algorithm.cuh
+        include/util/indexing.cuh
+        include/definition/tensor.cuh
+        include/definition/types.cuh
+        include/definition/memory_layout.cuh
+        include/util/atomics.cuh
+        include/engine/decider/decider.cuh
+        include/engine/decider/comps/edge.cuh
+        include/engine/decider/comps/expert.cuh
+        include/engine/decider/comps/group.cuh
+        include/engine/decider/comps/worker.cuh
+        include/engine/decider/comps/args.cuh
+        include/engine/decider/comps/functions.cuh
+        include/util/debug.cuh
+        include/engine/decider/comps/niche.cuh
         include/topo/topo.cuh
-        include/moe/engine/processor/mmaConfig.cuh
+        include/engine/processor/mmaConfig.cuh
+        include/prep.cuh
+        include/engine/scheduler.cuh
 )
 set_target_properties(csrc PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
@@ -118,17 +117,7 @@ CPMAddPackage(
         DOWNLOAD_ONLY
 )
 if(FMT_ADDED)
-    target_include_directories(csrc SYSTEM PRIVATE "${FMT_SOURCE_DIR}/include")
-endif ()
-
-CPMAddPackage(
-        NAME SPDLOG
-        GITHUB_REPOSITORY gabime/spdlog
-        VERSION 1.14.1
-        OPTIONS "SPDLOG_FMT_EXTERNAL 1"
-)
-if(SPDLOG_ADDED)
-    target_link_libraries(csrc PRIVATE spdlog::spdlog)
+    target_link_libraries(csrc PRIVATE fmt::fmt)
 endif ()
 
 set(NvidiaCutlass_ROOT "${CUTLASS_SOURCE_DIR}")

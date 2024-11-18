@@ -5,22 +5,25 @@
 #ifndef ARISTOS_CUH
 #define ARISTOS_CUH
 
+#include "definition/types.cuh"
+#include "util/atomics.cuh"
+#include "util/indexing.cuh"
+#include "definition/tensor.cuh"
+#include "util/debug.cuh"
+#include "definition/memory_layout.cuh"
+
+#include "algorithm/algorithm.cuh"
+
+#include "engine/scheduler.cuh"
+#include "engine/subscriber.cuh"
+#include "engine/decider/decider.cuh"
+#include "engine/decider/decider.cuh"
+#include "engine/processor/mmaConfig.cuh"
+#include "engine/processor/processor.cuh"
+
 #include "moe/moe.cuh"
-#include "moe/engine/subscriber.cuh"
-#include "moe/engine/decider/decider.cuh"
-#include "moe/engine/decider/decider.cuh"
+
 #include "topo/topo.cuh"
-#include "moe/algorithm/algorithm.cuh"
-#include "moe/util/indexing.cuh"
-#include "moe/util/config.cuh"
-#include "moe/util/debug.cuh"
-#include "moe/definition/tensor.cuh"
-#include "moe/engine/publisher.cuh"
-#include "moe/definition/types.cuh"
-#include "moe/definition/memory_layout.cuh"
-#include "moe/util/atomics.cuh"
-#include "moe/engine/processor/mmaConfig.cuh"
-#include "moe/engine/processor/processor.cuh"
-#include "moe/definition/values.cuh"
+#include "prep.cuh"
 
 #endif //ARISTOS_CUH

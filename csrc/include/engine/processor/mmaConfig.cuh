@@ -6,9 +6,9 @@
 #define MMACONFIG_CUH
 
 #include <cublasdx.hpp>
-#include <cuda/std/type_traits>
 #include <cute/arch/copy.hpp>
 #include <cute/arch/copy_sm80.hpp>
+#include <cutlass/gemm/dispatch_policy.hpp>
 
 // GEMM configuration constants
 #define MIN_ARCH 700
@@ -23,6 +23,7 @@
 
 namespace aristos {
     template<unsigned int Arch, typename TC, typename TA=TC, typename TB=TA>
+    requires (Arch >= 700)
     struct MMAConfig {
         using mma = cute::TiledMMA<
                     cute::MMA_Atom<cute::UniversalFMA<TC, TA, TB>>,

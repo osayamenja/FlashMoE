@@ -13,7 +13,8 @@
 #define BYTE_MAX cuda::std::numeric_limits<cuda::std::underlying_type_t<cuda::std::byte>>::max()
 #define TO_MB(b) (static_cast<float>(b) / (1024.0f*1024.0f))
 #define BETA_MB 1024.0f // 1GB
-#include "../moe/definition/types.cuh"
+
+#include "../definition/types.cuh"
 #include <cuda/cmath>
 
 using Nano = cuda::std::chrono::duration<float, cuda::std::nano>;
@@ -57,6 +58,7 @@ struct floatPair {
 };
 
 namespace aristos::topology{
+    __device__ unsigned int blockade = 0U;
     template<typename T>
     requires(!cuda::std::is_same_v<T, void>)
     CUTE_DEVICE
@@ -119,7 +121,7 @@ namespace aristos::topology{
         __syncthreads();
 
         /// Stage my row on the symmetric heap
-        for (unsigned int i = block::threadID(); i < n; i += THREADS) {
+        for (unsigned int i = block::threadID(); i < n; i += ARISTOS_BLOCK_SIZE) {
             results[i] = scratchpad[i];
         }
         __threadfence_block();
@@ -131,7 +133,7 @@ namespace aristos::topology{
         }
 
         // await responses from other GPUs
-        for (int i = block::threadID() + 1; i < n; i += THREADS) {
+        for (int i = block::threadID() + 1; i < n; i += ARISTOS_BLOCK_SIZE) {
             nvshmem_signal_wait_until(flags + (rank + i) % n, NVSHMEM_CMP_GT, sent + seqNo);
             flags[(rank + i) % n] -= sent + seqNo;
         }
@@ -148,7 +150,7 @@ namespace aristos::topology{
         __syncthreads();
 
         /// Stage my row to the symmetric heap
-        for (unsigned int i = block::threadID(); i < numPeers; i += THREADS) {
+        for (unsigned int i = block::threadID(); i < numPeers; i += ARISTOS_BLOCK_SIZE) {
             results[peers[i]] = scratchpad[i];
         }
         __threadfence();
@@ -157,13 +159,13 @@ namespace aristos::topology{
         // Ensures our vector is complete before sending to neighbors.
         // if num remote peers < n - 1, then we must await the contribution of our p2p siblings
         if (!block::threadID() && numPeers < (n - 1)) {
-            atomicAdd(&publisher::blockade, 1);
-            while (atomicLoad(&publisher::blockade) % gridDim.x != 0) {}
+            atomicAdd(&blockade, 1);
+            while (atomicLoad(&blockade) % gridDim.x != 0) {}
         }
         __syncthreads();
 
         // Signal our vector, including FLOPs, to others
-        for (unsigned int i = block::threadID(); i < numPeers; i += THREADS) {
+        for (unsigned int i = block::threadID(); i < numPeers; i += ARISTOS_BLOCK_SIZE) {
             nvshmem_putmem_signal_nbi(results, results, n * sizeof(floatPair), flags + rank,
                     constructSignal(processingRate, sent), NVSHMEM_SIGNAL_SET, peers[i]);
         }
@@ -176,7 +178,7 @@ namespace aristos::topology{
         // If num of other P2P peers == 0, then we adjourn early after conditional subscription
         if (numPeers <= 1)[[unlikely]] {
             if (blockIdx.x == (gridDim.x - 1)) {
-                for (int i = block::threadID() + 1; i < n; i += THREADS) {
+                for (int i = block::threadID() + 1; i < n; i += ARISTOS_BLOCK_SIZE) {
                     nvshmem_signal_wait_until(flags + (rank + i) % n, NVSHMEM_CMP_GT, sent + seqNo);
                     flags[(rank + i) % n] -= sent + seqNo;
                 }
@@ -197,7 +199,7 @@ namespace aristos::topology{
         /// All-Reduce to get max transfer time across blocks
         /// Update the global buffer with my values via max reduction
         /// Intra-block slicing
-        for (unsigned int i = block::threadID(); i < numPeers; i += THREADS) {
+        for (unsigned int i = block::threadID(); i < numPeers; i += ARISTOS_BLOCK_SIZE) {
             cuda::std::ignore = cuda::atomic_ref<floatPair, cuda::thread_scope_device>{results[peers[i]]}
                 .fetch_max(scratchpad[i]);
         }
@@ -208,8 +210,8 @@ namespace aristos::topology{
         // We do not use a block-wide barrier immediately afterward,
         // because there is already one at the beginning of the succeeding cooperative put API.
         if (!block::threadID()) {
-            atomicAdd(&publisher::blockade, 1);
-            while (atomicLoad(&publisher::blockade) % gridDim.x != 0) {}
+            atomicAdd(&blockade, 1);
+            while (atomicLoad(&blockade) % gridDim.x != 0) {}
         }
 
         // Signal our vector, including FLOPs, to others
@@ -225,7 +227,7 @@ namespace aristos::topology{
         // Most likely this block will not partake in the above thus, they would do the below in parallel
         // Could potentially enlist more blocks if n > THREADS, but that's unlikely
         if (blockIdx.x == (gridDim.x - 1)) {
-            for (int i = block::threadID() + 1; i < n; i += THREADS) {
+            for (int i = block::threadID() + 1; i < n; i += ARISTOS_BLOCK_SIZE) {
                 nvshmem_signal_wait_until(flags + (rank + i) % n, NVSHMEM_CMP_GT, sent + seqNo);
                 flags[(rank + i) % n] -= sent + seqNo;
             }

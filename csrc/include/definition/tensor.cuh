@@ -9,9 +9,12 @@
 
 namespace aristos{
     template<typename V>
-    concept TensorValueType = requires(V v){
-        {V(0)} -> cuda::std::same_as<V>;
-    };
+    concept TensorValueType = cuda::std::is_same_v<V, cute::half_t> ||
+        cuda::std::is_same_v<V, cute::bfloat16_t> ||
+        cuda::std::is_same_v<V, cute::tfloat32_t> ||
+        cuda::std::is_same_v<V, float> ||
+        cuda::std::is_same_v<V, cute::float_e4m3_t> ||
+        cuda::std::is_same_v<V, cute::float_e5m2_t>;
 
     template<typename T>
     concept Tensor = requires(T t){
@@ -21,7 +24,7 @@ namespace aristos{
 
     template<typename M>
     concept Matrix = requires(M m){
-        requires Tensor<M> && cute::rank<0>(m) == 1 && cute::rank<1>(m) == 1;
+        requires Tensor<M> && rank(m) == 2;
     };
 }
 

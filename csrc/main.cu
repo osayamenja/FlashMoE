@@ -15,8 +15,6 @@
 #include <nvshmem.h>
 #include <host/nvshmemx_api.h>
 
-#include "include/aristos.cuh"
-
 #include <cooperative_groups/memcpy_async.h>
 #include <cub/cub.cuh>
 #include <cute/tensor.hpp>
@@ -26,7 +24,8 @@
 
 #include <fmt/ranges.h>
 #include <fmt/core.h>
-#include <spdlog/spdlog.h>
+
+#include "include/aristos.cuh"
 
 #define THREADS_PER_WARP 32
 #define THREADS_PER_BLOCK 256
@@ -94,102 +93,6 @@ __global__ void benchAtomics(CUTE_GRID_CONSTANT const int iter, unsigned int* fl
                cuda::std::chrono::duration_cast<cuda::std::chrono::duration<double, cuda::std::micro>>(a_and/(iter*1.0)).count(),
                atomicAnd(pUnderTest, 1U),
                (shouldPersist)? "Yes" : "No");
-    }
-}
-
-template<unsigned int bM=128, unsigned int bN=128, unsigned int bK=8, unsigned int bP=3>
-__global__ void occupancyTestKernel(){
-    __shared__ float sharedA[cute::cosize_v<decltype(cute::make_layout(cute::make_shape(cute::Int<bM>{}, cute::Int<bK>{}, cute::Int<bP>{})))>];
-    __shared__ float sharedB[cute::cosize_v<decltype(cute::make_layout(cute::make_shape(cute::Int<bN>{}, cute::Int<bK>{}, cute::Int<bP>{})))>];
-}
-
-#define SUPPORTED = 1;
-namespace aristos{
-    bool isInitialized = false;
-    int blocksPerSM = 0;
-    auto aristosStream = cudaStreamPerThread;
-    void aristosInit(const unsigned int& seqLen, const unsigned int& embedDim, const unsigned int& hiddenProjDim,
-                     const unsigned int& k, const unsigned int& capacityFactor, const unsigned int& globalWorld,
-                     const unsigned int& numExperts) {
-        assert(!isInitialized);
-        isInitialized = true;
-        int cudaDevAttribute = 0;
-        int dev = 0;
-        CUTE_CHECK_ERROR(cudaGetDevice(&dev));
-        CUTE_CHECK_ERROR(cudaDeviceGetAttribute(&cudaDevAttribute, cudaDevAttrMultiProcessorCount, dev));
-        //TODO make below flexible to tiling
-        const auto GEMMBlocks = cute::ceil_div(seqLen, ARISTOS_M_BATCH) * cute::ceil_div(hiddenProjDim, ARISTOS_N_BATCH);
-        CUTE_CHECK_ERROR(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-                &blocksPerSM,
-                occupancyTestKernel<ARISTOS_M_BATCH, ARISTOS_N_BATCH, ARISTOS_K_BATCH, ARISTOS_PIPELINE_STAGES>,
-                ARISTOS_BLOCK_SIZE,
-                0));
-        const int maxActiveBlocks = blocksPerSM * cudaDevAttribute;
-        assert(GEMMBlocks + 2 <= maxActiveBlocks);
-        CUTE_CHECK_ERROR(cudaDeviceGetAttribute(&cudaDevAttribute,
-                                                cudaDevAttrMemoryPoolsSupported, dev));
-        assert(cudaDevAttribute);
-        CUTE_CHECK_ERROR(cudaDeviceGetAttribute(&cudaDevAttribute, cudaDevAttrComputeCapabilityMajor, dev));
-        /// Due to NVSHMEM: https://docs.nvidia.com/nvshmem/release-notes-install-guide/install-guide/abstract.html#hardware-requirements
-        assert(cudaDevAttribute >= 7);
-
-        // Good to go! Let's do some initialization
-        // Run decider
-        // ...
-        // generates the below
-        const unsigned int numLocalExperts = 0;
-        std::vector<specType> parallelSpec{};
-        std::vector<specType> translation{};
-        const unsigned int numNeighbors = translation.size();
-
-        // initialize NVSHMEM
-        nvshmem_init();
-        CUTE_CHECK_ERROR(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
-        // Allocate Symmetric Heap + Flags
-        size_t heapBytes = ((4 * seqLen * (embedDim + k + 2))*sizeof(maxPrecision)) + (STAGES * numNeighbors * sizeof(flagsType));
-        heapBytes = std::max(heapBytes, globalWorld * (BETA_BUFFER + ((2*globalWorld + 1)*sizeof(double))));
-        /// Allocates aligned memory
-        const auto sHeap = nvshmem_align(HEAP_ALIGNMENT, heapBytes);
-        CUTE_CHECK_ERROR(cudaMemsetAsync(sHeap, 0, heapBytes, aristosStream));
-
-        //Final Initialization
-        hostMoEConfig = Config();
-        specType* bookKeeping;
-        /// pubQueueLen -> Multiplied by 2 to simulate pair: {index, numTokens}
-        /// + translationLen + shardSpecLen +
-        /// syncVectorLen -> {syncGrid, checkpoints}
-        hostMoEConfig.bookKeepingLen = (numLocalExperts * numNeighbors * 2) + numNeighbors + numExperts + (numNeighbors * 2);
-        CUTE_CHECK_ERROR(cudaMallocAsync(&bookKeeping,
-                                    sizeof(specType)*hostMoEConfig.bookKeepingLen,
-                                    aristosStream));
-        CUTE_CHECK_ERROR(cudaMemsetAsync(bookKeeping, 0, hostMoEConfig.bookKeepingLen, aristosStream));
-
-        //TODO init with host memcpy?
-        hostMoEConfig.numP2PPublisherBlocks = maxActiveBlocks - GEMMBlocks - 1;
-        hostMoEConfig.worldSize = numNeighbors;
-        hostMoEConfig.bookKeeping = bookKeeping;
-        hostMoEConfig.sHeap = static_cast<cuda::std::byte*>(sHeap);
-        CUTE_CHECK_ERROR(cudaMemcpyToSymbolAsync(moeConfig,
-                                            &hostMoEConfig, sizeof(Config), 0, cudaMemcpyHostToDevice, aristosStream));
-        CUTE_CHECK_ERROR(cudaPeekAtLastError());
-        CUTE_CHECK_ERROR(cudaStreamSynchronize(aristosStream));
-    }
-
-    void forwardHost(){
-
-    }
-
-    void backwardHost(){
-    }
-
-    void aristosFinalize(){
-        assert(isInitialized);
-        isInitialized = false;
-        CUTE_CHECK_ERROR(cudaFreeAsync(hostMoEConfig.bookKeeping, aristosStream));
-        nvshmem_free(hostMoEConfig.sHeap);
-        nvshmem_finalize();
-        CUTE_CHECK_ERROR(cudaPeekAtLastError());
-        CUTE_CHECK_ERROR(cudaStreamSynchronize(aristosStream));
     }
 }
 
@@ -351,10 +254,10 @@ void testTopologyDiscovery() {
     int dev_count = 0;
     CUTE_CHECK_ERROR(cudaGetDeviceCount(&dev_count));
     CUTE_CHECK_ERROR(cudaGetDeviceProperties(&prop, localRank));
-    spdlog::set_pattern(std::string("[").append(std::string(hostname))
-    .append(":Rank ").append(std::to_string(localRank)).append("] [%c] [%^%l%$] %v"));
-    spdlog::info("Starting Topology Discovery...");
-    spdlog::info("GlobalRank: {}, LocalRank: {}, Device: {}, Bus ID: {}, Devices: {}",
+    if (globalRank == 0) {
+        fmt::println("Starting Topology Discovery...");
+    }
+    fmt::println("GlobalRank: {}, LocalRank: {}, Device: {}, Bus ID: {}, Devices: {}",
         globalRank, localRank, prop.name, prop.pciBusID, dev_count);
 
     CUTE_CHECK_ERROR(cudaSetDevice(localRank));

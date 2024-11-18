@@ -6,11 +6,10 @@
 #define ARISTOS_COMPUTE_CUH
 
 #include <cutlass/epilogue/thread/activation.h>
-#include <cutlass/gemm/dispatch_policy.hpp>
 #include <cutlass/gemm/collective/collective_mma.hpp>
-
-#define CAST_TO(T, p) static_cast<T*>(static_cast<void*>(p))
 #include "mmaConfig.cuh"
+
+#define SHARED_SIZE 16 * 1024UL
 
 template<typename T>
 using toCDX = cuda::std::conditional_t< cuda::std::is_same_v<T, cute::half_t>,
@@ -23,6 +22,7 @@ using toCDX = cuda::std::conditional_t< cuda::std::is_same_v<T, cute::half_t>,
         __nv_fp8_e5m2, T>>>>;
 
 namespace aristos::processor{
+    __device__ __inline__ unsigned int processorDoorbell = 0U;
     template <typename Element, typename ActivationFunction>
     requires(cuda::std::is_same_v<Element, cute::half_t> ||
         cuda::std::is_same_v<Element, cute::bfloat16_t> ||
@@ -90,8 +90,6 @@ namespace aristos::processor{
         constexpr auto bM = cublasdx::size_of<BlockMM>::m;
         constexpr auto bN = cublasdx::size_of<BlockMM>::n;
         constexpr auto bK = cublasdx::size_of<BlockMM>::k;
-        // put in constant memory
-        const unsigned int kChunks = cute::ceil_div(cute::get<1>(mC.shape()), bN);
 
         using blockTiler = cute::Shape<cute::Int<bM>, cute::Int<bN>, cute::Int<bK>>;
 
@@ -242,7 +240,6 @@ namespace aristos::processor{
 
     CUTE_DEVICE
     void start(){
-        //TODO processor scheduling plane
     }
 }
 #endif //ARISTOS_COMPUTE_CUH

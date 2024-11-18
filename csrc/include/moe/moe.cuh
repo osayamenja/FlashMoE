@@ -5,15 +5,9 @@
 #ifndef ARISTOS_MOE_CUH
 #define ARISTOS_MOE_CUH
 
-#include "definition/tensor.cuh"
-#include "util/indexing.cuh"
-#include "definition/types.cuh"
-#include "algorithm/algorithm.cuh"
-#include "engine/publisher.cuh"
-#include "engine/subscriber.cuh"
-#include "engine/processor/processor.cuh"
-#include "definition/values.cuh"
-#include <cuda/annotated_ptr>
+#include "../definition/tensor.cuh"
+#include "../util/indexing.cuh"
+#include "../algorithm/algorithm.cuh"
 
 namespace aristos{
     template<Matrix M>
@@ -30,23 +24,6 @@ namespace aristos{
         gate(activations, gateWeights, gateOutput);
         tokenToPeers(gateOutput, sharedSpec, mappingTensor);
         /// mappingTensor (S, D)
-
-        if (blockIdx.x >= (gridDim.x - (moeConfig.numP2PPublisherBlocks + 1))) {
-            /// Exclusive Subscribers get only one block
-            if(blockIdx.x == gridDim.x - (moeConfig.numP2PPublisherBlocks + 1)){
-                // We are Subscribers explicitly and Publishers semantically
-                subscriber::start();
-            }
-            else{
-                /// Exclusive Publishers get the remainder
-                // We are Publishers explicitly and Subscribers semantically
-                publisher::start();
-            }
-        }
-        else{
-            // We are Processors explicitly and semantic Subscribers and Publishers
-            processor::start();
-        }
     }
 
     __global__ void backward(){
