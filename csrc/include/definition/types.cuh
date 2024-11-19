@@ -12,6 +12,20 @@
 
 #define N_READY_Q_SIGNALS 2
 #define N_TASK_Q_SIGNALS 2
+
+/// The symmetric heap is a 4-D tensor (P, S, C, T)
+/// where P, S, C, and T denote dimensions for peers, communication stages,
+/// cells and tokens.
+/// Number of communication stages S
+#define STAGES 2
+
+/// Per stage, there is one cell for sending and another for reception
+#define CELLS 2
+#define SEND_CELL 0
+#define RECEIVE_CELL 1
+
+#define HEAP_ALIGNMENT 16
+
 namespace aristos{
     using maxPrecision = float;
     using specType = unsigned int;
@@ -110,33 +124,63 @@ namespace aristos{
         }
     };
 
-    struct __align__(16) SchedulerConfig{
-        bool* interrupts;
-        unsigned int* readyQ;
-        unsigned int* readyQSignals;
-        int* taskSignal;
-        unsigned int* taskSync;
-        unsigned int* taskQ;
-        unsigned long int* taskQSignals;
+    enum class TaskType {
+        preGEMM,
+        postGEMM,
+        GateScale
+    };
 
-        CUTE_HOST_DEVICE
+    struct __align__(16) Task {
+        cuda::std::byte* aData;
+        const cuda::std::byte* bData;
+        cuda::std::byte* cData;
+        const unsigned int expertIdx;
+        // crd2Idx(peer, expertIdx, offset)
+        const unsigned int syncIdx;
+
+        __device__ __forceinline__
+        Task(cuda::std::byte* _aData,
+            const cuda::std::byte* _bData,
+            cuda::std::byte* _cData,
+            const unsigned int& _expertIdx,
+            const unsigned int& _syncIdx):
+        aData(_aData), bData(_bData), cData(_cData), expertIdx(_expertIdx),
+        syncIdx(_syncIdx){}
+    };
+
+    struct __align__(16) SchedulerConfig{
+        unsigned int* interrupts;
+        unsigned int* readyQ;
+        /// rQS[0] -> head
+        /// rQS[1] -> tail
+        unsigned int* readyQSignals;
+        unsigned long long int* taskSignal;
+        unsigned long long int* taskSync;
+        Task* taskQ;
+        unsigned long long int* taskQSignals;
+        unsigned long long int taskBound;
+
+        __forceinline__ __host__ __device__
         SchedulerConfig() = default;
 
         SchedulerConfig(cuda::std::byte* _bk,
                const unsigned int& numberBlocks,
                const unsigned int& _syncTasksBound) {
-            interrupts = CAST_TO(bool, _bk);
+            // Below is not strict, we can migrate to unsigned long if necessary.
+            interrupts = CAST_TO(unsigned int, _bk);
             readyQ = CAST_TO(unsigned int, interrupts + numberBlocks);
             readyQSignals = CAST_TO(unsigned int, readyQ + numberBlocks);
-            taskSignal = CAST_TO(int, readyQSignals + N_READY_Q_SIGNALS);
-            taskSync = CAST_TO(unsigned int, taskSignal + numberBlocks);
-            taskQSignals = CAST_TO(unsigned long int, taskSync + _syncTasksBound);
-            taskQ = CAST_TO(unsigned int, taskQSignals + N_TASK_Q_SIGNALS);
+            taskSignal = CAST_TO(unsigned long long int, readyQSignals + N_READY_Q_SIGNALS);
+            taskSync = CAST_TO(unsigned long long int, taskSignal + numberBlocks);
+            taskQSignals = CAST_TO(unsigned long long int, taskSync + _syncTasksBound);
+            taskQ = CAST_TO(Task, taskQSignals + N_TASK_Q_SIGNALS);
+            taskBound = (STAGES + 1) * _syncTasksBound;
         }
     };
 
     __constant__ __inline__ uint64_t seqNo;
     __constant__ __inline__ Config moeConfig{};
+    __constant__ __inline__ SchedulerConfig schedulerState{};
     __inline__ Config hostMoEConfig;
 
     __device__

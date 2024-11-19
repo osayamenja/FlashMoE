@@ -6,7 +6,7 @@
 #define ARISTOS_QUEUE_CUH
 
 namespace aristos::subscriber{
-    CUTE_DEVICE
+    __device__ __forceinline__
     void start(){
 
     }

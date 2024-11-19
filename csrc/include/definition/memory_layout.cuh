@@ -5,19 +5,7 @@
 #ifndef ARISTOS_MEMORY_LAYOUT_CUH
 #define ARISTOS_MEMORY_LAYOUT_CUH
 
-/// The symmetric heap is a 4-D tensor (P, S, C, T)
-/// where P, S, C, and T denote dimensions for peers, communication stages,
-/// cells and tokens.
-/// Number of communication stages S
-#define STAGES 2
-
-/// Per stage, there is one cell for send and another for receive
-#define CELLS 2
-#define SEND_CELL 0
-#define RECEIVE_CELL 1
-
-#define HEAP_ALIGNMENT 16
-
+#include "types.cuh"
 namespace aristos{
     CUTE_DEVICE
     cuda::std::byte* getTokenPointer(unsigned int const& peer, unsigned int const& stage, unsigned int const& cell, unsigned int const& token){

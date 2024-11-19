@@ -10,6 +10,7 @@
 #include "mmaConfig.cuh"
 
 #define SHARED_SIZE 16 * 1024UL
+#define SENTINEL (-1)
 
 template<typename T>
 using toCDX = cuda::std::conditional_t< cuda::std::is_same_v<T, cute::half_t>,
@@ -22,7 +23,6 @@ using toCDX = cuda::std::conditional_t< cuda::std::is_same_v<T, cute::half_t>,
         __nv_fp8_e5m2, T>>>>;
 
 namespace aristos::processor{
-    __device__ __inline__ unsigned int processorDoorbell = 0U;
     template <typename Element, typename ActivationFunction>
     requires(cuda::std::is_same_v<Element, cute::half_t> ||
         cuda::std::is_same_v<Element, cute::bfloat16_t> ||
