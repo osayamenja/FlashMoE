@@ -12,16 +12,6 @@
 #define SHARED_SIZE 16 * 1024UL
 #define SENTINEL (-1)
 
-template<typename T>
-using toCDX = cuda::std::conditional_t< cuda::std::is_same_v<T, cute::half_t>,
-        __half,
-    cuda::std::conditional_t<cuda::std::is_same_v<T, cute::bfloat16_t>,
-        __nv_bfloat16,
-    cuda::std::conditional_t<cuda::std::is_same_v<T, cute::float_e4m3_t>,
-        __nv_fp8_e4m3,
-    cuda::std::conditional_t<cuda::std::is_same_v<T, cute::float_e5m2_t>,
-        __nv_fp8_e5m2, T>>>>;
-
 namespace aristos::processor{
     template <typename Element, typename ActivationFunction>
     requires(cuda::std::is_same_v<Element, cute::half_t> ||
@@ -36,8 +26,12 @@ namespace aristos::processor{
                 return op(fma(Element(1.0f), accumulator, term));
             }
             if constexpr(sizeof(Element) == 2) {
-                // Half precision FMA
-                return op(__hfma(Element(1.0f), accumulator, term));
+                // Half FMA
+                if constexpr (cuda::std::is_same_v<Element, cute::half_t>) {
+                    return op(cute::half_t(__hfma(__half(1.0f), accumulator.to_half(), term.to_half())));
+                }
+                // bfloat16 FMA
+                return op(cute::bfloat16_t(__hfma(__nv_bfloat16(1.0f), accumulator.to_nv_bfloat16(), term.to_nv_bfloat16())));
             }
             return op(accumulator + term);
         }
@@ -82,11 +76,11 @@ namespace aristos::processor{
         && cublasdx::sm_of<BlockMM>::value >= MIN_ARCH
         && cuda::std::is_same_v<ElementA, ElementB>)
     CUTE_DEVICE
-    void expert(const MatrixA mA, const MatrixB mB, MatrixC mC, const MatrixD mD,
-        const MatrixAx mAx, const MatrixBx mBx, MatrixCx mCx, const MatrixDx mDx) {
+    void expert(const MatrixA mA, const MatrixB mB, const MatrixC mC, const MatrixD mD,
+        const MatrixAx mAx, const MatrixBx mBx, const MatrixCx mCx, const MatrixDx mDx) {
         static_assert(rank(mA) == 2 && rank(mB) == 2 && rank(mC) == 2 && rank(mD) == 2);
         static_assert(rank(mAx) == 2 && rank(mBx) == 2 && rank(mCx) == 2 && rank(mDx) == 2);
-        using Parameters = CollectiveMMAConfig<BlockMM, ElementA, ElementB, ElementC, LayoutOptimization::UseSwizzle>;
+        using Parameters = CollectiveMMAConfig<BlockMM, LayoutOptimization::UseSwizzle>;
         constexpr auto bM = cublasdx::size_of<BlockMM>::m;
         constexpr auto bN = cublasdx::size_of<BlockMM>::n;
         constexpr auto bK = cublasdx::size_of<BlockMM>::k;
@@ -197,7 +191,7 @@ namespace aristos::processor{
 
         gA = local_tile(mAx, blockTiler{}, cta_coord, cute::Step<cute::_1, cute::X,cute::_1>{});  // (BLK_M,BLK_K,k)
         gB = local_tile(mBx, blockTiler{}, cta_coord, cute::Step< cute::X,cute::_1,cute::_1>{});  // (BLK_N,BLK_K,k)
-        auto gCx = local_tile(mCx, blockTiler{}, cta_coord, cute::Step<cute::_1,cute::_1, cute::X>{});  // (BLK_M,BLK_N)
+        gC = local_tile(mCx, blockTiler{}, cta_coord, cute::Step<cute::_1,cute::_1, cute::X>{});  // (BLK_M,BLK_N)
         gD = local_tile(mDx, blockTiler{}, cta_coord, cute::Step<cute::_1,cute::_1, cute::X>{});  // (BLK_M,BLK_N)
 
         auto k_tile_iterX = cute::make_coord_iterator(size<2>(gA));
@@ -218,7 +212,7 @@ namespace aristos::processor{
 
         // Epilogue
         tDgD = tiledMMA.get_slice(threadIdx.x).partition_C(gD);
-        auto tCgCx = tiledMMA.get_slice(threadIdx.x).partition_C(gCx);
+        tCgC = tiledMMA.get_slice(threadIdx.x).partition_C(gC);
 
         CUTE_UNROLL
         for (int i = 0; i < trips; ++i) {
@@ -230,7 +224,7 @@ namespace aristos::processor{
             // Fused Bias Add on register fragment
             CUTE_UNROLL
             for (int j = 0; j < elems; ++j) {
-                tCgCx(j + i * elems) = gCStoreOp(accum(j + i * elems) + scratch[threadIdx.x + j * THREADS]);
+                tCgC (j + i * elems) = gCStoreOp(accum(j + i * elems) + scratch[threadIdx.x + j * THREADS]);
             }
         }
         __threadfence();
@@ -238,8 +232,52 @@ namespace aristos::processor{
         // Signal publisher
     }
 
-    CUTE_DEVICE
+    template<unsigned int processorCount> requires(processorCount > 0)
+    __device__ __forceinline__
     void start(){
+        __shared__ unsigned long long int signal;
+        __shared__ Task currentTask;
+        __shared__ bool interrupt[ARISTOS_BLOCK_SIZE];
+        interrupt[threadIdx.x] = false;
+        atomicExch(&signal, 0UL);
+        while (!interrupt[threadIdx.x]) {
+            // Indicate readiness
+            schedulerState.readyQ[atomicAdd(schedulerState.readyQSignals, 1U) % processorCount] = blockIdx.x;
+            if (!threadIdx.x) {
+                // Grabs next task
+                auto nextTask = atomicLoad(schedulerState.taskQSignals + blockIdx.x);
+                while (nextTask == signal) {
+                    nextTask = atomicLoad(schedulerState.taskQSignals + blockIdx.x);
+                }
+                signal = nextTask;
+                currentTask = schedulerState.taskQ[signal - 1];
+            }
+            __syncthreads();
+            switch (currentTask.taskType) {
+                case TaskType::preGEMM: {
+                    // Do GEMM and GMEM write
+                    if (threadIdx.x == 1 &&
+                        atomicAdd(schedulerState.taskSync + currentTask.syncIdx, 1U) == moeConfig.tilesN) {
+                        // Enqueue next tasks
+                    }
+                }
+                break;
+                case TaskType::postGEMM: {
+                    // Do GEMM and GMEM write
+                    if (threadIdx.x == 1 &&
+                        atomicAdd(schedulerState.taskSync + currentTask.syncIdx, 1U) == 2 * moeConfig.tilesN) {
+                        // signal peer
+                    }
+                }
+                break;
+                case TaskType::GateScale: {
+                    // Do scale
+                }
+                break;
+                case TaskType::Interrupt:
+                    interrupt[threadIdx.x] = true;
+            }
+        }
     }
 }
 #endif //ARISTOS_COMPUTE_CUH

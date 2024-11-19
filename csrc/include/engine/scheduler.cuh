@@ -10,13 +10,14 @@
 namespace aristos::scheduler {
     /// Making processorCount a compile-time constant is not a functional requirement but rather strictly
     /// for optimizing the modulo operation, which is incredibly expensive.
+    /// Micro-benchmarks show 10 vs. 100 ns performance difference.
     template<unsigned int processorCount> requires(processorCount > 0)
     __device__ __forceinline__
     void start() {
-        static_assert(processorCount + 1 == gridDim.x);
         auto* rQHead = schedulerState.readyQSignals;
         auto* rQTail = schedulerState.readyQSignals + 1;
         auto* doorbell = schedulerState.taskQSignals;
+        auto* tQHead = schedulerState.taskQSignals + 1;
         unsigned long long int scheduled = 0U;
         while (scheduled < schedulerState.taskBound) {
             while (atomicLoad(doorbell) > scheduled && atomicLoad(rQHead) > atomicLoad(rQTail)) {
@@ -28,11 +29,18 @@ namespace aristos::scheduler {
             }
         }
 
+        #pragma unroll
+        for (unsigned int i = 0; i < processorCount; ++i) {
+            schedulerState.taskQ[atomicAdd(tQHead, 1U)] = Task{TaskType::Interrupt};
+        }
+        __threadfence();
+
         unsigned int interrupted = 0U;
         while (interrupted < processorCount) {
             while (atomicLoad(rQHead) > atomicLoad(rQTail)) {
+                scheduled++;
                 const auto pid = schedulerState.readyQ[atomicAdd(rQTail, 1U) % processorCount];
-                atomicAdd(schedulerState.interrupts + pid, 1U);
+                atomicExch(schedulerState.taskSignal + pid, scheduled);
                 interrupted++;
             }
         }

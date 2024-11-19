@@ -68,6 +68,7 @@ namespace aristos{
         unsigned int embedDim;
         unsigned int upProjection;
         unsigned int capacity;
+        unsigned int tilesN;
 
         CUTE_HOST_DEVICE
         Config() = default;
@@ -84,7 +85,8 @@ namespace aristos{
                const unsigned int& _seqLen,
                const unsigned int& _world,
                const unsigned int& _proj,
-               const unsigned int& _cap):
+               const unsigned int& _cap,
+               const unsigned int& _tilesN):
                 sHeap(_symmetricHeap),
                 flags(_flags),
                 bookKeeping(_bk),
@@ -98,8 +100,8 @@ namespace aristos{
                 k(_k), worldSize(_world),
                 embedDim(_embedDim),
                 upProjection(_proj),
-                capacity(_cap) {
-        }
+                capacity(_cap),
+                tilesN(_tilesN){}
 
         CUTE_HOST_DEVICE
         static unsigned int getCapacity(const unsigned int& _seqLen, const unsigned int& _numPeers,
@@ -125,6 +127,7 @@ namespace aristos{
     };
 
     enum class TaskType {
+        Interrupt,
         preGEMM,
         postGEMM,
         GateScale
@@ -132,24 +135,35 @@ namespace aristos{
 
     struct __align__(16) Task {
         cuda::std::byte* aData;
-        const cuda::std::byte* bData;
+        cuda::std::byte* bData;
         cuda::std::byte* cData;
-        const unsigned int expertIdx;
         // crd2Idx(peer, expertIdx, offset)
-        const unsigned int syncIdx;
+        unsigned long long int syncIdx = 0UL;
+        unsigned int tile = 0U;
+        TaskType taskType = TaskType::Interrupt;
+
+        __forceinline__ __device__
+        Task() = default;
 
         __device__ __forceinline__
-        Task(cuda::std::byte* _aData,
-            const cuda::std::byte* _bData,
+        Task(const TaskType& _taskType,
+            cuda::std::byte* _aData,
+            cuda::std::byte* _bData,
             cuda::std::byte* _cData,
-            const unsigned int& _expertIdx,
-            const unsigned int& _syncIdx):
-        aData(_aData), bData(_bData), cData(_cData), expertIdx(_expertIdx),
-        syncIdx(_syncIdx){}
+            const unsigned int& _syncIdx,
+            const unsigned int& _tile):
+        aData(_aData), bData(_bData), cData(_cData), syncIdx(_syncIdx), tile(_tile), taskType(_taskType){}
+
+        __device__ __forceinline__
+        explicit Task(const TaskType& _taskType):
+        taskType(_taskType) {
+            aData = nullptr;
+            bData = nullptr;
+            cData = nullptr;
+        }
     };
 
     struct __align__(16) SchedulerConfig{
-        unsigned int* interrupts;
         unsigned int* readyQ;
         /// rQS[0] -> head
         /// rQS[1] -> tail
@@ -160,15 +174,13 @@ namespace aristos{
         unsigned long long int* taskQSignals;
         unsigned long long int taskBound;
 
-        __forceinline__ __host__ __device__
+        __forceinline__ __device__
         SchedulerConfig() = default;
 
         SchedulerConfig(cuda::std::byte* _bk,
                const unsigned int& numberBlocks,
                const unsigned int& _syncTasksBound) {
-            // Below is not strict, we can migrate to unsigned long if necessary.
-            interrupts = CAST_TO(unsigned int, _bk);
-            readyQ = CAST_TO(unsigned int, interrupts + numberBlocks);
+            readyQ = CAST_TO(unsigned int, _bk);
             readyQSignals = CAST_TO(unsigned int, readyQ + numberBlocks);
             taskSignal = CAST_TO(unsigned long long int, readyQSignals + N_READY_Q_SIGNALS);
             taskSync = CAST_TO(unsigned long long int, taskSignal + numberBlocks);

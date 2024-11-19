@@ -68,7 +68,6 @@ namespace aristos{
         const auto taskBound = cute::ceil_div(cap, BLOCK_M) * numExperts * numNeighbors;
         memoryBytes = sizeof(unsigned int) * numNeighbors + // EP rank -> global rank
             sizeof(unsigned int) * numExperts * 2  + // Expert parallelism specification and EP -> heap
-            sizeof(unsigned int) * blocks + // interrupts
             sizeof(unsigned int) * blocks + // readyQ
             sizeof(unsigned long long int) * blocks + // taskSignal
             sizeof(unsigned long long int) * taskBound + // taskSync
