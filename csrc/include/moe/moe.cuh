@@ -6,7 +6,6 @@
 #define ARISTOS_MOE_CUH
 
 #include "../definition/tensor.cuh"
-#include "../util/indexing.cuh"
 #include "../algorithm/algorithm.cuh"
 
 namespace aristos{
@@ -19,7 +18,7 @@ namespace aristos{
     }
 
     template<Matrix M, Tensor T>
-    __global__ void forward(M const& activations, T const& expertsWeights, M const& gateWeights,
+    __global__ __maxnreg__(128) void forward(M const& activations, T const& expertsWeights, M const& gateWeights,
                             M gateOutput, M mappingTensor, M sharedSpec) {
         gate(activations, gateWeights, gateOutput);
         tokenToPeers(gateOutput, sharedSpec, mappingTensor);

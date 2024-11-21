@@ -129,7 +129,7 @@ namespace aristos::topology{
         // Signal my vector, including FLOPs, to others
         for (unsigned int i = 1U; i < n; ++i) {
             nvshmemx_putmem_signal_nbi_block(results, results, n*sizeof(floatPair), flags + rank,
-                constructSignal(processingRate, sent), NVSHMEM_SIGNAL_SET, (rank + i) % n);
+                constructSignal(sent, processingRate), NVSHMEM_SIGNAL_SET, (rank + i) % n);
         }
 
         // await responses from other GPUs
@@ -167,7 +167,7 @@ namespace aristos::topology{
         // Signal our vector, including FLOPs, to others
         for (unsigned int i = block::threadID(); i < numPeers; i += ARISTOS_BLOCK_SIZE) {
             nvshmem_putmem_signal_nbi(results, results, n * sizeof(floatPair), flags + rank,
-                    constructSignal(processingRate, sent), NVSHMEM_SIGNAL_SET, peers[i]);
+                    constructSignal(sent, processingRate), NVSHMEM_SIGNAL_SET, peers[i]);
         }
     }
 
@@ -219,7 +219,7 @@ namespace aristos::topology{
         for(unsigned int i = localBlockIdx; i < numPeers; i += numP2PBlocks){
             nvshmemx_putmem_signal_nbi_block(results, results,
                                              (peers[i] != rank) * sizeof(floatPair) * n, flags + rank,
-                                             constructSignal(processingRate, sent),
+                                             constructSignal(sent, processingRate),
                                              NVSHMEM_SIGNAL_SET, peers[i]);
         }
 

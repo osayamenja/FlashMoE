@@ -10,9 +10,55 @@
 #include "mmaConfig.cuh"
 
 #define SHARED_SIZE 16 * 1024UL
-#define SENTINEL (-1)
 
 namespace aristos::processor{
+    template<
+        unsigned int Arch,
+        typename ElementA,
+        typename ElementB,
+        typename ElementC = float,
+        typename ActivationOp = cute::identity>
+    struct ProcessorGEMM {
+        using GEMM = decltype(cublasdx::Size<BLOCK_M, BLOCK_N, BLOCK_K_FULL>()
+                              + cublasdx::Precision<toCDX<ElementA>, toCDX<ElementB>, toCDX<ElementC>>()
+                              + cublasdx::Type<cublasdx::type::real>()
+                              + cublasdx::Arrangement<cublasdx::row_major, cublasdx::row_major, cublasdx::row_major>()
+                              + cublasdx::Function<cublasdx::function::MM>()
+                              + cublasdx::SM<Arch>()
+                              + cublasdx::Block()
+                              + cublasdx::BlockDim<THREADS>());
+        using MatrixAType = ElementA;
+        using MatrixBType = ElementB;
+        using MatrixCType = ElementC;
+        using MatrixDType = ElementA;
+        using BlockTiler = cute::Shape<cute::Int<cublasdx::size_of<GEMM>::m>,
+                                        cute::Int<cublasdx::size_of<GEMM>::n>,
+                                        cute::Int<cublasdx::size_of<GEMM>::k>>;
+        using TilerOut = cute::Shape<cute::Int<cublasdx::size_of<GEMM>::m>, cute::Int<cublasdx::size_of<GEMM>::n>>;
+        using Parameters = CollectiveMMAConfig<GEMM, LayoutOptimization::UseSwizzle>;
+        using MMA = typename Parameters::mma_t;
+        using CollectiveMainloop = cutlass::gemm::collective::CollectiveMma<
+            typename Parameters::dispatch,
+            BlockTiler,
+            ElementA,
+            cute::Underscore,
+            ElementB,
+            cute::Underscore,
+            typename Parameters::mma_t,
+            typename Parameters::gCopyA,
+            typename Parameters::sLayA,
+            typename Parameters::sCopyA,
+            cute::identity,
+            typename Parameters::gCopyB,
+            typename Parameters::sLayB,
+            typename Parameters::sCopyB,
+            cute::identity
+        >;
+
+        using EpilogueOp = ActivationOp;
+        // TODO CollectiveMMA support for Hopper
+    };
+
     template <typename Element, typename ActivationFunction>
     requires(cuda::std::is_same_v<Element, cute::half_t> ||
         cuda::std::is_same_v<Element, cute::bfloat16_t> ||
@@ -53,85 +99,53 @@ namespace aristos::processor{
             accumulator.to_nv_bfloat16(), term.to_nv_bfloat16()));
     }
 
-    // <=96 registers: <= 5 blocks
-    template<class BlockMM, typename ActivationOp = cute::identity, unsigned int sharedSize,
-    typename MatrixA, typename MatrixB, typename MatrixC, typename MatrixD,
-    typename MatrixAx, typename MatrixBx, typename MatrixCx, typename MatrixDx,
-    typename ElementA = typename MatrixAx::value_type,
-    typename ElementB = typename MatrixBx::value_type,
-    typename ElementC = typename MatrixCx::value_type>
-    requires (cute::is_tensor_v<MatrixA>
-        && cute::is_tensor_v<MatrixB>
-        && cute::is_tensor_v<MatrixC>
-        && cute::is_tensor_v<MatrixD>
-        && cute::is_tensor_v<MatrixAx>
-        && cute::is_tensor_v<MatrixBx>
-        && cute::is_tensor_v<MatrixCx>
-        && cute::is_tensor_v<MatrixDx>
-        && cuda::std::is_same_v<typename MatrixC::value_type, typename MatrixAx::value_type>
-        && cuda::std::is_same_v<typename MatrixA::value_type, typename MatrixAx::value_type>
-        && cuda::std::is_same_v<typename MatrixB::value_type, typename MatrixBx::value_type>
-        && cublasdx::is_complete_blas<BlockMM>::value
-        && cublasdx::is_supported<BlockMM, cublasdx::sm_of<BlockMM>::value>::value
-        && cublasdx::sm_of<BlockMM>::value >= MIN_ARCH
-        && cuda::std::is_same_v<ElementA, ElementB>)
-    CUTE_DEVICE
-    void expert(const MatrixA mA, const MatrixB mB, const MatrixC mC, const MatrixD mD,
-        const MatrixAx mAx, const MatrixBx mBx, const MatrixCx mCx, const MatrixDx mDx) {
-        static_assert(rank(mA) == 2 && rank(mB) == 2 && rank(mC) == 2 && rank(mD) == 2);
-        static_assert(rank(mAx) == 2 && rank(mBx) == 2 && rank(mCx) == 2 && rank(mDx) == 2);
-        using Parameters = CollectiveMMAConfig<BlockMM, LayoutOptimization::UseSwizzle>;
-        constexpr auto bM = cublasdx::size_of<BlockMM>::m;
-        constexpr auto bN = cublasdx::size_of<BlockMM>::n;
-        constexpr auto bK = cublasdx::size_of<BlockMM>::k;
+    // Fused GEMM, Epilogue and Data transfer
+    template<
+        unsigned int sharedSize,
+        typename BlockGEMM,
+        class FrgTensorD>
+    __forceinline__ __device__
+    void fGET(FrgTensorD accumulator,
+        const typename BlockGEMM::MatrixAType* __restrict__ inputs,
+        const typename BlockGEMM::MatrixBType* __restrict__ weights,
+        typename BlockGEMM::MatrixDType* __restrict__ output,
+        const typename BlockGEMM::MatrixDType* __restrict__ bias,
+        const unsigned int& M,
+        const unsigned int& N,
+        const unsigned int& K,
+        const unsigned int& tileIdx) {
+        // Instantiate mainloop
+        typename BlockGEMM::CollectiveMainloop mainLoop{};
+        cute::clear(accumulator);
 
-        using blockTiler = cute::Shape<cute::Int<bM>, cute::Int<bN>, cute::Int<bK>>;
+        // Row-major
+        auto mA = make_tensor(cute::make_gmem_ptr(inputs),
+            make_layout(cute::make_shape(M, K), cute::make_stride(K, 1)));
+        // Row-major, transposed
+        auto mB = make_tensor(cute::make_gmem_ptr(weights),
+            make_layout(cute::make_shape(N, K), cute::make_stride(K, 1)));
+        // Row-major
+        auto mC = make_tensor(cute::make_gmem_ptr(output,
+            make_layout(cute::make_shape(M, N), cute::make_stride(N, 1))));
+        auto mD = make_tensor(cute::make_gmem_ptr(bias),
+            make_layout(cute::make_shape(M, N), cute::make_stride(0, 1)));
 
-        using CollectiveMainloop = cutlass::gemm::collective::CollectiveMma<
-            typename Parameters::dispatch,
-            blockTiler,
-            ElementA,
-            cute::Underscore,
-            ElementB,
-            cute::Underscore,
-            typename Parameters::mma_t,
-            typename Parameters::gCopyA,
-            typename Parameters::sLayA,
-            typename Parameters::sCopyA,
-            cute::identity,
-            typename Parameters::gCopyB,
-            typename Parameters::sLayB,
-            typename Parameters::sCopyB,
-            cute::identity
-        >;
-
-        typename Parameters::mma_t tiledMMA;
-        using TilerOut = cute::Shape<cute::Int<bM>, cute::Int<bN>>;
-        auto accum = cute::partition_fragment_C(tiledMMA, TilerOut{});
-        cute::clear(accum);
-
-        // Get the appropriate blocks for this thread block
-        // use problem shape instead, p_MNK = (cute::ceil_div(M, bM), cute::ceil_div(N, bN), K)
-        //auto M = cute::get<0>(mC.shape());
-        //auto N = cute::get<1>(mC.shape());
-        auto cta_coordX = cute::idx2crd(blockIdx.x, cute::Shape(cute::ceil_div(cute::get<0>(mC.shape()), bM),
-            cute::ceil_div(cute::get<1>(mC.shape()), bN)));
-        auto cta_coord = cute::make_coord(cute::get<0>(cta_coordX), cute::get<1>(cta_coordX), cute::_);
-        auto gA = local_tile(mA, blockTiler{}, cta_coord, cute::Step<cute::_1, cute::X,cute::_1>{});  // (BLK_M,BLK_K,k)
-        auto gB = local_tile(mB, blockTiler{}, cta_coord, cute::Step< cute::X,cute::_1,cute::_1>{});  // (BLK_N,BLK_K,k)
-        auto gC = local_tile(mC, blockTiler{}, cta_coord, cute::Step<cute::_1,cute::_1, cute::X>{});  // (BLK_M,BLK_N)
-        auto gD = local_tile(mD, blockTiler{}, cta_coord, cute::Step<cute::_1,cute::_1, cute::X>{});  // (BLK_M,BLK_N)
+        auto tileCoord = idx2crd(tileIdx, cute::Shape(M, N), cute::Stride(N ,1));
+        auto ctaCoord = make_coord(cute::get<0>(tileCoord), cute::get<1>(tileCoord), cute::_);
+        auto gA = cute::local_tile(mA, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1, cute::X,cute::_1>{});
+        auto gB = cute::local_tile(mB, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step< cute::X,cute::_1,cute::_1>{});
+        auto gC = cute::local_tile(mC, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1,cute::_1, cute::X>{});
+        auto gD = cute::local_tile(mD, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1,cute::_1, cute::X>{});
 
         auto k_tile_iter = cute::make_coord_iterator(size<2>(gA));
         int k_tile_count = size<2>(gA);
 
-        extern __shared__ ElementC scratch[];
-        CollectiveMainloop collective_mma;
-        collective_mma(
-            accum,
+        extern __shared__ typename BlockGEMM::MatrixCType scratch[];
+        mainLoop(
+            accumulator,
             gA,
             gB,
-            accum,
+            accumulator,
             k_tile_iter, k_tile_count,
             cute::Underscore{},
             threadIdx.x,
@@ -141,98 +155,59 @@ namespace aristos::processor{
         __syncthreads();
 
         // Epilogue
+        typename BlockGEMM::MMA tiledMMA{};
         auto tCgC = tiledMMA.get_slice(threadIdx.x).partition_C(gC);
         auto tDgD = tiledMMA.get_slice(threadIdx.x).partition_C(gD);
 
         // Accounts for GEMMs that accumulate in types differing from input types,
         // given that the result moonlights as the input for the succeeding GEMM.
-        auto gCStoreOp = cutlass::NumericConverter<typename decltype(tCgC)::value_type, typename decltype(accum)::value_type>{};
-        auto gDLoadOp = cutlass::NumericConverter<typename decltype(accum)::value_type, typename decltype(tDgD)::value_type>{};
+        auto gCStoreOp = cutlass::NumericConverter<typename decltype(tCgC)::value_type,
+                                                    typename decltype(accumulator)::value_type>{};
+        auto gDLoadOp = cutlass::NumericConverter<typename decltype(accumulator)::value_type,
+                                                    typename decltype(tDgD)::value_type>{};
 
-        // Assume unary operator
-        ActivationOp epilogueOp{};
+        // Assume elementwise operator
+        typename BlockGEMM::EpilogueOp epilogueOp{};
         constexpr auto elemsBytes = sharedSize / THREADS;
-        constexpr auto trips = size(accum) * sizeof(ElementC) / elemsBytes;
-        constexpr auto elems = elemsBytes / sizeof(ElementC);
-        // Instead of shared memory, we could use 32 registers per trip, for the workspace instead.
-        // We would be within the budget (32 + 64 <= 100) and, as a bonus, bypass the above barrier as well.
-        // However, then we would be at the mercy of the compiler,
-        // who may or may not reuse previous MMA register allocations (24 to be exact),
-        // thus causing spills to local memory.
-        CUTE_UNROLL
-        for (int i = 0; i < trips; ++i) {
+        constexpr auto trips = size(accumulator) * sizeof(typename BlockGEMM::MatrixCType) / elemsBytes;
+        constexpr auto elems = elemsBytes / sizeof(typename BlockGEMM::MatrixCType);
+
+        #pragma unroll
+        for (unsigned int i = 0; i < trips; ++i) {
             // Prefetch from global to shared memory that will be reused per trip
             // Use addressing that minimizes bank conflicts in shared memory
-            CUTE_UNROLL
-            for (int j = 0; j < elems; ++j) {
+            #pragma unroll
+            for (unsigned int j = 0; j < elems; ++j) {
                 scratch[threadIdx.x + j * THREADS] = gDLoadOp(tDgD(j + i * elems));
             }
             // Fused Bias Add and Activation Function on register fragment
-            // Also fuses copy to GMEM
-            CUTE_UNROLL
+            // Also fuses copy to GMEM, which is where things get interesting
+            #pragma unroll
             for (int j = 0; j < elems; ++j) {
-                tCgC(j + i * elems) = gCStoreOp(fusedAddActivate(accum(j + i * elems),
+                tCgC(j + i * elems) = gCStoreOp(fusedAddActivate(accumulator(j + i * elems),
                     scratch[threadIdx.x + j * THREADS], epilogueOp));
             }
         }
 
-        __threadfence();
         __syncthreads();
-        if (threadIdx.x == 0) {
-            // Signal that this tile is available
-            //atomicAdd(&syncP, 1);
-            // Wait until all tiles are ready.
-            //while (atomicCAS(&syncP, 0U, 0U) % kChunks != 0){}
+        if (!threadIdx.x) {
+            // The above GMEM copy could be local or p2p,
+            // with the latter being a direct store to an NVLink-connected peer.
+            // Thus, we must use a memory fence that spans all such cases.
+            __threadfence_system();
         }
         __syncthreads();
-
-        // Clear accumulator registers in preparation
-        cute::clear(accum);
-
-        gA = local_tile(mAx, blockTiler{}, cta_coord, cute::Step<cute::_1, cute::X,cute::_1>{});  // (BLK_M,BLK_K,k)
-        gB = local_tile(mBx, blockTiler{}, cta_coord, cute::Step< cute::X,cute::_1,cute::_1>{});  // (BLK_N,BLK_K,k)
-        gC = local_tile(mCx, blockTiler{}, cta_coord, cute::Step<cute::_1,cute::_1, cute::X>{});  // (BLK_M,BLK_N)
-        gD = local_tile(mDx, blockTiler{}, cta_coord, cute::Step<cute::_1,cute::_1, cute::X>{});  // (BLK_M,BLK_N)
-
-        auto k_tile_iterX = cute::make_coord_iterator(size<2>(gA));
-        k_tile_count = size<2>(gA);
-
-        // Execute next GEMM now
-        collective_mma(
-            accum,
-            gA,
-            gB,
-            accum,
-            k_tile_iterX, k_tile_count,
-            cute::Underscore{},
-            threadIdx.x,
-            CAST_TO(char, scratch));
-
-        __syncthreads();
-
-        // Epilogue
-        tDgD = tiledMMA.get_slice(threadIdx.x).partition_C(gD);
-        tCgC = tiledMMA.get_slice(threadIdx.x).partition_C(gC);
-
-        CUTE_UNROLL
-        for (int i = 0; i < trips; ++i) {
-            // Prefetch
-            CUTE_UNROLL
-            for (int j = 0; j < elems; ++j) {
-                scratch[threadIdx.x + j * THREADS] = gDLoadOp(tDgD(j + i * elems));
-            }
-            // Fused Bias Add on register fragment
-            CUTE_UNROLL
-            for (int j = 0; j < elems; ++j) {
-                tCgC (j + i * elems) = gCStoreOp(accum(j + i * elems) + scratch[threadIdx.x + j * THREADS]);
-            }
-        }
-        __threadfence();
-        __syncthreads();
-        // Signal publisher
     }
 
-    template<unsigned int processorCount> requires(processorCount > 0)
+    template<
+        unsigned int processorCount,
+        unsigned int Arch,
+        unsigned int sharedSize,
+        typename ElementA,
+        typename ElementB,
+        typename ElementC = float,
+        typename ActivationOp = cute::identity
+    > requires(processorCount > 0 && Arch >= MIN_ARCH)
     __device__ __forceinline__
     void start(){
         __shared__ unsigned long long int signal;
@@ -240,6 +215,9 @@ namespace aristos::processor{
         __shared__ bool interrupt[ARISTOS_BLOCK_SIZE];
         interrupt[threadIdx.x] = false;
         atomicExch(&signal, 0UL);
+        using Operation = ProcessorGEMM<Arch, ElementA, ElementB, ElementC, ActivationOp>;
+        auto accumulator = cute::partition_fragment_C(typename Operation::MMA{}, typename Operation::TilerOut{});
+
         while (!interrupt[threadIdx.x]) {
             // Indicate readiness
             schedulerState.readyQ[atomicAdd(schedulerState.readyQSignals, 1U) % processorCount] = blockIdx.x;
@@ -255,7 +233,15 @@ namespace aristos::processor{
             __syncthreads();
             switch (currentTask.taskType) {
                 case TaskType::preGEMM: {
-                    // Do GEMM and GMEM write
+                    fGET<sharedSize, Operation>(accumulator,
+                        CAST_TO(typename Operation::MatrixAType, currentTask.aData),
+                        CAST_TO(typename Operation::MatrixBType, currentTask.bData),
+                        CAST_TO(typename Operation::MatrixDType, currentTask.cData),
+                        CAST_TO(typename Operation::MatrixDType, currentTask.dData),
+                        currentTask.M,
+                        moeConfig.upProjection,
+                        moeConfig.embedDim,
+                        currentTask.tile);
                     if (threadIdx.x == 1 &&
                         atomicAdd(schedulerState.taskSync + currentTask.syncIdx, 1U) == moeConfig.tilesN) {
                         // Enqueue next tasks
@@ -263,15 +249,31 @@ namespace aristos::processor{
                 }
                 break;
                 case TaskType::postGEMM: {
-                    // Do GEMM and GMEM write
-                    if (threadIdx.x == 1 &&
-                        atomicAdd(schedulerState.taskSync + currentTask.syncIdx, 1U) == 2 * moeConfig.tilesN) {
-                        // signal peer
+                    fGET<sharedSize, Operation>(accumulator,
+                        CAST_TO(typename Operation::MatrixAType, currentTask.aData),
+                        CAST_TO(typename Operation::MatrixBType, currentTask.bData),
+                        CAST_TO(typename Operation::MatrixDType, currentTask.cData),
+                        CAST_TO(typename Operation::MatrixDType, currentTask.dData),
+                        currentTask.M,
+                        moeConfig.embedDim,
+                        moeConfig.upProjection,
+                        currentTask.tile);
+                    if (threadIdx.x == 1) {
+                        if (currentTask.isPeerRemote) {
+                            nvshmem_putmem(currentTask.cData, currentTask.cData,
+                                sizeof(Operation::MatrixDType) * currentTask.packetSize, currentTask.peerIdx);
+                        }
+                        if (atomicAdd(schedulerState.taskSync + currentTask.syncIdx, 1U)
+                            == 2 * moeConfig.tilesN) {
+                            nvshmemx_signal_op(moeConfig.flags + moeConfig.worldSize + currentTask.peerIdx,
+                                constructSignal(processed), NVSHMEM_SIGNAL_SET, currentTask.peerIdx);
+                        }
                     }
                 }
                 break;
                 case TaskType::GateScale: {
                     // Do scale
+                    // TODO read GShard paper for this op
                 }
                 break;
                 case TaskType::Interrupt:

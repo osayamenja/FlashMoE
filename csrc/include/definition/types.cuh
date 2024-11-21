@@ -134,12 +134,20 @@ namespace aristos{
     };
 
     struct __align__(16) Task {
-        cuda::std::byte* aData;
-        cuda::std::byte* bData;
-        cuda::std::byte* cData;
+        // sensible sentinel values
+        cuda::std::byte* aData = nullptr;
+        cuda::std::byte* bData = nullptr;
+        cuda::std::byte* bDataNext = nullptr;
+        cuda::std::byte* cData = nullptr;
+        cuda::std::byte* dData = nullptr;
+        cuda::std::byte* dDataNext = nullptr;
         // crd2Idx(peer, expertIdx, offset)
         unsigned long long int syncIdx = 0UL;
         unsigned int tile = 0U;
+        unsigned int M = 0U;
+        unsigned long long int packetSize = 0U;
+        int peerIdx = 0U;
+        bool isPeerRemote = false;
         TaskType taskType = TaskType::Interrupt;
 
         __forceinline__ __device__
@@ -149,18 +157,24 @@ namespace aristos{
         Task(const TaskType& _taskType,
             cuda::std::byte* _aData,
             cuda::std::byte* _bData,
+            cuda::std::byte* _bDataNext,
             cuda::std::byte* _cData,
+            cuda::std::byte* _dData,
+            cuda::std::byte* _dDataNext,
             const unsigned int& _syncIdx,
-            const unsigned int& _tile):
-        aData(_aData), bData(_bData), cData(_cData), syncIdx(_syncIdx), tile(_tile), taskType(_taskType){}
+            const unsigned int& _tile,
+            const unsigned int& _M,
+            const long long int& _size,
+            const bool& _remote,
+            const int& _peerIdx):
+        aData(_aData), bData(_bData), bDataNext(_bDataNext),
+        cData(_cData), dData(_dData), dDataNext(_dDataNext),
+        syncIdx(_syncIdx), tile(_tile), M(_M), packetSize(_size), peerIdx(_peerIdx),
+        isPeerRemote(_remote), taskType(_taskType){}
 
         __device__ __forceinline__
         explicit Task(const TaskType& _taskType):
-        taskType(_taskType) {
-            aData = nullptr;
-            bData = nullptr;
-            cData = nullptr;
-        }
+        taskType(_taskType) {}
     };
 
     struct __align__(16) SchedulerConfig{
@@ -210,7 +224,7 @@ namespace aristos{
 
     template<typename E = header> requires cuda::std::is_integral_v<cuda::std::underlying_type_t<E>>
     CUTE_DEVICE
-    uint64_t constructSignal(uint64_t const& tagAlong, E const& signal){
+    uint64_t constructSignal(E const& signal, uint64_t const& tagAlong = 0U){
         return tagAlong + signal + seqNo;
     }
 }
