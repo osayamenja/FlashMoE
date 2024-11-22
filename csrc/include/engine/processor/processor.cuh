@@ -5,9 +5,12 @@
 #ifndef ARISTOS_COMPUTE_CUH
 #define ARISTOS_COMPUTE_CUH
 
+#include <cutlass/array.h>
 #include <cutlass/epilogue/thread/activation.h>
 #include <cutlass/gemm/collective/collective_mma.hpp>
+
 #include "mmaConfig.cuh"
+#include "../../definition/types.cuh"
 
 #define SHARED_SIZE 16 * 1024UL
 
@@ -66,7 +69,7 @@ namespace aristos::processor{
         cuda::std::is_same_v<Element, float> ||
         cuda::std::is_same_v<Element, cute::float_e4m3_t> ||
         cuda::std::is_same_v<Element, cute::float_e5m2_t>)
-    CUTE_DEVICE
+    __forceinline__ __device__
     auto fusedAddActivate(Element& accumulator, const Element& term, const ActivationFunction& op) {
             if constexpr (sizeof(Element) >= 4) {
                 return op(fma(Element(1.0f), accumulator, term));
@@ -84,7 +87,7 @@ namespace aristos::processor{
 
     // conversion operators are reinterpret casts, so technically should be free at runtime
     template<>
-    CUTE_DEVICE
+    __forceinline__ __device__
     auto fusedAddActivate(cute::half_t& accumulator, const cute::half_t& term,
         const cutlass::epilogue::thread::ReLU<cute::half_t>& op) {
         return cute::half_t(__hfma_relu(__half(1.0f),
@@ -92,7 +95,7 @@ namespace aristos::processor{
     }
 
     template<>
-    CUTE_DEVICE
+    __forceinline__ __device__
     auto fusedAddActivate(cute::bfloat16_t& accumulator, const cute::bfloat16_t& term,
         const cutlass::epilogue::thread::ReLU<cute::bfloat16_t>& op) {
         return cute::bfloat16_t(__hfma_relu(__nv_bfloat16(1.0f),
@@ -101,11 +104,13 @@ namespace aristos::processor{
 
     // Fused GEMM, Epilogue and Data transfer
     template<
-        unsigned int sharedSize,
         typename BlockGEMM,
-        class FrgTensorD>
+        class FrgTensorD,
+        class RegisterScratch
+    >
     __forceinline__ __device__
     void fGET(FrgTensorD accumulator,
+        RegisterScratch rScratch,
         const typename BlockGEMM::MatrixAType* __restrict__ inputs,
         const typename BlockGEMM::MatrixBType* __restrict__ weights,
         typename BlockGEMM::MatrixDType* __restrict__ output,
@@ -114,6 +119,7 @@ namespace aristos::processor{
         const unsigned int& N,
         const unsigned int& K,
         const unsigned int& tileIdx) {
+        static_assert(size(accumulator) % rScratch.size() == 0 && cutlass::detail::is_Array_v<RegisterScratch>);
         // Instantiate mainloop
         typename BlockGEMM::CollectiveMainloop mainLoop{};
         cute::clear(accumulator);
@@ -151,16 +157,13 @@ namespace aristos::processor{
             threadIdx.x,
             CAST_TO(char, scratch));
 
-        // Ensure shared memory is ready for reuse
-        __syncthreads();
-
         // Epilogue
         typename BlockGEMM::MMA tiledMMA{};
         auto tCgC = tiledMMA.get_slice(threadIdx.x).partition_C(gC);
         auto tDgD = tiledMMA.get_slice(threadIdx.x).partition_C(gD);
 
         // Accounts for GEMMs that accumulate in types differing from input types,
-        // given that the result moonlights as the input for the succeeding GEMM.
+        // given that the result may moonlight as the input for the succeeding GEMM.
         auto gCStoreOp = cutlass::NumericConverter<typename decltype(tCgC)::value_type,
                                                     typename decltype(accumulator)::value_type>{};
         auto gDLoadOp = cutlass::NumericConverter<typename decltype(accumulator)::value_type,
@@ -168,24 +171,22 @@ namespace aristos::processor{
 
         // Assume elementwise operator
         typename BlockGEMM::EpilogueOp epilogueOp{};
-        constexpr auto elemsBytes = sharedSize / THREADS;
-        constexpr auto trips = size(accumulator) * sizeof(typename BlockGEMM::MatrixCType) / elemsBytes;
-        constexpr auto elems = elemsBytes / sizeof(typename BlockGEMM::MatrixCType);
+        constexpr auto trips = size(accumulator) / rScratch.size();
+        constexpr auto elems = rScratch.size();
 
         #pragma unroll
         for (unsigned int i = 0; i < trips; ++i) {
-            // Prefetch from global to shared memory that will be reused per trip
-            // Use addressing that minimizes bank conflicts in shared memory
+            // Prefetch from global to registers
             #pragma unroll
             for (unsigned int j = 0; j < elems; ++j) {
-                scratch[threadIdx.x + j * THREADS] = gDLoadOp(tDgD(j + i * elems));
+                rScratch[j] = gDLoadOp(tDgD(j + i * elems));
             }
             // Fused Bias Add and Activation Function on register fragment
             // Also fuses copy to GMEM, which is where things get interesting
             #pragma unroll
             for (int j = 0; j < elems; ++j) {
                 tCgC(j + i * elems) = gCStoreOp(fusedAddActivate(accumulator(j + i * elems),
-                    scratch[threadIdx.x + j * THREADS], epilogueOp));
+                    rScratch[j], epilogueOp));
             }
         }
 
@@ -202,7 +203,6 @@ namespace aristos::processor{
     template<
         unsigned int processorCount,
         unsigned int Arch,
-        unsigned int sharedSize,
         typename ElementA,
         typename ElementB,
         typename ElementC = float,
@@ -212,13 +212,16 @@ namespace aristos::processor{
     void start(){
         __shared__ unsigned long long int signal;
         __shared__ Task currentTask;
-        __shared__ bool interrupt[ARISTOS_BLOCK_SIZE];
-        interrupt[threadIdx.x] = false;
-        atomicExch(&signal, 0UL);
+        __shared__ unsigned int interrupt;
         using Operation = ProcessorGEMM<Arch, ElementA, ElementB, ElementC, ActivationOp>;
         auto accumulator = cute::partition_fragment_C(typename Operation::MMA{}, typename Operation::TilerOut{});
+        cutlass::AlignedArray<ElementC, 32> rScratch{};
 
-        while (!interrupt[threadIdx.x]) {
+        atomicExch(&interrupt, 0U);
+        atomicExch(&signal, 0UL);
+        __syncthreads();
+
+        while (!interrupt) {
             // Indicate readiness
             schedulerState.readyQ[atomicAdd(schedulerState.readyQSignals, 1U) % processorCount] = blockIdx.x;
             if (!threadIdx.x) {
@@ -233,7 +236,7 @@ namespace aristos::processor{
             __syncthreads();
             switch (currentTask.taskType) {
                 case TaskType::preGEMM: {
-                    fGET<sharedSize, Operation>(accumulator,
+                    fGET<Operation>(accumulator, rScratch,
                         CAST_TO(typename Operation::MatrixAType, currentTask.aData),
                         CAST_TO(typename Operation::MatrixBType, currentTask.bData),
                         CAST_TO(typename Operation::MatrixDType, currentTask.cData),
@@ -244,12 +247,25 @@ namespace aristos::processor{
                         currentTask.tile);
                     if (threadIdx.x == 1 &&
                         atomicAdd(schedulerState.taskSync + currentTask.syncIdx, 1U) == moeConfig.tilesN) {
-                        // Enqueue next tasks
+                        for (unsigned int i = 0; i < moeConfig.tilesNx; ++i) {
+                            schedulerState.taskQ[atomicAdd(schedulerState.taskQSignals + 1, 1U)]
+                                = Task{
+                                    TaskType::postGEMM,
+                                    currentTask.cData,
+                                    currentTask.bDataNext,
+                                    currentTask.cDataNext,
+                                    currentTask.syncIdx,
+                                    i,
+                                    currentTask.M,
+                                    currentTask.packetSize,
+                                    currentTask.peerIdx
+                                };
+                        }
                     }
                 }
                 break;
                 case TaskType::postGEMM: {
-                    fGET<sharedSize, Operation>(accumulator,
+                    fGET<Operation>(accumulator, rScratch,
                         CAST_TO(typename Operation::MatrixAType, currentTask.aData),
                         CAST_TO(typename Operation::MatrixBType, currentTask.bData),
                         CAST_TO(typename Operation::MatrixDType, currentTask.cData),
@@ -259,14 +275,19 @@ namespace aristos::processor{
                         moeConfig.upProjection,
                         currentTask.tile);
                     if (threadIdx.x == 1) {
-                        if (currentTask.isPeerRemote) {
-                            nvshmem_putmem(currentTask.cData, currentTask.cData,
-                                sizeof(Operation::MatrixDType) * currentTask.packetSize, currentTask.peerIdx);
-                        }
                         if (atomicAdd(schedulerState.taskSync + currentTask.syncIdx, 1U)
-                            == 2 * moeConfig.tilesN) {
-                            nvshmemx_signal_op(moeConfig.flags + moeConfig.worldSize + currentTask.peerIdx,
-                                constructSignal(processed), NVSHMEM_SIGNAL_SET, currentTask.peerIdx);
+                            == moeConfig.tilesN + moeConfig.tilesNx) {
+                            if (nvshmem_ptr(currentTask.cData, currentTask.peerIdx) == nullptr) {
+                                nvshmem_putmem_signal_nbi(currentTask.cData, currentTask.cData,
+                                    sizeof(Operation::MatrixDType) * currentTask.packetSize,
+                                    moeConfig.flags + moeConfig.worldSize + currentTask.peerIdx,
+                                    constructSignal(processed), NVSHMEM_SIGNAL_SET, currentTask.peerIdx);
+                            }
+                            else {
+                                // Already did the network transfer in fGET, so set signal only
+                                nvshmemx_signal_op(moeConfig.flags + moeConfig.worldSize + currentTask.peerIdx,
+                                 constructSignal(processed), NVSHMEM_SIGNAL_SET, currentTask.peerIdx);
+                            }
                         }
                     }
                 }
@@ -276,8 +297,12 @@ namespace aristos::processor{
                     // TODO read GShard paper for this op
                 }
                 break;
-                case TaskType::Interrupt:
-                    interrupt[threadIdx.x] = true;
+                case TaskType::Interrupt: {
+                    if (!threadIdx.x) {
+                        interrupt = 1U;
+                    }
+                    __syncthreads();
+                }
             }
         }
     }

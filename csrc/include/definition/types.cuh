@@ -69,6 +69,7 @@ namespace aristos{
         unsigned int upProjection;
         unsigned int capacity;
         unsigned int tilesN;
+        unsigned int tilesNx;
 
         CUTE_HOST_DEVICE
         Config() = default;
@@ -86,7 +87,8 @@ namespace aristos{
                const unsigned int& _world,
                const unsigned int& _proj,
                const unsigned int& _cap,
-               const unsigned int& _tilesN):
+               const unsigned int& _tilesN,
+               const unsigned int& _tilesNx):
                 sHeap(_symmetricHeap),
                 flags(_flags),
                 bookKeeping(_bk),
@@ -101,7 +103,7 @@ namespace aristos{
                 embedDim(_embedDim),
                 upProjection(_proj),
                 capacity(_cap),
-                tilesN(_tilesN){}
+                tilesN(_tilesN), tilesNx(_tilesNx){}
 
         CUTE_HOST_DEVICE
         static unsigned int getCapacity(const unsigned int& _seqLen, const unsigned int& _numPeers,
@@ -139,6 +141,7 @@ namespace aristos{
         cuda::std::byte* bData = nullptr;
         cuda::std::byte* bDataNext = nullptr;
         cuda::std::byte* cData = nullptr;
+        cuda::std::byte* cDataNext = nullptr;
         cuda::std::byte* dData = nullptr;
         cuda::std::byte* dDataNext = nullptr;
         // crd2Idx(peer, expertIdx, offset)
@@ -147,7 +150,6 @@ namespace aristos{
         unsigned int M = 0U;
         unsigned long long int packetSize = 0U;
         int peerIdx = 0U;
-        bool isPeerRemote = false;
         TaskType taskType = TaskType::Interrupt;
 
         __forceinline__ __device__
@@ -159,18 +161,32 @@ namespace aristos{
             cuda::std::byte* _bData,
             cuda::std::byte* _bDataNext,
             cuda::std::byte* _cData,
+            cuda::std::byte* _cDataNext,
             cuda::std::byte* _dData,
             cuda::std::byte* _dDataNext,
-            const unsigned int& _syncIdx,
+            const unsigned long long int& _syncIdx,
             const unsigned int& _tile,
             const unsigned int& _M,
-            const long long int& _size,
-            const bool& _remote,
+            const unsigned long long int& _size,
             const int& _peerIdx):
         aData(_aData), bData(_bData), bDataNext(_bDataNext),
-        cData(_cData), dData(_dData), dDataNext(_dDataNext),
+        cData(_cData), cDataNext(_cDataNext), dData(_dData), dDataNext(_dDataNext),
         syncIdx(_syncIdx), tile(_tile), M(_M), packetSize(_size), peerIdx(_peerIdx),
-        isPeerRemote(_remote), taskType(_taskType){}
+        taskType(_taskType){}
+
+        __device__ __forceinline__
+        Task(const TaskType& _taskType,
+            cuda::std::byte* _aData,
+            cuda::std::byte* _bData,
+            cuda::std::byte* _cData,
+            const unsigned long long int& _syncIdx,
+            const unsigned int& _tile,
+            const unsigned int& _M,
+            const unsigned long long int& _size,
+            const int& _peerIdx):
+        aData(_aData), bData(_bData), cData(_cData),
+        syncIdx(_syncIdx), tile(_tile), M(_M), packetSize(_size), peerIdx(_peerIdx),
+        taskType(_taskType){}
 
         __device__ __forceinline__
         explicit Task(const TaskType& _taskType):
