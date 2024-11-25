@@ -18,14 +18,16 @@ namespace aristos{
     }
 
     template<Matrix M, Tensor T>
-    __global__ __maxnreg__(128) void forward(M const& activations, T const& expertsWeights, M const& gateWeights,
-                            M gateOutput, M mappingTensor, M sharedSpec) {
+    __global__ __maxnreg__(128) void forward(
+        M const& activations,
+        T const& expertsWeights,
+        M const& gateWeights,
+        M gateOutput) {
         gate(activations, gateWeights, gateOutput);
-        tokenToPeers(gateOutput, sharedSpec, mappingTensor);
-        /// mappingTensor (S, D)
     }
 
-    __global__ void backward(){
+    template<Matrix M, Tensor T>
+    __global__ __maxnreg__(128) void backward(){
 
     }
 }

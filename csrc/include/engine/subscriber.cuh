@@ -8,6 +8,7 @@
 namespace aristos::subscriber{
     __device__ __forceinline__
     void start(){
+        // Produce
 
     }
 }

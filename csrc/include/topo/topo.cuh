@@ -196,6 +196,7 @@ namespace aristos::topology{
         __threadfence_block();
         __syncthreads();
 
+        // TODO Obviate below staging by writing to peer memory directly
         /// All-Reduce to get max transfer time across blocks
         /// Update the global buffer with my values via max reduction
         /// Intra-block slicing

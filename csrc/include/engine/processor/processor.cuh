@@ -210,20 +210,20 @@ namespace aristos::processor{
     > requires(processorCount > 0 && Arch >= MIN_ARCH)
     __device__ __forceinline__
     void start(){
-        __shared__ unsigned long long int signal;
+        __shared__ unsigned int signal;
         __shared__ Task currentTask;
         __shared__ unsigned int interrupt;
         using Operation = ProcessorGEMM<Arch, ElementA, ElementB, ElementC, ActivationOp>;
         auto accumulator = cute::partition_fragment_C(typename Operation::MMA{}, typename Operation::TilerOut{});
         cutlass::AlignedArray<ElementC, 32> rScratch{};
 
-        atomicExch(&interrupt, 0U);
-        atomicExch(&signal, 0UL);
+        atomicExch_block(&interrupt, 0U);
+        atomicExch_block(&signal, 0UL);
         __syncthreads();
 
         while (!interrupt) {
             // Indicate readiness
-            schedulerState.readyQ[atomicAdd(schedulerState.readyQSignals, 1U) % processorCount] = blockIdx.x;
+            schedulerState.readyQ[atomicAdd(schedulerState.readyQHead, 1U) % processorCount] = blockIdx.x;
             if (!threadIdx.x) {
                 // Grabs next task
                 auto nextTask = atomicLoad(schedulerState.taskQSignals + blockIdx.x);
@@ -245,7 +245,7 @@ namespace aristos::processor{
                         moeConfig.upProjection,
                         moeConfig.embedDim,
                         currentTask.tile);
-                    if (threadIdx.x == 1 &&
+                    if (!threadIdx.x &&
                         atomicAdd(schedulerState.taskSync + currentTask.syncIdx, 1U) == moeConfig.tilesN) {
                         for (unsigned int i = 0; i < moeConfig.tilesNx; ++i) {
                             schedulerState.taskQ[atomicAdd(schedulerState.taskQSignals + 1, 1U)]
@@ -274,12 +274,13 @@ namespace aristos::processor{
                         moeConfig.embedDim,
                         moeConfig.upProjection,
                         currentTask.tile);
-                    if (threadIdx.x == 1) {
+                    if (!threadIdx.x) {
                         if (atomicAdd(schedulerState.taskSync + currentTask.syncIdx, 1U)
                             == moeConfig.tilesN + moeConfig.tilesNx) {
                             if (nvshmem_ptr(currentTask.cData, currentTask.peerIdx) == nullptr) {
+                                // Batched remote network transfer to avoid overwhelming the NIC
                                 nvshmem_putmem_signal_nbi(currentTask.cData, currentTask.cData,
-                                    sizeof(Operation::MatrixDType) * currentTask.packetSize,
+                                    sizeof(Operation::MatrixDType) * BLOCK_M * BLOCK_N * moeConfig.tilesNx,
                                     moeConfig.flags + moeConfig.worldSize + currentTask.peerIdx,
                                     constructSignal(processed), NVSHMEM_SIGNAL_SET, currentTask.peerIdx);
                             }

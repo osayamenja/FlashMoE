@@ -69,11 +69,11 @@ namespace aristos{
         memoryBytes = sizeof(unsigned int) * numNeighbors + // EP rank -> global rank
             sizeof(unsigned int) * numExperts * 2  + // Expert parallelism specification and EP -> heap
             sizeof(unsigned int) * blocks + // readyQ
-            sizeof(unsigned long long int) * blocks + // taskSignal
-            sizeof(unsigned long long int) * taskBound + // taskSync
+            sizeof(unsigned int) * blocks + // taskSignal
+            sizeof(unsigned int) * taskBound + // taskSync
             sizeof(Task) * taskBound * 3 + // taskQ
-            sizeof(unsigned long long int) * N_READY_Q_SIGNALS + // rQS
-            sizeof(unsigned long long int) * (N_TASK_Q_SIGNALS + 1);// tQS and doorbell
+            sizeof(unsigned int) * N_READY_Q_SIGNALS + // rQS
+            sizeof(unsigned int) * (N_TASK_Q_SIGNALS + 1);// tQS and doorbell
         CUTE_CHECK_ERROR(cudaMallocAsync(&bookKeeping, memoryBytes, aristosStream));
         CUTE_CHECK_ERROR(cudaMemsetAsync(bookKeeping, 0, memoryBytes, aristosStream));
         CUTE_CHECK_ERROR(cudaMemcpyToSymbolAsync(moeConfig, &hostMoEConfig, sizeof(Config), 0,

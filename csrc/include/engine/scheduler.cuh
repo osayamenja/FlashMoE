@@ -14,34 +14,51 @@ namespace aristos::scheduler {
     template<unsigned int processorCount> requires(processorCount > 0)
     __device__ __forceinline__
     void start() {
-        auto* rQHead = schedulerState.readyQSignals;
-        auto* rQTail = schedulerState.readyQSignals + 1;
+        // Register allocations
+        const auto* rQ = schedulerState.readyQ;
+        auto* tQ = schedulerState.taskQ;
+        auto* pDB = schedulerState.taskSignal;
+        auto* rQHead = schedulerState.readyQHead;
         auto* doorbell = schedulerState.taskQSignals;
         auto* tQHead = schedulerState.taskQSignals + 1;
-        unsigned long long int scheduled = 0U;
-        while (scheduled < schedulerState.taskBound) {
-            while (atomicLoad(doorbell) > scheduled && atomicLoad(rQHead) > atomicLoad(rQTail)) {
-                scheduled++;
-                // Gets a ready processor
-                const auto pid = schedulerState.readyQ[atomicAdd(rQTail, 1U) % processorCount];
-                // Inform them of a single task
-                atomicExch(schedulerState.taskSignal + pid, scheduled);
+        const auto taskBound = schedulerState.taskBound;
+        unsigned int scheduled = 0U;
+        unsigned int rQTail = 0U;
+
+        while (scheduled < taskBound) {
+            auto tasks = atomicLoad(doorbell) - scheduled;
+            // Batch read to global memory
+            while (tasks > 0) {
+                auto readyProcesses = atomicLoad(rQHead) - rQTail;
+                while (readyProcesses > 0) {
+                    // Gets a ready processor
+                    const auto pid = rQ[rQTail++ % processorCount];
+                    // Update state
+                    --tasks;
+                    --readyProcesses;
+                    // Inform them of a single task
+                    atomicExch(pDB + pid, ++scheduled);
+                }
             }
         }
 
         #pragma unroll
         for (unsigned int i = 0; i < processorCount; ++i) {
-            schedulerState.taskQ[atomicAdd(tQHead, 1U)] = Task{TaskType::Interrupt};
+            tQ[atomicAdd(tQHead, 1U)] = Task{TaskType::Interrupt};
         }
         __threadfence();
 
         unsigned int interrupted = 0U;
         while (interrupted < processorCount) {
-            while (atomicLoad(rQHead) > atomicLoad(rQTail)) {
-                scheduled++;
-                const auto pid = schedulerState.readyQ[atomicAdd(rQTail, 1U) % processorCount];
-                atomicExch(schedulerState.taskSignal + pid, scheduled);
-                interrupted++;
+            auto readyProcesses = atomicLoad(rQHead) - rQTail;
+            while (readyProcesses > 0) {
+                // Gets a ready processor
+                const auto pid = rQ[rQTail++ % processorCount];
+                // Update state
+                --readyProcesses;
+                ++interrupted;
+                // Inform them of a single task
+                atomicExch(pDB + pid, ++scheduled);
             }
         }
     }

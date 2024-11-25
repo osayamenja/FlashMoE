@@ -10,7 +10,7 @@
 
 #define CAST_TO(T, p) static_cast<T*>(static_cast<void*>(p))
 
-#define N_READY_Q_SIGNALS 2
+#define N_READY_Q_SIGNALS 1 // head
 #define N_TASK_Q_SIGNALS 2
 
 /// The symmetric heap is a 4-D tensor (P, S, C, T)
@@ -58,9 +58,9 @@ namespace aristos{
         /// EP rank -> heap offsets
         unsigned int* heapOffsets;
         unsigned int* parallelismSpec;
+        unsigned long sequenceNumber;
         /// Expert parallel group rank
         unsigned int rank;
-        unsigned long sequenceNumber;
         unsigned int seqLen;
         unsigned int numExperts;
         unsigned int k;
@@ -95,8 +95,8 @@ namespace aristos{
                 peerTranslation(CAST_TO(unsigned int, _bk)),
                 heapOffsets(peerTranslation + _world),
                 parallelismSpec(heapOffsets + _world),
-                rank(_rank),
                 sequenceNumber(_sequenceNumber),
+                rank(_rank),
                 seqLen(_seqLen),
                 numExperts(_numExperts),
                 k(_k), worldSize(_world),
@@ -145,10 +145,10 @@ namespace aristos{
         cuda::std::byte* dData = nullptr;
         cuda::std::byte* dDataNext = nullptr;
         // crd2Idx(peer, expertIdx, offset)
-        unsigned long long int syncIdx = 0UL;
+        unsigned int syncIdx = 0UL;
         unsigned int tile = 0U;
         unsigned int M = 0U;
-        unsigned long long int packetSize = 0U;
+        unsigned int packetSize = 0U;
         int peerIdx = 0U;
         TaskType taskType = TaskType::Interrupt;
 
@@ -164,10 +164,10 @@ namespace aristos{
             cuda::std::byte* _cDataNext,
             cuda::std::byte* _dData,
             cuda::std::byte* _dDataNext,
-            const unsigned long long int& _syncIdx,
+            const unsigned int& _syncIdx,
             const unsigned int& _tile,
             const unsigned int& _M,
-            const unsigned long long int& _size,
+            const unsigned int& _size,
             const int& _peerIdx):
         aData(_aData), bData(_bData), bDataNext(_bDataNext),
         cData(_cData), cDataNext(_cDataNext), dData(_dData), dDataNext(_dDataNext),
@@ -179,10 +179,10 @@ namespace aristos{
             cuda::std::byte* _aData,
             cuda::std::byte* _bData,
             cuda::std::byte* _cData,
-            const unsigned long long int& _syncIdx,
+            const unsigned int& _syncIdx,
             const unsigned int& _tile,
             const unsigned int& _M,
-            const unsigned long long int& _size,
+            const unsigned int& _size,
             const int& _peerIdx):
         aData(_aData), bData(_bData), cData(_cData),
         syncIdx(_syncIdx), tile(_tile), M(_M), packetSize(_size), peerIdx(_peerIdx),
@@ -197,12 +197,12 @@ namespace aristos{
         unsigned int* readyQ;
         /// rQS[0] -> head
         /// rQS[1] -> tail
-        unsigned int* readyQSignals;
-        unsigned long long int* taskSignal;
-        unsigned long long int* taskSync;
+        unsigned int* readyQHead;
+        unsigned int* taskSignal;
+        unsigned int* taskSync;
         Task* taskQ;
-        unsigned long long int* taskQSignals;
-        unsigned long long int taskBound;
+        unsigned int* taskQSignals;
+        unsigned int taskBound;
 
         __forceinline__ __device__
         SchedulerConfig() = default;
@@ -211,10 +211,10 @@ namespace aristos{
                const unsigned int& numberBlocks,
                const unsigned int& _syncTasksBound) {
             readyQ = CAST_TO(unsigned int, _bk);
-            readyQSignals = CAST_TO(unsigned int, readyQ + numberBlocks);
-            taskSignal = CAST_TO(unsigned long long int, readyQSignals + N_READY_Q_SIGNALS);
-            taskSync = CAST_TO(unsigned long long int, taskSignal + numberBlocks);
-            taskQSignals = CAST_TO(unsigned long long int, taskSync + _syncTasksBound);
+            readyQHead = CAST_TO(unsigned int, readyQ + numberBlocks);
+            taskSignal = CAST_TO(unsigned int, readyQHead + N_READY_Q_SIGNALS);
+            taskSync = CAST_TO(unsigned int, taskSignal + numberBlocks);
+            taskQSignals = CAST_TO(unsigned int, taskSync + _syncTasksBound);
             taskQ = CAST_TO(Task, taskQSignals + N_TASK_Q_SIGNALS);
             taskBound = (STAGES + 1) * _syncTasksBound;
         }
