@@ -7,61 +7,13 @@
 
 #include <cutlass/array.h>
 #include <cutlass/epilogue/thread/activation.h>
-#include <cutlass/gemm/collective/collective_mma.hpp>
 
-#include "mmaConfig.cuh"
+#include "gemm.cuh"
 #include "../../definition/types.cuh"
 
 #define SHARED_SIZE 16 * 1024UL
 
 namespace aristos::processor{
-    template<
-        unsigned int Arch,
-        typename ElementA,
-        typename ElementB,
-        typename ElementC = float,
-        typename ActivationOp = cute::identity>
-    struct ProcessorGEMM {
-        using GEMM = decltype(cublasdx::Size<BLOCK_M, BLOCK_N, BLOCK_K_FULL>()
-                              + cublasdx::Precision<toCDX<ElementA>, toCDX<ElementB>, toCDX<ElementC>>()
-                              + cublasdx::Type<cublasdx::type::real>()
-                              + cublasdx::Arrangement<cublasdx::row_major, cublasdx::row_major, cublasdx::row_major>()
-                              + cublasdx::Function<cublasdx::function::MM>()
-                              + cublasdx::SM<Arch>()
-                              + cublasdx::Block()
-                              + cublasdx::BlockDim<THREADS>());
-        using MatrixAType = ElementA;
-        using MatrixBType = ElementB;
-        using MatrixCType = ElementC;
-        using MatrixDType = ElementA;
-        using BlockTiler = cute::Shape<cute::Int<cublasdx::size_of<GEMM>::m>,
-                                        cute::Int<cublasdx::size_of<GEMM>::n>,
-                                        cute::Int<cublasdx::size_of<GEMM>::k>>;
-        using TilerOut = cute::Shape<cute::Int<cublasdx::size_of<GEMM>::m>, cute::Int<cublasdx::size_of<GEMM>::n>>;
-        using Parameters = CollectiveMMAConfig<GEMM, LayoutOptimization::UseSwizzle>;
-        using MMA = typename Parameters::mma_t;
-        using CollectiveMainloop = cutlass::gemm::collective::CollectiveMma<
-            typename Parameters::dispatch,
-            BlockTiler,
-            ElementA,
-            cute::Underscore,
-            ElementB,
-            cute::Underscore,
-            typename Parameters::mma_t,
-            typename Parameters::gCopyA,
-            typename Parameters::sLayA,
-            typename Parameters::sCopyA,
-            cute::identity,
-            typename Parameters::gCopyB,
-            typename Parameters::sLayB,
-            typename Parameters::sCopyB,
-            cute::identity
-        >;
-
-        using EpilogueOp = ActivationOp;
-        // TODO CollectiveMMA support for Hopper
-    };
-
     template <typename Element, typename ActivationFunction>
     requires(cuda::std::is_same_v<Element, cute::half_t> ||
         cuda::std::is_same_v<Element, cute::bfloat16_t> ||
@@ -136,7 +88,12 @@ namespace aristos::processor{
         auto mD = make_tensor(cute::make_gmem_ptr(bias),
             make_layout(cute::make_shape(M, N), cute::make_stride(0, 1)));
 
-        auto tileCoord = idx2crd(tileIdx, cute::Shape(M, N), cute::Stride(N ,1));
+        // M is padded, such that the below is correct
+        const auto tilesM = M / cute::get<0>(BlockGEMM::BlockTiler{});
+        // We assert the below prior to this point
+        const auto tilesN = N / cute::get<1>(BlockGEMM::BlockTiler{});
+
+        auto tileCoord = idx2crd(tileIdx, cute::Shape(tilesM, tilesN), cute::Stride(tilesN ,1));
         auto ctaCoord = make_coord(cute::get<0>(tileCoord), cute::get<1>(tileCoord), cute::_);
         auto gA = cute::local_tile(mA, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1, cute::X,cute::_1>{});
         auto gB = cute::local_tile(mB, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step< cute::X,cute::_1,cute::_1>{});
@@ -213,7 +170,7 @@ namespace aristos::processor{
         __shared__ unsigned int signal;
         __shared__ Task currentTask;
         __shared__ unsigned int interrupt;
-        using Operation = ProcessorGEMM<Arch, ElementA, ElementB, ElementC, ActivationOp>;
+        using Operation = BlockMM<Arch, ElementA, ElementB, ElementC, ActivationOp>;
         auto accumulator = cute::partition_fragment_C(typename Operation::MMA{}, typename Operation::TilerOut{});
         cutlass::AlignedArray<ElementC, 32> rScratch{};
 
@@ -295,7 +252,7 @@ namespace aristos::processor{
                 break;
                 case TaskType::GateScale: {
                     // Do scale
-                    // TODO read GShard paper for this op
+                    // TODO atomicAdd to close scale
                 }
                 break;
                 case TaskType::Interrupt: {

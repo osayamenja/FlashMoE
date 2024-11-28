@@ -105,10 +105,20 @@ namespace aristos{
                 capacity(_cap),
                 tilesN(_tilesN), tilesNx(_tilesNx){}
 
-        CUTE_HOST_DEVICE
+        __host__ __device__ __forceinline__
         static unsigned int getCapacity(const unsigned int& _seqLen, const unsigned int& _numPeers,
                                         const unsigned int& _capacityFactor, const unsigned int& _k){
             return cute::ceil_div(_seqLen, _numPeers) * _capacityFactor * _k;
+        }
+
+        __device__ __forceinline__
+        uint8_t* getBRSFlags() const {
+            return CAST_TO(uint8_t, bookKeeping);
+        }
+
+        __device__ __forceinline__
+        float2* getBRSValues() const {
+            return CAST_TO(float2, bookKeeping + seqLen);
         }
 
 

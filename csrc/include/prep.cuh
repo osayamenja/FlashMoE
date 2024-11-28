@@ -64,18 +64,21 @@ namespace aristos{
 
         //Final Initialization
         void* bookKeeping;
-        const auto cap = Config::getCapacity(seqLen, numNeighbors, capacityFactor, k);
-        const auto taskBound = cute::ceil_div(cap, BLOCK_M) * numExperts * numNeighbors;
-        memoryBytes = sizeof(unsigned int) * numNeighbors + // EP rank -> global rank
+        const auto taskBound = cute::ceil_div(seqLen, BLOCK_M) *
+            (cute::ceil_div(embedDim, BLOCK_N) + cute::ceil_div(hiddenProjDim, BLOCK_N) + 1);
+        memoryBytes = (sizeof(uint8_t) + 2 * sizeof(float)) * seqLen * cute::ceil_div(numExperts, BLOCK_N) + // sync flags for gate
+            sizeof(float) * seqLen * numExperts + // gate routing
+            sizeof(unsigned int) * numNeighbors + // EP rank -> global rank
             sizeof(unsigned int) * numExperts * 2  + // Expert parallelism specification and EP -> heap
             sizeof(unsigned int) * blocks + // readyQ
             sizeof(unsigned int) * blocks + // taskSignal
-            sizeof(unsigned int) * taskBound + // taskSync
-            sizeof(Task) * taskBound * 3 + // taskQ
+            sizeof(unsigned int) * numNeighbors * numExperts * cute::ceil_div(seqLen, numExperts * BLOCK_M) + // taskSync
+            sizeof(Task) * taskBound + // taskQ
             sizeof(unsigned int) * N_READY_Q_SIGNALS + // rQS
             sizeof(unsigned int) * (N_TASK_Q_SIGNALS + 1);// tQS and doorbell
         CUTE_CHECK_ERROR(cudaMallocAsync(&bookKeeping, memoryBytes, aristosStream));
-        CUTE_CHECK_ERROR(cudaMemsetAsync(bookKeeping, 0, memoryBytes, aristosStream));
+        CUTE_CHECK_ERROR(cudaMemsetAsync(bookKeeping, 1, seqLen)); // assert westward flags
+        CUTE_CHECK_ERROR(cudaMemsetAsync(bookKeeping + seqLen, 0, memoryBytes - seqLen, aristosStream));
         CUTE_CHECK_ERROR(cudaMemcpyToSymbolAsync(moeConfig, &hostMoEConfig, sizeof(Config), 0,
                                             cudaMemcpyHostToDevice, aristosStream));
         CUTE_CHECK_ERROR(cudaPeekAtLastError());

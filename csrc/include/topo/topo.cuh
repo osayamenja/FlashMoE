@@ -58,7 +58,7 @@ struct floatPair {
 };
 
 namespace aristos::topology{
-    __device__ unsigned int blockade = 0U;
+    __device__ __inline__ unsigned int blockade = 0U;
     template<typename T>
     requires(!cuda::std::is_same_v<T, void>)
     CUTE_DEVICE
