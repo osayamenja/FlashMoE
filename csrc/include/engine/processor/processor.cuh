@@ -61,7 +61,8 @@ namespace aristos::processor{
         class RegisterScratch
     >
     __forceinline__ __device__
-    void fGET(FrgTensorD accumulator,
+    void fGET(typename BlockGEMM::MatrixDType* workspace,
+        FrgTensorD accumulator,
         RegisterScratch rScratch,
         const typename BlockGEMM::MatrixAType* __restrict__ inputs,
         const typename BlockGEMM::MatrixBType* __restrict__ weights,
@@ -103,7 +104,7 @@ namespace aristos::processor{
         auto k_tile_iter = cute::make_coord_iterator(size<2>(gA));
         int k_tile_count = size<2>(gA);
 
-        extern __shared__ typename BlockGEMM::MatrixCType scratch[];
+        using ElementD = typename BlockGEMM::MatrixDType;
         mainLoop(
             accumulator,
             gA,
@@ -112,7 +113,8 @@ namespace aristos::processor{
             k_tile_iter, k_tile_count,
             cute::Underscore{},
             threadIdx.x,
-            CAST_TO(char, scratch));
+            CAST_TO(char, workspace));
+        __syncthreads();
 
         // Epilogue
         typename BlockGEMM::MMA tiledMMA{};
@@ -124,19 +126,28 @@ namespace aristos::processor{
         auto gCStoreOp = cutlass::NumericConverter<typename decltype(tCgC)::value_type,
                                                     typename decltype(accumulator)::value_type>{};
         auto gDLoadOp = cutlass::NumericConverter<typename decltype(accumulator)::value_type,
-                                                    typename decltype(tDgD)::value_type>{};
+                                                    ElementD>{};
 
         // Assume elementwise operator
         typename BlockGEMM::EpilogueOp epilogueOp{};
         constexpr auto trips = size(accumulator) / rScratch.size();
         constexpr auto elems = rScratch.size();
 
+        // Prefetch from global to shared memory
+        #pragma unroll
+        for (int j = 0; j < elems; ++j) {
+            workspace[threadIdx.x + j * THREADS] = tDgD(j);
+        }
+
         #pragma unroll
         for (unsigned int i = 0; i < trips; ++i) {
-            // Prefetch from global to registers
             #pragma unroll
             for (unsigned int j = 0; j < elems; ++j) {
-                rScratch[j] = gDLoadOp(tDgD(j + i * elems));
+                rScratch[j] = workspace[threadIdx.x + j * THREADS];
+                if (i + 1 < trips) {
+                    // Eagerly start loads for the next batch, if needed
+                    workspace[threadIdx.x + j * THREADS] = tDgD(j + i * elems);
+                }
             }
             // Fused Bias Add and Activation Function on register fragment
             // Also fuses copy to GMEM, which is where things get interesting
@@ -163,25 +174,32 @@ namespace aristos::processor{
         typename ElementA,
         typename ElementB,
         typename ElementC = float,
-        typename ActivationOp = cute::identity
+        typename ElementD = ElementA,
+        typename ActivationOp = cute::identity,
+        typename ActivationOpX = cute::identity,
+        unsigned int sharedSize = 16 * 1024
     > requires(processorCount > 0 && Arch >= MIN_ARCH)
     __device__ __forceinline__
-    void start(){
+    void start(ElementD* workspace){
+        assert(__isShared(workspace));
         __shared__ unsigned int signal;
         __shared__ Task currentTask;
         __shared__ unsigned int interrupt;
         using Operation = BlockMM<Arch, ElementA, ElementB, ElementC, ActivationOp>;
+        using OperationX = BlockMM<Arch, ElementA, ElementB, ElementC, ActivationOpX>;
         auto accumulator = cute::partition_fragment_C(typename Operation::MMA{}, typename Operation::TilerOut{});
-        cutlass::AlignedArray<ElementC, 32> rScratch{};
+        constexpr auto elems = sharedSize / (THREADS * sizeof(ElementD));
+        static_assert(cute::size(accumulator) % elems == 0);
+        cutlass::AlignedArray<ElementC, elems> rScratch{};
 
         atomicExch_block(&interrupt, 0U);
         atomicExch_block(&signal, 0UL);
         __syncthreads();
 
         while (!interrupt) {
-            // Indicate readiness
-            schedulerState.readyQ[atomicAdd(schedulerState.readyQHead, 1U) % processorCount] = blockIdx.x;
             if (!threadIdx.x) {
+                // Indicate readiness
+                schedulerState.readyQ[atomicAdd(schedulerState.readyQHead, 1U) % processorCount] = blockIdx.x;
                 // Grabs next task
                 auto nextTask = atomicLoad(schedulerState.taskQSignals + blockIdx.x);
                 while (nextTask == signal) {
@@ -193,7 +211,7 @@ namespace aristos::processor{
             __syncthreads();
             switch (currentTask.taskType) {
                 case TaskType::preGEMM: {
-                    fGET<Operation>(accumulator, rScratch,
+                    fGET<Operation>(workspace, accumulator, rScratch,
                         CAST_TO(typename Operation::MatrixAType, currentTask.aData),
                         CAST_TO(typename Operation::MatrixBType, currentTask.bData),
                         CAST_TO(typename Operation::MatrixDType, currentTask.cData),
@@ -222,7 +240,7 @@ namespace aristos::processor{
                 }
                 break;
                 case TaskType::postGEMM: {
-                    fGET<Operation>(accumulator, rScratch,
+                    fGET<OperationX>(workspace, accumulator, rScratch,
                         CAST_TO(typename Operation::MatrixAType, currentTask.aData),
                         CAST_TO(typename Operation::MatrixBType, currentTask.bData),
                         CAST_TO(typename Operation::MatrixDType, currentTask.cData),

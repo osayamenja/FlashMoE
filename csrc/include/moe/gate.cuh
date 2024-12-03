@@ -7,6 +7,7 @@
 
 #include "../engine/processor/gemm.cuh"
 #include "../definition/types.cuh"
+#include "packet.cuh"
 
 namespace aristos::gate {
     enum class TripPredication {
@@ -25,7 +26,7 @@ namespace aristos::gate {
         unsigned int sharedSize,
         TripPredication tP = TripPredication::complete
     >
-    requires(k <= 64 && k > 0 && (sharedSize == 16 * 1024 || sharedSize == 8 * 1024))
+    requires(k <= 32 && k > 0 && (sharedSize == 16 * 1024 || sharedSize == 8 * 1024))
     __device__ __forceinline__
     void fGSTkM(const MatrixA& activations, const MatrixB& weights, MatrixC& routing,
         FrgTensorD accumulator, const unsigned int& tileIdx, typename BlockGEMM::MatrixCType* gateScratch) {
@@ -45,7 +46,6 @@ namespace aristos::gate {
         auto ctaCoord = make_coord(cute::get<0>(tileCoord), cute::get<1>(tileCoord), cute::_);
         auto gA = cute::local_tile(activations, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1, cute::X,cute::_1>{});
         auto gB = cute::local_tile(weights, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step< cute::X,cute::_1,cute::_1>{});
-        // TODO Transpose
         auto gC = cute::local_tile(routing, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1,cute::_1, cute::X>{});
 
         auto k_tile_iter = cute::make_coord_iterator(size<2>(gA));
@@ -63,7 +63,7 @@ namespace aristos::gate {
         __syncthreads();
 
         /// Epilogue
-        cutlass::AlignedArray<ElementC, cute::max(k, 32)> rScratch{};
+        cutlass::AlignedArray<ElementC, 32> rScratch{};
         /// Below needed for assigning -infinity
         /// See https://stackoverflow.com/a/20016972
         static_assert(cuda::std::numeric_limits<ElementC>::is_iec559, "IEEE 754 required");
@@ -108,7 +108,7 @@ namespace aristos::gate {
             for (unsigned int j = 0; j < elems; ++j) {
                 tCsC(j) = accumulator(j + i * elems);
             }
-            // Necessary to ensure 128x32 half-tile is ready as values are scattered across threads
+            // Necessary to ensure THREADSx32 half-tile is ready as values are scattered across threads
             __syncthreads();
 
             // Prefetch to registers
@@ -154,7 +154,7 @@ namespace aristos::gate {
             for (unsigned int j = 0; j < elems; ++j) {
                 tCsC(j) = accumulator(j + i * elems);
             }
-            // Necessary to ensure 128x32 half-tile is ready as values are scattered across threads
+            // Necessary to ensure THREADSx32 half-tile is ready as values are scattered across threads
             __syncthreads();
 
             // Prefetch to registers
@@ -168,12 +168,40 @@ namespace aristos::gate {
                 accumulator(j + i * elems) = __fdividef(__expf(__fsub_rn(rScratch[j], mI)), dI);
             }
         }
-        // Now do topKMask
 
+        // Now do "online" topKMask
+        // Build binary heap on register memory
+        cutlass::AlignedArray<cuda::std::pair<ElementC, unsigned int>, k> heap{};
+        #pragma unroll
+        for (int i = 0; i < k; ++i) {
+            heap[i].first = accumulator(i);
+            heap[i].second = i;
+        }
+        cuda::std::make_heap(rScratch.begin(), rScratch.end(), cuda::std::greater{});
+        cuda::std::pop_heap(rScratch.begin(), rScratch.end(), cuda::std::greater{});
+        // min element now at the end of the array
+        #pragma unroll
+        for (int i = k; i < size(accumulator); ++i) {
+            if (accumulator(i) > heap[i].first) {
+                accumulator(heap[i].second) = ElementC(0);
+                heap[k - 1] = cuda::std::pair<ElementC, unsigned int>{accumulator(i), i};
+                cuda::std::push_heap(rScratch.begin(), rScratch.end(), cuda::std::greater{});
+                cuda::std::pop_heap(rScratch.begin(), rScratch.end(), cuda::std::greater{});
+            }
+            else {
+                accumulator(i) = ElementC(0);
+            }
+        }
+
+        // Copy to global memory
+        // Await tiles to complete
+        // Build and send the first stage's packet to peers
+        buildSendPacket();
     }
     template<
         unsigned int Arch,
         unsigned int blocks,
+        unsigned int k,
         typename MatrixA,
         typename MatrixB,
         typename MatrixC,

@@ -73,6 +73,7 @@ add_executable(csrc main.cu
         include/engine/scheduler.cuh
         include/moe/gate.cuh
         include/engine/processor/gemm.cuh
+        include/moe/packet.cuh
 )
 set_target_properties(csrc PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON

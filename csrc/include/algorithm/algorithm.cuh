@@ -26,8 +26,8 @@ namespace aristos {
             for(uint i = 0; i < k; ++i){
                 window[i] = {my_slice(i), i};
             }
-            cuda::std::make_heap(window.begin(), window.end(), cuda::std::greater<>{});
-            cuda::std::pop_heap(window.begin(), window.end(), cuda::std::greater<>{});
+            cuda::std::make_heap(window.begin(), window.end(), cuda::std::greater{});
+            cuda::std::pop_heap(window.begin(), window.end(), cuda::std::greater{});
             // min element now at the end of the array
             CUTE_UNROLL
             for(uint i = k; i < cute::size(my_slice); ++i){
