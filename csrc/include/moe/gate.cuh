@@ -52,14 +52,13 @@ namespace aristos::gate {
 
         /// Pointers for flags needed in epilogue
         /// col-major indexing
-        auto* tFlag = moeConfig.getBRSFlags() + (cute::get<0>(tileCoord) * bM +
-            cute::get<1>(tileCoord) * bM * tilesM) + threadIdx.x;
-        auto* nextFlag = moeConfig.getBRSFlags() + (cute::get<0>(tileCoord) * bM +
-            (cute::get<1>(tileCoord) + 1) % tilesN * bM * tilesM) + threadIdx.x;
-        auto* values = moeConfig.getBRSValues() + (cute::get<0>(tileCoord) * bM +
-            cute::get<1>(tileCoord) * bM * tilesM) + threadIdx.x;
-        auto* nextValues = moeConfig.getBRSValues() + (cute::get<0>(tileCoord) * bM +
-            (cute::get<1>(tileCoord) + 1) % tilesN * bM * tilesM) + threadIdx.x;
+        auto myTileOffset = bM * (cute::get<0>(tileCoord) + cute::get<1>(tileCoord) * tilesM) + threadIdx.x;
+        auto nextTileOffset = bM * (cute::get<0>(tileCoord) +
+            (cute::get<1>(tileCoord) + 1 == tilesN ? 0 : cute::get<1>(tileCoord) + 1) * tilesM) + threadIdx.x;
+        auto* tFlag = moeConfig.getBRSFlags() + myTileOffset;
+        auto* nextFlag = moeConfig.getBRSFlags() + nextTileOffset;
+        auto* values = moeConfig.getBRSValues() + myTileOffset;
+        auto* nextValues = moeConfig.getBRSValues() + nextTileOffset;
 
         /// Below needed for assigning -infinity
         /// See https://stackoverflow.com/a/20016972
@@ -180,42 +179,51 @@ namespace aristos::gate {
             }
         }
 
+        cutlass::AlignedArray<cuda::std::pair<ElementC, unsigned int>, k> heap{};
         // Wait for heap to propagate
         if (cute::get<1>(tileCoord) > 0) {
             while (atomicLoad(tFlag) != 3U){}
+            // read from current values
+            auto* myHeap = moeConfig.getBRSHeap() + k * myTileOffset;
+            #pragma unroll
+            for (unsigned int i = 0; i < k; ++i) {
+                heap[i] = myHeap[i];
+            }
+        }
+        else {
+            #pragma unroll
+            for (unsigned int i = 0; i < k; ++i) {
+                heap[i] = cuda::std::pair<ElementC, unsigned int>{accumulator(i), i};
+            }
         }
 
         // Now do "online" topKMask
         // Build binary min heap on register memory
-        cutlass::AlignedArray<cuda::std::pair<ElementC, unsigned int>, k> heap{};
-        #pragma unroll
-        for (unsigned int i = 0; i < k; ++i) {
-            heap[i] = cuda::std::pair<ElementC, unsigned int>{accumulator(i), i};
-        }
         cuda::std::make_heap(rScratch.begin(), rScratch.end(), cuda::std::greater{});
         cuda::std::pop_heap(rScratch.begin(), rScratch.end(), cuda::std::greater{});
         // min element now at the end of the array
+        // Not a requirement, just ensures correctness
+        static_assert(cublasdx::arrangement_of<typename BlockGEMM::GEMM>::c == cublasdx::row_major);
         #pragma unroll
         for (unsigned int i = k; i < size(accumulator); ++i) {
             if (accumulator(i) > heap.back().first) {
-                accumulator(heap.back().second) = ElementC(0);
+                gC(threadIdx.x, i) = ElementC(0);
                 // Insert new element
-                heap[k - 1] = cuda::std::pair<ElementC, unsigned int>{accumulator(i), i};
+                heap[k - 1] = cuda::std::pair<ElementC, unsigned int>{accumulator(i), i * bN + cute::get<1>(tileCoord)};
                 cuda::std::push_heap(rScratch.begin(), rScratch.end(), cuda::std::greater{});
                 cuda::std::pop_heap(rScratch.begin(), rScratch.end(), cuda::std::greater{});
             }
             else {
-                accumulator(i) = ElementC(0);
+                gC(threadIdx.x, i) = ElementC(0);
             }
         }
         // propagate heap to next block
-        // Copy to global memory
-        if constexpr (cublasdx::arrangement_of<typename BlockGEMM::GEMM>::c == cublasdx::row_major) {
-            cute::copy(accumulator, gC(threadIdx.x, cute::_));
+        auto* nextHeap = moeConfig.getBRSHeap() + k * nextTileOffset;
+        for (int i = 0; i < k; ++i) {
+            nextHeap[i] = heap[i];
         }
-        else {
-            cute::copy(accumulator, gC(cute::_, threadIdx.x));
-        }
+        __threadfence();
+        atomicAdd(nextFlag, 1U);
     }
     template<
         unsigned int Arch,

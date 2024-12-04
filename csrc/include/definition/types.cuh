@@ -145,8 +145,8 @@ namespace aristos{
         }
 
         __device__ __forceinline__
-        unsigned int* getBRSHeap() const {
-            return CAST_TO(unsigned int, getBRSBlockade() + 1);
+        cuda::std::pair<maxPrecision, unsigned int>* getBRSHeap() const {
+            return static_cast<cuda::std::pair<maxPrecision, unsigned int>*>(static_cast<void*>(getBRSBlockade() + 1));
         }
 
         __host__ __device__ __forceinline__
