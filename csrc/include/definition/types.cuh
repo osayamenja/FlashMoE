@@ -26,8 +26,19 @@
 
 #define HEAP_ALIGNMENT 16
 
+// GEMM configuration constants
+#define MIN_ARCH 700
+#define THREADS 128
+#define BLOCK_M 128
+#define BLOCK_M_EXP 64
+#define BLOCK_N 64
+#define BLOCK_K_HALF 16
+#define BLOCK_K_FULL 8
+#define MAX_REGS (BLOCK_M * BLOCK_N) / THREADS
+#define PIPELINE_STAGES 2
+
 namespace aristos{
-    using maxPrecision = float;
+    using maxPrecision = float; // no support for double, unfortunately
     using specType = unsigned int;
     using flagsType = uint64_t;
 
@@ -106,9 +117,16 @@ namespace aristos{
                 tilesN(_tilesN), tilesNx(_tilesNx){}
 
         __host__ __device__ __forceinline__
-        static unsigned int getCapacity(const unsigned int& _seqLen, const unsigned int& _numPeers,
+        static constexpr unsigned int getCapacity(const unsigned int& _seqLen, const unsigned int& _numPeers,
                                         const unsigned int& _capacityFactor, const unsigned int& _k){
             return cute::ceil_div(_seqLen, _numPeers) * _capacityFactor * _k;
+        }
+
+        template<unsigned int tileDimension>
+        __host__ __device__ __forceinline__
+        static constexpr unsigned int pad(const unsigned int& dimension) {
+            // find next multiple of dimension.
+            return cute::ceil_div(dimension, tileDimension) * tileDimension;
         }
 
         __device__ __forceinline__
@@ -118,11 +136,20 @@ namespace aristos{
 
         __device__ __forceinline__
         float2* getBRSValues() const {
-            return CAST_TO(float2, bookKeeping + seqLen);
+            return CAST_TO(float2, getBRSFlags() + (seqLen * pad<BLOCK_M>(numExperts)));
         }
 
+        __device__ __forceinline__
+        unsigned int* getBRSBlockade() const {
+            return CAST_TO(unsigned int, getBRSValues() + (seqLen * pad<BLOCK_M>(numExperts)));
+        }
 
-        CUTE_HOST_DEVICE
+        __device__ __forceinline__
+        unsigned int* getBRSHeap() const {
+            return CAST_TO(unsigned int, getBRSBlockade() + 1);
+        }
+
+        __host__ __device__ __forceinline__
         void dump() const {
             printf("{\n\t"
                    "\"Capacity\": %u,\n\t"
@@ -249,7 +276,7 @@ namespace aristos{
     };
 
     template<typename E = header> requires cuda::std::is_integral_v<cuda::std::underlying_type_t<E>>
-    CUTE_DEVICE
+    __device__ __forceinline__
     uint64_t constructSignal(E const& signal, uint64_t const& tagAlong = 0U){
         return tagAlong + signal + seqNo;
     }

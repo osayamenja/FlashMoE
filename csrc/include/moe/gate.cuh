@@ -14,39 +14,62 @@ namespace aristos::gate {
         complete,
         partial
     };
+
     /// Fused GEMM, softmax and topKMask, assuming blocks >= tiles.N and no bias.
     /// Supporting the latter is trivial; the former requires a completely new algorithm
     template<
         typename BlockGEMM,
+        unsigned int k,
+        unsigned int sharedSize,
+        TripPredication tP = TripPredication::complete,
         class FrgTensorD,
         typename MatrixA,
         typename MatrixB,
-        typename MatrixC,
-        unsigned int k,
-        unsigned int sharedSize,
-        TripPredication tP = TripPredication::complete
+        typename MatrixC
     >
     requires(k <= 32 && k > 0 && (sharedSize == 16 * 1024 || sharedSize == 8 * 1024))
     __device__ __forceinline__
     void fGSTkM(const MatrixA& activations, const MatrixB& weights, MatrixC& routing,
-        FrgTensorD accumulator, const unsigned int& tileIdx, typename BlockGEMM::MatrixCType* gateScratch) {
+        FrgTensorD& accumulator, const unsigned int& tileIdx, typename BlockGEMM::MatrixCType* gateScratch) {
         using ElementC = toCT<typename BlockGEMM::c_value_type>;
         static_assert(cuda::std::is_same_v<ElementC, float>);
         typename BlockGEMM::CollectiveMainloop mainLoop{};
         cute::clear(accumulator);
         constexpr auto bM = cute::get<0>(BlockGEMM::BlockTiler{});
         constexpr auto bN = cute::get<0>(BlockGEMM::BlockTiler{});
+        constexpr auto threads = BlockGEMM::GEMM::block_dim.x;
 
-        // M is padded, such that the below is correct
-        const auto tilesM = cute::get<0>(routing.shape()) / bM;
-        // We assert the below prior to this point
-        const auto tilesN = cute::get<1>(routing.shape()) / bN;
+        // padded to fill bM
+        const auto tilesM = cute::ceil_div(cute::get<0>(routing.shape()), bM);
+        // padded to fill bN
+        const auto tilesN = cute::ceil_div(cute::get<1>(routing.shape()), bN);
 
         auto tileCoord = idx2crd(tileIdx, cute::Shape(tilesM, tilesN), cute::Stride(tilesN, 1));
         auto ctaCoord = make_coord(cute::get<0>(tileCoord), cute::get<1>(tileCoord), cute::_);
         auto gA = cute::local_tile(activations, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1, cute::X,cute::_1>{});
         auto gB = cute::local_tile(weights, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step< cute::X,cute::_1,cute::_1>{});
         auto gC = cute::local_tile(routing, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1,cute::_1, cute::X>{});
+
+        /// Pointers for flags needed in epilogue
+        /// col-major indexing
+        auto* tFlag = moeConfig.getBRSFlags() + (cute::get<0>(tileCoord) * bM +
+            cute::get<1>(tileCoord) * bM * tilesM) + threadIdx.x;
+        auto* nextFlag = moeConfig.getBRSFlags() + (cute::get<0>(tileCoord) * bM +
+            (cute::get<1>(tileCoord) + 1) % tilesN * bM * tilesM) + threadIdx.x;
+        auto* values = moeConfig.getBRSValues() + (cute::get<0>(tileCoord) * bM +
+            cute::get<1>(tileCoord) * bM * tilesM) + threadIdx.x;
+        auto* nextValues = moeConfig.getBRSValues() + (cute::get<0>(tileCoord) * bM +
+            (cute::get<1>(tileCoord) + 1) % tilesN * bM * tilesM) + threadIdx.x;
+
+        /// Below needed for assigning -infinity
+        /// See https://stackoverflow.com/a/20016972
+        static_assert(cuda::std::numeric_limits<ElementC>::is_iec559, "IEEE 754 required");
+        static_assert(cuda::std::numeric_limits<ElementC>::has_infinity);
+        if (!cute::get<0>(tileCoord)) {
+            // We are on the extreme west and need to preset our flags and values
+            *tFlag = 1U;
+            *values = -cuda::std::numeric_limits<ElementC>::infinity();
+        }
 
         auto k_tile_iter = cute::make_coord_iterator(size<2>(gA));
         int k_tile_count = size<2>(gA);
@@ -64,26 +87,12 @@ namespace aristos::gate {
 
         /// Epilogue
         cutlass::AlignedArray<ElementC, 32> rScratch{};
-        /// Below needed for assigning -infinity
-        /// See https://stackoverflow.com/a/20016972
-        static_assert(cuda::std::numeric_limits<ElementC>::is_iec559, "IEEE 754 required");
-        static_assert(cuda::std::numeric_limits<ElementC>::has_infinity);
         static_assert(rScratch.size() >= 32 || size(accumulator) % rScratch.size() == 0);
 
-        // Do Block-Ring softmax and write results to global memory
-        /// Column-major indexing
-        auto* tFlag = moeConfig.getBRSFlags() + (cute::get<0>(tileCoord) * bM +
-            cute::get<1>(tileCoord) * bM * tilesM);
-        auto* nextFlag = moeConfig.getBRSFlags() + (cute::get<0>(tileCoord) * bM +
-            (cute::get<1>(tileCoord) + 1) % tilesN * bM * tilesM);
-        auto* values = moeConfig.getBRSValues() + (cute::get<0>(tileCoord) * bM +
-            cute::get<1>(tileCoord) * bM * tilesM);
-        auto* nextValues = moeConfig.getBRSValues() + (cute::get<0>(tileCoord) * bM +
-            (cute::get<1>(tileCoord) + 1) % tilesN * bM * tilesM);
-        auto residue = tilesN * BLOCK_N - moeConfig.numExperts;
+        auto residue = tilesN * bN - moeConfig.numExperts;
 
-        static_assert(sharedSize % (ARISTOS_BLOCK_SIZE * sizeof(ElementC) == 0));
-        constexpr auto elems = sharedSize / (ARISTOS_BLOCK_SIZE * sizeof(ElementC));
+        static_assert(sharedSize % (threads * sizeof(ElementC) == 0));
+        constexpr auto elems = sharedSize / (threads * sizeof(ElementC));
         static_assert(size(accumulator) % elems == 0);
         static_assert(elems % 32 == 0);
         constexpr auto trips = size(accumulator) / elems;
@@ -91,12 +100,14 @@ namespace aristos::gate {
         cute::Int<trips>, cute::Int<trips / 2>>::value;
 
         // Transposed layout in shared memory to minimize bank conflicts
-        constexpr auto sCLay = cute::make_layout(cute::Shape<cute::Int<elems>, cute::Int<ARISTOS_BLOCK_SIZE>>{},
+        constexpr auto sCLay = cute::make_layout(cute::Shape<cute::Int<elems>, cute::Int<threads>>{},
             cute::LayoutRight{});
         auto sC = cute::make_tensor(cute::make_smem_ptr(gateScratch), sCLay);
         typename BlockGEMM::MMA tiledMMA{};
         auto tCsC = tiledMMA.get_slice(threadIdx.x).partition_C(sC);
-        auto unsigned int padIterator = BLOCK_N - residue;
+        auto unsigned int padIterator = bN - residue;
+
+        // Begin Block-Ring softmax
         while (atomicLoad(tFlag) != 1U){}
         // Unpack message
         // using notation from https://courses.cs.washington.edu/courses/cse599m/23sp/notes/flashattn.pdf
@@ -169,21 +180,26 @@ namespace aristos::gate {
             }
         }
 
+        // Wait for heap to propagate
+        if (cute::get<1>(tileCoord) > 0) {
+            while (atomicLoad(tFlag) != 3U){}
+        }
+
         // Now do "online" topKMask
-        // Build binary heap on register memory
+        // Build binary min heap on register memory
         cutlass::AlignedArray<cuda::std::pair<ElementC, unsigned int>, k> heap{};
         #pragma unroll
-        for (int i = 0; i < k; ++i) {
-            heap[i].first = accumulator(i);
-            heap[i].second = i;
+        for (unsigned int i = 0; i < k; ++i) {
+            heap[i] = cuda::std::pair<ElementC, unsigned int>{accumulator(i), i};
         }
         cuda::std::make_heap(rScratch.begin(), rScratch.end(), cuda::std::greater{});
         cuda::std::pop_heap(rScratch.begin(), rScratch.end(), cuda::std::greater{});
         // min element now at the end of the array
         #pragma unroll
-        for (int i = k; i < size(accumulator); ++i) {
-            if (accumulator(i) > heap[i].first) {
-                accumulator(heap[i].second) = ElementC(0);
+        for (unsigned int i = k; i < size(accumulator); ++i) {
+            if (accumulator(i) > heap.back().first) {
+                accumulator(heap.back().second) = ElementC(0);
+                // Insert new element
                 heap[k - 1] = cuda::std::pair<ElementC, unsigned int>{accumulator(i), i};
                 cuda::std::push_heap(rScratch.begin(), rScratch.end(), cuda::std::greater{});
                 cuda::std::pop_heap(rScratch.begin(), rScratch.end(), cuda::std::greater{});
@@ -192,22 +208,29 @@ namespace aristos::gate {
                 accumulator(i) = ElementC(0);
             }
         }
-
+        // propagate heap to next block
         // Copy to global memory
-        // Await tiles to complete
-        // Build and send the first stage's packet to peers
-        buildSendPacket();
+        if constexpr (cublasdx::arrangement_of<typename BlockGEMM::GEMM>::c == cublasdx::row_major) {
+            cute::copy(accumulator, gC(threadIdx.x, cute::_));
+        }
+        else {
+            cute::copy(accumulator, gC(cute::_, threadIdx.x));
+        }
     }
     template<
         unsigned int Arch,
         unsigned int blocks,
         unsigned int k,
+        unsigned int sharedSize,
+        TripPredication tP = TripPredication::complete,
+        typename ElementC = float,
         typename MatrixA,
         typename MatrixB,
         typename MatrixC,
-        typename MatrixD,
-        typename ElementC = float
+        typename MatrixD
     >
+    requires aristos::Matrix<MatrixA> &&
+        aristos::Matrix<MatrixB> && aristos::Matrix<MatrixC> && aristos::Matrix<MatrixD>
     __device__ __forceinline__
     void forward(const MatrixA& activations,
         const MatrixB& weights,
@@ -225,8 +248,28 @@ namespace aristos::gate {
             cute::ceil_div(cute::get<1>(routing.shape()), cute::get<1>(ctaTiler{}));
 
         for (unsigned int i = blockIdx.x; i < nTiles; i += blocks) {
-            fGSTkM<Operation>(activations, weights, routing, bias, accumulator, i, scratch);
+            fGSTkM<Operation, k, sharedSize, tP>(activations, weights, routing, bias, accumulator, i, scratch);
         }
+
+        // Each block set syncs here prior to packet construction
+        auto* eplBlockade = moeConfig.getBRSBlockade();
+        if (!threadIdx.x) {
+            atomicAdd(eplBlockade, 1U);
+            // Single use barrier
+            while (atomicLoad(eplBlockade) != blocks){}
+        }
+        __syncthreads();
+
+        // zero flags for subsequent iterations
+        // Rather do here than a host memcpy operation
+        const auto len = cute::get<0>(routing.shape()) * cute::ceil_div(cute::get<1>(routing.shape()), BLOCK_N);
+        constexpr auto threads = Operation::GEMM::block_dim.x;
+        auto* flags = moeConfig.getBRSFlags() + cute::get<0>(routing.shape());
+        for (unsigned int i = threads * blockIdx.x + threadIdx.x; i < len; i += threads * blocks) {
+            flags[i] = 0U;
+        }
+        // Build and send the first stage's packet to peers
+        buildSendPacket();
     }
 }
 #endif //GATE_CUH

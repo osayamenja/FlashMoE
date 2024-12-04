@@ -9,6 +9,7 @@
 #include <nvshmemx.h>
 #include <nvshmem.h>
 #include <host/nvshmemx_api.h>
+#include "definition/types.cuh"
 
 template<unsigned int bM=128, unsigned int bN=128, unsigned int bK=8, unsigned int bP=3>
 __global__ void occupancyTestKernel(){
@@ -66,8 +67,12 @@ namespace aristos{
         void* bookKeeping;
         const auto taskBound = cute::ceil_div(seqLen, BLOCK_M) *
             (cute::ceil_div(embedDim, BLOCK_N) + cute::ceil_div(hiddenProjDim, BLOCK_N) + 1);
-        memoryBytes = (sizeof(uint8_t) + 2 * sizeof(float)) * seqLen * cute::ceil_div(numExperts, BLOCK_N) + // sync flags for gate
-            sizeof(float) * seqLen * numExperts + // gate routing
+        const auto paddedSeqLen = Config::pad<BLOCK_M>(seqLen);
+        const auto paddedNumExperts = Config::pad<BLOCK_N>(numExperts);
+
+        memoryBytes = (sizeof(uint8_t) + 2 * sizeof(maxPrecision)) * paddedSeqLen * cute::ceil_div(paddedNumExperts, BLOCK_N) + // sync flags for gate
+            sizeof(unsigned int) + sizeof(maxPrecision) * k * paddedSeqLen +  // gate barrier and binary min heap
+            sizeof(maxPrecision) * paddedSeqLen * paddedNumExperts + // gate routing
             sizeof(unsigned int) * numNeighbors + // EP rank -> global rank
             sizeof(unsigned int) * numExperts * 2  + // Expert parallelism specification and EP -> heap
             sizeof(unsigned int) * blocks + // readyQ
@@ -77,8 +82,7 @@ namespace aristos{
             sizeof(unsigned int) * N_READY_Q_SIGNALS + // rQS
             sizeof(unsigned int) * (N_TASK_Q_SIGNALS + 1);// tQS and doorbell
         CUTE_CHECK_ERROR(cudaMallocAsync(&bookKeeping, memoryBytes, aristosStream));
-        CUTE_CHECK_ERROR(cudaMemsetAsync(bookKeeping, 1, seqLen)); // assert westward flags
-        CUTE_CHECK_ERROR(cudaMemsetAsync(bookKeeping + seqLen, 0, memoryBytes - seqLen, aristosStream));
+        CUTE_CHECK_ERROR(cudaMemsetAsync(bookKeeping, 0, memoryBytes, aristosStream));
         CUTE_CHECK_ERROR(cudaMemcpyToSymbolAsync(moeConfig, &hostMoEConfig, sizeof(Config), 0,
                                             cudaMemcpyHostToDevice, aristosStream));
         CUTE_CHECK_ERROR(cudaPeekAtLastError());

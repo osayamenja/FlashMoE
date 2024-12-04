@@ -10,16 +10,7 @@
 #include <cute/arch/copy_sm80.hpp>
 #include <cutlass/gemm/dispatch_policy.hpp>
 
-// GEMM configuration constants
-#define MIN_ARCH 700
-#define THREADS 128
-#define BLOCK_M 128
-#define BLOCK_M_EXP 64
-#define BLOCK_N 64
-#define BLOCK_K_HALF 16
-#define BLOCK_K_FULL 8
-#define MAX_REGS (BLOCK_M * BLOCK_N) / THREADS
-#define PIPELINE_STAGES 2
+#include "../../definition/types.cuh"
 
 namespace aristos {
     template<typename T>

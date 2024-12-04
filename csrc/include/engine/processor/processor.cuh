@@ -9,18 +9,12 @@
 #include <cutlass/epilogue/thread/activation.h>
 
 #include "gemm.cuh"
-#include "../../definition/types.cuh"
 
 #define SHARED_SIZE 16 * 1024UL
 
 namespace aristos::processor{
     template <typename Element, typename ActivationFunction>
-    requires(cuda::std::is_same_v<Element, cute::half_t> ||
-        cuda::std::is_same_v<Element, cute::bfloat16_t> ||
-        cuda::std::is_same_v<Element, cute::tfloat32_t> ||
-        cuda::std::is_same_v<Element, float> ||
-        cuda::std::is_same_v<Element, cute::float_e4m3_t> ||
-        cuda::std::is_same_v<Element, cute::float_e5m2_t>)
+    requires aristos::TensorValueType<Element>
     __forceinline__ __device__
     auto fusedAddActivate(Element& accumulator, const Element& term, const ActivationFunction& op) {
             if constexpr (sizeof(Element) >= 4) {
@@ -154,7 +148,7 @@ namespace aristos::processor{
             #pragma unroll
             for (int j = 0; j < elems; ++j) {
                 tCgC(j + i * elems) = gCStoreOp(fusedAddActivate(accumulator(j + i * elems),
-                    rScratch[j], epilogueOp));
+                    gDLoadOp(rScratch[j]), epilogueOp));
             }
         }
 
