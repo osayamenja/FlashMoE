@@ -71,7 +71,7 @@ namespace aristos{
         const auto paddedNumExperts = Config::pad<BLOCK_N>(numExperts);
 
         memoryBytes = (sizeof(uint8_t) + 2 * sizeof(maxPrecision)) * paddedSeqLen * cute::ceil_div(paddedNumExperts, BLOCK_N) + // sync flags for gate
-            sizeof(unsigned int) + sizeof(cuda::std::pair<maxPrecision, unsigned int>) * k * paddedSeqLen * cute::ceil_div(paddedNumExperts, BLOCK_N) +  // gate barrier and binary min heap
+            sizeof(cuda::std::pair<maxPrecision, unsigned int>) * k * paddedSeqLen * cute::ceil_div(paddedNumExperts, BLOCK_N) +  // binary min heap
             sizeof(maxPrecision) * paddedSeqLen * paddedNumExperts + // gate routing
             sizeof(unsigned int) * numNeighbors + // EP rank -> global rank
             sizeof(unsigned int) * numExperts * 2  + // Expert parallelism specification and EP -> heap

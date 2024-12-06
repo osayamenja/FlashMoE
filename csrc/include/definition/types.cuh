@@ -81,6 +81,7 @@ namespace aristos{
         unsigned int capacity;
         unsigned int tilesN;
         unsigned int tilesNx;
+        cuda::barrier<cuda::thread_scope_device>* deviceBlockade;
 
         CUTE_HOST_DEVICE
         Config() = default;
@@ -99,7 +100,8 @@ namespace aristos{
                const unsigned int& _proj,
                const unsigned int& _cap,
                const unsigned int& _tilesN,
-               const unsigned int& _tilesNx):
+               const unsigned int& _tilesNx,
+               cuda::barrier<cuda::thread_scope_device>* _blockade):
                 sHeap(_symmetricHeap),
                 flags(_flags),
                 bookKeeping(_bk),
@@ -114,7 +116,7 @@ namespace aristos{
                 embedDim(_embedDim),
                 upProjection(_proj),
                 capacity(_cap),
-                tilesN(_tilesN), tilesNx(_tilesNx){}
+                tilesN(_tilesN), tilesNx(_tilesNx), deviceBlockade(_blockade){}
 
         __host__ __device__ __forceinline__
         static constexpr unsigned int getCapacity(const unsigned int& _seqLen, const unsigned int& _numPeers,

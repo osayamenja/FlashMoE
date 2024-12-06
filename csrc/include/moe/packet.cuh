@@ -5,9 +5,13 @@
 #ifndef PACKET_CUH
 #define PACKET_CUH
 
-namespace aristos {
+namespace aristos::packet {
     __forceinline__ __device__
-    void buildSendPacket() {
+    void construct() {
+
+    }
+    __forceinline__ __device__
+    void send() {
 
     }
 }

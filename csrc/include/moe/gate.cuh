@@ -52,8 +52,8 @@ namespace aristos::gate {
 
         /// Pointers for flags needed in epilogue
         /// col-major indexing
-        auto myTileOffset = bM * (cute::get<0>(tileCoord) + cute::get<1>(tileCoord) * tilesM) + threadIdx.x;
-        auto nextTileOffset = bM * (cute::get<0>(tileCoord) +
+        const auto myTileOffset = bM * (cute::get<0>(tileCoord) + cute::get<1>(tileCoord) * tilesM) + threadIdx.x;
+        const auto nextTileOffset = bM * (cute::get<0>(tileCoord) +
             (cute::get<1>(tileCoord) + 1 == tilesN ? 0 : cute::get<1>(tileCoord) + 1) * tilesM) + threadIdx.x;
         auto* tFlag = moeConfig.getBRSFlags() + myTileOffset;
         auto* nextFlag = moeConfig.getBRSFlags() + nextTileOffset;
@@ -88,7 +88,7 @@ namespace aristos::gate {
         cutlass::AlignedArray<ElementC, 32> rScratch{};
         static_assert(rScratch.size() >= 32 || size(accumulator) % rScratch.size() == 0);
 
-        auto residue = tilesN * bN - moeConfig.numExperts;
+        const auto residue = tilesN * bN - moeConfig.numExperts;
 
         static_assert(sharedSize % (threads * sizeof(ElementC) == 0));
         constexpr auto elems = sharedSize / (threads * sizeof(ElementC));
@@ -99,8 +99,7 @@ namespace aristos::gate {
         cute::Int<trips>, cute::Int<trips / 2>>::value;
 
         // Transposed layout in shared memory to minimize bank conflicts
-        constexpr auto sCLay = cute::make_layout(cute::Shape<cute::Int<elems>, cute::Int<threads>>{},
-            cute::LayoutRight{});
+        constexpr auto sCLay = cute::make_layout(cute::Shape<cute::Int<bM>, cute::Int<elems>>{});
         auto sC = cute::make_tensor(cute::make_smem_ptr(gateScratch), sCLay);
         typename BlockGEMM::MMA tiledMMA{};
         auto tCsC = tiledMMA.get_slice(threadIdx.x).partition_C(sC);
@@ -124,7 +123,7 @@ namespace aristos::gate {
             // Prefetch to registers
             #pragma unroll
             for (unsigned int j = 0; j < elems; ++j) {
-                rScratch[j + i * elems] = tCsC(j, threadIdx.x);
+                rScratch[j + i * elems] = sC(threadIdx.x, j);
             }
 
             // Handle padding before softmax
@@ -170,7 +169,7 @@ namespace aristos::gate {
             // Prefetch to registers
             #pragma unroll
             for (unsigned int j = 0; j < elems; ++j) {
-                rScratch[j + i * elems] = tCsC(j, threadIdx.x);
+                rScratch[j + i * elems] = sC(threadIdx.x, j);
             }
 
             #pragma unroll
@@ -260,11 +259,8 @@ namespace aristos::gate {
         }
 
         // Each block set syncs here prior to packet construction
-        auto* eplBlockade = moeConfig.getBRSBlockade();
         if (!threadIdx.x) {
-            atomicAdd(eplBlockade, 1U);
-            // Single use barrier
-            while (atomicLoad(eplBlockade) != blocks){}
+            moeConfig.deviceBlockade->arrive_and_wait();
         }
         __syncthreads();
 
@@ -276,8 +272,6 @@ namespace aristos::gate {
         for (unsigned int i = threads * blockIdx.x + threadIdx.x; i < len; i += threads * blocks) {
             flags[i] = 0U;
         }
-        // Build and send the first stage's packet to peers
-        buildSendPacket();
     }
 }
 #endif //GATE_CUH
