@@ -92,7 +92,7 @@ namespace aristos::gate {
                 cute::Underscore{},
                 threadIdx.x,
                 static_cast<char*>(static_cast<void*>(gateScratch)));
-            /// There is a barrier at the end of the above ^
+            __syncthreads();
 
             /// Epilogue
             static_assert(SHARED_SIZE % (threads * sizeof(ElementC) == 0));
@@ -259,7 +259,6 @@ namespace aristos::gate {
             }
 
             // Now issue additions to global loss vector: mE
-            // handle predication, when
             if (threadIdx.x < bN) {
                 atomicAdd(moeConfig.getGateMeanLogits() + (bN * cute::get<1>(tileCoord) + threadIdx.x),
                     __fdividef(lossScratch[threadIdx.x], static_cast<float>(moeConfig.seqLen)));
@@ -289,11 +288,17 @@ namespace aristos::gate {
                 atomicAdd(moeConfig.getMeanExpertCounts() + (bN * cute::get<1>(tileCoord) + threadIdx.x),
                     __fdividef(lossScratch[threadIdx.x], static_cast<float>(moeConfig.seqLen)));
                 atomicAdd(moeConfig.getExpertCounts() + (bN * cute::get<1>(tileCoord) + threadIdx.x),
-                    lossScratch[threadIdx.x]);
+                    static_cast<unsigned int>(lossScratch[threadIdx.x]));
+                lossScratch[threadIdx.x] = ElementC(0);
             }
             // Needed to avoid overwriting gC
             __syncthreads();
-            // Copy values from registers to gC
+            // Copy logits from registers to gC
+            #pragma unroll
+            for (unsigned int i = 0; i < cute::size(accumulator); ++i) {
+                gC(threadIdx.x, i) = accumulator(i);
+            }
+            __syncthreads();
         }
     };
 
@@ -348,12 +353,13 @@ namespace aristos::gate {
                 cute::Underscore{},
                 threadIdx.x,
                 static_cast<char*>(static_cast<void*>(gateScratch)));
+            __syncthreads();
 
             /// Epilogue
             static_assert(SHARED_SIZE % (threads * sizeof(ElementC) == 0));
             constexpr auto elems = SHARED_SIZE / (threads * sizeof(ElementC));
-            cutlass::AlignedArray<ElementC, bN> rScratch{};
-            static_assert(rScratch.size() == size(accumulator));
+            cutlass::AlignedArray<ElementC, elems> rScratch{};
+            static_assert(size(accumulator) % rScratch.size());
             const auto residue = tilesN * bN - moeConfig.numExperts;
             constexpr auto trips = size(accumulator) / elems;
 
@@ -403,7 +409,14 @@ namespace aristos::gate {
                 accumulator(j) = __fdividef(__expf(rScratch[j] - mI), dI);
             }
 
+            // Write gate logits to global memory
+            #pragma unroll
+            for (unsigned int j = 0; j < cute::size(accumulator); ++j) {
+                gC(threadIdx.x, j) = accumulator(j);
+            }
+
             // Reduce gate logits
+            static_assert(bN % elems == 0);
             #pragma unroll
             for (unsigned int i = 0; i < trips; ++i) {
                 #pragma unroll
@@ -413,25 +426,26 @@ namespace aristos::gate {
                 // Necessary to ensure THREADSx32 half-tile is ready
                 __syncthreads();
 
-                if (threadIdx.x < bN) {
-                    // 32x1 sub-tile from 128x32 tile
-                    #pragma unroll
-                    for (unsigned int j = 0; j < elems; ++j) {
-                        rScratch[j + i * elems] = sC(j, threadIdx.x);
-                    }
+                // 32x1 sub-tile from 128x32 tile
+                #pragma unroll
+                for (unsigned int j = 0; j < elems; ++j) {
+                    rScratch[j] = sC(j + threadIdx.x / elems * elems, threadIdx.x % elems);
                 }
+
+                /// Reduce
+                #pragma unroll
+                for (unsigned int j = 1; j < rScratch.size(); ++j) {
+                    rScratch[0] += rScratch[j];
+                }
+                atomicAdd_block(lossScratch + (i * elems + threadIdx.x % elems), rScratch[0]);
+                // Below is needed to avoid data races while loading the next batch
                 __syncthreads();
             }
 
-            #pragma unroll
-            for (unsigned int i = 1; i < rScratch.size(); ++i) {
-                rScratch[0] += rScratch[i];
-            }
-
-            // Now issue additions to global loss vector: mE
             if (threadIdx.x < bN) {
-                atomicAdd(moeConfig.getGateMeanLogits() + threadIdx.x, __fdividef(rScratch[0],
-                    static_cast<float>(moeConfig.seqLen)));
+                atomicAdd(moeConfig.getGateMeanLogits() + threadIdx.x,
+                    __fdividef(lossScratch[threadIdx.x], static_cast<float>(moeConfig.seqLen)));
+                lossScratch[threadIdx.x] = ElementC(0);
             }
             __syncthreads();
 
@@ -463,6 +477,7 @@ namespace aristos::gate {
 
             // Now accumulator has mask
             // Transpose
+            static_assert(bN % elems == 0);
             #pragma unroll
             for (unsigned int i = 0; i < trips; ++i) {
                 #pragma unroll
@@ -472,26 +487,32 @@ namespace aristos::gate {
                 // Necessary to ensure THREADSx32 half-tile is ready
                 __syncthreads();
 
-                if (threadIdx.x < bN) {
-                    // 32x1 sub-tile from 128x32 tile
-                    #pragma unroll
-                    for (unsigned int j = 0; j < elems; ++j) {
-                        accumulator(j + i * elems) = sC(j, threadIdx.x);
-                    }
+                // 32x1 sub-tile from 128x32 tile
+                #pragma unroll
+                for (unsigned int j = 0; j < elems; ++j) {
+                    rScratch[j] = sC(j + threadIdx.x / elems * elems, threadIdx.x % elems);
                 }
+
+                rScratch[0] = static_cast<ElementC>(rScratch(0) > ElementC(0));
+                /// Reduce
+                #pragma unroll
+                for (unsigned int j = 1; j < rScratch.size(); ++j) {
+                    rScratch[j] += static_cast<ElementC>(rScratch(j) > ElementC(0));
+                }
+                atomicAdd_block(lossScratch + (i * elems + threadIdx.x % elems), rScratch[0]);
+                // Below is needed to avoid data races while loading the next batch
                 __syncthreads();
             }
 
             // No warp divergence since bN % 32 == 0
             if (threadIdx.x < bN) {
-                // Reduce
-                accumulator(0) = static_cast<ElementC>(accumulator(0) > ElementC(0));
-                #pragma unroll
-                for (unsigned int i = 1; i < cute::size(accumulator); ++i) {
-                    accumulator(0) += static_cast<ElementC>(accumulator(i) > ElementC(i));
-                }
+                atomicAdd(moeConfig.getMeanExpertCounts() + threadIdx.x,
+                    __fdividef(lossScratch[threadIdx.x], static_cast<float>(moeConfig.seqLen)));
+                atomicAdd(moeConfig.getExpertCounts() + threadIdx.x,
+                    static_cast<unsigned int>(lossScratch[threadIdx.x]));
+                lossScratch[threadIdx.x] = ElementC(0);
             }
-
+            __syncthreads();
         }
     };
 

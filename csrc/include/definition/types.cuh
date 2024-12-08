@@ -296,7 +296,6 @@ namespace aristos{
     };
 
     enum class GateReductionLevel {
-        partialBlock,
         singleBlock,
         multiBlock
     };
