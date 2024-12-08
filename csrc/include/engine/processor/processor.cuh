@@ -10,8 +10,6 @@
 
 #include "gemm.cuh"
 
-#define SHARED_SIZE 16 * 1024UL
-
 namespace aristos::processor{
     template <typename Element, typename ActivationFunction>
     requires aristos::TensorValueType<Element>
@@ -35,7 +33,7 @@ namespace aristos::processor{
     template<>
     __forceinline__ __device__
     auto fusedAddActivate(cute::half_t& accumulator, const cute::half_t& term,
-        const cutlass::epilogue::thread::ReLU<cute::half_t>& op) {
+        [[maybe_unused]] const cutlass::epilogue::thread::ReLU<cute::half_t>& op) {
         return cute::half_t(__hfma_relu(__half(1.0f),
             accumulator.to_half(), term.to_half()));
     }
@@ -43,7 +41,7 @@ namespace aristos::processor{
     template<>
     __forceinline__ __device__
     auto fusedAddActivate(cute::bfloat16_t& accumulator, const cute::bfloat16_t& term,
-        const cutlass::epilogue::thread::ReLU<cute::bfloat16_t>& op) {
+        [[maybe_unused]] const cutlass::epilogue::thread::ReLU<cute::bfloat16_t>& op) {
         return cute::bfloat16_t(__hfma_relu(__nv_bfloat16(1.0f),
             accumulator.to_nv_bfloat16(), term.to_nv_bfloat16()));
     }
@@ -108,7 +106,7 @@ namespace aristos::processor{
             cute::Underscore{},
             threadIdx.x,
             CAST_TO(char, workspace));
-        __syncthreads();
+        /// There is a block-wide barrier at the end of the above ^
 
         // Epilogue
         typename BlockGEMM::MMA tiledMMA{};
@@ -170,11 +168,10 @@ namespace aristos::processor{
         typename ElementC = float,
         typename ElementD = ElementA,
         typename ActivationOp = cute::identity,
-        typename ActivationOpX = cute::identity,
-        unsigned int sharedSize = 16 * 1024
+        typename ActivationOpX = cute::identity
     > requires(processorCount > 0 && Arch >= MIN_ARCH)
     __device__ __forceinline__
-    void start(ElementD* workspace){
+    void start(ElementD* __restrict__ workspace){
         assert(__isShared(workspace));
         __shared__ unsigned int signal;
         __shared__ Task currentTask;
@@ -182,7 +179,7 @@ namespace aristos::processor{
         using Operation = BlockMM<Arch, ElementA, ElementB, ElementC, ActivationOp>;
         using OperationX = BlockMM<Arch, ElementA, ElementB, ElementC, ActivationOpX>;
         auto accumulator = cute::partition_fragment_C(typename Operation::MMA{}, typename Operation::TilerOut{});
-        constexpr auto elems = sharedSize / (THREADS * sizeof(ElementD));
+        constexpr auto elems = SHARED_SIZE / (THREADS * sizeof(ElementD));
         static_assert(cute::size(accumulator) % elems == 0);
         cutlass::AlignedArray<ElementC, elems> rScratch{};
 

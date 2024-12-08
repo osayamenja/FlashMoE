@@ -6,12 +6,10 @@
 #define PACKET_CUH
 
 namespace aristos::packet {
+    template<typename MatrixA>
+    requires aristos::Matrix<MatrixA>
     __forceinline__ __device__
-    void construct() {
-
-    }
-    __forceinline__ __device__
-    void send() {
+    void constructSend(MatrixA gateOutput, cuda::std::byte* workspace) {
 
     }
 }

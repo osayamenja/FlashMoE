@@ -23,21 +23,15 @@ namespace aristos{
     __inline__ auto aristosStream = cudaStreamPerThread;
     __forceinline__
     void aristosInit(const unsigned int& seqLen, const unsigned int& embedDim, const unsigned int& hiddenProjDim,
-                     const unsigned int& k, const unsigned int& capacityFactor, const unsigned int& globalWorld,
-                     const unsigned int& numExperts) {
-        int blocksPerSM = 0, l2CacheSize = 0;
+                     const unsigned int& k, const unsigned int& capacityFactor, const unsigned int& numExperts) {
+        // TODO assert inputs are correct
+        int l2CacheSize = 0;
         assert(!isInitialized);
         isInitialized = true;
         int cudaDevAttribute = 0;
         int dev = 0;
+        int blocks = 0;
         CUTE_CHECK_ERROR(cudaGetDevice(&dev));
-        CUTE_CHECK_ERROR(cudaDeviceGetAttribute(&cudaDevAttribute, cudaDevAttrMultiProcessorCount, dev));
-        CUTE_CHECK_ERROR(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-                &blocksPerSM,
-                occupancyTestKernel<BLOCK_M, BLOCK_N, BLOCK_K_FULL, PIPELINE_STAGES>,
-                ARISTOS_BLOCK_SIZE,
-                SHARED_SIZE));
-        const auto blocks = cudaDevAttribute * blocksPerSM;
         CUTE_CHECK_ERROR(cudaDeviceGetAttribute(&cudaDevAttribute,
                                                 cudaDevAttrMemoryPoolsSupported, dev));
         assert(cudaDevAttribute);
@@ -57,6 +51,7 @@ namespace aristos{
         // initialize NVSHMEM
         nvshmem_init();
         CUTE_CHECK_ERROR(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
+        const auto globalWorld = nvshmem_n_pes();
         // Allocate Symmetric Heap + Flags
         auto memoryBytes = ((STAGES * CELLS * seqLen * (embedDim + k + 2))*sizeof(maxPrecision)) + (STAGES * numNeighbors * sizeof(flagsType));
         memoryBytes = cute::max(memoryBytes, globalWorld * (BETA_BUFFER + (globalWorld + 1) * sizeof(floatPair)));
@@ -69,10 +64,15 @@ namespace aristos{
             (cute::ceil_div(embedDim, BLOCK_N) + cute::ceil_div(hiddenProjDim, BLOCK_N) + 1);
         const auto paddedSeqLen = Config::pad<BLOCK_M>(seqLen);
         const auto paddedNumExperts = Config::pad<BLOCK_N>(numExperts);
+        const auto brsData = (numExperts > BLOCK_N) *
+            (sizeof(unsigned int) * (paddedSeqLen * (paddedNumExperts / BLOCK_N)) + // sync flags for gate
+            2 * sizeof(maxPrecision) * paddedSeqLen + // m and d for softmax
+            sizeof(cuda::std::pair<maxPrecision, unsigned int>) * k * paddedSeqLen);  // binary min heap)
 
-        memoryBytes = (sizeof(uint8_t) + 2 * sizeof(maxPrecision)) * paddedSeqLen * cute::ceil_div(paddedNumExperts, BLOCK_N) + // sync flags for gate
-            sizeof(cuda::std::pair<maxPrecision, unsigned int>) * k * paddedSeqLen * cute::ceil_div(paddedNumExperts, BLOCK_N) +  // binary min heap
+        memoryBytes = brsData +
             sizeof(maxPrecision) * paddedSeqLen * paddedNumExperts + // gate routing
+            sizeof(unsigned int) * paddedNumExperts + // expert counts,
+            sizeof(maxPrecision) * (2 * paddedNumExperts + 1) + // gate loss vectors, loss value
             sizeof(unsigned int) * numNeighbors + // EP rank -> global rank
             sizeof(unsigned int) * numExperts * 2  + // Expert parallelism specification and EP -> heap
             sizeof(unsigned int) * blocks + // readyQ
@@ -81,6 +81,7 @@ namespace aristos{
             sizeof(Task) * taskBound + // taskQ
             sizeof(unsigned int) * N_READY_Q_SIGNALS + // rQS
             sizeof(unsigned int) * (N_TASK_Q_SIGNALS + 1);// tQS and doorbell
+        // Initialize hostConfig
         CUTE_CHECK_ERROR(cudaMallocAsync(&bookKeeping, memoryBytes, aristosStream));
         CUTE_CHECK_ERROR(cudaMemsetAsync(bookKeeping, 0, memoryBytes, aristosStream));
         CUTE_CHECK_ERROR(cudaMemcpyToSymbolAsync(moeConfig, &hostMoEConfig, sizeof(Config), 0,

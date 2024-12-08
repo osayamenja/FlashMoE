@@ -36,6 +36,7 @@
 #define BLOCK_K_FULL 8
 #define MAX_REGS (BLOCK_M * BLOCK_N) / THREADS
 #define PIPELINE_STAGES 2
+#define SHARED_SIZE 16 * 1024U
 
 namespace aristos{
     using maxPrecision = float; // no support for double, unfortunately
@@ -60,6 +61,7 @@ namespace aristos{
     };
 
     struct __align__(16) Config{
+        using HeapTuple = cuda::std::pair<maxPrecision, unsigned int>;
         cuda::std::byte* sHeap;
         flagsType* flags;
         /// Needed for free
@@ -132,23 +134,39 @@ namespace aristos{
         }
 
         __device__ __forceinline__
-        uint8_t* getBRSFlags() const {
-            return CAST_TO(uint8_t, bookKeeping);
+        unsigned int* getBRSFlags() const {
+            return CAST_TO(unsigned int, bookKeeping);
         }
 
         __device__ __forceinline__
         float2* getBRSValues() const {
-            return CAST_TO(float2, getBRSFlags() + (seqLen * pad<BLOCK_M>(numExperts)));
+            return CAST_TO(float2, getBRSFlags() + (seqLen * pad<BLOCK_N>(numExperts)));
         }
 
         __device__ __forceinline__
-        unsigned int* getBRSBlockade() const {
-            return CAST_TO(unsigned int, getBRSValues() + (seqLen * pad<BLOCK_M>(numExperts)));
+        HeapTuple* getBRSHeap() const {
+            return static_cast<HeapTuple*>(static_cast<void*>(getBRSValues() + pad<BLOCK_M>(seqLen)));
         }
 
         __device__ __forceinline__
-        cuda::std::pair<maxPrecision, unsigned int>* getBRSHeap() const {
-            return static_cast<cuda::std::pair<maxPrecision, unsigned int>*>(static_cast<void*>(getBRSBlockade() + 1));
+        unsigned int* getExpertCounts() const {
+            return CAST_TO(unsigned int, getBRSHeap() + k * pad<BLOCK_M>(seqLen));
+        }
+
+        // Gate loss
+        __device__ __forceinline__
+        maxPrecision* getGateMeanLogits() const {
+            return CAST_TO(maxPrecision, getExpertCounts() + pad<BLOCK_N>(numExperts));
+        }
+
+        __device__ __forceinline__
+        maxPrecision* getMeanExpertCounts() const {
+            return CAST_TO(maxPrecision, getGateMeanLogits() + pad<BLOCK_N>(numExperts));
+        }
+
+        __device__ __forceinline__
+        maxPrecision* getGateLoss() const {
+            return CAST_TO(maxPrecision, getMeanExpertCounts() + pad<BLOCK_N>(numExperts));
         }
 
         __host__ __device__ __forceinline__
@@ -270,6 +288,17 @@ namespace aristos{
         processed = 0,
         shouldProcess = 1,
         begin = 2
+    };
+
+    enum class TripPredication {
+        complete,
+        partial
+    };
+
+    enum class GateReductionLevel {
+        partialBlock,
+        singleBlock,
+        multiBlock
     };
 
     __device__

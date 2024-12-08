@@ -17,6 +17,9 @@ namespace aristos {
         typename ElementC = float,
         typename ActivationOp = cute::identity>
     struct BlockMM {
+        static_assert(BLOCK_M == THREADS);
+        static_assert(BLOCK_M == 128);
+        static_assert(BLOCK_N == 64, "64 is a very good value for N, change it back!");
         using GEMM = decltype(cublasdx::Size<BLOCK_M, BLOCK_N, BLOCK_K_FULL>()
                               + cublasdx::Precision<toCDX<ElementA>, toCDX<ElementB>, toCDX<ElementC>>()
                               + cublasdx::Type<cublasdx::type::real>()
