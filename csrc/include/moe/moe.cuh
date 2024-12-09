@@ -12,7 +12,7 @@ namespace aristos::moe{
     template<unsigned int Arch,
         unsigned int blocks,
         unsigned int k,
-        TripPredication tP = TripPredication::complete,
+        GateReductionLevel g = GateReductionLevel::singleBlock,
         typename ActivationOp = cute::identity,
         typename ActivationOpX = cute::identity,
         typename ElementC = float,
@@ -35,10 +35,10 @@ namespace aristos::moe{
         MatrixC moeOutput,
         MatrixCg gateOutput) {
 
-        gate::forward<Arch, blocks, k, tP, ElementC>(activations,
+        gate::forward<Arch, blocks, k, g, ElementC>(activations,
             gateWeights, gateOutput, CAST_TO(ElementC, workspace));
         if (blockIdx.x + 1 < blocks) {
-            packet::constructSend(gateOutput, workspace);
+            packet::constructSend<blocks>(gateOutput, workspace);
             processor::start<
                 blocks,
                 Arch,

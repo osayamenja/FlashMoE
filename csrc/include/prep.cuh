@@ -11,14 +11,54 @@
 #include <host/nvshmemx_api.h>
 #include "definition/types.cuh"
 
-template<unsigned int bM=128, unsigned int bN=128, unsigned int bK=8, unsigned int bP=3>
-__global__ void occupancyTestKernel(){
-    __shared__ float sharedA[cute::cosize_v<decltype(cute::make_layout(cute::make_shape(cute::Int<bM>{}, cute::Int<bK>{}, cute::Int<bP>{})))>];
-    __shared__ float sharedB[cute::cosize_v<decltype(cute::make_layout(cute::make_shape(cute::Int<bN>{}, cute::Int<bK>{}, cute::Int<bP>{})))>];
-}
-
 #define SUPPORTED = 1;
 namespace aristos{
+    enum class Board {
+        pcie,
+        sxm,
+    };
+    // Data center GPUs only
+    template<unsigned int Arch = 800, unsigned int maxRegisters = 128, Board b = Board::pcie>
+    struct Hardware {
+        static_assert(Arch == 800 && maxRegisters == 128 && b == Board::pcie);
+        using blocks = cute::Int<4 * 108>;
+    };
+
+    struct Hardware<800, 96> {
+        using blocks = cute::Int<5 * 108>;
+    };
+
+    struct Hardware<700> {
+        using blocks = cute::Int<4 * 80>;
+    };
+
+    struct Hardware<700, 96> {
+        using blocks = cute::Int<5 * 80>;
+    };
+
+    // Hopper
+    struct Hardware<900, 128, Board::sxm> {
+        using blocks = cute::Int<4 * 132>;
+    };
+
+    struct Hardware<900, 128, Board::pcie> {
+        using blocks = cute::Int<4 * 114>;
+    };
+
+    // Odd ones
+    struct Hardware<890> {
+        using blocks = cute::Int<5 * 84>;
+    };
+
+    struct Hardware<860> {
+        using blocks = cute::Int<5 * 84>;
+    };
+
+    struct Hardware<750> {
+        // this may be less than the actual
+        using blocks = cute::Int<3 * 40>;
+    };
+
     __inline__ bool isInitialized = false;
     __inline__ auto aristosStream = cudaStreamPerThread;
     __forceinline__
@@ -47,13 +87,17 @@ namespace aristos{
         std::vector<specType> parallelSpec{};
         std::vector<specType> translation{};
         const unsigned int numNeighbors = translation.size();
+        assert(sizeof(unsigned int) * (numExperts + numNeighbors) <= 14 * 1024 &&
+            "This use case requires more shared memory than we allocated."
+            "Let us know and we will do so and we will address.");
 
-        // initialize NVSHMEM
+        // initialize communication backend
         nvshmem_init();
         CUTE_CHECK_ERROR(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
         const auto globalWorld = nvshmem_n_pes();
         // Allocate Symmetric Heap + Flags
-        auto memoryBytes = ((STAGES * CELLS * seqLen * (embedDim + k + 2))*sizeof(maxPrecision)) + (STAGES * numNeighbors * sizeof(flagsType));
+        auto memoryBytes = STAGES * CELLS * seqLen * (embedDim + k + 2) * sizeof(maxPrecision) +
+            STAGES * numNeighbors * sizeof(flagsType);
         memoryBytes = cute::max(memoryBytes, globalWorld * (BETA_BUFFER + (globalWorld + 1) * sizeof(floatPair)));
         /// Allocates symmetric heap
         auto sHeap = nvshmem_calloc(memoryBytes, sizeof(cuda::std::byte));
@@ -67,12 +111,13 @@ namespace aristos{
         const auto brsData = (numExperts > BLOCK_N) *
             (sizeof(unsigned int) * (paddedSeqLen * (paddedNumExperts / BLOCK_N)) + // sync flags for gate
             2 * sizeof(maxPrecision) * paddedSeqLen + // m and d for softmax
-            sizeof(cuda::std::pair<maxPrecision, unsigned int>) * k * paddedSeqLen);  // binary min heap)
+            sizeof(cuda::std::pair<maxPrecision, unsigned int>) * k * paddedSeqLen);  // binary min heap
 
         memoryBytes = brsData +
             sizeof(maxPrecision) * paddedSeqLen * paddedNumExperts + // gate routing
             sizeof(unsigned int) * paddedNumExperts + // expert counts,
             sizeof(maxPrecision) * (2 * paddedNumExperts + 1) + // gate loss vectors, loss value
+            sizeof(unsigned int) * (numExperts + 1) * numNeighbors + // GPU -> experts lookup table
             sizeof(unsigned int) * numNeighbors + // EP rank -> global rank
             sizeof(unsigned int) * numExperts * 2  + // Expert parallelism specification and EP -> heap
             sizeof(unsigned int) * blocks + // readyQ

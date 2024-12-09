@@ -19,6 +19,7 @@ namespace aristos::gate {
     >
     requires(k <= 32 && k > 0)
     struct FusedGate {
+        static_assert(g == GateReductionLevel::multiBlock);
         template<
             class FrgTensorD,
             typename MatrixA,
@@ -260,6 +261,7 @@ namespace aristos::gate {
 
             // Now issue additions to global loss vector: mE
             if (threadIdx.x < bN) {
+                // TODO optimize to use float2 for hopper
                 atomicAdd(moeConfig.getGateMeanLogits() + (bN * cute::get<1>(tileCoord) + threadIdx.x),
                     __fdividef(lossScratch[threadIdx.x], static_cast<float>(moeConfig.seqLen)));
                 lossScratch[threadIdx.x] = ElementC(0);

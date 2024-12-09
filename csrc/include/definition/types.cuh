@@ -7,6 +7,8 @@
 
 #define ARISTOS_BLOCK_SIZE 128
 #define ARISTOS_BLOCK_SIZE_WARP (128 / 32)
+// number of blocks
+#define ARISTOS_SUPER_BLOCK_SIZE 64
 
 #define CAST_TO(T, p) static_cast<T*>(static_cast<void*>(p))
 
@@ -84,6 +86,7 @@ namespace aristos{
         unsigned int tilesN;
         unsigned int tilesNx;
         cuda::barrier<cuda::thread_scope_device>* deviceBlockade;
+        cuda::barrier<cuda::thread_scope_device>** packetBarriers;
 
         CUTE_HOST_DEVICE
         Config() = default;
@@ -103,7 +106,8 @@ namespace aristos{
                const unsigned int& _cap,
                const unsigned int& _tilesN,
                const unsigned int& _tilesNx,
-               cuda::barrier<cuda::thread_scope_device>* _blockade):
+               cuda::barrier<cuda::thread_scope_device>* _blockade,
+               cuda::barrier<cuda::thread_scope_device>** _pBarriers):
                 sHeap(_symmetricHeap),
                 flags(_flags),
                 bookKeeping(_bk),
@@ -118,7 +122,7 @@ namespace aristos{
                 embedDim(_embedDim),
                 upProjection(_proj),
                 capacity(_cap),
-                tilesN(_tilesN), tilesNx(_tilesNx), deviceBlockade(_blockade){}
+                tilesN(_tilesN), tilesNx(_tilesNx), deviceBlockade(_blockade), packetBarriers(_pBarriers){}
 
         __host__ __device__ __forceinline__
         static constexpr unsigned int getCapacity(const unsigned int& _seqLen, const unsigned int& _numPeers,
@@ -167,6 +171,11 @@ namespace aristos{
         __device__ __forceinline__
         maxPrecision* getGateLoss() const {
             return CAST_TO(maxPrecision, getMeanExpertCounts() + pad<BLOCK_N>(numExperts));
+        }
+
+        __device__ __forceinline__
+        unsigned int* getPeerXLookup() const {
+            return CAST_TO(unsigned int, getGateLoss() + 1);
         }
 
         __host__ __device__ __forceinline__
@@ -290,11 +299,10 @@ namespace aristos{
         begin = 2
     };
 
-    enum class TripPredication {
-        complete,
-        partial
+    enum class PacketWrapDistribution {
+        equidistant,
+        variant
     };
-
     enum class GateReductionLevel {
         singleBlock,
         multiBlock
