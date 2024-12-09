@@ -87,9 +87,8 @@ namespace aristos{
         std::vector<specType> parallelSpec{};
         std::vector<specType> translation{};
         const unsigned int numNeighbors = translation.size();
-        assert(sizeof(unsigned int) * (numExperts + numNeighbors) <= 14 * 1024 &&
-            "This use case requires more shared memory than we allocated."
-            "Let us know and we will do so and we will address.");
+        assert(numExperts + numNeighbors <= 4 * 1024 &&
+            "This use case requires more shared memory than we allocated. Let us know and we will address.");
 
         // initialize communication backend
         nvshmem_init();
