@@ -38,7 +38,7 @@ namespace aristos::moe{
         gate::forward<Arch, blocks, k, g, ElementC>(activations,
             gateWeights, gateOutput, CAST_TO(ElementC, workspace));
         if (blockIdx.x + 1 < blocks) {
-            packet::constructSend<blocks>(gateOutput, workspace);
+            packet::constructSend<blocks>(activations, gateOutput, workspace);
             processor::start<
                 blocks,
                 Arch,

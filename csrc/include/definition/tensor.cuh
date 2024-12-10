@@ -17,10 +17,7 @@ namespace aristos{
         cuda::std::is_same_v<V, cute::float_e5m2_t>;
 
     template<typename T>
-    concept Tensor = requires(T t){
-        requires cute::is_tensor<T>::value == true;
-        requires TensorValueType<typename decltype(t)::value_type>;
-    };
+    concept Tensor = cute::is_tensor<T>::value && TensorValueType<typename T::value_type>;
 
     template<typename M>
     concept Matrix = requires(M m){

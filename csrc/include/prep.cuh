@@ -116,7 +116,7 @@ namespace aristos{
             sizeof(maxPrecision) * paddedSeqLen * paddedNumExperts + // gate routing
             sizeof(unsigned int) * paddedNumExperts + // expert counts,
             sizeof(maxPrecision) * (2 * paddedNumExperts + 1) + // gate loss vectors, loss value
-            sizeof(unsigned int) * (numExperts + 1) * numNeighbors + // GPU -> experts lookup table
+            sizeof(unsigned int) * (numExperts * numNeighbors) + // GPU -> experts lookup table
             sizeof(unsigned int) * numNeighbors + // EP rank -> global rank
             sizeof(unsigned int) * numExperts * 2  + // Expert parallelism specification and EP -> heap
             sizeof(unsigned int) * blocks + // readyQ

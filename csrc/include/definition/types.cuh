@@ -39,6 +39,7 @@
 #define MAX_REGS (BLOCK_M * BLOCK_N) / THREADS
 #define PIPELINE_STAGES 2
 #define SHARED_SIZE 16 * 1024U
+#include "tensor.cuh"
 
 namespace aristos{
     using maxPrecision = float; // no support for double, unfortunately
@@ -65,6 +66,7 @@ namespace aristos{
     struct __align__(16) Config{
         using HeapTuple = cuda::std::pair<maxPrecision, unsigned int>;
         cuda::std::byte* sHeap;
+        cuda::std::byte* sHeapRemote;
         flagsType* flags;
         /// Needed for free
         cuda::std::byte* bookKeeping;
@@ -92,7 +94,7 @@ namespace aristos{
         Config() = default;
 
         CUTE_HOST
-        Config(cuda::std::byte* _symmetricHeap,
+        Config(cuda::std::byte* _symmetricHeap, cuda::std::byte* _sHeapRemote,
                flagsType* _flags,
                cuda::std::byte* _bk,
                const unsigned int& _rank,
@@ -109,6 +111,7 @@ namespace aristos{
                cuda::barrier<cuda::thread_scope_device>* _blockade,
                cuda::barrier<cuda::thread_scope_device>** _pBarriers):
                 sHeap(_symmetricHeap),
+                sHeapRemote(_sHeapRemote),
                 flags(_flags),
                 bookKeeping(_bk),
                 peerTranslation(CAST_TO(unsigned int, _bk)),
@@ -176,6 +179,13 @@ namespace aristos{
         __device__ __forceinline__
         unsigned int* getPeerXLookup() const {
             return CAST_TO(unsigned int, getGateLoss() + 1);
+        }
+
+        // Packet stuff
+        template<typename Element> requires aristos::TensorValueType<Element>
+        __forceinline__
+        auto frameSize() const {
+            return embedDim * sizeof(Element) + 2 * sizeof(maxPrecision);
         }
 
         __host__ __device__ __forceinline__
