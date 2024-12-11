@@ -7,7 +7,7 @@
 
 namespace aristos::subscriber{
     __device__ __forceinline__
-    void start(){
+    void start(cuda::std::byte* workspace){
         // Produce
 
     }

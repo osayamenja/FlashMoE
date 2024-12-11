@@ -155,15 +155,10 @@ namespace aristos{
             return static_cast<HeapTuple*>(static_cast<void*>(getBRSValues() + pad<BLOCK_M>(seqLen)));
         }
 
-        __device__ __forceinline__
-        unsigned int* getExpertCounts() const {
-            return CAST_TO(unsigned int, getBRSHeap() + k * pad<BLOCK_M>(seqLen));
-        }
-
         // Gate loss
         __device__ __forceinline__
         maxPrecision* getGateMeanLogits() const {
-            return CAST_TO(maxPrecision, getExpertCounts() + pad<BLOCK_N>(numExperts));
+            return CAST_TO(maxPrecision, getBRSHeap() + k * pad<BLOCK_M>(seqLen));
         }
 
         __device__ __forceinline__
@@ -177,15 +172,20 @@ namespace aristos{
         }
 
         __device__ __forceinline__
-        unsigned int* getPeerXLookup() const {
+        unsigned int* getExpertCounts() const {
             return CAST_TO(unsigned int, getGateLoss() + 1);
+        }
+
+        __device__ __forceinline__
+        unsigned int* getPeerXLookup() const {
+            return CAST_TO(unsigned int, getGateLoss() + numExperts);
         }
 
         // Packet stuff
         template<typename Element> requires aristos::TensorValueType<Element>
         __forceinline__
-        auto frameSize() const {
-            return embedDim * sizeof(Element) + 2 * sizeof(maxPrecision);
+        static auto frameSize(const unsigned int& length) {
+            return Config::pad<BLOCK_M>(length) * 2 * sizeof(Element) + (1 + length) * sizeof(maxPrecision);
         }
 
         __host__ __device__ __forceinline__

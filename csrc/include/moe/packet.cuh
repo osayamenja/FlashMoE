@@ -13,35 +13,64 @@ namespace aristos::packet {
     __forceinline__ __device__
     void constructSend(const Activations& activations, const GateProb& gateOutput,
         cuda::std::byte* __restrict__ workspace) {
+        __shared__ unsigned int packetTokenIdx;
         // assumption that simplifies pointer arithmetic
         static_assert(sizeof(unsigned int) == sizeof(maxPrecision));
         using ElementAct = typename Activations::value_type;
         using ElementGate = typename GateProb::value_type;
         using TrailerPair = cuda::std::pair<unsigned int, ElementAct>;
-        const auto seqLen = moeConfig.seqLen;
-        const auto world = moeConfig.worldSize;
-        const auto len = moeConfig.numExperts + 2 * world;
-        const auto frameSize = moeConfig.frameSize<ElementAct>();
-        const auto tokenSize = moeConfig.embedDim;
-        auto* scratch = CAST_TO(unsigned int, workspace);
-        const auto* experts = scratch + world;
-        for (unsigned int i = threadIdx.x; i < len; i += THREADS) {
-            scratch[i] = moeConfig.getPeerXLookup()[i];
-        }
-        __shared__ unsigned int packetTokenIdx;
+
         // Map 64 blocks to a peer and stride as thus
         constexpr auto residual = blocks / ARISTOS_SUPER_BLOCK_SIZE * ARISTOS_SUPER_BLOCK_SIZE;
         constexpr auto numSuperBlocks = blocks / ARISTOS_SUPER_BLOCK_SIZE + (blocks - residual > 32);
         const auto superBlockIdx = blockIdx.x / ARISTOS_SUPER_BLOCK_SIZE -
             (blockIdx.x >= residual && blocks - residual < 32);
         auto* superBlockBarrier = moeConfig.packetBarriers[superBlockIdx];
+
+        const auto numExperts = moeConfig.numExperts;
+        const auto seqLen = moeConfig.seqLen;
+        const auto world = moeConfig.worldSize;
+        const auto len = 2 * (numExperts + world);
+        const auto frameSize = moeConfig.frameSize<ElementAct>();
+        const auto tokenSize = moeConfig.embedDim;
+        auto* scratch = CAST_TO(unsigned int, workspace);
         auto* flags = moeConfig.flags;
-        auto* peerTranslation = scratch + moeConfig.numExperts + world;
+        const auto* expertCounts = scratch;
+        const auto* prefixExperts = scratch + numExperts;
+        const auto* experts = prefixExperts + world + 1; // sentinel at the end of this array
+        const auto* peerTranslation = experts + numExperts;
+        // below is above + world; done as such to maintain const for the above
+        auto* expertOffsets = CAST_TO(unsigned long int, scratch + numExperts + world + 1 + numExperts + world);
+        for (unsigned int i = threadIdx.x; i < numExperts; i += THREADS) {
+            scratch[i] = moeConfig.getExpertCounts()[i];
+        }
+        scratch += numExperts;
+        for (unsigned int i = threadIdx.x; i < len; i += THREADS) {
+            scratch[i] = moeConfig.getPeerXLookup()[i];
+        }
+        __syncthreads();
+
+        // Build expert offsets using a prefix sum
+        for (uint i = threadIdx.x; i < world; ++i) {
+            // get offset from prefix array
+            const auto offset = prefixExperts[i];
+            const auto length = prefixExperts[i + 1] - offset;
+            auto* slice = experts + offset;
+            expertOffsets[slice[0]] = 0;
+            auto prev = 0;
+            for (uint j = 1; j < length; ++j) {
+                auto actualExpertCounts = expertCounts[slice[j - 1]];
+                // frame length = padded(tokens) + padded(probabilities) + ids + single integer
+                prev += Config::frameSize<ElementAct>(actualExpertCounts);
+                expertOffsets[slice[j]] = prev;
+            }
+        }
         // Build and send a packet for this peer
         for (unsigned int i = superBlockIdx; i < world; i += numSuperBlocks) {
-            const auto numPeerExperts = scratch[i];
+            const auto numPeerExperts = prefixExperts[i + 1] - prefixExperts[i];
             const auto counts = numPeerExperts * seqLen;
             const bool isRemote = nvshmem_ptr(moeConfig.sHeap, i) == nullptr;
+            auto* peerExperts = experts + prefixExperts[i];
             // If the peer is P2P connected, then all memory writes below are NVLink transfers
             // TODO benchmark the below vs staging and sending one giant packet instead
             auto* peerHeap = static_cast<cuda::std::byte*>(isRemote? heap::advanceRemote<0, 0>(i) :
@@ -49,9 +78,9 @@ namespace aristos::packet {
             // Iterate through experts
             for (unsigned int j = superBlockIdx; j < counts; j += ARISTOS_SUPER_BLOCK_SIZE) {
                 const auto expertOffset = j / seqLen;
-                const auto expertIdx = experts[expertOffset];
+                const auto expertIdx = peerExperts[expertOffset];
                 const auto tokenIdx = j % seqLen;
-                auto* packetBuffer = peerHeap + expertOffset * frameSize;
+                auto* packetBuffer = peerHeap + expertOffsets[expertOffset];
                 auto* packetPayload = CAST_TO(ElementAct, packetBuffer + 1);
                 auto* packetTrailer = static_cast<TrailerPair*>(static_cast<void*>(packetPayload + tokenSize));
                 auto expertProbability = gateOutput(tokenIdx, expertIdx);
@@ -62,8 +91,7 @@ namespace aristos::packet {
                         // Note that using device scope rather than system is valid here
                         // because the remote peer will not access this buffer
                         // until we signal its availability.
-                        atomicIncrement(CAST_TO(unsigned int, peerHeap));
-                        packetTokenIdx = atomicIncrement(packetBuffer);
+                        packetTokenIdx = atomicIncrement(CAST_TO(unsigned int, packetBuffer));
                         // Tag on a subset of this packet's trailer
                         // Hopefully the pair struct here motivates the compiler
                         // to use a 64-bit store.
@@ -81,14 +109,13 @@ namespace aristos::packet {
             __syncthreads();
             if (!threadIdx.x) {
                 superBlockBarrier->arrive_and_wait();
-                // For a P2P peer, this read is via NVLink, meaning we should be vigilant of its performance.
-                const auto totalTokens = *CAST_TO(unsigned int, peerHeap);
+                const auto actualCount = expertCounts[peerExperts[numPeerExperts - 1]];
+                const auto totalBytes = expertOffsets[numPeerExperts - 1] + Config::frameSize<ElementAct>(actualCount);
                 if (!superBlockIdx) {
                     if (isRemote) {
                         // Only one thread is needed for RDMA transfer
                         nvshmem_putmem_signal_nbi(peerHeap, peerHeap,
-                            // Header + payload + trailer
-                            1 + totalTokens * (sizeof(ElementAct) + 2 * sizeof(maxPrecision)),
+                            totalBytes,
                             flags + i,
                             constructSignal(shouldProcess), NVSHMEM_SIGNAL_SET, peerTranslation[i]);
                     }
