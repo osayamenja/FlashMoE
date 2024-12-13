@@ -178,14 +178,20 @@ namespace aristos{
 
         __device__ __forceinline__
         unsigned int* getPeerXLookup() const {
-            return CAST_TO(unsigned int, getGateLoss() + numExperts);
+            return CAST_TO(unsigned int, getExpertCounts() + numExperts);
+        }
+
+        __device__ __forceinline__
+        unsigned int* getTokenIds() const {
+            return CAST_TO(unsigned int, getPeerXLookup() + (numExperts + 1 + 2 * worldSize));
         }
 
         // Packet stuff
         template<typename Element> requires aristos::TensorValueType<Element>
         __forceinline__
-        static auto frameSize(const unsigned int& length) {
-            return Config::pad<BLOCK_M>(length) * 2 * sizeof(Element) + (1 + length) * sizeof(maxPrecision);
+        static auto frameSize(const unsigned int& length, const unsigned int& dim){
+            // Header and payload
+            return  sizeof(maxPrecision) + (dim + 1) * Config::pad<BLOCK_M>(length) * sizeof(Element);
         }
 
         __host__ __device__ __forceinline__

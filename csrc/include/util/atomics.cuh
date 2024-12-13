@@ -54,6 +54,7 @@ namespace aristos{
         }
 
         template<cuda::thread_scope scope = cuda::thread_scope_device, typename T>
+        requires AtomicScope<scope> && AtomicType<T>
         __device__ __forceinline__
         void signal(T* addr) {
             if constexpr (scope == cuda::thread_scope_block || scope == cuda::thread_scope_thread) {

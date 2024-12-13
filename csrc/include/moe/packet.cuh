@@ -18,29 +18,19 @@ namespace aristos::packet {
         static_assert(sizeof(unsigned int) == sizeof(maxPrecision));
         using ElementAct = typename Activations::value_type;
         using ElementGate = typename GateProb::value_type;
-        using TrailerPair = cuda::std::pair<unsigned int, ElementAct>;
-
-        // Map 64 blocks to a peer and stride as thus
-        constexpr auto residual = blocks / ARISTOS_SUPER_BLOCK_SIZE * ARISTOS_SUPER_BLOCK_SIZE;
-        constexpr auto numSuperBlocks = blocks / ARISTOS_SUPER_BLOCK_SIZE + (blocks - residual > 32);
-        const auto superBlockIdx = blockIdx.x / ARISTOS_SUPER_BLOCK_SIZE -
-            (blockIdx.x >= residual && blocks - residual < 32);
-        auto* superBlockBarrier = moeConfig.packetBarriers[superBlockIdx];
 
         const auto numExperts = moeConfig.numExperts;
         const auto seqLen = moeConfig.seqLen;
         const auto world = moeConfig.worldSize;
         const auto len = 2 * (numExperts + world);
-        const auto frameSize = moeConfig.frameSize<ElementAct>();
         const auto tokenSize = moeConfig.embedDim;
         auto* scratch = CAST_TO(unsigned int, workspace);
         auto* flags = moeConfig.flags;
+        // readonly arrays
         const auto* expertCounts = scratch;
         const auto* prefixExperts = scratch + numExperts;
         const auto* experts = prefixExperts + world + 1; // sentinel at the end of this array
         const auto* peerTranslation = experts + numExperts;
-        // below is above + world; done as such to maintain const for the above
-        auto* expertOffsets = CAST_TO(unsigned long int, scratch + numExperts + world + 1 + numExperts + world);
         for (unsigned int i = threadIdx.x; i < numExperts; i += THREADS) {
             scratch[i] = moeConfig.getExpertCounts()[i];
         }
@@ -50,80 +40,129 @@ namespace aristos::packet {
         }
         __syncthreads();
 
-        // Build expert offsets using a prefix sum
+        scratch += world + 1 + numExperts + world;
+        auto* expertOffsets = CAST_TO(unsigned long long int, scratch);
+        auto* tokenOffsets = CAST_TO(unsigned int, expertOffsets + numExperts);
+        // Build expert and token offsets using a prefix sum
         for (uint i = threadIdx.x; i < world; ++i) {
             // get offset from prefix array
             const auto offset = prefixExperts[i];
             const auto length = prefixExperts[i + 1] - offset;
-            auto* slice = experts + offset;
+            const auto* slice = experts + offset;
             expertOffsets[slice[0]] = 0;
-            auto prev = 0;
+            tokenOffsets[slice[0]] = 0;
+            auto p = 0UL;
+            auto tP = 0U;
             for (uint j = 1; j < length; ++j) {
                 auto actualExpertCounts = expertCounts[slice[j - 1]];
-                // frame length = padded(tokens) + padded(probabilities) + ids + single integer
-                prev += Config::frameSize<ElementAct>(actualExpertCounts);
-                expertOffsets[slice[j]] = prev;
+                p += Config::frameSize<ElementAct>(actualExpertCounts, tokenSize);
+                tP += cute::ceil_div(actualExpertCounts, THREADS);
+                expertOffsets[slice[j]] = p;
+                tokenOffsets[slice[j]] = tP;
             }
         }
-        // Build and send a packet for this peer
-        for (unsigned int i = superBlockIdx; i < world; i += numSuperBlocks) {
-            const auto numPeerExperts = prefixExperts[i + 1] - prefixExperts[i];
-            const auto counts = numPeerExperts * seqLen;
-            const bool isRemote = nvshmem_ptr(moeConfig.sHeap, i) == nullptr;
-            auto* peerExperts = experts + prefixExperts[i];
-            // If the peer is P2P connected, then all memory writes below are NVLink transfers
-            // TODO benchmark the below vs staging and sending one giant packet instead
-            auto* peerHeap = static_cast<cuda::std::byte*>(isRemote? heap::advanceRemote<0, 0>(i) :
-                nvshmem_ptr(heap::advanceP2P<0>(i), i));
-            // Iterate through experts
-            for (unsigned int j = superBlockIdx; j < counts; j += ARISTOS_SUPER_BLOCK_SIZE) {
-                const auto expertOffset = j / seqLen;
-                const auto expertIdx = peerExperts[expertOffset];
-                const auto tokenIdx = j % seqLen;
-                auto* packetBuffer = peerHeap + expertOffsets[expertOffset];
-                auto* packetPayload = CAST_TO(ElementAct, packetBuffer + 1);
-                auto* packetTrailer = static_cast<TrailerPair*>(static_cast<void*>(packetPayload + tokenSize));
-                auto expertProbability = gateOutput(tokenIdx, expertIdx);
-                if (expertProbability > ElementGate(0)) {
-                    // insert into packet
-                    if (!threadIdx.x) {
-                        // Increment token count, needed later for packet transfer
-                        // Note that using device scope rather than system is valid here
-                        // because the remote peer will not access this buffer
-                        // until we signal its availability.
-                        packetTokenIdx = atomicIncrement(CAST_TO(unsigned int, packetBuffer));
-                        // Tag on a subset of this packet's trailer
-                        // Hopefully the pair struct here motivates the compiler
-                        // to use a 64-bit store.
-                        packetTrailer[packetTokenIdx] = TrailerPair{tokenIdx, expertProbability};
+        __syncthreads();
+        auto* staging = CAST_TO(ElementGate, scratch + 2 * numExperts + world);
+        // Account for subscriber block currently not here
+        constexpr auto blockStride = blocks - 1;
+        // upper bound metadata at <= 1024 elements
+        constexpr auto stagingSize = SHARED_SIZE / sizeof(ElementGate) - 1024;
+        static_assert(stagingSize % THREADS == 0);
+        constexpr auto prefetchStages = stagingSize / THREADS;
+        const auto trips = seqLen / stagingSize;
+        const auto residue = seqLen - trips * stagingSize;
+
+        // data structures
+        const unsigned int* epSpec = nullptr;
+        for (unsigned int i = blockIdx.x; i < numExperts; i += blockStride) {
+            const auto peer = epSpec[i];
+            auto* peerHeap = static_cast<cuda::std::byte*>(nvshmem_ptr(moeConfig.sHeap, peer) == nullptr ?
+                heap::advanceRemote<0, 0>(peer) : nvshmem_ptr(heap::advanceP2P<0>(peer), peer));
+            auto* packetBuffer = peerHeap + expertOffsets[i];
+            const auto routedTokens = expertCounts[i];
+            auto* packetPayload = CAST_TO(ElementAct, packetBuffer + 1);
+            auto* packetPayProb = packetPayload + Config::pad<BLOCK_M>(routedTokens) * tokenSize;
+            auto* packetIds = CAST_TO(unsigned int, packetPayProb + Config::pad<BLOCK_M>(routedTokens));
+            unsigned int tokenIdx = 0U;
+
+            if (!threadIdx.x) {
+                // header -> number of tokens in this packet
+                *CAST_TO(unsigned int, packetBuffer) = routedTokens;
+                const auto startIdx = tokenOffsets[i];
+                const auto nIds = cute::ceil_div(expertCounts[i], BLOCK_M);
+                packetIds += startIdx;
+                packetIds[0] = startIdx;
+                for (unsigned int j = 0; j < nIds; ++j) {
+                    packetIds[j] = startIdx + j;
+                }
+            }
+            // Split into two loop types: a static loop below and dynamic loop subsequently
+            // We unroll the static one.
+            if (trips) {
+                // prefetch subset of token context to shared memory
+                #pragma unroll
+                for (unsigned int k = threadIdx.x; k < stagingSize; ++k) {
+                    staging[k] = gateOutput(k, i);
+                }
+            }
+
+            for (unsigned int j = 0; j < trips; ++j) {
+                __syncthreads();
+                #pragma unroll
+                for (unsigned int k = 0; k < stagingSize; ++k) {
+                    const auto probability = staging[i];
+                    if (k < prefetchStages && j + 1 < trips) {
+                        // overlap prefetch of the next batch
+                        staging[threadIdx.x + k * THREADS] = gateOutput(k, i);
                     }
-                    __syncthreads();
-                    // single block cooperates to transfer token to the packet's buffer
-                    // we could do a 128-bit transfer here,
-                    // but that would require assertions to ensure corrections
-                    for (unsigned int k = threadIdx.x; k < tokenSize; ++k) {
-                        packetPayload[k] = activations(tokenIdx, k);
+                    if (probability > ElementGate(0)) {
+                        if (!threadIdx.x) {
+                            // write trailer
+                            packetPayProb[tokenIdx] = probability;
+                        }
+                        packetPayload += tokenSize * tokenIdx++;
+                        for (int l = threadIdx.x; l < tokenSize; ++l) {
+                            packetPayload[l] = activations(k, l);
+                        }
                     }
                 }
             }
+            for (unsigned int k = threadIdx.x; k < residue; ++k) {
+                staging[k] = gateOutput(k, i);
+            }
+            // Subset of token sequence now resides in shared memory
+            for (unsigned int k = 0; k < stagingSize; ++k) {
+                const auto probability = staging[i];
+                if (probability > ElementGate(0)) {
+                    if (!threadIdx.x) {
+                        // write trailer
+                        packetPayProb[tokenIdx] = probability;
+                    }
+                    packetPayload += tokenSize * tokenIdx++;
+                    for (int l = threadIdx.x; l < tokenSize; ++l) {
+                        packetPayload[l] = activations(k, l);
+                    }
+                }
+            }
+            // ensures data persistence before network transfer
             __syncthreads();
+            // send the packet or signal
             if (!threadIdx.x) {
-                superBlockBarrier->arrive_and_wait();
-                const auto actualCount = expertCounts[peerExperts[numPeerExperts - 1]];
-                const auto totalBytes = expertOffsets[numPeerExperts - 1] + Config::frameSize<ElementAct>(actualCount);
-                if (!superBlockIdx) {
-                    if (isRemote) {
-                        // Only one thread is needed for RDMA transfer
-                        nvshmem_putmem_signal_nbi(peerHeap, peerHeap,
-                            totalBytes,
-                            flags + i,
-                            constructSignal(shouldProcess), NVSHMEM_SIGNAL_SET, peerTranslation[i]);
-                    }
-                    else {
-                        // We have already done the transfer; thus, we set the signal only
-                        nvshmemx_signal_op(flags + i,
-                            constructSignal(shouldProcess), NVSHMEM_SIGNAL_SET, peerTranslation[i]);
-                    }
+                const auto totalBytes = sizeof(unsigned int) *
+                    (1 + cute::ceil_div(expertCounts[i], BLOCK_M))
+                + Config::pad<BLOCK_M>(routedTokens) * (tokenSize * sizeof(ElementAct) + sizeof(ElementGate));
+                if (nvshmem_ptr(moeConfig.sHeap, peer) == nullptr) {
+                    // Only one thread is needed for RDMA transfer
+                    nvshmem_putmem_signal_nbi(peerHeap, peerHeap,
+                        totalBytes,
+                        flags + i,
+                        sent, NVSHMEM_SIGNAL_ADD, peerTranslation[i]);
+                }
+                else {
+                    __threadfence_system();
+                    // We have already done the transfer; thus, we set the signal only
+                    nvshmemx_signal_op(flags + i,
+                        sent, NVSHMEM_SIGNAL_ADD, peerTranslation[i]);
                 }
             }
         }

@@ -118,6 +118,7 @@ namespace aristos{
             sizeof(unsigned int) * paddedNumExperts + // expert counts,
             sizeof(unsigned int) * (numExperts + numNeighbors + 1) + // GPU -> expert lookup table and sentinel for prefix
             sizeof(unsigned int) * numNeighbors + // EP rank -> global rank
+            sizeof(unsigned int) * seqLen + // token Ids used for post-reconstruction
             sizeof(unsigned int) * numExperts * 2  + // Expert parallelism specification and EP -> heap
             sizeof(unsigned int) * blocks + // readyQ
             sizeof(unsigned int) * blocks + // taskSignal

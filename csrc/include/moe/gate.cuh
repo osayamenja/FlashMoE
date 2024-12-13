@@ -372,7 +372,7 @@ namespace aristos::gate {
             auto tCsC = tiledMMA.get_slice(threadIdx.x).partition_C(sC);
             auto unsigned int padIterator = bN - residue;
 
-            // Begin Block-Ring softmax
+            // Begin softmax
             // using notation from https://courses.cs.washington.edu/courses/cse599m/23sp/notes/flashattn.pdf
             auto dI = ElementC(0);
             auto mI = -cuda::std::numeric_limits<ElementC>::infinity();
@@ -468,8 +468,8 @@ namespace aristos::gate {
                     accumulator(heap.back().first) = ElementC(0);
                     // Insert new element
                     heap[k - 1] = cuda::std::pair<ElementC, unsigned int>{accumulator(i), i + bN * cute::get<1>(tileCoord)};
-                    cuda::std::push_heap(rScratch.begin(), rScratch.end(), cuda::std::greater{});
-                    cuda::std::pop_heap(rScratch.begin(), rScratch.end(), cuda::std::greater{});
+                    cuda::std::push_heap(heap.begin(), heap.end(), cuda::std::greater{});
+                    cuda::std::pop_heap(heap.begin(), heap.end(), cuda::std::greater{});
                 }
                 else {
                     // applies mask
