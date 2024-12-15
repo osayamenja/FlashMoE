@@ -64,7 +64,7 @@ namespace aristos{
     __forceinline__
     void aristosInit(const unsigned int& seqLen, const unsigned int& embedDim, const unsigned int& hiddenProjDim,
                      const unsigned int& k, const unsigned int& capacityFactor, const unsigned int& numExperts) {
-        // TODO assert inputs are correct
+        // TODO assert inputs are correct and check for cudaDevP2PAttrNativeAtomicSupported, cudaDevP2PAttrAccessSupported
         int l2CacheSize = 0;
         assert(!isInitialized);
         isInitialized = true;
@@ -105,6 +105,7 @@ namespace aristos{
         void* bookKeeping;
         const auto taskBound = cute::ceil_div(seqLen, BLOCK_M) *
             (cute::ceil_div(embedDim, BLOCK_N) + cute::ceil_div(hiddenProjDim, BLOCK_N) + 1);
+        const auto tiles = cute::ceil_div(seqLen, BLOCK_M) * cute::ceil_div(embedDim, BLOCK_N);
         const auto paddedSeqLen = Config::pad<BLOCK_M>(seqLen);
         const auto paddedNumExperts = Config::pad<BLOCK_N>(numExperts);
         const auto brsData = (numExperts > BLOCK_N) *
@@ -112,7 +113,11 @@ namespace aristos{
             2 * sizeof(maxPrecision) * paddedSeqLen + // m and d for softmax
             sizeof(cuda::std::pair<maxPrecision, unsigned int>) * k * paddedSeqLen);  // binary min heap
 
+        // Allocate all memory needed once
         memoryBytes = brsData +
+            // flags for ring aggregation of token indices
+            sizeof(unsigned int) * (cute::ceil_div(seqLen, BLOCK_M) + cute::ceil_div(embedDim, BLOCK_N)) +
+            sizeof(unsigned int) * seqLen + // token ids
             sizeof(maxPrecision) * paddedSeqLen * paddedNumExperts + // gate routing
             sizeof(maxPrecision) * (2 * paddedNumExperts + 1) + // gate loss vectors, loss value
             sizeof(unsigned int) * paddedNumExperts + // expert counts,

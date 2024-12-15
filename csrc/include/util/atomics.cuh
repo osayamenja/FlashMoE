@@ -49,8 +49,15 @@ namespace aristos{
         // Ring-based polling.
         template<cuda::thread_scope scope = cuda::thread_scope_device, typename T>
         __device__ __forceinline__
-        void awaitTurn(T* addr, const T& baton) {
+        void awaitTurn(T* addr, const T& baton = static_cast<T>(1U)) {
             while (atomicLoad<scope>(addr) != baton){}
+        }
+
+        // non-blocking await routine
+        template<cuda::thread_scope scope = cuda::thread_scope_device, typename T>
+        __device__ __forceinline__
+        bool tryAwait(T* addr, const T& baton = static_cast<T>(1U)) {
+            return atomicLoad<scope>(addr) == baton;
         }
 
         template<cuda::thread_scope scope = cuda::thread_scope_device, typename T>
@@ -58,12 +65,12 @@ namespace aristos{
         __device__ __forceinline__
         void signal(T* addr) {
             if constexpr (scope == cuda::thread_scope_block || scope == cuda::thread_scope_thread) {
-                return atomicAdd_block(addr, 0U);
+                atomicAdd_block(addr, 1U);
             }
             if constexpr (scope == cuda::thread_scope_system) {
-                return atomicAdd_system(addr, 0U);
+                atomicAdd_system(addr, 1U);
             }
-            return atomicAdd(addr, 0U);
+            atomicAdd(addr, 1U);
         }
     }
 

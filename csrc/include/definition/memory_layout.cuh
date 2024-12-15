@@ -23,7 +23,7 @@ namespace aristos::heap{
         // peerStride = STAGES * stageStride
         // Thus, indexing is a prefix product of the above quantities, namely
         // ptr = moeConfig.sHeap + (peer * peerStride) + (stage * stageStride) + (cell * cellStride)
-        return moeConfig.sHeapRemote + moeConfig.capacity * moeConfig.embedDim * (CELLS * (peer * STAGES + stage) + cell);
+        return moeConfig.sHeap + moeConfig.capacity * moeConfig.embedDim * (CELLS * (peer * STAGES + stage) + cell);
     }
 }
 #endif //ARISTOS_MEMORY_LAYOUT_CUH

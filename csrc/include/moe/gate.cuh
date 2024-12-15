@@ -300,7 +300,6 @@ namespace aristos::gate {
             for (unsigned int i = 0; i < cute::size(accumulator); ++i) {
                 gC(threadIdx.x, i) = accumulator(i);
             }
-            __syncthreads();
         }
     };
 
@@ -361,6 +360,7 @@ namespace aristos::gate {
             static_assert(SHARED_SIZE % (threads * sizeof(ElementC) == 0));
             constexpr auto elems = SHARED_SIZE / (threads * sizeof(ElementC));
             cutlass::AlignedArray<ElementC, elems> rScratch{};
+            static_assert(elems % 32 == 0);
             static_assert(size(accumulator) % rScratch.size());
             const auto residue = tilesN * bN - moeConfig.numExperts;
             constexpr auto trips = size(accumulator) / elems;
@@ -480,6 +480,7 @@ namespace aristos::gate {
             // Now accumulator has mask
             // Transpose
             static_assert(bN % elems == 0);
+            auto tIdx = 0U;
             #pragma unroll
             for (unsigned int i = 0; i < trips; ++i) {
                 #pragma unroll
@@ -495,18 +496,26 @@ namespace aristos::gate {
                     rScratch[j] = sC(j + threadIdx.x / elems * elems, threadIdx.x % elems);
                 }
 
-                rScratch[0] = static_cast<ElementC>(rScratch(0) > ElementC(0));
+                if (rScratch(0) > ElementC(0)) {
+                    // reuse accumulator to store token indices
+                    accumulator(tIdx++) = static_cast<ElementC>(0);
+                    rScratch[0] += static_cast<ElementC>(1);
+                }
                 /// Reduce
                 #pragma unroll
                 for (unsigned int j = 1; j < rScratch.size(); ++j) {
-                    rScratch[j] += static_cast<ElementC>(rScratch(j) > ElementC(0));
+                    if (rScratch(j) > ElementC(0)) {
+                        // reuse accumulator to store token indices
+                        accumulator(tIdx++) = static_cast<ElementC>(j);
+                        rScratch[0] += static_cast<ElementC>(1);
+                    }
                 }
                 atomicAdd_block(lossScratch + (i * elems + threadIdx.x % elems), rScratch[0]);
                 // Below is needed to avoid data races while loading the next batch
                 __syncthreads();
             }
 
-            // No warp divergence since bN % 32 == 0
+            // No warp divergence since bN % warpSize == 0
             if (threadIdx.x < bN) {
                 atomicAdd(moeConfig.getMeanExpertCounts() + threadIdx.x,
                     __fdividef(lossScratch[threadIdx.x], static_cast<float>(moeConfig.seqLen)));
@@ -515,6 +524,43 @@ namespace aristos::gate {
                 lossScratch[threadIdx.x] = ElementC(0);
             }
             __syncthreads();
+            const bool inLastSection = threadIdx.x / elems + 1 == threads / elems;
+            auto* nF = threadIdx.x < elems ?
+                moeConfig.tIdxFlag() + (!cute::get<0>(tileCoord) ? 0 : cute::get<0>(tileCoord) - 1)
+                : CAST_TO(unsigned int, gateScratch);
+            auto* nV = threadIdx.x < elems ?
+                moeConfig.tIdxVal() : CAST_TO(unsigned int, gateScratch) + bN;
+            auto* sF = inLastSection? moeConfig.tIdxFlag() + cute::get<0>(tileCoord) + 1
+                : CAST_TO(unsigned int, gateScratch);
+            auto* sV = inLastSection? moeConfig.tIdxVal() : CAST_TO(unsigned int, gateScratch) + bN;
+            auto* status = CAST_TO(bool, CAST_TO(unsigned int, gateScratch) + 2 * bN);
+            #pragma unroll
+            for (uint i = 0; i < trips; ++i) {
+                status[i] = false;
+            }
+            const auto baton = threadIdx.x < elems ? 1U : threadIdx.x / elems;
+            // Now we await signal from the tile above us
+            auto received = 0U;
+            while (received < trips) {
+                #pragma unroll
+                for (uint i = 0; i < trips; ++i) {
+                    if (!status[i] && ring::tryAwait(nF + (threadIdx.x % elems + i * elems), baton)) {
+                        received++;
+                        // read value
+                        const auto msg = *nV;
+                        // update south peer's value
+                        *sV = msg + tIdx;
+                        // fence and notify
+                        __threadfence();
+                        atomicAdd(sF, 1U);
+                        // do copy
+                        auto* tokenIdx = moeConfig.tIdx() + msg;
+                        for (uint j = 0; j < tIdx; ++j) {
+                            tokenIdx[j] = __float2uint_rn(accumulator(j));
+                        }
+                    }
+                }
+            }
         }
     };
 
@@ -563,7 +609,7 @@ namespace aristos::gate {
         }
         __syncthreads();
 
-        // Compute loss
+        // Compute Gate loss
         for (unsigned int i = threads * blockIdx.x + threadIdx.x; i < moeConfig.numExperts; i+= threads * blocks) {
             const auto me = moeConfig.getGateMeanLogits()[i];
             const auto ce = moeConfig.getMeanExpertCounts()[i];
@@ -571,7 +617,7 @@ namespace aristos::gate {
                 __fdividef(me * ce, static_cast<maxPrecision>(moeConfig.numExperts)));
         }
 
-        // zero flags for subsequent iterations
+        // zero flags for next iterations
         // Rather do here than a host memcpy
         const auto len = cute::get<0>(routing.shape()) * cute::ceil_div(cute::get<1>(routing.shape()), bN);
         auto* flags = moeConfig.getBRSFlags() + cute::get<0>(routing.shape());

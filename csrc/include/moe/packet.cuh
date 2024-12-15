@@ -5,7 +5,6 @@
 #ifndef PACKET_CUH
 #define PACKET_CUH
 #include "../definition/memory_layout.cuh"
-#include "../util/atomics.cuh"
 
 namespace aristos::packet {
     template<unsigned int blocks, typename Activations, typename GateProb>
@@ -66,7 +65,7 @@ namespace aristos::packet {
         // Account for subscriber block currently not here
         constexpr auto blockStride = blocks - 1;
         // upper bound metadata at <= 1024 elements
-        constexpr auto stagingSize = SHARED_SIZE / sizeof(ElementGate) - 1024;
+        constexpr auto stagingSize = 256;
         static_assert(stagingSize % THREADS == 0);
         constexpr auto prefetchStages = stagingSize / THREADS;
         const auto trips = seqLen / stagingSize;
