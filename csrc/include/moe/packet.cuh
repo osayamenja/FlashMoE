@@ -156,7 +156,7 @@ namespace aristos::packet {
     __device__ __forceinline__
     void decode(cuda::std::byte* __restrict__ const& packet) {
         static_assert(p == PacketStage::initial);
-        
+
     }
     template<>
     __device__ __forceinline__
