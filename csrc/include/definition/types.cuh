@@ -8,7 +8,7 @@
 #define ARISTOS_BLOCK_SIZE 128
 #define ARISTOS_BLOCK_SIZE_WARP (128 / 32)
 // number of blocks
-#define ARISTOS_SUPER_BLOCK_SIZE 64
+#define ARISTOS_SUPER_BLOCK_SIZE 32
 
 #define CAST_TO(T, p) static_cast<T*>(static_cast<void*>(p))
 
@@ -47,11 +47,9 @@ namespace aristos{
     using flagsType = uint64_t;
 
     __device__
-    enum header : unsigned short {
-        NOOP = 0,
-        processed = 0,
-        shouldProcess = 1,
-        begin = 2
+    enum class PacketStage {
+        initial,
+        final,
     };
 
     enum class PacketWrapDistribution {
@@ -61,6 +59,16 @@ namespace aristos{
     enum class GateReductionLevel {
         singleBlock,
         multiBlock
+    };
+
+    enum class HeapType {
+        remote,
+        p2p
+    };
+
+    enum class DropTokens {
+        yes,
+        no
     };
 
     __device__
@@ -88,13 +96,12 @@ namespace aristos{
     struct __align__(16) Config{
         using HeapTuple = cuda::std::pair<maxPrecision, unsigned int>;
         cuda::std::byte* sHeap;
+        cuda::std::byte* p2pSHeap;
         flagsType* flags;
         /// Needed for free
         cuda::std::byte* bookKeeping;
         /// EP rank -> global rank
         unsigned int* peerTranslation;
-        /// EP rank -> heap offsets
-        unsigned int* heapOffsets;
         unsigned int* parallelismSpec;
         unsigned long sequenceNumber;
         /// Expert parallel group rank
@@ -116,7 +123,7 @@ namespace aristos{
         Config() = default;
 
         CUTE_HOST
-        Config(cuda::std::byte* _symmetricHeap,
+        Config(cuda::std::byte* _symmetricHeap, cuda::std::byte* _p2pHeap,
                flagsType* _flags,
                cuda::std::byte* _bk,
                const unsigned int& _rank,
@@ -134,11 +141,11 @@ namespace aristos{
                cuda::barrier<cuda::thread_scope_device>* _blockade,
                cuda::barrier<cuda::thread_scope_device>** _pBarriers):
                 sHeap(_symmetricHeap),
+                p2pSHeap(_p2pHeap),
                 flags(_flags),
                 bookKeeping(_bk),
                 peerTranslation(CAST_TO(unsigned int, _bk)),
-                heapOffsets(peerTranslation + _world),
-                parallelismSpec(heapOffsets + _world),
+                parallelismSpec(peerTranslation + _world),
                 sequenceNumber(_sequenceNumber),
                 rank(_rank),
                 seqLen(_seqLen),
@@ -163,28 +170,28 @@ namespace aristos{
             return cute::ceil_div(dimension, tileDimension) * tileDimension;
         }
 
-        template<GateReductionLevel g = GateReductionLevel::singleBlock>
+        template<GateReductionLevel g = GateReductionLevel::multiBlock>
         __device__ __forceinline__
         unsigned int* getBRSFlags() const {
-            static_assert(g == GateReductionLevel::singleBlock);
+            static_assert(g == GateReductionLevel::multiBlock);
             return CAST_TO(unsigned int, bookKeeping);
         }
 
-        template<GateReductionLevel g = GateReductionLevel::singleBlock>
+        template<GateReductionLevel g = GateReductionLevel::multiBlock>
         __device__ __forceinline__
         float2* getBRSValues() const {
-            static_assert(g == GateReductionLevel::singleBlock);
+            static_assert(g == GateReductionLevel::multiBlock);
             return CAST_TO(float2, getBRSFlags() + (seqLen * pad<BLOCK_N>(numExperts)));
         }
 
-        template<GateReductionLevel g = GateReductionLevel::singleBlock>
+        template<GateReductionLevel g = GateReductionLevel::multiBlock>
         __device__ __forceinline__
         HeapTuple* getBRSHeap() const {
-            static_assert(g == GateReductionLevel::singleBlock);
+            static_assert(g == GateReductionLevel::multiBlock);
             return static_cast<HeapTuple*>(static_cast<void*>(getBRSValues() + pad<BLOCK_M>(seqLen)));
         }
 
-        template<GateReductionLevel g = GateReductionLevel::multiBlock>
+        template<GateReductionLevel g = GateReductionLevel::singleBlock>
         unsigned int* tIdxFlag() const {
             if constexpr (g == GateReductionLevel::multiBlock) {
                 return CAST_TO(unsigned int, getBRSHeap() + k * pad<BLOCK_M>(seqLen));
@@ -192,14 +199,14 @@ namespace aristos{
             return CAST_TO(unsigned int, bookKeeping);
         }
 
-        template<GateReductionLevel g = GateReductionLevel::multiBlock>
+        template<GateReductionLevel g = GateReductionLevel::singleBlock>
         unsigned int* tIdxVal() const {
             if constexpr (g == GateReductionLevel::multiBlock) {
                 return CAST_TO(unsigned int, tIdxFlag() + tilesM * pad<BLOCK_N>(numExperts));
             }
             return CAST_TO(unsigned int, tIdxFlag() + tilesM * BLOCK_N);
         }
-        template<GateReductionLevel g = GateReductionLevel::multiBlock>
+        template<GateReductionLevel g = GateReductionLevel::singleBlock>
         unsigned int* tIdx() const {
             if constexpr (g == GateReductionLevel::multiBlock) {
                 return CAST_TO(unsigned int, tIdxVal() + pad<BLOCK_N>(numExperts));
@@ -208,10 +215,9 @@ namespace aristos{
         }
 
         // Gate loss
-        template<GateReductionLevel g = GateReductionLevel::multiBlock>
         __device__ __forceinline__
         maxPrecision* getGateMeanLogits() const {
-            return CAST_TO(maxPrecision, tIdx + seqLen);
+            return CAST_TO(maxPrecision, tIdx() + seqLen);
         }
 
         __device__ __forceinline__

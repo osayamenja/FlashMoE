@@ -63,7 +63,8 @@ namespace aristos{
     __inline__ auto aristosStream = cudaStreamPerThread;
     __forceinline__
     void aristosInit(const unsigned int& seqLen, const unsigned int& embedDim, const unsigned int& hiddenProjDim,
-                     const unsigned int& k, const unsigned int& capacityFactor, const unsigned int& numExperts) {
+                     const unsigned int& k, const unsigned int& capacityFactor, const unsigned int& numExperts,
+                     const bool& shouldDrop) {
         // TODO assert inputs are correct and check for cudaDevP2PAttrNativeAtomicSupported, cudaDevP2PAttrAccessSupported
         int l2CacheSize = 0;
         assert(!isInitialized);
@@ -99,6 +100,7 @@ namespace aristos{
             STAGES * numNeighbors * sizeof(flagsType);
         memoryBytes = cute::max(memoryBytes, globalWorld * (BETA_BUFFER + (globalWorld + 1) * sizeof(floatPair)));
         /// Allocates symmetric heap
+        /// assert alignment 16 bytes
         auto sHeap = nvshmem_calloc(memoryBytes, sizeof(cuda::std::byte));
 
         //Final Initialization
@@ -114,6 +116,7 @@ namespace aristos{
             sizeof(cuda::std::pair<maxPrecision, unsigned int>) * k * paddedSeqLen);  // binary min heap
 
         // Allocate all memory needed once
+        // TODO account for no token dropping
         memoryBytes = brsData +
             // flags for ring aggregation of token indices
             sizeof(unsigned int) * (cute::ceil_div(seqLen, BLOCK_M) + cute::ceil_div(embedDim, BLOCK_N)) +

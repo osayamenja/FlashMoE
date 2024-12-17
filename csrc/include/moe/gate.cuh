@@ -541,6 +541,7 @@ namespace aristos::gate {
             const auto baton = threadIdx.x < elems ? 1U : threadIdx.x / elems;
             // Now we await signal from the tile above us
             auto received = 0U;
+            auto* tIdxData = moeConfig.tIdx() + threadIdx.x % elems * moeConfig.capacity;
             while (received < trips) {
                 #pragma unroll
                 for (uint i = 0; i < trips; ++i) {
@@ -554,13 +555,14 @@ namespace aristos::gate {
                         __threadfence();
                         atomicAdd(sF, 1U);
                         // do copy
-                        auto* tokenIdx = moeConfig.tIdx() + msg;
+                        auto* tokenIdx = tIdxData + msg;
                         for (uint j = 0; j < tIdx; ++j) {
                             tokenIdx[j] = __float2uint_rn(accumulator(j));
                         }
                     }
                 }
             }
+            __syncthreads();
         }
     };
 

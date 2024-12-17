@@ -38,7 +38,7 @@ namespace aristos::moe{
         gate::forward<Arch, blocks, k, g, ElementC>(activations,
             gateWeights, gateOutput, CAST_TO(ElementC, workspace));
         if (blockIdx.x + 1 < blocks) {
-            packet::constructSend<blocks>(activations, gateOutput, workspace);
+            packet::encode<blocks>(activations, gateOutput, workspace);
             processor::start<
                 blocks,
                 Arch,
@@ -54,7 +54,7 @@ namespace aristos::moe{
                 scheduler::start<blocks>();
             }
             else {
-                subscriber::start();
+                subscriber::start(workspace);
             }
         }
     }

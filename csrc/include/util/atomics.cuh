@@ -20,7 +20,7 @@ namespace aristos{
     template<cuda::thread_scope scope = cuda::thread_scope_device, typename T>
     requires AtomicType<T> && AtomicScope<scope>
     __device__ __forceinline__
-    T atomicLoad(T* addr){
+    T atomicLoad(T* const& addr){
         if constexpr (scope == cuda::thread_scope_block || scope == cuda::thread_scope_thread) {
             return atomicOr_block(addr, 0U);
         }
@@ -34,7 +34,7 @@ namespace aristos{
     unsigned int bound = cuda::std::numeric_limits<unsigned int>::max()>
     requires(AtomicScope<scope> && bound <= cuda::std::numeric_limits<unsigned int>::max())
     __device__ __forceinline__
-    unsigned int atomicIncrement(unsigned int* addr) {
+    unsigned int atomicIncrement(unsigned int* const& addr) {
         if constexpr (scope == cuda::thread_scope_block || scope == cuda::thread_scope_thread) {
             return atomicInc_block(addr, bound);
         }
@@ -49,21 +49,21 @@ namespace aristos{
         // Ring-based polling.
         template<cuda::thread_scope scope = cuda::thread_scope_device, typename T>
         __device__ __forceinline__
-        void awaitTurn(T* addr, const T& baton = static_cast<T>(1U)) {
+        void awaitTurn(T* const& addr, const T& baton = static_cast<T>(1U)) {
             while (atomicLoad<scope>(addr) != baton){}
         }
 
         // non-blocking await routine
         template<cuda::thread_scope scope = cuda::thread_scope_device, typename T>
         __device__ __forceinline__
-        bool tryAwait(T* addr, const T& baton = static_cast<T>(1U)) {
+        bool tryAwait(T* const& addr, const T& baton = static_cast<T>(1U)) {
             return atomicLoad<scope>(addr) == baton;
         }
 
         template<cuda::thread_scope scope = cuda::thread_scope_device, typename T>
         requires AtomicScope<scope> && AtomicType<T>
         __device__ __forceinline__
-        void signal(T* addr) {
+        void signal(T* const& addr) {
             if constexpr (scope == cuda::thread_scope_block || scope == cuda::thread_scope_thread) {
                 atomicAdd_block(addr, 1U);
             }
