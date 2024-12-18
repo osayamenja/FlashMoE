@@ -51,7 +51,11 @@ namespace aristos::moe{
         }
         else {
             if (!threadIdx.x) {
-                scheduler::start<blocks>();
+                *CAST_TO(unsigned int, workspace) = moeConfig.nTiles;
+            }
+            __syncthreads();
+            if (!threadIdx.x) {
+                scheduler::start<blocks>(CAST_TO(unsigned int, workspace));
             }
             else {
                 subscriber::start(workspace);

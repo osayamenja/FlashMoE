@@ -13,6 +13,10 @@ namespace aristos{
     concept AtomicType = cuda::std::same_as<B, int> || cuda::std::same_as<B, unsigned int>
     || cuda::std::same_as<B, unsigned long long int>;
 
+    template<typename B>
+    concept AtomicCASType = cuda::std::same_as<B, int> || cuda::std::same_as<B, unsigned int>
+    || cuda::std::same_as<B, unsigned long long int> || cuda::std::same_as<B, unsigned short int>;
+
     template<cuda::thread_scope scope>
     concept AtomicScope = scope == cuda::thread_scope_thread ||
         scope == cuda::thread_scope_block || scope == cuda::thread_scope_device || scope == cuda::thread_scope_system;
@@ -43,6 +47,21 @@ namespace aristos{
         }
         return atomicInc(addr, bound);
     }
+
+    // Atomic Test and set
+    template<cuda::thread_scope scope = cuda::thread_scope_device, typename T>
+    requires AtomicCASType<T> && AtomicScope<scope>
+    __device__ __forceinline__
+    T atomicTAS(T* const& addr) {
+        if constexpr (scope == cuda::thread_scope_block || scope == cuda::thread_scope_thread) {
+            return atomicCAS_block(addr, 0U, 1U);
+        }
+        if constexpr (scope == cuda::thread_scope_system) {
+            return atomicCAS_system(addr, 0U, 1U);
+        }
+        return atomicCAS(addr, 0U, 1U);
+    }
+
 
     namespace ring {
         //TODO use partially specialized struct for this

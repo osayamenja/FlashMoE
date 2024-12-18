@@ -7,14 +7,11 @@
 
 #include "types.cuh"
 namespace aristos::heap{
-    template<HeapType h = HeapType::remote, unsigned int stage = 0, unsigned cell = 0>
+    template<unsigned int stage = 0, unsigned cell = 0>
     requires (stage < STAGES && cell < CELLS)
     __device__ __forceinline__
     auto* advance(unsigned int const& peer) {
-        if constexpr (h == HeapType::remote) {
-            return moeConfig.sHeap + moeConfig.capacity * moeConfig.embedDim * (CELLS * (peer * STAGES + stage) + cell);
-        }
-        return moeConfig.p2pSHeap + moeConfig.capacity * moeConfig.embedDim * (peer * STAGES + stage);
+        return moeConfig.sHeap + moeConfig.capacity * moeConfig.embedDim * (CELLS * (peer * STAGES + stage) + cell);
     }
 }
 #endif //ARISTOS_MEMORY_LAYOUT_CUH

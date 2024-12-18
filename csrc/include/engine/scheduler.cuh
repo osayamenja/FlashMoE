@@ -13,7 +13,7 @@ namespace aristos::scheduler {
     /// Micro-benchmarks show 10 vs. 100 ns performance difference.
     template<unsigned int processorCount> requires(processorCount > 0)
     __device__ __forceinline__
-    void start() {
+    void start(unsigned int* taskBound) {
         // Register allocations
         const auto* rQ = schedulerState.readyQ;
         auto* tQ = schedulerState.taskQ;
@@ -21,11 +21,10 @@ namespace aristos::scheduler {
         auto* rQHead = schedulerState.readyQHead;
         auto* doorbell = schedulerState.taskQSignals;
         auto* tQHead = schedulerState.taskQSignals + 1;
-        const auto taskBound = schedulerState.taskBound;
         unsigned int scheduled = 0U;
         unsigned int rQTail = 0U;
 
-        while (scheduled < taskBound) {
+        while (scheduled < atomicLoad<cuda::thread_scope_block>(taskBound)) {
             auto tasks = atomicLoad(doorbell) - scheduled;
             // Batch read to global memory
             while (tasks > 0) {

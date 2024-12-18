@@ -66,6 +66,7 @@ namespace aristos{
                      const unsigned int& k, const unsigned int& capacityFactor, const unsigned int& numExperts,
                      const bool& shouldDrop) {
         // TODO assert inputs are correct and check for cudaDevP2PAttrNativeAtomicSupported, cudaDevP2PAttrAccessSupported
+        assert(embedDim % BLOCK_N == 0 && hiddenProjDim % BLOCK_N == 0 && "Must be multiple of BLOCK_N");
         int l2CacheSize = 0;
         assert(!isInitialized);
         isInitialized = true;
@@ -116,8 +117,8 @@ namespace aristos{
             sizeof(cuda::std::pair<maxPrecision, unsigned int>) * k * paddedSeqLen);  // binary min heap
 
         // Allocate all memory needed once
-        // TODO account for no token dropping
-        memoryBytes = brsData +
+        memoryBytes = sizeof(maxPrecision) * paddedSeqLen * hiddenProjDim + // intermediary results of expert GEMM
+            brsData +
             // flags for ring aggregation of token indices
             sizeof(unsigned int) * (cute::ceil_div(seqLen, BLOCK_M) + cute::ceil_div(embedDim, BLOCK_N)) +
             sizeof(unsigned int) * seqLen + // token ids
@@ -125,8 +126,8 @@ namespace aristos{
             sizeof(maxPrecision) * (2 * paddedNumExperts + 1) + // gate loss vectors, loss value
             sizeof(unsigned int) * paddedNumExperts + // expert counts,
             sizeof(unsigned int) * (numExperts + numNeighbors + 1) + // GPU -> expert lookup table and sentinel for prefix
+            sizeof(unsigned int) * numExperts + // sync array for packet Construction
             sizeof(unsigned int) * numNeighbors + // EP rank -> global rank
-            sizeof(unsigned int) * seqLen + // token Ids used for post-reconstruction
             sizeof(unsigned int) * numExperts * 2  + // Expert parallelism specification and EP -> heap
             sizeof(unsigned int) * blocks + // readyQ
             sizeof(unsigned int) * blocks + // taskSignal

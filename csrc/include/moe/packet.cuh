@@ -6,6 +6,7 @@
 #define PACKET_CUH
 #include "../definition/types.cuh"
 #include "../definition/memory_layout.cuh"
+#include "../util/atomics.cuh"
 
 namespace aristos::packet {
     template<unsigned int blocks,
@@ -25,10 +26,9 @@ namespace aristos::packet {
         constexpr auto numSuperBlocks = blocks / superBlockSize;
         const auto superBlockIdx = blockIdx.x / superBlockSize;
         const auto lBid = blockIdx.x % superBlockSize;
-        auto* superBlockBarrier = moeConfig.packetBarriers[superBlockIdx];
         const auto tIdx =  lBid * THREADS + threadIdx.x;
         const bool isLeader = !blockIdx.x && !threadIdx.x;
-        const auto cap = moeConfig.capacity;
+        const auto cap = moeConfig.expertCapacity;
 
         auto tokenIds = make_tensor(cute::make_gmem_ptr(moeConfig.tIdx()),
             make_layout(cute::make_shape(moeConfig.numExperts, cap), cute::LayoutRight{}));
@@ -56,25 +56,24 @@ namespace aristos::packet {
 
         for (uint expertIdx = superBlockIdx; expertIdx < moeConfig.numExperts; expertIdx += numSuperBlocks) {
             // prefix array of routed tokens
+            // TODO below is not needed
             const auto prt = pRT[expertIdx];
             // logical expert index
             const auto lIdx = expertIdx / numSuperBlocks;
             const auto pLIdx = iPS[lIdx];
-            auto tokensToSend = expertCounts[lIdx];
-            if constexpr (d == DropTokens::yes) {
-                tokensToSend = prt >= cap ? 0 : prt + tokensToSend <= cap ? tokensToSend : prt + tokensToSend - cap;
-                if (!tokensToSend) {
-                    continue;
-                }
+            const auto routedTokens = d == DropTokens::yes ?
+                cute::min(expertCounts[lIdx], cap) : expertCounts[lIdx];
+            if (!routedTokens) {
+                // nothing to do here, folks
+                continue;
             }
-            const auto routedTokens = tokensToSend;
             const auto padded = Config::pad<BLOCK_M>(routedTokens);
             const auto peer = pS[lIdx];
             const auto pTT = cute::min(peerTotalTokens[peer], moeConfig.capacity);
             const auto isRemote = nvshmem_ptr(moeConfig.sHeap, peer) == nullptr;
             auto* peerHeap = static_cast<cuda::std::byte*>(isRemote ?
-                heap::advance<HeapType::remote, 0, 0>(peer) + prt :
-                nvshmem_ptr(heap::advance<HeapType::p2p, 0>(peer) + prt, peer));
+                heap::advance<0, 0>(peer) + prt :
+                nvshmem_ptr(heap::advance<0, 1>(peer) + prt, peer));
             if (isLeader) {
                 // write header -> {total tokens from me to peer, number of tokens in this packet}
                 *CAST_TO(uint2, peerHeap) = uint2{pTT, routedTokens};
@@ -123,45 +122,111 @@ namespace aristos::packet {
             }
             __syncthreads();
             if (!threadIdx.x) {
-                superBlockBarrier->arrive_and_wait();
-            }
-            if (isLeader) {
-                if (isRemote) {
-                    const auto tB = sizeof(uint2) +
-                        sizeof(unsigned int) * batchIdxLength +
-                        sizeof(ElementGate) * padded +
-                        sizeof(ElementAct) * routedTokens * moeConfig.embedDim;
-                    // do RDMA transfer
-                    nvshmem_putmem_signal_nbi(peerHeap, peerHeap,
-                        tB,
-                        moeConfig.flags + moeConfig.rank * nX[peer] + pLIdx,
-                        constructSignal(PacketStage::initial),
-                        NVSHMEM_SIGNAL_SET,
-                        pT[peer]);
-                }
-                else {
-                    __threadfence_system();
-                    // we've done the DMA transfer already, so we set the signal instead
-                    nvshmemx_signal_op(moeConfig.flags + moeConfig.rank * nX[peer] + pLIdx,
-                        constructSignal(PacketStage::initial),
-                        NVSHMEM_SIGNAL_SET,
-                        pT[peer]);
+                if (atomicIncrement(moeConfig.xSync() + expertIdx) + 1 == superBlockSize) {
+                    // I am the last block, let's finalize this transfer.
+                    if (isRemote) {
+                        const auto tB = sizeof(uint2) +
+                            sizeof(unsigned int) * batchIdxLength +
+                            sizeof(ElementGate) * padded +
+                            sizeof(ElementAct) * routedTokens * moeConfig.embedDim;
+                        // do RDMA transfer
+                        nvshmem_putmem_signal_nbi(heap::advance<0, 1>(peer) + prt,
+                            peerHeap,
+                            tB,
+                            moeConfig.flags + moeConfig.rank * nX[peer] + pLIdx,
+                            constructSignal(PacketStage::initial),
+                            NVSHMEM_SIGNAL_SET,
+                            pT[peer]);
+                    }
+                    else {
+                        __threadfence_system();
+                        // we've done the DMA transfer already, so we set the signal instead
+                        nvshmemx_signal_op(moeConfig.flags + moeConfig.rank * nX[peer] + pLIdx,
+                            constructSignal(PacketStage::initial),
+                            NVSHMEM_SIGNAL_SET,
+                            pT[peer]);
+                    }
                 }
             }
         }
     }
 
     // Decodes a single packet,
-    template<PacketStage p = PacketStage::initial>
+    template<PacketStage p = PacketStage::initial,
+    typename ElementData,
+    typename ElementScale>
     __device__ __forceinline__
-    void decode(cuda::std::byte* __restrict__ const& packet) {
+    void decode(cuda::std::byte* __restrict__ const& packet,
+        unsigned short int* __restrict__ const& status,
+        unsigned int* __restrict__ const& taskCount,
+        unsigned int const& localExpertIdx,
+        cuda::std::byte* __restrict__& cInitial,
+        cuda::std::byte** __restrict__& weights,
+        cuda::std::byte** __restrict__& bias,
+        unsigned int const& peer) {
         static_assert(p == PacketStage::initial);
+        // process header
+        const auto [totalTokens, routedTokens] = *CAST_TO(uint2, packet);
+        const auto globalTaskTiles = Config::tiles<BLOCK_M>(totalTokens);
+        const auto taskTiles = routedTokens / BLOCK_M;
+        if (!atomicTAS(status + peer)) {
+            // atomically reduce taskCount
+            const auto superfluous = (moeConfig.tilesN + moeConfig.tilesNx) *
+                (Config::tiles<BLOCK_M>(moeConfig.capacity) - globalTaskTiles);
+            atomicSub(taskCount, superfluous);
+        }
+        // process payload
+        auto* tokenIndices = packet + sizeof(uint2);
+        auto* scaleWeights = tokenIndices + sizeof(unsigned int) * routedTokens;
+        auto* tokens = scaleWeights + sizeof(ElementScale) * Config::pad<BLOCK_M>(routedTokens);
+        const auto tokenSize = moeConfig.embedDim;
+        auto* schedulerDB = schedulerState.taskQSignals;
 
-    }
-    template<>
-    __device__ __forceinline__
-    void decode<PacketStage::final>(cuda::std::byte* __restrict__ const& packet) {
+        // TODO abstract the below using structured bindings
+        auto* tQ = schedulerState.taskQ;
+        auto* tQHead = schedulerState.taskQSignals + 1;
 
+        const auto syncIdx = moeConfig.expertCapacity * (peer * moeConfig.numExperts + localExpertIdx);
+
+        // Below batch notifies the scheduler
+        for (uint i = 0; i < taskTiles; ++i) {
+            tQ[atomicIncrement(tQHead)] = Task{
+                TaskType::preGEMM,
+                tokens + i * BLOCK_M * tokenSize,
+                weights,
+                nullptr,
+                bias,
+                scaleWeights + i * BLOCK_M,
+                syncIdx + i,
+                i,
+                Config::pad<BLOCK_M>(routedTokens),
+                BLOCK_M,
+                peer,
+            };
+            // Populate ids in egress packet buffer
+        }
+
+        // Residual task
+        if (routedTokens % BLOCK_M != 0) {
+            tQ[atomicIncrement(tQHead)] = Task{
+                TaskType::preGEMM,
+                tokens + taskTiles * BLOCK_M * tokenSize,
+                weights,
+                nullptr,
+                bias,
+                scaleWeights + taskTiles * BLOCK_M,
+                syncIdx + taskTiles,
+                taskTiles,
+                Config::pad<BLOCK_M>(routedTokens),
+                routedTokens - taskTiles * BLOCK_M,
+                peer,
+            };
+        }
+        // Populate ids in egress packet buffer
+
+        __threadfence();
+        // notify scheduler
+        atomicAdd(schedulerDB, taskTiles);
     }
 }
 #endif //PACKET_CUH

@@ -47,11 +47,14 @@ namespace aristos::processor{
     }
 
     // Fused GEMM, Epilogue and Data transfer
+    // TODO make a struct
     template<
         typename BlockGEMM,
+        TaskType t = TaskType::preGEMM,
         class FrgTensorD,
         class RegisterScratch
     >
+    requires(t == TaskType::preGEMM || t == TaskType::postGEMM)
     __forceinline__ __device__
     void fGET(typename BlockGEMM::MatrixDType* workspace,
         FrgTensorD accumulator,
@@ -152,10 +155,13 @@ namespace aristos::processor{
 
         __syncthreads();
         if (!threadIdx.x) {
-            // The above GMEM copy could be local or p2p,
-            // with the latter being a direct store to an NVLink-connected peer.
-            // Thus, we must use a memory fence that spans all such cases.
-            __threadfence_system();
+            if constexpr (t == TaskType::preGEMM) {
+                __threadfence();
+            }
+            else {
+                // this could be a local or network transfer, thus requires a fence spanning both.
+                __threadfence_system();
+            }
         }
         __syncthreads();
     }
@@ -202,28 +208,31 @@ namespace aristos::processor{
             __syncthreads();
             switch (currentTask.taskType) {
                 case TaskType::preGEMM: {
-                    fGET<Operation>(workspace, accumulator, rScratch,
+                    constexpr unsigned int preIndex = 0;
+                    fGET<Operation, TaskType::preGEMM>(workspace, accumulator, rScratch,
                         CAST_TO(typename Operation::MatrixAType, currentTask.aData),
-                        CAST_TO(typename Operation::MatrixBType, currentTask.bData),
-                        CAST_TO(typename Operation::MatrixDType, currentTask.cData),
-                        CAST_TO(typename Operation::MatrixDType, currentTask.dData),
+                        CAST_TO(typename Operation::MatrixBType, currentTask.bData[preIndex]),
+                        CAST_TO(typename Operation::MatrixDType, currentTask.cData[preIndex]),
+                        CAST_TO(typename Operation::MatrixDType, currentTask.dData[preIndex]),
                         currentTask.M,
                         moeConfig.upProjection,
                         moeConfig.embedDim,
-                        currentTask.tile);
+                        currentTask.tileIdx);
                     if (!threadIdx.x &&
                         atomicAdd(schedulerState.taskSync + currentTask.syncIdx, 1U) == moeConfig.tilesN) {
                         for (unsigned int i = 0; i < moeConfig.tilesNx; ++i) {
                             schedulerState.taskQ[atomicAdd(schedulerState.taskQSignals + 1, 1U)]
                                 = Task{
                                     TaskType::postGEMM,
+                                    currentTask.cData[preIndex],
+                                    currentTask.bData,
                                     currentTask.cData,
-                                    currentTask.bDataNext,
-                                    currentTask.cDataNext,
+                                    currentTask.dData,
+                                    currentTask.scale,
                                     currentTask.syncIdx,
                                     i,
                                     currentTask.M,
-                                    currentTask.packetSize,
+                                    currentTask.tileSize,
                                     currentTask.peerIdx
                                 };
                         }
@@ -231,29 +240,30 @@ namespace aristos::processor{
                 }
                 break;
                 case TaskType::postGEMM: {
-                    fGET<OperationX>(workspace, accumulator, rScratch,
+                    constexpr unsigned int postIndex = 0;
+                    fGET<OperationX, TaskType::postGEMM>(workspace, accumulator, rScratch,
                         CAST_TO(typename Operation::MatrixAType, currentTask.aData),
-                        CAST_TO(typename Operation::MatrixBType, currentTask.bData),
-                        CAST_TO(typename Operation::MatrixDType, currentTask.cData),
-                        CAST_TO(typename Operation::MatrixDType, currentTask.dData),
+                        CAST_TO(typename Operation::MatrixBType, currentTask.bData[postIndex]),
+                        CAST_TO(typename Operation::MatrixDType, currentTask.cData[postIndex]),
+                        CAST_TO(typename Operation::MatrixDType, currentTask.dData[postIndex]),
                         currentTask.M,
                         moeConfig.embedDim,
                         moeConfig.upProjection,
-                        currentTask.tile);
+                        currentTask.tileIdx);
                     if (!threadIdx.x) {
                         if (atomicAdd(schedulerState.taskSync + currentTask.syncIdx, 1U)
                             == moeConfig.tilesN + moeConfig.tilesNx) {
                             if (nvshmem_ptr(currentTask.cData, currentTask.peerIdx) == nullptr) {
-                                // Batched remote network transfer to avoid overwhelming the NIC
+                                // Batch remote network transfer to avoid overwhelming the NIC
                                 nvshmem_putmem_signal_nbi(currentTask.cData, currentTask.cData,
-                                    sizeof(Operation::MatrixDType) * BLOCK_M * BLOCK_N * moeConfig.tilesNx,
+                                    moeConfig.finalPacketSize<ElementA>(currentTask.tileSize),
                                     moeConfig.flags + moeConfig.worldSize + currentTask.peerIdx,
-                                    constructSignal(processed), NVSHMEM_SIGNAL_SET, currentTask.peerIdx);
+                                    constructSignal(PacketStage::final), NVSHMEM_SIGNAL_SET, currentTask.peerIdx);
                             }
                             else {
                                 // Already did the network transfer in fGET, so set signal only
                                 nvshmemx_signal_op(moeConfig.flags + moeConfig.worldSize + currentTask.peerIdx,
-                                 constructSignal(processed), NVSHMEM_SIGNAL_SET, currentTask.peerIdx);
+                                 constructSignal(PacketStage::final), NVSHMEM_SIGNAL_SET, currentTask.peerIdx);
                             }
                         }
                     }

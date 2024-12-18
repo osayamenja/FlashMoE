@@ -618,14 +618,6 @@ namespace aristos::gate {
             atomicAdd(moeConfig.getGateLoss(),
                 __fdividef(me * ce, static_cast<maxPrecision>(moeConfig.numExperts)));
         }
-
-        // zero flags for next iterations
-        // Rather do here than a host memcpy
-        const auto len = cute::get<0>(routing.shape()) * cute::ceil_div(cute::get<1>(routing.shape()), bN);
-        auto* flags = moeConfig.getBRSFlags() + cute::get<0>(routing.shape());
-        for (unsigned int i = threads * blockIdx.x + threadIdx.x; i < len; i += threads * blocks) {
-            flags[i] = 0U;
-        }
     }
 }
 #endif //GATE_CUH
