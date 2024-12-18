@@ -96,6 +96,7 @@ namespace aristos{
         nvshmem_init();
         CUTE_CHECK_ERROR(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
         const auto globalWorld = nvshmem_n_pes();
+        // TODO: dual allocation to precisely get memory cost, namely max {|W| * |X_l|} across all EP groups
         // Allocate Symmetric Heap + Flags
         auto memoryBytes = STAGES * CELLS * seqLen * (embedDim + k + 2) * sizeof(maxPrecision) +
             STAGES * numNeighbors * sizeof(flagsType);
@@ -122,6 +123,7 @@ namespace aristos{
             // flags for ring aggregation of token indices
             sizeof(unsigned int) * (cute::ceil_div(seqLen, BLOCK_M) + cute::ceil_div(embedDim, BLOCK_N)) +
             sizeof(unsigned int) * seqLen + // token ids
+            sizeof(unsigned short int) * numNeighbors + // flags for packet construction
             sizeof(maxPrecision) * paddedSeqLen * paddedNumExperts + // gate routing
             sizeof(maxPrecision) * (2 * paddedNumExperts + 1) + // gate loss vectors, loss value
             sizeof(unsigned int) * paddedNumExperts + // expert counts,

@@ -27,7 +27,7 @@ namespace aristos::decider{
     /// Generates DP-EP groups [D, G] -> Devices to Groups
     /// Complexity 𝓞(|E|*log(|E|) + |V|(|V|-1)) => 𝓞(|V|^2*log(|V|^2)),
     /// where |V| = |workers| and |E| = number of edges = |V|*(|V| - 1)
-    __forceinline__
+    __forceinline__ __host__
     std::vector<size_t> decide(const AdjMatrix& adjMatrix,
                                const std::vector<Worker>& workers,
                                const unsigned long& totalExpertCost,

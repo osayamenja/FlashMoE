@@ -253,9 +253,9 @@ namespace aristos::processor{
                     if (!threadIdx.x) {
                         if (atomicAdd(schedulerState.taskSync + currentTask.syncIdx, 1U)
                             == moeConfig.tilesN + moeConfig.tilesNx) {
-                            if (nvshmem_ptr(currentTask.cData, currentTask.peerIdx) == nullptr) {
+                            if (nvshmem_ptr(currentTask.cData[postIndex], currentTask.peerIdx) == nullptr) {
                                 // Batch remote network transfer to avoid overwhelming the NIC
-                                nvshmem_putmem_signal_nbi(currentTask.cData, currentTask.cData,
+                                nvshmem_putmem_signal_nbi(currentTask.cData[postIndex], currentTask.cData[postIndex],
                                     moeConfig.finalPacketSize<ElementA>(currentTask.tileSize),
                                     moeConfig.flags + moeConfig.worldSize + currentTask.peerIdx,
                                     constructSignal(PacketStage::final), NVSHMEM_SIGNAL_SET, currentTask.peerIdx);

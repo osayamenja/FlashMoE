@@ -10,7 +10,7 @@ namespace aristos::heap{
     template<unsigned int stage = 0, unsigned cell = 0>
     requires (stage < STAGES && cell < CELLS)
     __device__ __forceinline__
-    auto* advance(unsigned int const& peer) {
+    auto* advance(unsigned int const& peer, unsigned int const& expert) {
         return moeConfig.sHeap + moeConfig.capacity * moeConfig.embedDim * (CELLS * (peer * STAGES + stage) + cell);
     }
 }

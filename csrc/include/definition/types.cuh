@@ -39,6 +39,7 @@
 #define MAX_REGS (BLOCK_M * BLOCK_N) / THREADS
 #define PIPELINE_STAGES 2
 #define SHARED_SIZE 16 * 1024U
+#define GEMMs 2U // per expert
 #include "tensor.cuh"
 
 namespace aristos{
@@ -161,7 +162,7 @@ namespace aristos{
         template<typename Element>
         __forceinline__ __device__
         constexpr size_t finalPacketSize(const unsigned int& numTokens) const {
-            return sizeof(unsigned int) + numTokens * (sizeof(unsigned int) + sizeof(Element) * embedDim);
+            return sizeof(unsigned int) + numTokens * (sizeof(unsigned int) + sizeof(Element) * embedDim * numTokens);
         }
         template<unsigned int tileDimension>
         __host__ __device__ __forceinline__
@@ -184,11 +185,16 @@ namespace aristos{
             return CAST_TO(Element, bookKeeping);
         }
 
+        __device__ __forceinline__
+        auto* packetFlags() const {
+            return CAST_TO(unsigned short int, xMid<maxPrecision>() + pad<BLOCK_M>(seqLen) * embedDim);
+        }
+
         template<GateReductionLevel g = GateReductionLevel::multiBlock>
         __device__ __forceinline__
         unsigned int* getBRSFlags() const {
             static_assert(g == GateReductionLevel::multiBlock);
-            return CAST_TO(unsigned int, xMid<maxPrecision>() + pad<BLOCK_M>(seqLen) * embedDim);
+            return CAST_TO(unsigned int, packetFlags() + worldSize);
         }
 
         template<GateReductionLevel g = GateReductionLevel::multiBlock>
@@ -293,9 +299,9 @@ namespace aristos{
     struct __align__(16) Task {
         // sensible sentinel values
         cuda::std::byte* aData = nullptr;
-        cuda::std::byte** bData = nullptr;
-        cuda::std::byte** cData = nullptr;
-        cuda::std::byte** dData = nullptr;
+        cuda::std::array<cuda::std::byte*, GEMMs> bData = {};
+        cuda::std::array<cuda::std::byte*, GEMMs> cData = {};
+        cuda::std::array<cuda::std::byte*, GEMMs> dData = {};
         cuda::std::byte* scale = nullptr;
         // crd2Idx(peer, expertIdx, offset)
         unsigned int syncIdx = 0UL;
@@ -310,11 +316,11 @@ namespace aristos{
 
         __device__ __forceinline__
         Task(const TaskType& _taskType,
-            cuda::std::byte* _aData,
-            cuda::std::byte** _bData,
-            cuda::std::byte** _cData,
-            cuda::std::byte** _dData,
-            cuda::std::byte* _scale,
+            cuda::std::byte*  const& _aData,
+            const cuda::std::array<cuda::std::byte*, GEMMs>& _bData,
+            const cuda::std::array<cuda::std::byte*, GEMMs>& _cData,
+            const cuda::std::array<cuda::std::byte*, GEMMs>& _dData,
+            cuda::std::byte*  const& _scale,
             const unsigned int& _syncIdx,
             const unsigned int& _tile,
             const unsigned int& _M,
