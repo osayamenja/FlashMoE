@@ -4,6 +4,11 @@
 
 #ifndef PACKET_CUH
 #define PACKET_CUH
+
+#include <nvshmemx.h>
+#include <nvshmem.h>
+#include <host/nvshmemx_api.h>
+
 #include "../definition/types.cuh"
 #include "../definition/memory_layout.cuh"
 #include "../util/atomics.cuh"
@@ -12,15 +17,14 @@ namespace aristos::packet {
     template<unsigned int blocks,
     DropTokens d = DropTokens::yes,
     unsigned int superBlockSize = ARISTOS_SUPER_BLOCK_SIZE,
-    typename Activations, typename GateProb>
-    requires aristos::Matrix<Activations> && aristos::Matrix<GateProb>
+    typename Activations>
+    requires aristos::Matrix<Activations>
     __forceinline__ __device__
-    void encode(const Activations& activations, const GateProb& gateOutput,
-        unsigned int* const& __restrict__ workspace) {
+    void encode(const Activations& activations, unsigned int* const& __restrict__ workspace) {
         // assert(blocks <= gridDim.x - 1)
         static_assert(blocks % superBlockSize == 0);
         using ElementAct = typename Activations::value_type;
-        using ElementGate = typename GateProb::value_type;
+        using ElementGate = maxPrecision;
 
         // Map a static set of blocks to an expert and stride as thus
         constexpr auto numSuperBlocks = blocks / superBlockSize;
@@ -106,21 +110,25 @@ namespace aristos::packet {
                 CAST_TO(unsigned int, peerHeap)[j] = startIdx + j;
             }
             peerHeap += sizeof(unsigned int) * batchIdxLength;
-            // copy scale probabilities
             for (uint j = tIdx; j < routedTokens; j += superBlockSize * THREADS) {
-                peerHeap[j] = gateOutput(tokenIds(expertIdx, j), expertIdx);
+                CAST_TO(ElementGate, peerHeap)[j] = tokenIds(expertIdx, j).second;
             }
             peerHeap += sizeof(ElementGate) * routedTokens;
-
             // Not needed for P2P connectivity due to non-contiguous access
             if (isRemote) {
-                // Padding the below rather than tokens reduces the packet size by pad amount * embedDim
+                // We pad below rather than tokens as it reduces the packet size by pad amount * embedDim
                 // Technically, we could optimize the below by sending a single zero byte per element,
                 // rather than the materialized element 0.
                 // This jeopardizes decoding as the decoder expects all data to be available in the
                 // packet.
-                for (uint j = tIdx; j < padded; j += superBlockSize * THREADS) {
-                    peerHeap[j] = ElementGate{0};
+                const auto padResidue = padded - routedTokens;
+                const auto vPr = padResidue / (sizeof(uint4) / sizeof(ElementGate));
+                for (uint j = tIdx; j < vPr; j += superBlockSize * THREADS) {
+                    CAST_TO(uint4, peerHeap)[j] = uint4{0UL, 0UL, 0UL, 0UL};
+                }
+                peerHeap += sizeof(uint4) * vPr;
+                for (uint j = tIdx; j < padResidue; j += superBlockSize * THREADS) {
+                    CAST_TO(ElementGate, peerHeap)[j] = ElementGate{0};
                 }
             }
 
@@ -130,13 +138,13 @@ namespace aristos::packet {
             for (uint j = lBid; j < routedTokens; j += superBlockSize) {
                 auto* localPH = peerHeap + j * moeConfig.embedDim * sizeof(ElementAct);
                 const auto tokenIdx = tokenIds(expertIdx, j);
-                const auto vTokenSize = moeConfig.embedDim / (sizeof(cute::uint128_t) / sizeof(ElementAct));
+                const auto vTokenSize = moeConfig.embedDim / (sizeof(uint4) / sizeof(ElementAct));
                 // Use high-throughput vector copy
                 for (uint k = threadIdx.x; k < vTokenSize; k += THREADS) {
-                    CAST_TO(cute::uint128_t, localPH)[k] = activations(tokenIdx, k);
+                    CAST_TO(uint4, localPH)[k] = activations(tokenIdx, k);
                 }
-                const auto residue = moeConfig.embedDim - vTokenSize * (sizeof(cute::uint128_t) / sizeof(ElementAct));
-                localPH += sizeof(cute::uint128_t) * vTokenSize;
+                const auto residue = moeConfig.embedDim - vTokenSize * (sizeof(uint4) / sizeof(ElementAct));
+                localPH += sizeof(uint4) * vTokenSize;
                 for (uint k = threadIdx.x; k < residue; k += THREADS) {
                     CAST_TO(ElementAct, localPH)[k] = activations(tokenIdx, k);
                 }
@@ -220,12 +228,12 @@ namespace aristos::packet {
         if (routedTokens) {
             *CAST_TO(unsigned int, packetBuffer) = routedTokens;
             packetBuffer += sizeof(unsigned int);
-            const auto vRt = routedTokens / (sizeof(cute::uint128_t) / sizeof(unsigned int));
+            const auto vRt = routedTokens / (sizeof(uint4) / sizeof(unsigned int));
             for (uint i = 0; i < vRt; ++i) {
-                CAST_TO(cute::uint128_t, packetBuffer)[i] = CAST_TO(cute::uint128_t, tokenIndices)[i];
+                CAST_TO(uint4, packetBuffer)[i] = CAST_TO(uint4, tokenIndices)[i];
             }
-            packetBuffer += sizeof(cute::uint128_t) * vRt;
-            const auto residue = routedTokens - vRt * (sizeof(cute::uint128_t) / sizeof(unsigned int));
+            packetBuffer += sizeof(uint4) * vRt;
+            const auto residue = routedTokens - vRt * (sizeof(uint4) / sizeof(unsigned int));
             for (uint i = 0; i < residue; ++i) {
                 CAST_TO(unsigned int, packetBuffer)[i] = CAST_TO(unsigned int, tokenIndices)[i];
             }

@@ -300,6 +300,8 @@ namespace aristos::gate {
             for (unsigned int i = 0; i < cute::size(accumulator); ++i) {
                 gC(threadIdx.x, i) = accumulator(i);
             }
+
+            // TODO token ids and combine weights
         }
     };
 
@@ -321,7 +323,7 @@ namespace aristos::gate {
             const MatrixB& weights, MatrixC& routing,
             FrgTensorD& accumulator,
             const unsigned int& tileIdx,
-            ElementC* __restrict__ gateScratch, ElementC* __restrict__ lossScratch) {
+            ElementC* __restrict__ gateScratch, ElementC* __restrict__ scratchpad) {
             static_assert(cuda::std::is_same_v<ElementC, float> && cuda::std::is_same_v<ElementC, maxPrecision>);
             typename BlockGEMM::CollectiveMainloop mainLoop{};
             cute::clear(accumulator);
@@ -439,22 +441,25 @@ namespace aristos::gate {
                 for (unsigned int j = 1; j < rScratch.size(); ++j) {
                     rScratch[0] += rScratch[j];
                 }
-                atomicAdd_block(lossScratch + (i * elems + threadIdx.x % elems), rScratch[0]);
+                atomicAdd_block(scratchpad + (i * elems + threadIdx.x % elems), rScratch[0]);
                 // Below is needed to avoid data races while loading the next batch
                 __syncthreads();
             }
 
             if (threadIdx.x < bN) {
                 atomicAdd(moeConfig.getGateMeanLogits() + threadIdx.x,
-                    __fdividef(lossScratch[threadIdx.x], static_cast<float>(moeConfig.seqLen)));
-                lossScratch[threadIdx.x] = ElementC(0);
+                    __fdividef(scratchpad[threadIdx.x], static_cast<float>(moeConfig.seqLen)));
+                scratchpad[threadIdx.x] = ElementC(0);
             }
             __syncthreads();
 
             cutlass::AlignedArray<cuda::std::pair<ElementC, unsigned int>, k> heap{};
+            // sum of the combine weights per token
+            auto mCw = ElementC{0};
             #pragma unroll
             for (unsigned int i = 0; i < k; ++i) {
                 heap[i] = cuda::std::pair<ElementC, unsigned int>{accumulator(i), i};
+                mCw += accumulator(i);
             }
 
             // Now do "online" topKMask
@@ -465,18 +470,21 @@ namespace aristos::gate {
             #pragma unroll
             for (unsigned int i = k; i < size(accumulator); ++i) {
                 if (accumulator(i) > heap.back().first) {
-                    accumulator(heap.back().first) = ElementC(0);
+                    // update the sliding window sum
+                    mCw += accumulator(i) - heap.back().first;
+                    accumulator(heap.back().second) = ElementC{0};
                     // Insert new element
-                    heap[k - 1] = cuda::std::pair<ElementC, unsigned int>{accumulator(i), i + bN * cute::get<1>(tileCoord)};
+                    heap[k - 1] = Config::HeapTuple{accumulator(i), i + bN * cute::get<1>(tileCoord)};
                     cuda::std::push_heap(heap.begin(), heap.end(), cuda::std::greater{});
                     cuda::std::pop_heap(heap.begin(), heap.end(), cuda::std::greater{});
                 }
                 else {
                     // applies mask
-                    accumulator(i) = ElementC(0);
+                    accumulator(i) = ElementC{0};
                 }
             }
 
+            cutlass::AlignedArray<unsigned int, elems> regTokenIdx{};
             // Now accumulator has mask
             // Transpose
             static_assert(bN % elems == 0);
@@ -498,7 +506,7 @@ namespace aristos::gate {
 
                 if (rScratch(0) > ElementC(0)) {
                     // reuse accumulator to store token indices
-                    accumulator(tIdx++) = static_cast<ElementC>(0);
+                    regTokenIdx[tIdx++] = bM * cute::get<0>(tileCoord);
                     rScratch[0] += static_cast<ElementC>(1);
                 }
                 /// Reduce
@@ -506,11 +514,11 @@ namespace aristos::gate {
                 for (unsigned int j = 1; j < rScratch.size(); ++j) {
                     if (rScratch(j) > ElementC(0)) {
                         // reuse accumulator to store token indices
-                        accumulator(tIdx++) = static_cast<ElementC>(j);
+                        regTokenIdx[tIdx++] = bM * cute::get<0>(tileCoord) + j;
                         rScratch[0] += static_cast<ElementC>(1);
                     }
                 }
-                atomicAdd_block(lossScratch + (i * elems + threadIdx.x % elems), rScratch[0]);
+                atomicAdd_block(scratchpad + (i * elems + threadIdx.x % elems), rScratch[0]);
                 // Below is needed to avoid data races while loading the next batch
                 __syncthreads();
             }
@@ -518,12 +526,13 @@ namespace aristos::gate {
             // No warp divergence since bN % warpSize == 0
             if (threadIdx.x < bN) {
                 atomicAdd(moeConfig.getMeanExpertCounts() + threadIdx.x,
-                    __fdividef(lossScratch[threadIdx.x], static_cast<float>(moeConfig.seqLen)));
+                    __fdividef(scratchpad[threadIdx.x], static_cast<float>(moeConfig.seqLen)));
                 atomicAdd(moeConfig.getExpertCounts() + threadIdx.x,
-                    static_cast<unsigned int>(lossScratch[threadIdx.x]));
-                lossScratch[threadIdx.x] = ElementC(0);
+                    static_cast<unsigned int>(scratchpad[threadIdx.x]));
+                scratchpad[threadIdx.x] = ElementC(0);
             }
             __syncthreads();
+            scratchpad[threadIdx.x] = mCw;
             const bool inLastSection = threadIdx.x / elems + 1 == threads / elems;
             auto* nF = threadIdx.x < elems ?
                 moeConfig.tIdxFlag() + (!cute::get<0>(tileCoord) ? 0 : cute::get<0>(tileCoord) - 1)
@@ -539,9 +548,15 @@ namespace aristos::gate {
                 status[i] = false;
             }
             const auto baton = threadIdx.x < elems ? 1U : threadIdx.x / elems;
+            if (!cute::get<0>(tileCoord) && threadIdx.x < elems) {
+                #pragma unroll
+                for (uint i = 0; i < trips; ++i) {
+                    //preset flags for topmost row
+                    nF[threadIdx.x % elems + i * elems] = 1U;
+                }
+            }
             // Now we await signal from the tile above us
             auto received = 0U;
-            auto* tIdxData = moeConfig.tIdx() + threadIdx.x % elems * moeConfig.capacity;
             while (received < trips) {
                 #pragma unroll
                 for (uint i = 0; i < trips; ++i) {
@@ -553,11 +568,13 @@ namespace aristos::gate {
                         *sV = msg + tIdx;
                         // fence and notify
                         __threadfence();
-                        atomicAdd(sF, 1U);
+                        ring::signal(sF);
                         // do copy
+                        auto* tIdxData = moeConfig.tIdx() + (threadIdx.x % elems + i * elems) * moeConfig.capacity;
                         auto* tokenIdx = tIdxData + msg;
                         for (uint j = 0; j < tIdx; ++j) {
-                            tokenIdx[j] = __float2uint_rn(accumulator(j));
+                            auto rTI = regTokenIdx[j];
+                            tokenIdx[j] = Config::TokenIdxTuple{rTI, scratchpad[rTI % bM]};
                         }
                     }
                 }
@@ -582,6 +599,7 @@ namespace aristos::gate {
         MatrixC& routing,
         ElementC* __restrict__ scratch){
         assert(__isShared(scratch));
+        static_assert(cuda::std::is_same_v<maxPrecision, ElementC>);
         using ElementA = typename MatrixA::value_type;
         using ElementB = typename MatrixB::value_type;
         using Operation = BlockMM<Arch, ElementA, ElementB, ElementC>;
@@ -590,9 +608,11 @@ namespace aristos::gate {
         constexpr auto threads = Operation::GEMM::block_dim.x;
         constexpr auto bM = cute::get<0>(ctaTiler{});
         constexpr auto bN = cute::get<1>(ctaTiler{});
-        __shared__ ElementC lossStaging[bN];
-        if (threadIdx.x < bN) {
-            lossStaging[threadIdx.x] = ElementC(0);
+        constexpr auto sDim = cute::max(bM, bN);
+        __shared__ ElementC lossStaging[sDim];
+        #pragma unroll
+        for (uint i = threadIdx.x; i < sDim; ++i) {
+            lossStaging[i] = ElementC(0);
         }
         FusedGate<g, Operation, k> fusedGate{};
 

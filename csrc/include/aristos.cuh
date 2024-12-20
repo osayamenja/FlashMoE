@@ -12,8 +12,6 @@
 #include "util/debug.cuh"
 #include "definition/memory_layout.cuh"
 
-#include "algorithm/algorithm.cuh"
-
 #include "engine/scheduler.cuh"
 #include "engine/subscriber.cuh"
 #include "engine/decider/decider.cuh"

@@ -40,7 +40,10 @@
 #define PIPELINE_STAGES 2
 #define SHARED_SIZE 16 * 1024U
 #define GEMMs 2U // per expert
+
 #include "tensor.cuh"
+#include "cuda/barrier"
+#include "cuda/std/array"
 
 namespace aristos{
     using maxPrecision = float; // no support for double, unfortunately
@@ -96,6 +99,8 @@ namespace aristos{
 
     struct __align__(16) Config{
         using HeapTuple = cuda::std::pair<maxPrecision, unsigned int>;
+        // Index and gate combine weight
+        using TokenIdxTuple = cuda::std::pair<unsigned int, maxPrecision>;
         cuda::std::byte* sHeap;
         flagsType* flags;
         /// Needed for free
@@ -227,11 +232,11 @@ namespace aristos{
             return CAST_TO(unsigned int, tIdxFlag() + tilesM * BLOCK_N);
         }
         template<GateReductionLevel g = GateReductionLevel::singleBlock>
-        unsigned int* tIdx() const {
+        auto* tIdx() const {
             if constexpr (g == GateReductionLevel::multiBlock) {
-                return CAST_TO(unsigned int, tIdxVal() + pad<BLOCK_N>(numExperts));
+                return static_cast<TokenIdxTuple*>(static_cast<void*>(tIdxVal() + pad<BLOCK_N>(numExperts)));
             }
-            return CAST_TO(unsigned int, tIdxVal() + BLOCK_N);
+            return static_cast<TokenIdxTuple*>(static_cast<void*>(tIdxVal() + BLOCK_N));
         }
 
         // Gate loss

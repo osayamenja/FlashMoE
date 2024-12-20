@@ -52,7 +52,6 @@ add_executable(csrc main.cu
         include/moe/moe.cuh
         include/aristos.cuh
         include/engine/processor/processor.cuh
-        include/algorithm/algorithm.cuh
         include/util/indexing.cuh
         include/definition/tensor.cuh
         include/definition/types.cuh
@@ -74,6 +73,8 @@ add_executable(csrc main.cu
         include/moe/gate.cuh
         include/engine/processor/gemm.cuh
         include/moe/packet.cuh
+        bench.cuh
+        eval.cuh
 )
 set_target_properties(csrc PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
@@ -167,8 +168,6 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
 elseif(CMAKE_BUILD_TYPE STREQUAL "Release")
     target_compile_options(csrc PRIVATE
             $<$<COMPILE_LANGUAGE:CXX>:-O3>
-            $<$<COMPILE_LANGUAGE:CUDA>:-O3>
-            $<$<COMPILE_LANGUAGE:CUDA>:-Xptxas -O3>
             $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-gencode=arch=compute_${COMPUTE_CAPABILITY},code=lto_${COMPUTE_CAPABILITY}>
     )
 endif ()

@@ -122,7 +122,7 @@ namespace aristos{
             brsData +
             // flags for ring aggregation of token indices
             sizeof(unsigned int) * (cute::ceil_div(seqLen, BLOCK_M) + cute::ceil_div(embedDim, BLOCK_N)) +
-            sizeof(unsigned int) * seqLen + // token ids
+            sizeof(sizeof(Config::TokenIdxTuple)) * seqLen + // token ids and probabilities
             sizeof(unsigned short int) * numNeighbors + // flags for packet construction
             sizeof(maxPrecision) * paddedSeqLen * paddedNumExperts + // gate routing
             sizeof(maxPrecision) * (2 * paddedNumExperts + 1) + // gate loss vectors, loss value

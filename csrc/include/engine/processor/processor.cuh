@@ -7,14 +7,17 @@
 
 #include <cutlass/array.h>
 #include <cutlass/epilogue/thread/activation.h>
+#include <nvshmemx.h>
+#include <nvshmem.h>
+#include <host/nvshmemx_api.h>
 
 #include "gemm.cuh"
 
 namespace aristos::processor{
     template <typename Element, typename ActivationFunction>
-    requires aristos::TensorValueType<Element>
     __forceinline__ __device__
     auto fusedAddActivate(Element& accumulator, const Element& term, const ActivationFunction& op) {
+            static_assert(aristos::TensorValueType<Element>);
             if constexpr (sizeof(Element) >= 4) {
                 return op(fma(Element(1.0f), accumulator, term));
             }
@@ -56,9 +59,9 @@ namespace aristos::processor{
     >
     requires(t == TaskType::preGEMM || t == TaskType::postGEMM)
     __forceinline__ __device__
-    void fGET(typename BlockGEMM::MatrixDType* workspace,
-        FrgTensorD accumulator,
-        RegisterScratch rScratch,
+    void fGET(typename BlockGEMM::MatrixDType* __restrict__ workspace,
+        FrgTensorD& accumulator,
+        RegisterScratch& rScratch,
         const typename BlockGEMM::MatrixAType* __restrict__ inputs,
         const typename BlockGEMM::MatrixBType* __restrict__ weights,
         typename BlockGEMM::MatrixDType* __restrict__ output,
@@ -129,6 +132,7 @@ namespace aristos::processor{
         constexpr auto elems = rScratch.size();
 
         // Prefetch from global to shared memory
+        // TODO vectorize these reads
         #pragma unroll
         for (int j = 0; j < elems; ++j) {
             workspace[threadIdx.x + j * THREADS] = tDgD(j);
