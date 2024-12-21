@@ -8,6 +8,10 @@
 #include "../definition/types.cuh"
 
 namespace aristos::scheduler {
+    __device__ __forceinline__
+    void notify(const unsigned int& tasks) {
+        atomicAdd(schedulerState.taskQSignals, tasks);
+    }
     // fast, batch scheduling with register and shared memory pipelining
     // Gives about 3.5x speedup over vanilla scheduling,
     // see https://github.com/osayamenja/cuPlayground/blob/master/examples/pipelining.cuh
@@ -20,19 +24,19 @@ namespace aristos::scheduler {
     requires(processorCount > 0 && scratchSize > 0 && regSize > 0 &&
         scratchSize >= regSize && scratchSize % regSize == 0)
     __device__ __forceinline__
-    void fastSchedule(RegisterScratch& registerScratch,
+    void fastSchedule(RegisterScratch const& registerScratch,
         unsigned int& tasksToSchedule,
         unsigned int& scheduled,
         unsigned int& rQTail,
-        unsigned int* __restrict__ fastScratch,
-        unsigned int* __restrict__ rQ,
-        unsigned int* __restrict__ pDB) {
+        unsigned int* __restrict__ const& fastScratch,
+        unsigned int* __restrict__ const& rQ,
+        unsigned int* __restrict__ const& pDB) {
         constexpr auto vectorLength = sizeof(uint4) / sizeof(unsigned int);
         static_assert(regSize % vectorLength == 0, "regSize must be a multiple of vectorLength");
         constexpr auto vectorSize = scratchSize / vectorLength;
         // Batch reads from global memory
         const auto trips = tasksToSchedule / scratchSize;
-        // Quickly prefetch pids to fast shared memory
+        // Quickly prefetch process ids to fast shared memory
         if (trips) {
             #pragma unroll
             for (uint i = 0; i < vectorSize; i++) {
@@ -50,7 +54,7 @@ namespace aristos::scheduler {
                     registerScratch[k] = fastScratch[k + j * regSize];
                 }
 
-                // Eagerly prefetch next batch to smem
+                // Eagerly prefetch next batch to shared memory
                 if (i + 1 < trips) {
                     constexpr auto rVs = regSize / vectorLength;
                     #pragma unroll
@@ -115,12 +119,13 @@ namespace aristos::scheduler {
 
     /// Making processorCount a compile-time constant is not a functional requirement but rather strictly
     /// for optimizing the modulo operation, which is incredibly expensive.
-    /// Micro-benchmarks show 10 vs. 100 ns performance difference.
-    template<unsigned int processorCount, unsigned int scratchSize = 64U>
-    requires(processorCount > 0 && scratchSize >= 64 && scratchSize % 64 == 0 && cutlass::ispow2(scratchSize))
+    /// Benchmarks show an order of magnitude performance difference for runtime vs. compile-time evaluation
+    template<unsigned int processorCount> requires(processorCount > 0)
     __device__ __forceinline__
-    void start(unsigned int* __restrict__ taskBound, unsigned int* __restrict__ fastScratch) {
+    void start(unsigned int* __restrict__ taskBound) {
         constexpr auto schedulerRegSize = 32U;
+        constexpr auto scratchSize = 64U;
+        __shared__ __align__(16) unsigned int fastScratch[scratchSize];
         static_assert(scratchSize >= schedulerRegSize && scratchSize % schedulerRegSize == 0,
             "scratchSize must be a multiple of register scratch size");
         // Register allocations

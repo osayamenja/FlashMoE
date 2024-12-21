@@ -6,7 +6,7 @@
 #define ARISTOS_TENSOR_CUH
 
 #include <cute/tensor.hpp>
-
+#include <cuda/std/type_traits>
 namespace aristos{
     template<typename V>
     concept TensorValueType = cuda::std::is_same_v<V, cute::half_t> ||

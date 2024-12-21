@@ -10,6 +10,64 @@
 #include "mmaConfig.cuh"
 
 namespace aristos {
+    /// Fused, Add, Activate
+    template <typename Element, typename ActivationFunction>
+    requires(aristos::TensorValueType<Element> && cuda::std::is_invocable_r_v<Element, ActivationFunction, Element>)
+    struct FAA {
+        // fp8
+        static_assert(sizeof(Element) == 2);
+        __forceinline__ __device__
+        Element operator()(const Element& accumulator, const Element& term) const {
+            const ActivationFunction op{};
+            return op(accumulator + term);
+        }
+    };
+
+    // specialization for half-precision
+    template<typename ActivationFunction>
+    struct FAA<cute::half_t, ActivationFunction> {
+        __forceinline__ __device__
+        cute::half_t operator()(const cute::half_t& accumulator, const cute::half_t& term) const {
+            const ActivationFunction op{};
+            return op(cute::half_t(__hfma(__half(1.0f), accumulator.to_half(), term.to_half())));
+        }
+    };
+
+    // specialization for half-precision and relu
+    template<>
+    struct FAA<cute::half_t, cutlass::epilogue::thread::ReLU<cute::half_t>> {
+        __forceinline__ __device__
+        cute::half_t operator()(const cute::half_t& accumulator, const cute::half_t& term) const {
+            return cute::half_t(__hfma_relu(__half(1.0f),accumulator.to_half(), term.to_half()));
+        }
+    };
+
+    // specialization for bfloat16
+    template<typename ActivationFunction>
+    struct FAA<cute::bfloat16_t, ActivationFunction> {
+        __forceinline__ __device__
+        cute::bfloat16_t operator()(const cute::bfloat16_t& accumulator, const cute::bfloat16_t& term) const {
+            const ActivationFunction op{};
+            return op(cute::bfloat16_t(__hfma(__nv_bfloat16(1.0f), accumulator.to_nv_bfloat16(), term.to_nv_bfloat16())));
+        }
+    };
+
+    // specialization for bfloat16 and relu
+    template<>
+    struct FAA<cute::bfloat16_t, cutlass::epilogue::thread::ReLU<cute::bfloat16_t>> {
+        __forceinline__ __device__
+        cute::bfloat16_t operator()(const cute::bfloat16_t& accumulator, const cute::bfloat16_t& term) const {
+            return cute::bfloat16_t(__hfma_relu(__nv_bfloat16(1.0f),
+                accumulator.to_nv_bfloat16(), term.to_nv_bfloat16()));
+        }
+    };
+
+    template<typename F>
+    struct isFAA : cuda::std::false_type {};
+
+    template<typename Element, typename ActivationFunction>
+    struct isFAA<FAA<Element, ActivationFunction>> : cuda::std::true_type {};
+
     template<
         unsigned int Arch,
         typename ElementA,
@@ -56,7 +114,7 @@ namespace aristos {
             cute::identity
         >;
 
-        using EpilogueOp = ActivationOp;
+        using FusedEpilogue = FAA<ElementC, ActivationOp>;
         // TODO CollectiveMMA support for Hopper
     };
 }

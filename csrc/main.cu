@@ -8,4 +8,3 @@ int main() {
     aristos::testTopologyDiscovery();
     return 0;
 }
-

@@ -41,14 +41,63 @@
 #define SHARED_SIZE 16 * 1024U
 #define GEMMs 2U // per expert
 
+#define TOPO_LOOP_TRIP 4U // this may be too much
+#define BETA_BUFFER (1024UL * 1024UL) // 1MB
+#define ALPHA_BUFFER 1024UL // 1KB
+#define NANO_TO_MILLI (cuda::std::nano::den / cuda::std::milli::den)
+#define NANO_TO_MICRO (cuda::std::nano::den / cuda::std::micro::den)
+#define BYTE_MAX cuda::std::numeric_limits<cuda::std::underlying_type_t<cuda::std::byte>>::max()
+#define TO_MB(b) (static_cast<float>(b) / (1024.0f*1024.0f))
+#define BETA_MB 1024.0f // 1GB
+
+#include <cuda/barrier>
+#include <cuda/std/array>
 #include "tensor.cuh"
-#include "cuda/barrier"
-#include "cuda/std/array"
 
 namespace aristos{
     using maxPrecision = float; // no support for double, unfortunately
     using specType = unsigned int;
     using flagsType = uint64_t;
+
+    using Nano = cuda::std::chrono::duration<float, cuda::std::nano>;
+    using Milli = cuda::std::chrono::duration<float, cuda::std::milli>;
+    using ull_t = unsigned long long int;
+
+    struct floatPair {
+        float alpha;
+        float beta;
+
+        __device__ __forceinline__
+        friend bool operator<(const floatPair &lhs, const floatPair &rhs) {
+            return fmaf(lhs.beta, BETA_MB, lhs.alpha) < fmaf(rhs.beta, BETA_MB, rhs.alpha);
+        }
+
+        __device__ __forceinline__
+        friend bool operator<=(const floatPair &lhs, const floatPair &rhs) {
+            return !(rhs < lhs);
+        }
+
+        __device__ __forceinline__
+        friend bool operator>(const floatPair &lhs, const floatPair &rhs) {
+            return rhs < lhs;
+        }
+
+        __device__ __forceinline__
+        friend bool operator>=(const floatPair &lhs, const floatPair &rhs) {
+            return !(lhs < rhs);
+        }
+
+        __device__ __forceinline__
+        friend bool operator==(const floatPair &lhs, const floatPair &rhs) {
+            return lhs.alpha == rhs.alpha
+                   && lhs.beta == rhs.beta;
+        }
+
+        __device__ __forceinline__
+        friend bool operator!=(const floatPair &lhs, const floatPair &rhs) {
+            return !(lhs == rhs);
+        }
+    };
 
     __device__
     enum class PacketStage {
@@ -167,7 +216,7 @@ namespace aristos{
         template<typename Element>
         __forceinline__ __device__
         constexpr size_t finalPacketSize(const unsigned int& numTokens) const {
-            return sizeof(unsigned int) + numTokens * (sizeof(unsigned int) + sizeof(Element) * embedDim * numTokens);
+            return sizeof(unsigned int) + numTokens * (sizeof(unsigned int) + sizeof(Element) * embedDim);
         }
         template<unsigned int tileDimension>
         __host__ __device__ __forceinline__
@@ -311,9 +360,11 @@ namespace aristos{
         // crd2Idx(peer, expertIdx, offset)
         unsigned int syncIdx = 0UL;
         unsigned int tileIdx = 0U;
-        unsigned int M = 0U;
         unsigned int tileSize = 0U;
         unsigned int peerIdx = 0U;
+        //padded
+        unsigned int M = 0U;
+        unsigned int flagIdx = 0U;
         TaskType taskType = TaskType::Interrupt;
 
         __forceinline__ __device__
@@ -329,11 +380,12 @@ namespace aristos{
             const unsigned int& _syncIdx,
             const unsigned int& _tile,
             const unsigned int& _M,
+            const unsigned int& _flagIdx,
             const unsigned int& _size,
             const unsigned int& _peerIdx):
         aData(_aData), bData(_bData),
         cData(_cData), dData(_dData), scale(_scale),
-        syncIdx(_syncIdx), tileIdx(_tile), M(_M), tileSize(_size), peerIdx(_peerIdx),
+        syncIdx(_syncIdx), tileIdx(_tile), tileSize(_size), peerIdx(_peerIdx), M(_M), flagIdx(_flagIdx),
         taskType(_taskType){}
 
         __device__ __forceinline__

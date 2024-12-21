@@ -5,8 +5,11 @@
 #ifndef ARISTOS_COMPUTE_CUH
 #define ARISTOS_COMPUTE_CUH
 
+#include <cuda/std/type_traits>
 #include <cutlass/array.h>
+#include <cute/tensor.hpp>
 #include <cutlass/epilogue/thread/activation.h>
+
 #include <nvshmemx.h>
 #include <nvshmem.h>
 #include <host/nvshmemx_api.h>
@@ -14,43 +17,7 @@
 #include "gemm.cuh"
 
 namespace aristos::processor{
-    template <typename Element, typename ActivationFunction>
-    __forceinline__ __device__
-    auto fusedAddActivate(Element& accumulator, const Element& term, const ActivationFunction& op) {
-            static_assert(aristos::TensorValueType<Element>);
-            if constexpr (sizeof(Element) >= 4) {
-                return op(fma(Element(1.0f), accumulator, term));
-            }
-            if constexpr(sizeof(Element) == 2) {
-                // Half FMA
-                if constexpr (cuda::std::is_same_v<Element, cute::half_t>) {
-                    return op(cute::half_t(__hfma(__half(1.0f), accumulator.to_half(), term.to_half())));
-                }
-                // bfloat16 FMA
-                return op(cute::bfloat16_t(__hfma(__nv_bfloat16(1.0f), accumulator.to_nv_bfloat16(), term.to_nv_bfloat16())));
-            }
-            return op(accumulator + term);
-        }
-
-    // conversion operators are reinterpret casts, so technically should be free at runtime
-    template<>
-    __forceinline__ __device__
-    auto fusedAddActivate(cute::half_t& accumulator, const cute::half_t& term,
-        [[maybe_unused]] const cutlass::epilogue::thread::ReLU<cute::half_t>& op) {
-        return cute::half_t(__hfma_relu(__half(1.0f),
-            accumulator.to_half(), term.to_half()));
-    }
-
-    template<>
-    __forceinline__ __device__
-    auto fusedAddActivate(cute::bfloat16_t& accumulator, const cute::bfloat16_t& term,
-        [[maybe_unused]] const cutlass::epilogue::thread::ReLU<cute::bfloat16_t>& op) {
-        return cute::bfloat16_t(__hfma_relu(__nv_bfloat16(1.0f),
-            accumulator.to_nv_bfloat16(), term.to_nv_bfloat16()));
-    }
-
     // Fused GEMM, Epilogue and Data transfer
-    // TODO make a struct
     template<
         typename BlockGEMM,
         TaskType t = TaskType::preGEMM,
@@ -127,12 +94,11 @@ namespace aristos::processor{
                                                     ElementD>{};
 
         // Assume elementwise operator
-        typename BlockGEMM::EpilogueOp epilogueOp{};
+        typename BlockGEMM::FusedEpilogue epilogueOp{};
         constexpr auto trips = size(accumulator) / rScratch.size();
         constexpr auto elems = rScratch.size();
 
         // Prefetch from global to shared memory
-        // TODO vectorize these reads
         #pragma unroll
         for (int j = 0; j < elems; ++j) {
             workspace[threadIdx.x + j * THREADS] = tDgD(j);
@@ -152,8 +118,7 @@ namespace aristos::processor{
             // Also fuses copy to GMEM, which is where things get interesting
             #pragma unroll
             for (int j = 0; j < elems; ++j) {
-                tCgC(j + i * elems) = gCStoreOp(fusedAddActivate(accumulator(j + i * elems),
-                    gDLoadOp(rScratch[j]), epilogueOp));
+                tCgC(j + i * elems) = gCStoreOp(epilogueOp(accumulator(j + i * elems), gDLoadOp(rScratch[j])));
             }
         }
 
@@ -167,7 +132,6 @@ namespace aristos::processor{
                 __threadfence_system();
             }
         }
-        __syncthreads();
     }
 
     template<
@@ -181,11 +145,18 @@ namespace aristos::processor{
         typename ActivationOpX = cute::identity
     > requires(processorCount > 0 && Arch >= MIN_ARCH)
     __device__ __forceinline__
-    void start(ElementD* __restrict__ workspace){
+    void start(cuda::std::byte* __restrict__ const& workspace){
         assert(__isShared(workspace));
         __shared__ unsigned int signal;
         __shared__ Task currentTask;
         __shared__ unsigned int interrupt;
+        const auto* __restrict__ cachedConfig = CAST_TO(Config, workspace);
+        const auto* __restrict__ scState = CAST_TO(SchedulerConfig, workspace + sizeof(Config));
+        auto* processorWorkspace = CAST_TO(ElementD, workspace + sizeof(Config) + sizeof(SchedulerConfig));
+        if (!threadIdx.x) {
+            *CAST_TO(Config, workspace) = moeConfig;
+            *CAST_TO(SchedulerConfig, workspace + sizeof(Config)) = schedulerState;
+        }
         using Operation = BlockMM<Arch, ElementA, ElementB, ElementC, ActivationOp>;
         using OperationX = BlockMM<Arch, ElementA, ElementB, ElementC, ActivationOpX>;
         auto accumulator = cute::partition_fragment_C(typename Operation::MMA{}, typename Operation::TilerOut{});
@@ -200,73 +171,78 @@ namespace aristos::processor{
         while (!interrupt) {
             if (!threadIdx.x) {
                 // Indicate readiness
-                schedulerState.readyQ[atomicAdd(schedulerState.readyQHead, 1U) % processorCount] = blockIdx.x;
+                scState->readyQ[atomicAdd(scState->readyQHead, 1U) % processorCount] = blockIdx.x;
                 // Grabs next task
-                auto nextTask = atomicLoad(schedulerState.taskQSignals + blockIdx.x);
+                auto nextTask = atomicLoad(scState->taskQSignals + blockIdx.x);
                 while (nextTask == signal) {
-                    nextTask = atomicLoad(schedulerState.taskQSignals + blockIdx.x);
+                    nextTask = atomicLoad(scState->taskQSignals + blockIdx.x);
                 }
                 signal = nextTask;
-                currentTask = schedulerState.taskQ[signal - 1];
+                currentTask = scState->taskQ[signal - 1];
             }
             __syncthreads();
             switch (currentTask.taskType) {
                 case TaskType::preGEMM: {
                     constexpr unsigned int preIndex = 0;
-                    fGET<Operation, TaskType::preGEMM>(workspace, accumulator, rScratch,
+                    fGET<Operation, TaskType::preGEMM>(processorWorkspace, accumulator, rScratch,
                         CAST_TO(typename Operation::MatrixAType, currentTask.aData),
                         CAST_TO(typename Operation::MatrixBType, currentTask.bData[preIndex]),
                         CAST_TO(typename Operation::MatrixDType, currentTask.cData[preIndex]),
                         CAST_TO(typename Operation::MatrixDType, currentTask.dData[preIndex]),
                         currentTask.M,
-                        moeConfig.upProjection,
-                        moeConfig.embedDim,
+                        cachedConfig->upProjection,
+                        cachedConfig->embedDim,
                         currentTask.tileIdx);
                     if (!threadIdx.x &&
-                        atomicAdd(schedulerState.taskSync + currentTask.syncIdx, 1U) == moeConfig.tilesN) {
-                        for (unsigned int i = 0; i < moeConfig.tilesNx; ++i) {
-                            schedulerState.taskQ[atomicAdd(schedulerState.taskQSignals + 1, 1U)]
-                                = Task{
-                                    TaskType::postGEMM,
-                                    currentTask.cData[preIndex],
-                                    currentTask.bData,
-                                    currentTask.cData,
-                                    currentTask.dData,
-                                    currentTask.scale,
-                                    currentTask.syncIdx,
-                                    i,
-                                    currentTask.M,
-                                    currentTask.tileSize,
-                                    currentTask.peerIdx
-                                };
+                        atomicAdd(scState->taskSync + currentTask.syncIdx, 1U) == cachedConfig->tilesN) {
+                        const auto tasks = cachedConfig->tilesNx;
+                        auto* tQHead = scState->taskQSignals + 1;
+                        auto* tQ = scState->taskQ;
+                        for (unsigned int i = 0; i < tasks; ++i) {
+                            tQ[atomicAdd(tQHead, 1U)] = Task{
+                                TaskType::postGEMM,
+                                currentTask.cData[preIndex],
+                                currentTask.bData,
+                                currentTask.cData,
+                                currentTask.dData,
+                                currentTask.scale,
+                                currentTask.syncIdx,
+                                i,
+                                currentTask.M,
+                                currentTask.flagIdx,
+                                currentTask.tileSize,
+                                currentTask.peerIdx
+                            };
                         }
+                        __threadfence();
+                        // notify scheduler
+                        atomicAdd(scState->taskQSignals, tasks);
                     }
                 }
                 break;
                 case TaskType::postGEMM: {
                     constexpr unsigned int postIndex = 0;
-                    fGET<OperationX, TaskType::postGEMM>(workspace, accumulator, rScratch,
+                    fGET<OperationX, TaskType::postGEMM>(processorWorkspace, accumulator, rScratch,
                         CAST_TO(typename Operation::MatrixAType, currentTask.aData),
                         CAST_TO(typename Operation::MatrixBType, currentTask.bData[postIndex]),
                         CAST_TO(typename Operation::MatrixDType, currentTask.cData[postIndex]),
                         CAST_TO(typename Operation::MatrixDType, currentTask.dData[postIndex]),
-                        currentTask.M,
-                        moeConfig.embedDim,
-                        moeConfig.upProjection,
+                        cachedConfig->embedDim,
+                        cachedConfig->upProjection,
                         currentTask.tileIdx);
                     if (!threadIdx.x) {
-                        if (atomicAdd(schedulerState.taskSync + currentTask.syncIdx, 1U)
-                            == moeConfig.tilesN + moeConfig.tilesNx) {
+                        if (atomicAdd(scState->taskSync + currentTask.syncIdx, 1U)
+                            == cachedConfig->tilesN + cachedConfig->tilesNx) {
                             if (nvshmem_ptr(currentTask.cData[postIndex], currentTask.peerIdx) == nullptr) {
                                 // Batch remote network transfer to avoid overwhelming the NIC
                                 nvshmem_putmem_signal_nbi(currentTask.cData[postIndex], currentTask.cData[postIndex],
-                                    moeConfig.finalPacketSize<ElementA>(currentTask.tileSize),
-                                    moeConfig.flags + moeConfig.worldSize + currentTask.peerIdx,
+                                    cachedConfig->finalPacketSize<ElementA>(currentTask.tileSize),
+                                    cachedConfig->flags + currentTask.flagIdx,
                                     constructSignal(PacketStage::final), NVSHMEM_SIGNAL_SET, currentTask.peerIdx);
                             }
                             else {
                                 // Already did the network transfer in fGET, so set signal only
-                                nvshmemx_signal_op(moeConfig.flags + moeConfig.worldSize + currentTask.peerIdx,
+                                nvshmemx_signal_op(cachedConfig->flags + currentTask.flagIdx,
                                  constructSignal(PacketStage::final), NVSHMEM_SIGNAL_SET, currentTask.peerIdx);
                             }
                         }

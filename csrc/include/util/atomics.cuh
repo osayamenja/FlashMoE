@@ -6,6 +6,7 @@
 #define CSRC_ATOMICS_CUH
 
 #include <cuda/annotated_ptr>
+#include <thrust/system/cuda/error.h>
 #define USE_BARRIER 0
 
 namespace aristos{
@@ -50,7 +51,8 @@ namespace aristos{
 
     // Atomic Test and set
     template<cuda::thread_scope scope = cuda::thread_scope_device, typename T>
-    requires AtomicCASType<T> && AtomicScope<scope>
+    requires AtomicCASType<T> && AtomicScope<scope> &&
+        (!cuda::std::is_same_v<T, unsigned short int> || scope == cuda::thread_scope_device)
     __device__ __forceinline__
     T atomicTAS(T* const& addr) {
         if constexpr (scope == cuda::thread_scope_block || scope == cuda::thread_scope_thread) {

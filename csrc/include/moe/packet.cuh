@@ -186,7 +186,7 @@ namespace aristos::packet {
     typename ElementScale>
     __device__ __forceinline__
     void decode(cuda::std::byte* __restrict__ const& packet,
-        unsigned short int* __restrict__ const& status,
+        unsigned int* __restrict__ const& status,
         unsigned int* __restrict__ const& taskCount,
         unsigned int const& localExpertIdx,
         cuda::std::byte* __restrict__& cInitialBase,
@@ -201,6 +201,7 @@ namespace aristos::packet {
         const auto [totalTokens, routedTokens] = *CAST_TO(uint2, packet);
         const auto globalTaskTiles = Config::tiles<BLOCK_M>(totalTokens);
         const auto taskTiles = routedTokens / BLOCK_M;
+        const auto padM = Config::pad<BLOCK_M>(routedTokens);
         if (!atomicTAS<cuda::thread_scope_block>(status + peer)) {
             // atomically reduce taskCount
             const auto superfluous = (moeConfig.tilesN + moeConfig.tilesNx) *
@@ -210,18 +211,17 @@ namespace aristos::packet {
         // process payload
         auto* tokenIndices = packet + sizeof(uint2);
         auto* scaleWeights = tokenIndices + sizeof(unsigned int) * routedTokens;
-        auto* tokens = scaleWeights + sizeof(ElementScale) * Config::pad<BLOCK_M>(routedTokens);
+        auto* tokens = scaleWeights + sizeof(ElementScale) * padM;
         const auto tokenSize = moeConfig.embedDim;
         auto* schedulerDB = schedulerState.taskQSignals;
 
-        // TODO abstract the below using structured bindings
         auto* tQ = schedulerState.taskQ;
         auto* tQHead = schedulerState.taskQSignals + 1;
 
         const auto syncIdx = moeConfig.expertCapacity * (peer * moeConfig.numExperts + localExpertIdx);
         cuda::std::array<cuda::std::byte*, GEMMs> taskData{};
         taskData[0] = cInitialBase +
-            atomicAdd_block(cBOffset, Config::tiles<BLOCK_M>(routedTokens)) * BLOCK_M * BLOCK_N * sizeof(Element);
+            atomicAdd_block(cBOffset, padM) * BLOCK_M * BLOCK_N * sizeof(Element);
         auto* packetBuffer = peerHeapBase + atomicAdd_block(pHOffset, Config::finalPacketSize<Element>(routedTokens));
         taskData[1] = packetBuffer + sizeof(unsigned int) * (1 + routedTokens);
 
@@ -239,38 +239,91 @@ namespace aristos::packet {
             }
         }
 
-        // Below batch notifies the scheduler
-        for (uint i = 0; i < taskTiles; ++i) {
-            tQ[atomicIncrement(tQHead)] = Task{
-                TaskType::preGEMM,
-                tokens + i * BLOCK_M * tokenSize,
-                weights,
-                taskData,
-                bias,
-                scaleWeights + i * BLOCK_M,
-                syncIdx + i,
-                i,
-                Config::pad<BLOCK_M>(routedTokens),
-                BLOCK_M,
-                peer,
-            };
-        }
+        const auto tilesN = moeConfig.tilesN;
+        const auto flagIdx = moeConfig.rank * moeConfig.numExperts * moeConfig.capacity + localExpertIdx * moeConfig.capacity;
 
-        // Residual task
-        if (routedTokens % BLOCK_M != 0) {
-            tQ[atomicIncrement(tQHead)] = Task{
-                TaskType::preGEMM,
-                tokens + taskTiles * BLOCK_M * tokenSize,
-                weights,
-                taskData,
-                bias,
-                scaleWeights + taskTiles * BLOCK_M,
-                syncIdx + taskTiles,
-                taskTiles,
-                Config::pad<BLOCK_M>(routedTokens),
-                routedTokens - taskTiles * BLOCK_M,
-                peer,
-            };
+        if (nvshmem_ptr(moeConfig.sHeap, peer) != nullptr)[[likely]] {
+            // TODO unroll this loop
+            // Below batch notifies the scheduler
+            for (uint i = 0; i < taskTiles; ++i) {
+                for (uint j = 0; j < tilesN; ++j) {
+                    tQ[atomicIncrement(tQHead)] = Task{
+                        TaskType::preGEMM,
+                        tokens + i * BLOCK_M * tokenSize,
+                        weights,
+                        taskData,
+                        bias,
+                        scaleWeights + i * BLOCK_M,
+                        syncIdx + i,
+                        i * tilesN + j,
+                        padM,
+                        flagIdx + i,
+                        BLOCK_M,
+                        peer,
+                    };
+                }
+            }
+
+            // Residual task
+            if (routedTokens % BLOCK_M != 0) {
+                for (uint j = 0; j < tilesN; ++j) {
+                    tQ[atomicIncrement(tQHead)] = Task{
+                        TaskType::preGEMM,
+                        tokens + taskTiles * BLOCK_M * tokenSize,
+                        weights,
+                        taskData,
+                        bias,
+                        scaleWeights + taskTiles * BLOCK_M,
+                        syncIdx + taskTiles,
+                        taskTiles * tilesN + j,
+                        padM,
+                        flagIdx + taskTiles,
+                        routedTokens - taskTiles * BLOCK_M,
+                        peer,
+                    };
+                }
+            }
+        }
+        else {
+            // P2P peer
+            for (uint i = 0; i < taskTiles; ++i) {
+                for (uint j = 0; j < tilesN; ++j) {
+                    tQ[atomicIncrement(tQHead)] = Task{
+                        TaskType::preGEMM,
+                        tokens + i * BLOCK_M * tokenSize,
+                        weights,
+                        taskData,
+                        bias,
+                        scaleWeights + i * BLOCK_M,
+                        syncIdx + i,
+                        i * tilesN + j,
+                        padM,
+                        flagIdx + i * tilesN + j,
+                        BLOCK_M,
+                        peer,
+                    };
+                }
+            }
+
+            // Residual task
+            if (routedTokens % BLOCK_M != 0) {
+                for (uint j = 0; j < tilesN; ++j) {
+                    tQ[atomicIncrement(tQHead)] = Task{
+                        TaskType::preGEMM,
+                        tokens + taskTiles * BLOCK_M * tokenSize,
+                        weights,
+                        taskData,
+                        bias,
+                        scaleWeights + taskTiles * BLOCK_M,
+                        syncIdx + taskTiles,
+                        taskTiles * tilesN + j,
+                        padM,
+                        flagIdx + taskTiles * tilesN + j,
+                        routedTokens - taskTiles * BLOCK_M,
+                        peer,
+                    };
+                }
+            }
         }
 
         if (routedTokens) {

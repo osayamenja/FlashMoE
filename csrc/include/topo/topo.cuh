@@ -5,57 +5,9 @@
 #ifndef TOPO_CUH
 #define TOPO_CUH
 
-#define TOPO_LOOP_TRIP 4U // this may be too much
-#define BETA_BUFFER (1024UL * 1024UL) // 1MB
-#define ALPHA_BUFFER 1024UL // 1KB
-#define NANO_TO_MILLI (cuda::std::nano::den / cuda::std::milli::den)
-#define NANO_TO_MICRO (cuda::std::nano::den / cuda::std::micro::den)
-#define BYTE_MAX cuda::std::numeric_limits<cuda::std::underlying_type_t<cuda::std::byte>>::max()
-#define TO_MB(b) (static_cast<float>(b) / (1024.0f*1024.0f))
-#define BETA_MB 1024.0f // 1GB
-
-#include "../definition/types.cuh"
 #include <cuda/cmath>
-
-using Nano = cuda::std::chrono::duration<float, cuda::std::nano>;
-using Milli = cuda::std::chrono::duration<float, cuda::std::milli>;
-using ull_t = unsigned long long int;
-
-struct floatPair {
-    float alpha;
-    float beta;
-
-    __device__ __forceinline__
-    friend bool operator<(const floatPair &lhs, const floatPair &rhs) {
-        return fmaf(lhs.beta, BETA_MB, lhs.alpha) < fmaf(rhs.beta, BETA_MB, rhs.alpha);
-    }
-
-    __device__ __forceinline__
-    friend bool operator<=(const floatPair &lhs, const floatPair &rhs) {
-        return !(rhs < lhs);
-    }
-
-    __device__ __forceinline__
-    friend bool operator>(const floatPair &lhs, const floatPair &rhs) {
-        return rhs < lhs;
-    }
-
-    __device__ __forceinline__
-    friend bool operator>=(const floatPair &lhs, const floatPair &rhs) {
-        return !(lhs < rhs);
-    }
-
-    __device__ __forceinline__
-    friend bool operator==(const floatPair &lhs, const floatPair &rhs) {
-        return lhs.alpha == rhs.alpha
-               && lhs.beta == rhs.beta;
-    }
-
-    __device__ __forceinline__
-    friend bool operator!=(const floatPair &lhs, const floatPair &rhs) {
-        return !(lhs == rhs);
-    }
-};
+#include "../definition/types.cuh"
+#include "../util/atomics.cuh"
 
 namespace aristos::topology{
     __device__ __inline__ unsigned int blockade = 0U;
@@ -66,12 +18,11 @@ namespace aristos::topology{
         return buffer + (slot * BETA_BUFFER);
     }
 
-    template<size_t betaBuf = BETA_BUFFER, size_t alphaBuf = ALPHA_BUFFER, typename ID, typename Put>
-    requires (cuda::std::is_invocable_r_v<unsigned int, ID>
-        && cuda::std::is_invocable_r_v<void, Put, void*, const void*, size_t, int>)
+    template<size_t betaBuf = BETA_BUFFER, size_t alphaBuf = ALPHA_BUFFER, typename Put>
+    requires (cuda::std::is_invocable_r_v<void, Put, void*, const void*, size_t, int>)
     CUTE_DEVICE
     void measureTransfer(const unsigned int& rank, cuda::std::byte* sHeap, floatPair* remoteDurations,
-        const int& peer, const ID& id, const Put& put, const unsigned int& peerIdx,
+        const int& peer, const unsigned int& id, const Put& put, const unsigned int& peerIdx,
         const unsigned int& lBid = 0, const unsigned int& nb = 1) {
         ull_t start, end;
         float duration = 0.0;
@@ -87,7 +38,7 @@ namespace aristos::topology{
             asm volatile("mov.u64 %0, %%globaltimer;": "=l"(end)::);
             duration += static_cast<float>(end - start) / static_cast<float>(TOPO_LOOP_TRIP*NANO_TO_MILLI);
         }
-        if(id() == 0) {
+        if(!id) {
             remoteDurations[peerIdx].alpha = duration;
         }
         duration = 0.0;
@@ -102,7 +53,7 @@ namespace aristos::topology{
             asm volatile("mov.u64 %0, %%globaltimer;": "=l"(end)::);
             duration += static_cast<float>(end - start) / static_cast<float>(TOPO_LOOP_TRIP*NANO_TO_MILLI);
         }
-        if(id() == 0) {
+        if(!id) {
             // Compute beta using slope intercept equation
             remoteDurations[peerIdx].beta = ((duration - remoteDurations[peerIdx].alpha) / (TO_MB(betaBuf) - TO_MB(alphaBuf)));
             // Compute alpha and apply abs for spurious negatives
@@ -115,16 +66,14 @@ namespace aristos::topology{
         cuda::std::byte* sHeap, floatPair* results, uint64_t* flags) {
         for (unsigned int i = 1U; i < n; ++i) {
             measureTransfer(rank, sHeap, scratchpad, (rank + i) % n,
-                block::threadID, nvshmemx_putmem_block, (rank + i) % n);
+                threadIdx.x, nvshmemx_putmem_block, (rank + i) % n);
         }
-        __threadfence_block();
         __syncthreads();
 
         /// Stage my row on the symmetric heap
-        for (unsigned int i = block::threadID(); i < n; i += ARISTOS_BLOCK_SIZE) {
+        for (unsigned int i = threadIdx.x; i < n; i += ARISTOS_BLOCK_SIZE) {
             results[i] = scratchpad[i];
         }
-        __threadfence_block();
 
         // Signal my vector, including FLOPs, to others
         for (unsigned int i = 1U; i < n; ++i) {
@@ -133,7 +82,7 @@ namespace aristos::topology{
         }
 
         // await responses from other GPUs
-        for (int i = block::threadID() + 1; i < n; i += ARISTOS_BLOCK_SIZE) {
+        for (int i = threadIdx.x + 1; i < n; i += ARISTOS_BLOCK_SIZE) {
             nvshmem_signal_wait_until(flags + (rank + i) % n, NVSHMEM_CMP_GT, sent + seqNo);
             flags[(rank + i) % n] -= sent + seqNo;
         }
@@ -144,28 +93,27 @@ namespace aristos::topology{
         const unsigned long& processingRate, const unsigned int numPeers, cuda::std::byte* sHeap, floatPair* results, uint64_t* flags) {
         for (unsigned int i = 0U; i < numPeers; ++i) {
             measureTransfer(rank, sHeap, scratchpad, peers[(i + rank) % numPeers],
-                block::threadID, nvshmemx_putmem_block, (i + rank) % numPeers);
+                threadIdx.x, nvshmemx_putmem_block, (i + rank) % numPeers);
         }
-        __threadfence_block();
         __syncthreads();
 
         /// Stage my row to the symmetric heap
-        for (unsigned int i = block::threadID(); i < numPeers; i += ARISTOS_BLOCK_SIZE) {
+        for (unsigned int i = threadIdx.x; i < numPeers; i += ARISTOS_BLOCK_SIZE) {
             results[peers[i]] = scratchpad[i];
         }
-        __threadfence();
         __syncthreads();
 
         // Ensures our vector is complete before sending to neighbors.
         // if num remote peers < n - 1, then we must await the contribution of our p2p siblings
-        if (!block::threadID() && numPeers < (n - 1)) {
+        if (!threadIdx.x && numPeers < n - 1) {
+            __threadfence();
             atomicAdd(&blockade, 1);
             while (atomicLoad(&blockade) % gridDim.x != 0) {}
         }
         __syncthreads();
 
         // Signal our vector, including FLOPs, to others
-        for (unsigned int i = block::threadID(); i < numPeers; i += ARISTOS_BLOCK_SIZE) {
+        for (unsigned int i = threadIdx.x; i < numPeers; i += ARISTOS_BLOCK_SIZE) {
             nvshmem_putmem_signal_nbi(results, results, n * sizeof(floatPair), flags + rank,
                     constructSignal(sent, processingRate), NVSHMEM_SIGNAL_SET, peers[i]);
         }
@@ -178,7 +126,7 @@ namespace aristos::topology{
         // If num of other P2P peers == 0, then we adjourn early after conditional subscription
         if (numPeers <= 1)[[unlikely]] {
             if (blockIdx.x == (gridDim.x - 1)) {
-                for (int i = block::threadID() + 1; i < n; i += ARISTOS_BLOCK_SIZE) {
+                for (int i = threadIdx.x + 1; i < n; i += ARISTOS_BLOCK_SIZE) {
                     nvshmem_signal_wait_until(flags + (rank + i) % n, NVSHMEM_CMP_GT, sent + seqNo);
                     flags[(rank + i) % n] -= sent + seqNo;
                 }
@@ -190,27 +138,26 @@ namespace aristos::topology{
 
         for (unsigned int i = 1U; i < numPeers; ++i) {
             measureTransfer(rank, sHeap, scratchpad, peers[(i + rank) % numPeers],
-                block::threadID, nvshmemx_putmem_block,
+                threadIdx.x, nvshmemx_putmem_block,
                 (i + rank) % numPeers, localBlockIdx, numP2PBlocks);
         }
-        __threadfence_block();
         __syncthreads();
 
         // TODO Obviate below staging by writing to peer memory directly
         /// All-Reduce to get max transfer time across blocks
         /// Update the global buffer with my values via max reduction
         /// Intra-block slicing
-        for (unsigned int i = block::threadID(); i < numPeers; i += ARISTOS_BLOCK_SIZE) {
+        for (unsigned int i = threadIdx.x; i < numPeers; i += ARISTOS_BLOCK_SIZE) {
             cuda::std::ignore = cuda::atomic_ref<floatPair, cuda::thread_scope_device>{results[peers[i]]}
                 .fetch_max(scratchpad[i]);
         }
-        __threadfence();
         __syncthreads();
 
         // Synchronize across all blocks
         // We do not use a block-wide barrier immediately afterward,
         // because there is already one at the beginning of the succeeding cooperative put API.
-        if (!block::threadID()) {
+        if (!threadIdx.x) {
+            __threadfence();
             atomicAdd(&blockade, 1);
             while (atomicLoad(&blockade) % gridDim.x != 0) {}
         }
@@ -227,8 +174,8 @@ namespace aristos::topology{
         // The last block awaits results
         // Most likely this block will not partake in the above thus, they would do the below in parallel
         // Could potentially enlist more blocks if n > THREADS, but that's unlikely
-        if (blockIdx.x == (gridDim.x - 1)) {
-            for (int i = block::threadID() + 1; i < n; i += ARISTOS_BLOCK_SIZE) {
+        if (blockIdx.x == gridDim.x - 1) {
+            for (int i = threadIdx.x + 1; i < n; i += ARISTOS_BLOCK_SIZE) {
                 nvshmem_signal_wait_until(flags + (rank + i) % n, NVSHMEM_CMP_GT, sent + seqNo);
                 flags[(rank + i) % n] -= sent + seqNo;
             }
@@ -257,7 +204,7 @@ namespace aristos::topology{
             // Specialization
             __shared__ unsigned int numPeers;
             __shared__ unsigned int* peers;
-            if (block::threadID() == 0) {
+            if (!threadIdx.x) {
                 numPeers = 0;
                 peers = static_cast<unsigned int*>(static_cast<void*>(scratchpad + n));
                 /// Block 0 gets remote peers, if present; otherwise, joins the others in getting proximal peers
@@ -268,7 +215,6 @@ namespace aristos::topology{
                     }
                 }
             }
-            __threadfence_block();
             __syncthreads();
             /// local publisher block 0 will service remote communication requests
             /// while other blocks will further specialize to serve parallel P2P, à la NVLink, transfers
