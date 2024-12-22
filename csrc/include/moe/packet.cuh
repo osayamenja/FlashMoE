@@ -181,6 +181,7 @@ namespace aristos::packet {
     }
 
     // Decodes a single packet,
+    // TODO make a struct and parametrize for remote peer
     template<PacketStage p = PacketStage::initial,
     typename Element,
     typename ElementScale>
@@ -249,11 +250,11 @@ namespace aristos::packet {
                 for (uint j = 0; j < tilesN; ++j) {
                     tQ[atomicIncrement(tQHead)] = Task{
                         TaskType::preGEMM,
-                        tokens + i * BLOCK_M * tokenSize,
+                        tokens,
                         weights,
                         taskData,
                         bias,
-                        scaleWeights + i * BLOCK_M,
+                        scaleWeights,
                         syncIdx + i,
                         i * tilesN + j,
                         padM,
@@ -269,11 +270,11 @@ namespace aristos::packet {
                 for (uint j = 0; j < tilesN; ++j) {
                     tQ[atomicIncrement(tQHead)] = Task{
                         TaskType::preGEMM,
-                        tokens + taskTiles * BLOCK_M * tokenSize,
+                        tokens,
                         weights,
                         taskData,
                         bias,
-                        scaleWeights + taskTiles * BLOCK_M,
+                        scaleWeights,
                         syncIdx + taskTiles,
                         taskTiles * tilesN + j,
                         padM,
@@ -290,11 +291,11 @@ namespace aristos::packet {
                 for (uint j = 0; j < tilesN; ++j) {
                     tQ[atomicIncrement(tQHead)] = Task{
                         TaskType::preGEMM,
-                        tokens + i * BLOCK_M * tokenSize,
+                        tokens ,
                         weights,
                         taskData,
                         bias,
-                        scaleWeights + i * BLOCK_M,
+                        scaleWeights,
                         syncIdx + i,
                         i * tilesN + j,
                         padM,
@@ -310,11 +311,11 @@ namespace aristos::packet {
                 for (uint j = 0; j < tilesN; ++j) {
                     tQ[atomicIncrement(tQHead)] = Task{
                         TaskType::preGEMM,
-                        tokens + taskTiles * BLOCK_M * tokenSize,
+                        tokens,
                         weights,
                         taskData,
                         bias,
-                        scaleWeights + taskTiles * BLOCK_M,
+                        scaleWeights,
                         syncIdx + taskTiles,
                         taskTiles * tilesN + j,
                         padM,
