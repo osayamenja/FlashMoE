@@ -13,52 +13,6 @@
 
 #define SUPPORTED = 1;
 namespace aristos{
-    enum class Board {
-        pcie,
-        sxm,
-    };
-    // Data center GPUs only
-    template<unsigned int Arch = 800, unsigned int maxRegisters = 128, Board b = Board::pcie>
-    struct Hardware {
-        static_assert(Arch == 800 && maxRegisters == 128 && b == Board::pcie);
-        using blocks = cute::Int<4 * 108>;
-    };
-
-    struct Hardware<800, 96> {
-        using blocks = cute::Int<5 * 108>;
-    };
-
-    struct Hardware<700> {
-        using blocks = cute::Int<4 * 80>;
-    };
-
-    struct Hardware<700, 96> {
-        using blocks = cute::Int<5 * 80>;
-    };
-
-    // Hopper
-    struct Hardware<900, 128, Board::sxm> {
-        using blocks = cute::Int<4 * 132>;
-    };
-
-    struct Hardware<900, 128, Board::pcie> {
-        using blocks = cute::Int<4 * 114>;
-    };
-
-    // Odd ones
-    struct Hardware<890> {
-        using blocks = cute::Int<5 * 84>;
-    };
-
-    struct Hardware<860> {
-        using blocks = cute::Int<5 * 84>;
-    };
-
-    struct Hardware<750> {
-        // this may be less than the actual
-        using blocks = cute::Int<3 * 40>;
-    };
-
     __inline__ bool isInitialized = false;
     __inline__ auto aristosStream = cudaStreamPerThread;
     __forceinline__

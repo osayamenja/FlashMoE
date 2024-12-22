@@ -331,7 +331,7 @@ namespace aristos::gate {
             typename BlockGEMM::CollectiveMainloop mainLoop{};
             cute::clear(accumulator);
             constexpr auto bM = cute::get<0>(BlockGEMM::BlockTiler{});
-            constexpr auto bN = cute::get<0>(BlockGEMM::BlockTiler{});
+            constexpr auto bN = cute::get<1>(BlockGEMM::BlockTiler{});
             constexpr auto threads = BlockGEMM::GEMM::block_dim.x;
 
             // padded to fill bM

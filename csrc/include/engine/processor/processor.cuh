@@ -5,7 +5,6 @@
 #ifndef ARISTOS_COMPUTE_CUH
 #define ARISTOS_COMPUTE_CUH
 
-#include <cuda/std/type_traits>
 #include <cutlass/array.h>
 #include <cute/tensor.hpp>
 
@@ -13,9 +12,64 @@
 #include <nvshmem.h>
 #include <host/nvshmemx_api.h>
 
+#include "arch.cuh"
 #include "gemm.cuh"
 
 namespace aristos::processor{
+    template<unsigned int Arch, typename Element>
+    requires aristos::SupportedArch<Arch> && aristos::TensorValueType<Element>
+    struct Combine {
+        // default will be non-vectorized
+        template<typename BlockGEMM, class Registers>
+        __device__ __forceinline__
+        void operator()(cuda::std::byte* __restrict__ const& workspace,
+            Registers& accumulator,
+            const typename BlockGEMM::MatrixAType* __restrict__ const& inputs,
+            const unsigned int& M,
+            const unsigned int& K,
+            const unsigned int& tileIdx) const{
+            using ElementSource = typename BlockGEMM::MatrixAType;
+            static_assert(cute::is_rmem_v<Registers>);
+            cute::clear(accumulator);
+
+            // Row-major
+            const auto mA = make_tensor(cute::make_gmem_ptr(inputs),
+                make_layout(cute::make_shape(M, K), cute::make_stride(K, 1)));
+
+            const auto tilesM = M / cute::get<0>(BlockGEMM::BlockTiler{});
+            // We assert the below prior to this point
+            const auto tilesK = K / cute::get<1>(BlockGEMM::BlockTiler{});
+
+            const auto tileCoord = idx2crd(tileIdx, cute::Shape(tilesM, tilesK), cute::Stride(tilesK ,1));
+            const auto ctaCoord = make_coord(cute::get<0>(tileCoord), cute::get<1>(tileCoord), cute::_);
+            const auto gA = cute::local_tile(mA, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1, cute::_1, cute::X>{});
+            constexpr auto bM = cute::get<0>(BlockGEMM::BlockTiler{});
+            constexpr auto elems = SHARED_SIZE / (threads * sizeof(ElementC));
+
+            constexpr auto sCLay = cute::make_layout(cute::Shape<cute::Int<bM>, cute::Int<elems>>{});
+            auto sC = cute::make_tensor(cute::make_smem_ptr(CAST_TO(ElementSource, workspace)), sCLay);
+            // global -> shared
+        }
+    };
+
+    // Specialization for vectorized instructions on hopper
+    template<>
+    struct Combine<900, float> {
+        // default will be non-vectorized
+    };
+
+    // Specialization for vectorized half-precision
+    template<unsigned int Arch> requires Arch >= 700
+    struct Combine<Arch, cute::half_t> {
+
+    };
+
+    // Specialization for vectorized half-precision
+    template<unsigned int Arch> requires Arch >= 800
+    struct Combine<Arch, cute::bfloat16_t> {
+
+    };
+
     // Fused GEMM, Epilogue and data Transfer
     template<
         TaskType t = TaskType::preGEMM,
@@ -38,19 +92,19 @@ namespace aristos::processor{
         const unsigned int& tileIdx) const {
             static_assert(size(accumulator) % rScratch.size() == 0 && cutlass::detail::is_Array_v<RegisterScratch>);
             // Instantiate mainloop
-            typename BlockGEMM::CollectiveMainloop mainLoop{};
+            constexpr typename BlockGEMM::CollectiveMainloop mainLoop{};
             cute::clear(accumulator);
 
             // Row-major
-            auto mA = make_tensor(cute::make_gmem_ptr(inputs),
+            const auto mA = make_tensor(cute::make_gmem_ptr(inputs),
                 make_layout(cute::make_shape(M, K), cute::make_stride(K, 1)));
             // Row-major, transposed
-            auto mB = make_tensor(cute::make_gmem_ptr(weights),
+            const auto mB = make_tensor(cute::make_gmem_ptr(weights),
                 make_layout(cute::make_shape(N, K), cute::make_stride(K, 1)));
             // Row-major
-            auto mC = make_tensor(cute::make_gmem_ptr(output,
+            const auto mC = make_tensor(cute::make_gmem_ptr(output,
                 make_layout(cute::make_shape(M, N), cute::make_stride(N, 1))));
-            auto mD = make_tensor(cute::make_gmem_ptr(bias),
+            const auto mD = make_tensor(cute::make_gmem_ptr(bias),
                 make_layout(cute::make_shape(M, N), cute::make_stride(0, 1)));
 
             // M is padded, such that the below is correct
@@ -58,12 +112,12 @@ namespace aristos::processor{
             // We assert the below prior to this point
             const auto tilesN = N / cute::get<1>(BlockGEMM::BlockTiler{});
 
-            auto tileCoord = idx2crd(tileIdx, cute::Shape(tilesM, tilesN), cute::Stride(tilesN ,1));
-            auto ctaCoord = make_coord(cute::get<0>(tileCoord), cute::get<1>(tileCoord), cute::_);
-            auto gA = cute::local_tile(mA, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1, cute::X,cute::_1>{});
-            auto gB = cute::local_tile(mB, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step< cute::X,cute::_1,cute::_1>{});
-            auto gC = cute::local_tile(mC, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1,cute::_1, cute::X>{});
-            auto gD = cute::local_tile(mD, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1,cute::_1, cute::X>{});
+            const auto tileCoord = idx2crd(tileIdx, cute::Shape(tilesM, tilesN), cute::Stride(tilesN ,1));
+            const auto ctaCoord = make_coord(cute::get<0>(tileCoord), cute::get<1>(tileCoord), cute::_);
+            const auto gA = cute::local_tile(mA, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1, cute::X,cute::_1>{});
+            const auto gB = cute::local_tile(mB, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step< cute::X,cute::_1,cute::_1>{});
+            const auto gC = cute::local_tile(mC, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1,cute::_1, cute::X>{});
+            const auto gD = cute::local_tile(mD, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1,cute::_1, cute::X>{});
 
             auto k_tile_iter = cute::make_coord_iterator(size<2>(gA));
             int k_tile_count = size<2>(gA);
@@ -81,19 +135,19 @@ namespace aristos::processor{
             /// There is a block-wide barrier at the end of the above ^
 
             // Epilogue
-            typename BlockGEMM::MMA tiledMMA{};
-            auto tCgC = tiledMMA.get_slice(threadIdx.x).partition_C(gC);
-            auto tDgD = tiledMMA.get_slice(threadIdx.x).partition_C(gD);
+            constexpr typename BlockGEMM::MMA tiledMMA{};
+            const auto tCgC = tiledMMA.get_slice(threadIdx.x).partition_C(gC);
+            const auto tDgD = tiledMMA.get_slice(threadIdx.x).partition_C(gD);
 
             // Accounts for GEMMs that accumulate in types differing from input types,
             // given that the result may moonlight as the input for the succeeding GEMM.
-            auto gCStoreOp = cutlass::NumericConverter<typename decltype(tCgC)::value_type,
+            const auto gCStoreOp = cutlass::NumericConverter<typename decltype(tCgC)::value_type,
                                                         typename decltype(accumulator)::value_type>{};
-            auto gDLoadOp = cutlass::NumericConverter<typename decltype(accumulator)::value_type,
+            const auto gDLoadOp = cutlass::NumericConverter<typename decltype(accumulator)::value_type,
                                                         ElementD>{};
 
             // Assume elementwise operator
-            typename BlockGEMM::FusedEpilogue epilogueOp{};
+            constexpr typename BlockGEMM::FusedEpilogue epilogueOp{};
             constexpr auto trips = size(accumulator) / rScratch.size();
             constexpr auto elems = rScratch.size();
 
@@ -150,7 +204,7 @@ namespace aristos::processor{
         const unsigned int& isRemote) const {
             static_assert(size(accumulator) % rScratch.size() == 0 && cutlass::detail::is_Array_v<RegisterScratch>);
             // Instantiate mainloop
-            typename BlockGEMM::CollectiveMainloop mainLoop{};
+            constexpr typename BlockGEMM::CollectiveMainloop mainLoop{};
             cute::clear(accumulator);
 
             // Row-major
@@ -196,7 +250,7 @@ namespace aristos::processor{
             /// There is a block-wide barrier at the end of the above ^
 
             // Epilogue
-            typename BlockGEMM::MMA tiledMMA{};
+            constexpr typename BlockGEMM::MMA tiledMMA{};
             const auto tCgC = tiledMMA.get_slice(threadIdx.x).partition_C(gC);
             const auto tDgD = tiledMMA.get_slice(threadIdx.x).partition_C(gD);
             const auto tSgS = tiledMMA.get_slice(threadIdx.x).partition_C(gS);
@@ -207,10 +261,10 @@ namespace aristos::processor{
                                                         typename decltype(accumulator)::value_type>{};
             constexpr auto gDLoadOp = cutlass::NumericConverter<typename decltype(accumulator)::value_type,
                                                         ElementD>{};
-            constexpr auto scaleOp = Scale<typename decltype(accumulator)::value_type>{};
+            constexpr auto scaleOp = cutlass::epilogue::thread::Scale<typename decltype(accumulator)::value_type>{};
 
             // Assume elementwise operator
-            typename BlockGEMM::FusedEpilogue epilogueOp{};
+            constexpr typename BlockGEMM::FusedEpilogue epilogueOp{};
             constexpr auto trips = size(accumulator) / rScratch.size();
             constexpr auto elems = rScratch.size();
 
@@ -246,10 +300,10 @@ namespace aristos::processor{
             __syncthreads();
             if (!threadIdx.x) {
                 if (isRemote) {
-                    // Below is expensive, so we only invoke when necessary
                     __threadfence();
                 }
                 else {
+                    // Below is expensive, so we only invoke when necessary
                     __threadfence_system();
                 }
             }
@@ -376,7 +430,7 @@ namespace aristos::processor{
                     }
                 }
                 break;
-                case TaskType::GateScale: {
+                case TaskType::combine: {
                     // Do scale
                     // TODO atomicAdd to close scale
                 }

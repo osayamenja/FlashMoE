@@ -347,7 +347,7 @@ namespace aristos{
         Interrupt,
         preGEMM,
         postGEMM,
-        GateScale
+        combine
     };
 
     struct __align__(16) Task {
