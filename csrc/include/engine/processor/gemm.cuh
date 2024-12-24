@@ -6,17 +6,112 @@
 #define GEMM_CUH
 
 #include <cublasdx.hpp>
+#include <cute/tensor.hpp>
+#include <cutlass/array.h>
 #include <cutlass/epilogue/thread/activation.h>
 #include <cutlass/gemm/collective/collective_mma.hpp>
 #include "mmaConfig.cuh"
 
 namespace aristos {
+    /// A more apropos name would be "static storage" rather than registers.
+    template<class T>
+    struct isRegister : cuda::std::false_type {};
+
+    template<class T, int N, int Alignment>
+    struct isRegister<cutlass::AlignedArray<T, N, Alignment>> : cuda::std::true_type {};
+
+    template<class T, int N, bool RegisterSized>
+    struct isRegister<cutlass::Array<T, N, RegisterSized>> : cuda::std::true_type {};
+
+    template<class Engine, class Layout>
+    struct isRegister<cute::Tensor<Engine, Layout>> :
+    cuda::std::conditional_t<cute::is_rmem_v<cute::Tensor<Engine, Layout>>,
+    cuda::std::true_type, cuda::std::false_type> {};
+
+    template <class T>
+    constexpr bool isRegisterV = isRegister<T>::value;
+
     template<typename Element>
     requires aristos::TensorValueType<Element>
     struct Scale {
         __forceinline__ __device__
         Element operator()(const Element& accumulator, const Element& scale) const {
             return scale * accumulator;
+        }
+    };
+
+    /// Vector atomic add
+    template<unsigned int Arch, typename Element = float>
+    requires SupportedArch<Arch> && TensorValueType<Element>
+    struct VAA {
+        template<class Registers>
+        requires isRegisterV<Registers> &&
+            cuda::std::is_same_v<typename Registers::value_type, Element>
+        __device__ __forceinline__
+        void operator()(Element* __restrict__ const& gS, Registers registers) const {
+            #pragma unroll
+            for (uint i = 0; i < registers.size(); ++i) {
+                atomicAdd(gS + i, registers(i));
+            }
+        }
+    };
+
+    // specialization for half-precision
+    template<unsigned int Arch>
+    struct VAA<Arch, cute::half_t> {
+        template<class Registers>
+        requires isRegisterV<Registers> &&
+            cuda::std::is_same_v<typename Registers::value_type, cute::half_t>
+        __device__ __forceinline__
+        void operator()(cute::half_t* __restrict__ const& gS, Registers registers) const {
+            using vType = cuda::std::conditional_t<registers.size() % 2 == 0, __half2, __half>;
+            constexpr auto len = registers.size() / (sizeof(vType) / sizeof(__half));
+            auto* __restrict__ gSv = CAST_TO(vType, gS);
+            const auto* __restrict__ vRegs = CAST_TO(vType, registers.data());
+            #pragma unroll
+            for (uint i = 0; i < len; ++i) {
+                atomicAdd(gSv + i, vRegs[i]);
+            }
+        }
+    };
+
+    // specialization for bfloat16
+    template<unsigned int Arch> requires(Arch >= 800)
+    struct VAA<Arch, cute::bfloat16_t> {
+        template<class Registers>
+        requires isRegisterV<Registers> &&
+            cuda::std::is_same_v<typename Registers::value_type, cute::bfloat16_t>
+        __device__ __forceinline__
+        void operator()(cute::bfloat16_t* __restrict__ const& gS, Registers registers) const {
+            using vType = cuda::std::conditional_t<registers.size() % 2 == 0, __nv_bfloat162, __nv_bfloat16>;
+            constexpr auto len = registers.size() / (sizeof(vType) / sizeof(__half));
+            auto* __restrict__ gSv = CAST_TO(vType, gS);
+            const auto* __restrict__ vRegs = CAST_TO(vType, registers.data());
+            #pragma unroll
+            for (uint i = 0; i < len; ++i) {
+                atomicAdd(gSv + i, vRegs[i]);
+            }
+        }
+    };
+
+    // specialization for float on Hopper
+    template<>
+    struct VAA<900, float> {
+        template<class Registers>
+        requires isRegisterV<Registers> &&
+            cuda::std::is_same_v<typename Registers::value_type, float>
+        __device__ __forceinline__
+        void operator()(float* __restrict__ const& gS, Registers registers) const {
+            static_assert(registers.size() % 2 == 0, "Register tensor does not vectorize");
+            using vType = cuda::std::conditional_t<registers.size() % 4 == 0, float4,
+                cuda::std::conditional_t<registers.size() % 2 == 0, float2, float>>;
+            constexpr auto len = registers.size() / (sizeof(vType) / sizeof(float));
+            auto* __restrict__ gSv = CAST_TO(vType, gS);
+            const auto* __restrict__ vRegs = CAST_TO(vType, registers.data());
+            #pragma unroll
+            for (uint i = 0; i < len; ++i) {
+                atomicAdd(gSv + i, vRegs[i]);
+            }
         }
     };
 
