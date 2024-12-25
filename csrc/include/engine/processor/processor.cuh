@@ -16,7 +16,16 @@
 #include "gemm.cuh"
 
 namespace aristos::processor{
-    template<unsigned Arch> requires SupportedArch<Arch>
+    enum class CombineMode {
+        single,
+        multithreaded
+    };
+
+    template<
+        unsigned Arch,
+        typename ElementCombine,
+        CombineMode c = CombineMode::single
+    > requires SupportedArch<Arch> && TensorValueType<ElementCombine>
     struct Combine {
         template<
             class Activations,
@@ -65,7 +74,6 @@ namespace aristos::processor{
             // Transposed layout
             constexpr auto sCLay = cute::make_layout(cute::Shape<cute::Int<bM>, cute::Int<elems>>{}, cute::LayoutRight{});
             const auto sC = cute::make_tensor(cute::make_smem_ptr(workspace), sCLay);
-            constexpr VAA<Arch, Element> vaa{};
 
             #pragma unroll
             for (uint i = 0; i < trips; ++i) {
@@ -84,7 +92,21 @@ namespace aristos::processor{
             }
 
             if (threadIdx.x < tileSize) {
-                vaa(&activations(tokenIdx, 0), registers);
+                if constexpr (c == CombineMode::multithreaded) {
+                    // do conversion to float before combining
+                    constexpr VAA<Arch, ElementCombine> vaa{};
+                    vaa(&activations(tokenIdx, 0), registers);
+                }
+                else {
+                    // vector copy from registers to global directly
+                    constexpr auto vL = registers.size() * sizeof(Element) / sizeof(uint4);
+                    auto* __restrict__ aP = CAST_TO(uint4, &activations(tokenIdx, 0));
+                    const auto* __restrict__ rD = CAST_TO(uint4, registers.data());
+                    #pragma unroll
+                    for (uint i = 0; i < vL; ++i) {
+                        aP[i] = rD[i];
+                    }
+                }
             }
         }
     };
@@ -333,6 +355,7 @@ namespace aristos::processor{
     template<
         unsigned int processorCount,
         unsigned int Arch,
+        CombineMode c,
         typename ElementA,
         typename ElementB,
         typename ElementC = float,
@@ -345,13 +368,13 @@ namespace aristos::processor{
         assert(__isShared(workspace));
         __shared__ unsigned int signal;
         __shared__ Task currentTask;
+        __shared__ Config cachedConfig;
+        __shared__ SchedulerConfig scState;
         __shared__ unsigned int interrupt;
-        const auto* __restrict__ cachedConfig = CAST_TO(Config, workspace);
-        const auto* __restrict__ scState = CAST_TO(SchedulerConfig, workspace + sizeof(Config));
-        auto* processorWorkspace = CAST_TO(ElementD, workspace + sizeof(Config) + sizeof(SchedulerConfig));
+        
         if (!threadIdx.x) {
-            *CAST_TO(Config, workspace) = moeConfig;
-            *CAST_TO(SchedulerConfig, workspace + sizeof(Config)) = schedulerState;
+            cachedConfig = moeConfig;
+            scState = schedulerState;
         }
         using Operation = BlockMM<Arch, ElementA, ElementB, ElementC, ActivationOp>;
         using OperationX = BlockMM<Arch, ElementA, ElementB, ElementC, ActivationOpX>;
@@ -361,6 +384,7 @@ namespace aristos::processor{
         cutlass::AlignedArray<ElementC, elems> rScratch{};
         constexpr auto preGEMM = FGT<TaskType::preGEMM, Operation>{};
         constexpr auto postGEMM = FGT<TaskType::postGEMM, OperationX>{};
+        constexpr auto combineOp = Combine<Arch, ElementA, c>{};
 
         atomicExch_block(&interrupt, 0U);
         atomicExch_block(&signal, 0UL);
@@ -369,33 +393,33 @@ namespace aristos::processor{
         while (!interrupt) {
             if (!threadIdx.x) {
                 // Indicate readiness
-                scState->readyQ[atomicAdd(scState->readyQHead, 1U) % processorCount] = blockIdx.x;
+                scState.readyQ[atomicAdd(scState.readyQHead, 1U) % processorCount] = blockIdx.x;
                 // Grabs next task
-                auto nextTask = atomicLoad(scState->taskQSignals + blockIdx.x);
+                auto nextTask = atomicLoad(scState.taskQSignals + blockIdx.x);
                 while (nextTask == signal) {
-                    nextTask = atomicLoad(scState->taskQSignals + blockIdx.x);
+                    nextTask = atomicLoad(scState.taskQSignals + blockIdx.x);
                 }
                 signal = nextTask;
-                currentTask = scState->taskQ[signal - 1];
+                currentTask = scState.taskQ[signal - 1];
             }
             __syncthreads();
             switch (currentTask.taskType) {
                 case TaskType::preGEMM: {
                     constexpr unsigned int preIndex = 0;
-                    preGEMM(processorWorkspace, accumulator, rScratch,
+                    preGEMM(workspace, accumulator, rScratch,
                         CAST_TO(typename Operation::MatrixAType, currentTask.aData),
                         CAST_TO(typename Operation::MatrixBType, currentTask.bData[preIndex]),
                         CAST_TO(typename Operation::MatrixDType, currentTask.cData[preIndex]),
                         CAST_TO(typename Operation::MatrixDType, currentTask.dData[preIndex]),
                         currentTask.M,
-                        cachedConfig->upProjection,
-                        cachedConfig->embedDim,
+                        cachedConfig.upProjection,
+                        cachedConfig.embedDim,
                         currentTask.tileIdx);
                     if (!threadIdx.x &&
-                        atomicAdd(scState->taskSync + currentTask.syncIdx, 1U) == cachedConfig->tilesN) {
-                        const auto tasks = cachedConfig->tilesNx;
-                        auto* tQHead = scState->taskQSignals + 1;
-                        auto* tQ = scState->taskQ;
+                        atomicAdd(scState.taskSync + currentTask.syncIdx, 1U) == cachedConfig.tilesN) {
+                        const auto tasks = cachedConfig.tilesNx;
+                        auto* tQHead = scState.taskQSignals + 1;
+                        auto* tQ = scState.taskQ;
                         for (unsigned int i = 0; i < tasks; ++i) {
                             tQ[atomicAdd(tQHead, 1U)] = Task{
                                 TaskType::postGEMM,
@@ -414,35 +438,35 @@ namespace aristos::processor{
                         }
                         __threadfence();
                         // notify scheduler
-                        atomicAdd(scState->taskQSignals, tasks);
+                        atomicAdd(scState.taskQSignals, tasks);
                     }
                 }
                 break;
                 case TaskType::postGEMM: {
                     constexpr unsigned int postIndex = 0;
-                    postGEMM(processorWorkspace, accumulator, rScratch,
+                    postGEMM(workspace, accumulator, rScratch,
                         CAST_TO(typename Operation::MatrixAType, currentTask.aData),
                         CAST_TO(typename Operation::MatrixBType, currentTask.bData[postIndex]),
                         CAST_TO(typename Operation::MatrixDType, currentTask.cData[postIndex]),
                         CAST_TO(typename Operation::MatrixDType, currentTask.dData[postIndex]),
                         CAST_TO(typename Operation::MatrixDType, currentTask.scale),
-                        cachedConfig->embedDim,
-                        cachedConfig->upProjection,
+                        cachedConfig.embedDim,
+                        cachedConfig.upProjection,
                         currentTask.tileIdx,
-                        nvshmem_ptr(cachedConfig->sHeap, currentTask.peerIdx) == nullptr);
+                        nvshmem_ptr(cachedConfig.sHeap, currentTask.peerIdx) == nullptr);
                     if (!threadIdx.x) {
-                        if (atomicAdd(scState->taskSync + currentTask.syncIdx, 1U)
-                            == cachedConfig->tilesN + cachedConfig->tilesNx) {
+                        if (atomicAdd(scState.taskSync + currentTask.syncIdx, 1U)
+                            == cachedConfig.tilesN + cachedConfig.tilesNx) {
                             if (nvshmem_ptr(currentTask.cData[postIndex], currentTask.peerIdx) == nullptr) {
                                 // Batch remote network transfer to avoid overwhelming the NIC
                                 nvshmem_putmem_signal_nbi(currentTask.cData[postIndex], currentTask.cData[postIndex],
-                                    cachedConfig->finalPacketSize<ElementA>(currentTask.tileSize),
-                                    cachedConfig->flags + currentTask.flagIdx,
+                                    cachedConfig.finalPacketSize<ElementA>(currentTask.tileSize),
+                                    cachedConfig.flags + currentTask.flagIdx,
                                     constructSignal(PacketStage::final), NVSHMEM_SIGNAL_SET, currentTask.peerIdx);
                             }
                             else {
                                 // Already did the network transfer in fGET, so set signal only
-                                nvshmemx_signal_op(cachedConfig->flags + currentTask.flagIdx,
+                                nvshmemx_signal_op(cachedConfig.flags + currentTask.flagIdx,
                                  constructSignal(PacketStage::final), NVSHMEM_SIGNAL_SET, currentTask.peerIdx);
                             }
                         }
@@ -450,8 +474,9 @@ namespace aristos::processor{
                 }
                 break;
                 case TaskType::combine: {
-                    // Do scale
-                    // TODO atomicAdd to close scale
+                    combineOp(CAST_TO(ElementA, workspace), currentTask.aData[0], rScratch, currentTask.bData[0],
+                        currentTask.cData[0], currentTask.M, cachedConfig.embedDim, currentTask.tileIdx,
+                        currentTask.tileSize);
                 }
                 break;
                 case TaskType::Interrupt: {

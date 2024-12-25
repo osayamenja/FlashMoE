@@ -49,9 +49,12 @@ namespace aristos {
             cuda::std::is_same_v<typename Registers::value_type, Element>
         __device__ __forceinline__
         void operator()(Element* __restrict__ const& gS, Registers registers) const {
+            // Float is the "safe accumulator type"
+            // We acknowledge this by converting registers to float before accumulating.
+            auto regLoadOp = cutlass::NumericConverter<float, typename Registers::value_type>{};
             #pragma unroll
             for (uint i = 0; i < registers.size(); ++i) {
-                atomicAdd(gS + i, registers(i));
+                atomicAdd(gS + i, regLoadOp(registers(i)));
             }
         }
     };

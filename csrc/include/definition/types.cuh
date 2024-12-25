@@ -370,6 +370,7 @@ namespace aristos{
         __forceinline__ __device__
         Task() = default;
 
+        // Stage 1
         __device__ __forceinline__
         Task(const TaskType& _taskType,
             cuda::std::byte*  const& _aData,
@@ -387,6 +388,18 @@ namespace aristos{
         cData(_cData), dData(_dData), scale(_scale),
         syncIdx(_syncIdx), tileIdx(_tile), tileSize(_size), peerIdx(_peerIdx), M(_M), flagIdx(_flagIdx),
         taskType(_taskType){}
+
+        // Stage 2
+        __device__ __forceinline__
+        Task(const TaskType& _taskType,
+        cuda::std::byte*  const& _aData,
+        const cuda::std::array<cuda::std::byte*, GEMMs>& _bData,
+        const cuda::std::array<cuda::std::byte*, GEMMs>& _cData,
+        const unsigned int& _size,
+        const unsigned int& _tile,
+        const unsigned int& _M):
+        aData(_aData), bData(_bData), cData(_cData), tileIdx(_tile), tileSize(_size), M(_M), taskType(_taskType){}
+
 
         __device__ __forceinline__
         explicit Task(const TaskType& _taskType):
