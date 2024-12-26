@@ -18,19 +18,18 @@ namespace aristos::scheduler {
     template<
         unsigned int scratchSize,
         unsigned int regSize,
-        unsigned int processorCount,
-        typename RegisterScratch
+        unsigned int processorCount
     >
     requires(processorCount > 0 && scratchSize > 0 && regSize > 0 &&
         scratchSize >= regSize && scratchSize % regSize == 0)
     __device__ __forceinline__
-    void fastSchedule(RegisterScratch const& registerScratch,
-        unsigned int& tasksToSchedule,
-        unsigned int& scheduled,
+    void fastSchedule(unsigned int& tasksToSchedule,
+        unsigned int& tQStart,
         unsigned int& rQTail,
         unsigned int* __restrict__ const& fastScratch,
         unsigned int* __restrict__ const& rQ,
         unsigned int* __restrict__ const& pDB) {
+        cutlass::AlignedArray<unsigned int, regSize> registerScratch {};
         constexpr auto vectorLength = sizeof(uint4) / sizeof(unsigned int);
         static_assert(regSize % vectorLength == 0, "regSize must be a multiple of vectorLength");
         constexpr auto vectorSize = scratchSize / vectorLength;
@@ -68,7 +67,7 @@ namespace aristos::scheduler {
                     const auto pid = registerScratch[k];
                     --tasksToSchedule;
                     // Inform this process of a single task
-                    atomicExch(pDB + pid, ++scheduled);
+                    atomicExch(pDB + pid, ++tQStart);
                 }
             }
         }
@@ -99,7 +98,7 @@ namespace aristos::scheduler {
                 const auto pid = registerScratch[j];
                 --tasksToSchedule;
                 // Inform this process of a single task
-                atomicExch(pDB + pid, ++scheduled);
+                atomicExch(pDB + pid, ++tQStart);
             }
         }
 
@@ -113,7 +112,7 @@ namespace aristos::scheduler {
             const auto pid = registerScratch[j];
             --tasksToSchedule;
             // Inform this process of a single task
-            atomicExch(pDB + pid, ++scheduled);
+            atomicExch(pDB + pid, ++tQStart);
         }
     }
 
@@ -125,10 +124,13 @@ namespace aristos::scheduler {
     void start(unsigned int* __restrict__ taskBound) {
         constexpr auto schedulerRegSize = 32U;
         constexpr auto scratchSize = 64U;
+        constexpr auto stageSize = 32U;
+        __shared__ __align__(16) uint2 stage[stageSize];
         __shared__ __align__(16) unsigned int fastScratch[scratchSize];
         static_assert(scratchSize >= schedulerRegSize && scratchSize % schedulerRegSize == 0,
             "scratchSize must be a multiple of register scratch size");
         // Register allocations
+        auto* wQ = schedulerState.workItemQ;
         auto* rQ = schedulerState.readyQ;
         auto* tQ = schedulerState.taskQ;
         auto* pDB = schedulerState.taskSignal;
@@ -136,27 +138,44 @@ namespace aristos::scheduler {
         auto* doorbell = schedulerState.taskQSignals;
         auto* tQHead = schedulerState.taskQSignals + 1;
         unsigned int scheduled = 0U;
+        unsigned int wQTail = 0U;
         unsigned int rQTail = 0U;
-        cutlass::AlignedArray<unsigned int, schedulerRegSize> registerScratch{};
 
         while (scheduled < atomicLoad<cuda::thread_scope_block>(taskBound)) {
             // Batch process doorbell
-            auto tasks = atomicLoad(doorbell) - scheduled;
-            while (tasks) {
-                auto readyProcesses = atomicLoad(rQHead) - rQTail;
-                // The below if is not strictly needed as no operation will execute if tasksToSchedule == 0
-                // However, that scenario will involve many more conditionals than just a single if check like below
-                if (auto tasksToSchedule = cute::min(tasks, readyProcesses); tasksToSchedule) {
-                    tasks -= tasksToSchedule;
-                    fastSchedule<scratchSize, schedulerRegSize, processorCount>(
-                        registerScratch,
-                        tasksToSchedule,
-                        scheduled,
-                        rQTail,
-                        fastScratch,
-                        rQ,
-                        pDB);
+            auto workItems = atomicLoad(doorbell) - wQTail;
+            while (workItems) {
+                // TODO batch process wQ, staging in shared memory
+                const auto vectorTrips = workItems / (2 * stageSize);
+                for (uint i = 0; i < vectorTrips; ++i) {
+                    #pragma unroll
+                    for (uint j = 0; j < stageSize; ++j) {
+                        CAST_TO(uint4, stage)[j] = CAST_TO(uint4, wQ)[wQTail];
+                        wQTail += 2;
+                    }
+
+                    #pragma unroll
+                    
                 }
+                auto [tQStart, tasks] = wQ[wQTail++];
+                scheduled += tasks;
+                while (tasks) {
+                    auto readyProcesses = atomicLoad(rQHead) - rQTail;
+                    // The below if is not strictly needed as no operation will execute if tasksToSchedule == 0
+                    // However, that scenario will involve many more conditionals than just a single if check like below
+                    if (auto tasksToSchedule = cute::min(tasks, readyProcesses); tasksToSchedule) {
+                        tasks -= tasksToSchedule;
+                        fastSchedule<scratchSize, schedulerRegSize, processorCount>(
+                            tasksToSchedule,
+                            tQStart,
+                            scheduled,
+                            rQTail,
+                            fastScratch,
+                            rQ,
+                            pDB);
+                    }
+                }
+                --workItems;
             }
         }
 
@@ -173,8 +192,8 @@ namespace aristos::scheduler {
             if (auto tasksToSchedule = cute::min(tasks, readyProcesses); tasksToSchedule) {
                 tasks -= tasksToSchedule;
                 fastSchedule<scratchSize, schedulerRegSize, processorCount>(
-                    registerScratch,
                     tasksToSchedule,
+                    0,
                     interrupted,
                     rQTail,
                     fastScratch,

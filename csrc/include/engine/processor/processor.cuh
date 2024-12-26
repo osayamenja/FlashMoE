@@ -433,7 +433,8 @@ namespace aristos::processor{
                                 currentTask.M,
                                 currentTask.flagIdx,
                                 currentTask.tileSize,
-                                currentTask.peerIdx
+                                currentTask.peerIdx,
+                                currentTask.batchIdx
                             };
                         }
                         __threadfence();
@@ -474,7 +475,7 @@ namespace aristos::processor{
                 }
                 break;
                 case TaskType::combine: {
-                    combineOp(CAST_TO(ElementA, workspace), currentTask.aData[0], rScratch, currentTask.bData[0],
+                    combineOp(CAST_TO(ElementA, workspace), currentTask.aData, rScratch, currentTask.bData[0],
                         currentTask.cData[0], currentTask.M, cachedConfig.embedDim, currentTask.tileIdx,
                         currentTask.tileSize);
                 }

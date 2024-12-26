@@ -14,6 +14,25 @@
 #include "../util/atomics.cuh"
 
 namespace aristos::packet {
+    namespace signal {
+        // Motivates the compiler to use 64-bit LD/ST instructions
+        using SignalStruct = cuda::std::pair<unsigned int, ushort2>;
+        __device__ __forceinline__
+        // buffer is an 8-byte array, which we split into the following:
+        // 4-byte integer denoting batch index
+        // 2 bytes denoting blockM dimension
+        // 2 bytes identifying the communication stage
+        void encode(cuda::std::byte* __restrict__ const& buffer, const SignalStruct& s) {
+            // assert(__isShared(buffer));
+            *CAST_TO(SignalStruct, buffer) = s;
+        }
+
+        __device__ __forceinline__
+        auto decode(cuda::std::byte* __restrict__ const& buffer) {
+            return *CAST_TO(SignalStruct, buffer);
+        }
+    }
+
     template<unsigned int blocks,
     DropTokens d = DropTokens::yes,
     unsigned int superBlockSize = ARISTOS_SUPER_BLOCK_SIZE,
@@ -180,158 +199,138 @@ namespace aristos::packet {
         }
     }
 
-    // Decodes a single packet,
-    // TODO make a struct and parametrize for remote peer
-    template<PacketStage p = PacketStage::initial,
-    typename Element,
-    typename ElementScale>
-    __device__ __forceinline__
-    void decode(cuda::std::byte* __restrict__ const& packet,
+    /// Decodes a single packet from the initial stage
+    template<
+        PacketStage s = PacketStage::initial,
+        PeerConnectivity p,
+        typename Element,
+        typename ElementScale
+    >
+    requires aristos::TensorValueType<Element> && aristos::TensorValueType<ElementScale>
+    struct Decoder {
+        static_assert(s == PacketStage::initial);
+        __device__ __forceinline__
+        void operator()(cuda::std::byte* __restrict__ const& packet,
         unsigned int* __restrict__ const& status,
         unsigned int* __restrict__ const& taskCount,
         unsigned int const& localExpertIdx,
-        cuda::std::byte* __restrict__& cInitialBase,
-        unsigned int* const& cBOffset,
-        cuda::std::byte* __restrict__& peerHeapBase,
-        unsigned long int* pHOffset,
+        cuda::std::byte* __restrict__ const& cInitialBase,
+        unsigned int* __restrict__ const& cBOffset,
+        cuda::std::byte* __restrict__ const& peerHeapBase,
+        unsigned int* __restrict__ const& pHOffset,
         const cuda::std::array<cuda::std::byte*, GEMMs>& weights,
         const cuda::std::array<cuda::std::byte*, GEMMs>& bias,
-        unsigned int const& peer) {
-        static_assert(p == PacketStage::initial);
-        // process header
-        const auto [totalTokens, routedTokens] = *CAST_TO(uint2, packet);
-        const auto globalTaskTiles = Config::tiles<BLOCK_M>(totalTokens);
-        const auto taskTiles = routedTokens / BLOCK_M;
-        const auto padM = Config::pad<BLOCK_M>(routedTokens);
-        if (!atomicTAS<cuda::thread_scope_block>(status + peer)) {
-            // atomically reduce taskCount
-            const auto superfluous = (moeConfig.tilesN + moeConfig.tilesNx) *
-                (Config::tiles<BLOCK_M>(moeConfig.capacity) - globalTaskTiles);
-            atomicSub_block(taskCount, superfluous);
-        }
-        // process payload
-        auto* tokenIndices = packet + sizeof(uint2);
-        auto* scaleWeights = tokenIndices + sizeof(unsigned int) * routedTokens;
-        auto* tokens = scaleWeights + sizeof(ElementScale) * padM;
-        const auto tokenSize = moeConfig.embedDim;
-        auto* schedulerDB = schedulerState.taskQSignals;
-
-        auto* tQ = schedulerState.taskQ;
-        auto* tQHead = schedulerState.taskQSignals + 1;
-
-        const auto syncIdx = moeConfig.expertCapacity * (peer * moeConfig.numExperts + localExpertIdx);
-        cuda::std::array<cuda::std::byte*, GEMMs> taskData{};
-        taskData[0] = cInitialBase +
-            atomicAdd_block(cBOffset, padM) * BLOCK_M * BLOCK_N * sizeof(Element);
-        auto* packetBuffer = peerHeapBase + atomicAdd_block(pHOffset, Config::finalPacketSize<Element>(routedTokens));
-        taskData[1] = packetBuffer + sizeof(unsigned int) * (1 + routedTokens);
-
-        if (routedTokens) {
-            *CAST_TO(unsigned int, packetBuffer) = routedTokens;
-            packetBuffer += sizeof(unsigned int);
-            const auto vRt = routedTokens / (sizeof(uint4) / sizeof(unsigned int));
-            for (uint i = 0; i < vRt; ++i) {
-                CAST_TO(uint4, packetBuffer)[i] = CAST_TO(uint4, tokenIndices)[i];
+        unsigned int const& peer) const {
+            // process header
+            const auto [totalTokens, routedTokens] = *CAST_TO(uint2, packet);
+            const auto globalTaskTiles = Config::tiles<BLOCK_M>(totalTokens);
+            const auto fTilesM = routedTokens / BLOCK_M;
+            const auto padM = Config::pad<BLOCK_M>(routedTokens);
+            if (!atomicTAS<cuda::thread_scope_block>(status + peer)) {
+                // atomically reduce taskCount
+                const auto superfluous = (moeConfig.tilesN + moeConfig.tilesNx) *
+                    (Config::tiles<BLOCK_M>(moeConfig.capacity) - globalTaskTiles);
+                atomicSub_block(taskCount, superfluous);
             }
-            packetBuffer += sizeof(uint4) * vRt;
-            const auto residue = routedTokens - vRt * (sizeof(uint4) / sizeof(unsigned int));
-            for (uint i = 0; i < residue; ++i) {
-                CAST_TO(unsigned int, packetBuffer)[i] = CAST_TO(unsigned int, tokenIndices)[i];
-            }
-        }
+            // process payload
+            auto* __restrict__ scaleWeights = packet + sizeof(uint2);
+            auto* __restrict__ tokens = scaleWeights + sizeof(ElementScale) * padM;
+            const auto tokenSize = moeConfig.embedDim;
+            auto* __restrict__ schedulerDB = schedulerState.taskQSignals;
 
-        const auto tilesN = moeConfig.tilesN;
-        const auto flagIdx = moeConfig.rank * moeConfig.numExperts * moeConfig.capacity + localExpertIdx * moeConfig.capacity;
+            auto* __restrict__ tQ = schedulerState.taskQ;
+            auto* __restrict__ tQHead = schedulerState.taskQSignals + 1;
 
-        if (nvshmem_ptr(moeConfig.sHeap, peer) != nullptr)[[likely]] {
-            // TODO unroll this loop
-            // Below batch notifies the scheduler
-            for (uint i = 0; i < taskTiles; ++i) {
+            const auto syncIdx = moeConfig.expertCapacity * (peer * moeConfig.numExperts + localExpertIdx);
+            cuda::std::array<cuda::std::byte*, GEMMs> taskResults{};
+            // Staging buffer for results of preGEMM
+            taskResults[0] = cInitialBase +
+                atomicAdd_block(cBOffset, padM) * BLOCK_M * tokenSize * sizeof(Element);
+            // Egress packet buffer
+            taskResults[1] = peerHeapBase +
+                atomicAdd_block(pHOffset, padM) * BLOCK_M * tokenSize * sizeof(Element);
+            const auto tilesN = moeConfig.tilesN;
+            const auto totalTasks = Config::tiles<BLOCK_M>(totalTokens) * tilesN;
+            const auto flagIdx = moeConfig.capacity * (moeConfig.rank * moeConfig.numExperts + localExpertIdx);
+            const auto tQStart = atomicAdd(tQHead, totalTasks);
+
+            for (uint i = 0; i < fTilesM; ++i) {
                 for (uint j = 0; j < tilesN; ++j) {
-                    tQ[atomicIncrement(tQHead)] = Task{
+                    const auto tileIdx = j + i * tilesN;
+                    tQ[tQStart + tileIdx] = Task{
                         TaskType::preGEMM,
                         tokens,
                         weights,
-                        taskData,
+                        taskResults,
                         bias,
                         scaleWeights,
                         syncIdx + i,
-                        i * tilesN + j,
+                        tileIdx,
                         padM,
-                        flagIdx + i,
+                        flagIdx + (p == PeerConnectivity::remote ? i : tileIdx),
                         BLOCK_M,
                         peer,
+                        i
                     };
                 }
             }
 
-            // Residual task
-            if (routedTokens % BLOCK_M != 0) {
-                for (uint j = 0; j < tilesN; ++j) {
-                    tQ[atomicIncrement(tQHead)] = Task{
-                        TaskType::preGEMM,
-                        tokens,
-                        weights,
-                        taskData,
-                        bias,
-                        scaleWeights,
-                        syncIdx + taskTiles,
-                        taskTiles * tilesN + j,
-                        padM,
-                        flagIdx + taskTiles,
-                        routedTokens - taskTiles * BLOCK_M,
-                        peer,
-                    };
-                }
-            }
-        }
-        else {
-            // P2P peer
-            for (uint i = 0; i < taskTiles; ++i) {
-                for (uint j = 0; j < tilesN; ++j) {
-                    tQ[atomicIncrement(tQHead)] = Task{
-                        TaskType::preGEMM,
-                        tokens ,
-                        weights,
-                        taskData,
-                        bias,
-                        scaleWeights,
-                        syncIdx + i,
-                        i * tilesN + j,
-                        padM,
-                        flagIdx + i * tilesN + j,
-                        BLOCK_M,
-                        peer,
-                    };
-                }
+            // residue tile
+            const auto residue = routedTokens - fTilesM * BLOCK_M;
+            for (uint j = 0; j < tilesN; ++j) {
+                const auto tileIdx = j + fTilesM * tilesN;
+                tQ[atomicIncrement(tQHead)] = Task{
+                    TaskType::preGEMM,
+                    tokens,
+                    weights,
+                    taskResults,
+                    bias,
+                    scaleWeights,
+                    syncIdx + fTilesM,
+                    tileIdx,
+                    padM,
+                    flagIdx + (p == PeerConnectivity::remote ? fTilesM : tileIdx),
+                    residue,
+                    peer,
+                    fTilesM
+                };
             }
 
-            // Residual task
-            if (routedTokens % BLOCK_M != 0) {
-                for (uint j = 0; j < tilesN; ++j) {
-                    tQ[atomicIncrement(tQHead)] = Task{
-                        TaskType::preGEMM,
-                        tokens,
-                        weights,
-                        taskData,
-                        bias,
-                        scaleWeights,
-                        syncIdx + taskTiles,
-                        taskTiles * tilesN + j,
-                        padM,
-                        flagIdx + taskTiles * tilesN + j,
-                        routedTokens - taskTiles * BLOCK_M,
-                        peer,
-                    };
-                }
+            if (routedTokens) {
+                // Two-phase commit
+                // fence to commit tasks
+                __threadfence();
+                const auto commitIdx = atomicIncrement(schedulerState.workItemQHead);
+                schedulerState.workItemQ[commitIdx] = uint2{tQStart, totalTasks};
+                // fence for work item commit of commited tasks
+                __threadfence();
+                // notify scheduler to check commit log for new work
+                atomicIncrement(schedulerDB);
             }
         }
+    };
 
-        if (routedTokens) {
-            __threadfence();
-            // notify scheduler
-            atomicAdd(schedulerDB, taskTiles);
+
+    template<
+        typename Element,
+        typename ElementScale
+    >
+    struct Decoder<PacketStage::final, PeerConnectivity::p2p, Element, ElementScale> {
+        __device__ __forceinline__
+        void operator()() const {
+
         }
-    }
+    };
+
+    template<
+        typename Element,
+        typename ElementScale
+    >
+    struct Decoder<PacketStage::final, PeerConnectivity::remote, Element, ElementScale> {
+        __device__ __forceinline__
+        void operator()() const {
+
+        }
+    };
 }
 #endif //PACKET_CUH

@@ -105,16 +105,12 @@ namespace aristos{
         final,
     };
 
-    enum class PacketWrapDistribution {
-        equidistant,
-        variant
-    };
     enum class GateReductionLevel {
         singleBlock,
         multiBlock
     };
 
-    enum class HeapType {
+    enum class PeerConnectivity {
         remote,
         p2p
     };
@@ -128,6 +124,24 @@ namespace aristos{
     enum putSignal : uint64_t {
         sent = 1
     };
+
+    /// A more apropos name would be "static storage" rather than registers.
+    template<class T>
+    struct isRegister : cuda::std::false_type {};
+
+    template<class T, int N, int Alignment>
+    struct isRegister<cutlass::AlignedArray<T, N, Alignment>> : cuda::std::true_type {};
+
+    template<class T, int N, bool RegisterSized>
+    struct isRegister<cutlass::Array<T, N, RegisterSized>> : cuda::std::true_type {};
+
+    template<class Engine, class Layout>
+    struct isRegister<cute::Tensor<Engine, Layout>> :
+    cuda::std::conditional_t<cute::is_rmem_v<cute::Tensor<Engine, Layout>>,
+    cuda::std::true_type, cuda::std::false_type> {};
+
+    template <class T>
+    constexpr bool isRegisterV = isRegister<T>::value;
 
     struct ModelConfig{
         unsigned int numLayers;
@@ -216,7 +230,7 @@ namespace aristos{
         template<typename Element>
         __forceinline__ __device__
         constexpr size_t finalPacketSize(const unsigned int& numTokens) const {
-            return sizeof(unsigned int) + numTokens * (sizeof(unsigned int) + sizeof(Element) * embedDim);
+            return numTokens * (sizeof(Element) * embedDim);
         }
         template<unsigned int tileDimension>
         __host__ __device__ __forceinline__
@@ -365,6 +379,7 @@ namespace aristos{
         //padded
         unsigned int M = 0U;
         unsigned int flagIdx = 0U;
+        unsigned int batchIdx = 0U;
         TaskType taskType = TaskType::Interrupt;
 
         __forceinline__ __device__
@@ -383,11 +398,12 @@ namespace aristos{
             const unsigned int& _M,
             const unsigned int& _flagIdx,
             const unsigned int& _size,
-            const unsigned int& _peerIdx):
+            const unsigned int& _peerIdx,
+            const unsigned int& _batchIdx):
         aData(_aData), bData(_bData),
         cData(_cData), dData(_dData), scale(_scale),
         syncIdx(_syncIdx), tileIdx(_tile), tileSize(_size), peerIdx(_peerIdx), M(_M), flagIdx(_flagIdx),
-        taskType(_taskType){}
+        batchIdx(_batchIdx), taskType(_taskType){}
 
         // Stage 2
         __device__ __forceinline__
@@ -413,8 +429,10 @@ namespace aristos{
         unsigned int* readyQHead;
         unsigned int* taskSignal;
         unsigned int* taskSync;
-        Task* taskQ;
         unsigned int* taskQSignals;
+        uint2* workItemQ;
+        unsigned int* workItemQHead;
+        Task* taskQ;
 
         __forceinline__ __device__
         SchedulerConfig() = default;
@@ -422,13 +440,16 @@ namespace aristos{
         __forceinline__ __device__ __host__
         SchedulerConfig(cuda::std::byte* _bk,
                const unsigned int& numberBlocks,
-               const unsigned int& _syncTasksBound) {
+               const unsigned int& _syncTasksBound,
+               const unsigned int& _commitLogBound) {
             readyQ = CAST_TO(unsigned int, _bk);
-            readyQHead = CAST_TO(unsigned int, readyQ + numberBlocks);
-            taskSignal = CAST_TO(unsigned int, readyQHead + N_READY_Q_SIGNALS);
-            taskSync = CAST_TO(unsigned int, taskSignal + numberBlocks);
-            taskQSignals = CAST_TO(unsigned int, taskSync + _syncTasksBound);
-            taskQ = CAST_TO(Task, taskQSignals + N_TASK_Q_SIGNALS);
+            readyQHead = readyQ + numberBlocks;
+            taskSignal = readyQHead + N_READY_Q_SIGNALS;
+            taskSync = taskSignal + numberBlocks;
+            taskQSignals = taskSync + _syncTasksBound;
+            workItemQHead = taskQSignals + N_TASK_Q_SIGNALS;
+            workItemQ = CAST_TO(uint2, workItemQHead + 1);
+            taskQ = CAST_TO(Task, workItemQ + _commitLogBound);
         }
     };
 

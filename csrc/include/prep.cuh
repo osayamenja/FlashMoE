@@ -64,6 +64,7 @@ namespace aristos{
         const auto taskBound = cute::ceil_div(seqLen, BLOCK_M) *
             (cute::ceil_div(embedDim, BLOCK_N) + cute::ceil_div(hiddenProjDim, BLOCK_N) + 1);
         const auto tiles = cute::ceil_div(seqLen, BLOCK_M) * cute::ceil_div(embedDim, BLOCK_N);
+        const auto workItemBound = tiles + numNeighbors * numLocalExperts;
         const auto paddedSeqLen = Config::pad<BLOCK_M>(seqLen);
         const auto paddedNumExperts = Config::pad<BLOCK_N>(numExperts);
         const auto brsData = (numExperts > BLOCK_N) *
@@ -88,6 +89,7 @@ namespace aristos{
             sizeof(unsigned int) * blocks + // readyQ
             sizeof(unsigned int) * blocks + // taskSignal
             sizeof(unsigned int) * numNeighbors * numExperts * cute::ceil_div(seqLen, numExperts * BLOCK_M) + // taskSync
+            sizeof(uint2) * workItemBound + // commit log
             sizeof(Task) * taskBound + // taskQ
             sizeof(unsigned int) * N_READY_Q_SIGNALS + // rQS
             sizeof(unsigned int) * (N_TASK_Q_SIGNALS + 1);// tQS and doorbell
