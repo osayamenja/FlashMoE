@@ -8,14 +8,13 @@
 #include "../definition/types.cuh"
 
 namespace aristos::scheduler {
-    template<unsigned int processorCount, typename Registers, typename RScratch>
-    requires(processorCount > 0 && isRegisterV<Registers> && isRegisterV<RScratch>)
+    template<unsigned int processorCount, unsigned int rQSetSize, typename Registers>
+    requires(processorCount > 0 && isRegisterV<Registers> && rQSetSize > 1 && cutlass::ispow2(rQSetSize))
     __device__ __forceinline__
     void scheduleLoop(unsigned int& tasks,
         unsigned int& scheduled,
         const unsigned int& wSIdx,
         Registers& rtQTails,
-        RScratch& rQSet,
         unsigned int* __restrict__ const& rQHead,
         unsigned int& rQTail,
         const unsigned int* __restrict__ const& rQ,
@@ -31,28 +30,18 @@ namespace aristos::scheduler {
                 // ensures reads to ready Q happen after signal reception
                 __threadfence_block();
             }
-            constexpr auto batchSize = RScratch::kElements;
-            const auto tSb = tasksToSchedule / batchSize; // tasks to schedule batches
+            const auto tSb = tasksToSchedule / rQSetSize; // tasks to schedule batches
             for (uint i = 0; i < tSb; ++i) {
                 #pragma unroll
-                for (uint j = 0; j < batchSize; ++j) {
-                    rQSet[j] = rQ[rQTail++ % processorCount];
-                }
-
-                #pragma unroll
-                for (uint j = 0; j < batchSize; ++j) {
-                    const auto pid = rQSet[j];
+                for (uint j = 0; j < rQSetSize; ++j) {
+                    const auto pid = rQ[rQTail++ % processorCount];
                     ++rtQTails[wSIdx];
                     atomicExch(pDB + pid, tQRow * tQRl + rtQTails[wSIdx]);
                 }
             }
-            const auto residue = tasksToSchedule - tSb * batchSize;
+            const auto residue = tasksToSchedule - tSb * rQSetSize;
             for (uint i = 0; i < residue; ++i) {
-                rQSet[i] = rQ[rQTail++ % processorCount];
-            }
-
-            for (uint i = 0; i < residue; ++i) {
-                const auto pid = rQSet[i];
+                const auto pid = rQ[rQTail++ % processorCount];
                 ++rtQTails[wSIdx];
                 // Fence is not needed prior to signal given task producers already issue one.
                 atomicExch(pDB + pid, tQRow * tQRl + rtQTails[wSIdx]);
@@ -61,15 +50,13 @@ namespace aristos::scheduler {
     }
 
     // all loops are unrolled
-    template<unsigned int processorCount, unsigned int producerCount, unsigned int wSetSize,
-    typename Registers, typename RScratch>
+    template<unsigned int processorCount, unsigned int producerCount, unsigned int wSetSize, unsigned int rQSetSize,
+    typename Registers>
     requires(processorCount > 0 && producerCount > 0 && producerCount < 128 && wSetSize > 1 && wSetSize % 4 == 0
-        && isRegisterV<Registers> && Registers::kElements == wSetSize
-        && isRegisterV<RScratch>)
+        && isRegisterV<Registers> && Registers::kElements == wSetSize)
     __device__ __forceinline__
     void staticSchedule(unsigned int& scheduled,
         Registers& rtQTails,
-        RScratch& rQSet,
         const unsigned int& tQRl,
         unsigned int* __restrict__ const& tQTails,
         unsigned int* __restrict__ const& tQHeads,
@@ -91,7 +78,7 @@ namespace aristos::scheduler {
                 const auto tQRow = j + i * wSetSize;
                 auto tasks = atomicLoad<cuda::thread_scope_block>(tQHeads + tQRow) - rtQTails[j];
                 // Let's schedule these tasks
-                scheduleLoop<processorCount>(tasks, scheduled, j, rtQTails, rQSet, rQHead,
+                scheduleLoop<processorCount, rQSetSize>(tasks, scheduled, j, rtQTails, rQHead,
                     rQTail, rQ, tQRow, tQRl, pDB);
             }
 
@@ -113,7 +100,7 @@ namespace aristos::scheduler {
         for (uint j = 0; j < residue; ++j) {
             const auto tQRow = j + producerBatches * wSetSize;
             auto tasks = atomicLoad<cuda::thread_scope_block>(tQHeads + tQRow) - rtQTails[j];
-            scheduleLoop<processorCount>(tasks, scheduled, j, rtQTails, rQSet, rQHead,
+            scheduleLoop<processorCount, rQSetSize>(tasks, scheduled, j, rtQTails, rQHead,
                     rQTail, rQ, tQRow, tQRl, pDB);
         }
 
@@ -125,14 +112,12 @@ namespace aristos::scheduler {
     }
 
     // dynamic trip, used for external task queue whose heads are in global memory not shared.
-    template<unsigned int processorCount, unsigned int wSetSize, typename Registers, typename RScratch>
+    template<unsigned int processorCount, unsigned int wSetSize, unsigned int rQSetSize, typename Registers>
     requires(processorCount > 0 && wSetSize > 1 && wSetSize % 4 == 0
-        && isRegisterV<Registers> && Registers::kElements == wSetSize
-        && isRegisterV<RScratch>)
+        && isRegisterV<Registers> && Registers::kElements == wSetSize)
     __device__ __forceinline__
     void dynamicSchedule(unsigned int& scheduled,
         Registers& rtQTails,
-        RScratch& rQSet,
         const unsigned int& tQRl,
         unsigned int* __restrict__ const& tQTails,
         unsigned int* __restrict__ const& tQHeads,
@@ -140,7 +125,7 @@ namespace aristos::scheduler {
         unsigned int& rQTail,
         const unsigned int* __restrict__ const& rQ,
         unsigned int* __restrict__ const& pDB,
-        const unsigned int& taskMailboxes) {
+        unsigned int const& taskMailboxes) {
         const auto mailboxBatches = taskMailboxes / wSetSize;
 
         for (uint i = 0; i < mailboxBatches; ++i) {
@@ -154,7 +139,7 @@ namespace aristos::scheduler {
                 const auto tQRow = j + i * wSetSize;
                 auto tasks = atomicLoad(tQHeads + tQRow) - rtQTails[j];
                 // Let's schedule these tasks
-                scheduleLoop<processorCount>(tasks, scheduled, j, rtQTails, rQSet, rQHead,
+                scheduleLoop<processorCount, rQSetSize>(tasks, scheduled, j, rtQTails, rQHead,
                     rQTail, rQ, tQRow, tQRl, pDB);
             }
 
@@ -173,7 +158,7 @@ namespace aristos::scheduler {
         for (uint j = 0; j < residue; ++j) {
             const auto tQRow = j + mailboxBatches * wSetSize;
             auto tasks = atomicLoad(tQHeads + tQRow) - rtQTails[j];
-            scheduleLoop<processorCount>(tasks, scheduled, j, rtQTails, rQSet, rQHead,
+            scheduleLoop<processorCount, rQSetSize>(tasks, scheduled, j, rtQTails, rQHead,
                     rQTail, rQ, tQRow, tQRl, pDB);
         }
 
@@ -199,21 +184,20 @@ namespace aristos::scheduler {
         unsigned int* __restrict__ const& rQHead,
         const unsigned int* __restrict__ const& rQ,
         unsigned int* __restrict__ const& pDB) {
-        // assert(__isShared(all arguments above) and alignment is 16)
+        // assert(__isShared(all arguments above) except gtQ* and alignment is 16)
         unsigned int scheduled = 0U;
         unsigned int rQTail = 0U;
         constexpr auto wSetSize = 16;
-        constexpr auto rQSetSize = 16;
         cutlass::AlignedArray<unsigned int, wSetSize> rtQTails{};
-        cutlass::AlignedArray<unsigned int, rQSetSize> rQSet{};
         rtQTails.fill(0U);
 
         while (scheduled < atomicLoad<cuda::thread_scope_block>(taskBound)) {
+            constexpr auto rQSetSize = 16;
             // sweep all static wQHeads and schedule pending tasks
-            staticSchedule<processorCount, producerCount, wSetSize>(scheduled, rtQTails, rQSet, tQRl, tQTails,
+            staticSchedule<processorCount, producerCount, wSetSize, rQSetSize>(scheduled, rtQTails,tQRl, tQTails,
                 tQHeads, rQHead, rQTail, rQ, pDB);
             // Now do dynamic scheduling
-            dynamicSchedule<processorCount, wSetSize>(scheduled, rtQTails, rQSet, gtQRl, gtQTails,
+            dynamicSchedule<processorCount, wSetSize, rQSetSize>(scheduled, rtQTails, gtQRl, gtQTails,
                 gtQHeads, rQHead, rQTail, rQ, pDB, gtQCL);
         }
     }

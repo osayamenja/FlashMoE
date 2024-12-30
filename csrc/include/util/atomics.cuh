@@ -64,6 +64,17 @@ namespace aristos{
         return atomicCAS(addr, 0U, 1U);
     }
 
+    template<cuda::thread_scope scope = cuda::thread_scope_device>
+    void fence() {
+        if constexpr (scope == cuda::thread_scope_block) {
+            __threadfence_block();
+        }
+        else if constexpr (scope == cuda::thread_scope_device) {
+            __threadfence();
+        }
+        __threadfence_system();
+    }
+
 
     namespace ring {
         //TODO use partially specialized struct for this
@@ -72,13 +83,18 @@ namespace aristos{
         __device__ __forceinline__
         void awaitTurn(T* const& addr, const T& baton = static_cast<T>(1U)) {
             while (atomicLoad<scope>(addr) != baton){}
+            fence<scope>();
         }
 
         // non-blocking await routine
         template<cuda::thread_scope scope = cuda::thread_scope_device, typename T>
         __device__ __forceinline__
         bool tryAwait(T* const& addr, const T& baton = static_cast<T>(1U)) {
-            return atomicLoad<scope>(addr) == baton;
+            if (atomicLoad<scope>(addr) == baton) {
+                fence<scope>();
+                return true;
+            }
+            return false;
         }
 
         template<cuda::thread_scope scope = cuda::thread_scope_device, typename T>

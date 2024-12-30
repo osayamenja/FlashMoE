@@ -7,18 +7,6 @@
 
 #include "../definition/types.cuh"
 
-namespace aristos::readyQ {
-    /// readyQ Observer
-    __device__ __forceinline__
-    void observe(unsigned int* __restrict__ rQHead,
-    unsigned int* __restrict__ rQ,
-    unsigned int* __restrict__ rQTail) {
-        // global ready queue
-        auto* __restrict__ globalRQ = schedulerState.readyQ;
-
-    }
-}
-
 namespace aristos::workQ {
     /// workQ Observer
     __device__ __forceinline__
