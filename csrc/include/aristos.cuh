@@ -12,11 +12,11 @@
 #include "util/indexing.cuh"
 #include "util/debug.cuh"
 
-#include "engine/scheduler.cuh"
-#include "engine/subscriber.cuh"
-#include "engine/decider/decider.cuh"
-#include "engine/processor/mmaConfig.cuh"
-#include "engine/processor/processor.cuh"
+#include "os/scheduler.cuh"
+#include "os/subscriber.cuh"
+#include "os/decider/decider.cuh"
+#include "os/processor/mmaConfig.cuh"
+#include "os/processor/processor.cuh"
 
 #include "moe/moe.cuh"
 

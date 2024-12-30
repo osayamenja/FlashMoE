@@ -8,7 +8,7 @@
 #include <cuda/std/__algorithm/make_heap.h>
 #include <cuda/std/__algorithm/pop_heap.h>
 
-#include "../engine/processor/gemm.cuh"
+#include "../os/processor/gemm.cuh"
 #include "../definition/types.cuh"
 #include "../util/atomics.cuh"
 

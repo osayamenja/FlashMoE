@@ -105,16 +105,19 @@ namespace aristos{
         final,
     };
 
+    __device__
     enum class GateReductionLevel {
         singleBlock,
         multiBlock
     };
 
+    __device__
     enum class PeerConnectivity {
         remote,
         p2p
     };
 
+    __device__
     enum class DropTokens {
         yes,
         no
@@ -123,6 +126,12 @@ namespace aristos{
     __device__
     enum putSignal : uint64_t {
         sent = 1
+    };
+
+    __device__
+    enum ReadySignal : unsigned int {
+        observed,
+        ready
     };
 
     /// A more apropos name would be "static storage" rather than registers.
@@ -134,11 +143,6 @@ namespace aristos{
 
     template<class T, int N, bool RegisterSized>
     struct isRegister<cutlass::Array<T, N, RegisterSized>> : cuda::std::true_type {};
-
-    template<class Engine, class Layout>
-    struct isRegister<cute::Tensor<Engine, Layout>> :
-    cuda::std::conditional_t<cute::is_rmem_v<cute::Tensor<Engine, Layout>>,
-    cuda::std::true_type, cuda::std::false_type> {};
 
     template <class T>
     constexpr bool isRegisterV = isRegister<T>::value;
@@ -365,6 +369,7 @@ namespace aristos{
     };
 
     struct __align__(16) Task {
+        // D = A * B + C
         // sensible sentinel values
         cuda::std::byte* aData = nullptr;
         cuda::std::array<cuda::std::byte*, GEMMs> bData = {};

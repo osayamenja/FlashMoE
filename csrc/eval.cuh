@@ -14,7 +14,7 @@
 #include <nvshmem.h>
 #include <host/nvshmemx_api.h>
 
-#include "include/engine/decider/decider.cuh"
+#include "include/os/decider/decider.cuh"
 #include "include/definition/types.cuh"
 #include "include/prep.cuh"
 #include "include/topo/topo.cuh"
@@ -73,7 +73,7 @@ namespace aristos {
             sizeof(decltype(aristos::seqNo)), 0, cudaMemcpyHostToDevice, aristos::aristosStream));
         #pragma unroll
         for (uint i = 0; i < skip; ++i) {
-            aristos::topology::discover<<<32, ARISTOS_BLOCK_SIZE, sharedSize, aristos::aristosStream>>>(n, globalRank, isRemotePresent,
+            topology::discover<<<32, ARISTOS_BLOCK_SIZE, sharedSize, aristos::aristosStream>>>(n, globalRank, isRemotePresent,
             pr, sHeap, flags, results);
             hostSeqNo = hostSeqNo + 1;
             CUTE_CHECK_ERROR(cudaMemcpyToSymbolAsync(aristos::seqNo, &hostSeqNo, sizeof(decltype(aristos::seqNo)),

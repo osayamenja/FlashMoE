@@ -48,34 +48,35 @@ check_compiler_flag(CUDA -t4 NVCC_THREADS)
 find_package(CUDAToolkit REQUIRED)
 
 add_executable(csrc main.cu
-        include/engine/subscriber.cuh
+        include/os/subscriber.cuh
         include/moe/moe.cuh
         include/aristos.cuh
-        include/engine/processor/processor.cuh
+        include/os/processor/processor.cuh
         include/util/indexing.cuh
         include/definition/tensor.cuh
         include/definition/types.cuh
         include/definition/memory_layout.cuh
         include/util/atomics.cuh
-        include/engine/decider/decider.cuh
-        include/engine/decider/comps/edge.cuh
-        include/engine/decider/comps/expert.cuh
-        include/engine/decider/comps/group.cuh
-        include/engine/decider/comps/worker.cuh
-        include/engine/decider/comps/args.cuh
-        include/engine/decider/comps/functions.cuh
+        include/os/decider/decider.cuh
+        include/os/decider/comps/edge.cuh
+        include/os/decider/comps/expert.cuh
+        include/os/decider/comps/group.cuh
+        include/os/decider/comps/worker.cuh
+        include/os/decider/comps/args.cuh
+        include/os/decider/comps/functions.cuh
         include/util/debug.cuh
-        include/engine/decider/comps/niche.cuh
+        include/os/decider/comps/niche.cuh
         include/topo/topo.cuh
-        include/engine/processor/mmaConfig.cuh
+        include/os/processor/mmaConfig.cuh
         include/prep.cuh
-        include/engine/scheduler.cuh
+        include/os/scheduler.cuh
         include/moe/gate.cuh
-        include/engine/processor/gemm.cuh
+        include/os/processor/gemm.cuh
         include/moe/packet.cuh
         bench.cuh
         eval.cuh
         include/arch.cuh
+        include/os/observer.cuh
 )
 set_target_properties(csrc PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON

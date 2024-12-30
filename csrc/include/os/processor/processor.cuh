@@ -375,6 +375,8 @@ namespace aristos::processor{
         if (!threadIdx.x) {
             cachedConfig = moeConfig;
             scState = schedulerState;
+            signal = 0U;
+            interrupt = 0U;
         }
         using Operation = BlockMM<Arch, ElementA, ElementB, ElementC, ActivationOp>;
         using OperationX = BlockMM<Arch, ElementA, ElementB, ElementC, ActivationOpX>;
@@ -385,15 +387,12 @@ namespace aristos::processor{
         constexpr auto preGEMM = FGT<TaskType::preGEMM, Operation>{};
         constexpr auto postGEMM = FGT<TaskType::postGEMM, OperationX>{};
         constexpr auto combineOp = Combine<Arch, ElementA, c>{};
-
-        atomicExch_block(&interrupt, 0U);
-        atomicExch_block(&signal, 0UL);
         __syncthreads();
 
         while (!interrupt) {
             if (!threadIdx.x) {
                 // Indicate readiness
-                scState.readyQ[atomicAdd(scState.readyQHead, 1U) % processorCount] = blockIdx.x;
+                atomicExch(scState.readyQ + blockIdx.x, ready);
                 // Grabs next task
                 auto nextTask = atomicLoad(scState.taskQSignals + blockIdx.x);
                 while (nextTask == signal) {
@@ -456,19 +455,21 @@ namespace aristos::processor{
                         currentTask.tileIdx,
                         nvshmem_ptr(cachedConfig.sHeap, currentTask.peerIdx) == nullptr);
                     if (!threadIdx.x) {
-                        if (atomicAdd(scState.taskSync + currentTask.syncIdx, 1U)
+                        if (atomicIncrement(scState.taskSync + currentTask.syncIdx)
                             == cachedConfig.tilesN + cachedConfig.tilesNx) {
                             if (nvshmem_ptr(currentTask.cData[postIndex], currentTask.peerIdx) == nullptr) {
                                 // Batch remote network transfer to avoid overwhelming the NIC
                                 nvshmem_putmem_signal_nbi(currentTask.cData[postIndex], currentTask.cData[postIndex],
                                     cachedConfig.finalPacketSize<ElementA>(currentTask.tileSize),
                                     cachedConfig.flags + currentTask.flagIdx,
-                                    constructSignal(PacketStage::final), NVSHMEM_SIGNAL_SET, currentTask.peerIdx);
+                                    constructSignal(PacketStage::final), NVSHMEM_SIGNAL_SET,
+                                    currentTask.peerIdx);
                             }
                             else {
                                 // Already did the network transfer in fGET, so set signal only
                                 nvshmemx_signal_op(cachedConfig.flags + currentTask.flagIdx,
-                                 constructSignal(PacketStage::final), NVSHMEM_SIGNAL_SET, currentTask.peerIdx);
+                                 constructSignal(PacketStage::final), NVSHMEM_SIGNAL_SET,
+                                 currentTask.peerIdx);
                             }
                         }
                     }

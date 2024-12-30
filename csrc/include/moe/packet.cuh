@@ -16,6 +16,7 @@
 namespace aristos::packet {
     namespace signal {
         // Motivates the compiler to use 64-bit LD/ST instructions
+        // {batchIdx, numTokens, signal}
         using SignalStruct = cuda::std::pair<unsigned int, ushort2>;
         __device__ __forceinline__
         // buffer is an 8-byte array, which we split into the following:
@@ -302,9 +303,9 @@ namespace aristos::packet {
                 __threadfence();
                 const auto commitIdx = atomicIncrement(schedulerState.workItemQHead);
                 schedulerState.workItemQ[commitIdx] = uint2{tQStart, totalTasks};
-                // fence for work item commit of commited tasks
+                // fence to commit work item of commited tasks
                 __threadfence();
-                // notify scheduler to check commit log for new work
+                // notify scheduler to check work item queue for new work
                 atomicIncrement(schedulerDB);
             }
         }
