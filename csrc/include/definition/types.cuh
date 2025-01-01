@@ -428,16 +428,16 @@ namespace aristos{
     };
 
     struct __align__(16) SchedulerConfig{
-        unsigned int* readyQ;
-        /// rQS[0] -> head
-        /// rQS[1] -> tail
-        unsigned int* readyQHead;
+        unsigned int* statusQ;
         unsigned int* taskSignal;
         unsigned int* taskSync;
-        unsigned int* taskQSignals;
-        uint2* workItemQ;
-        unsigned int* workItemQHead;
+        // at least the upper bound for number of tasks, excluding interrupt tasks.
+        // ceiling rounded to allow uniform strides for each producer's slice
+        unsigned int tUB;
+        unsigned int* tQHeads;
+        unsigned int* xTQHeads;
         Task* taskQ;
+        Task* xTaskQ;
 
         __forceinline__ __device__
         SchedulerConfig() = default;
@@ -445,16 +445,19 @@ namespace aristos{
         __forceinline__ __device__ __host__
         SchedulerConfig(cuda::std::byte* _bk,
                const unsigned int& numberBlocks,
+               const unsigned int& numberSubscribers,
+               const unsigned int& gtQCL,
+               const unsigned int& tQRl,
                const unsigned int& _syncTasksBound,
-               const unsigned int& _commitLogBound) {
-            readyQ = CAST_TO(unsigned int, _bk);
-            readyQHead = readyQ + numberBlocks;
-            taskSignal = readyQHead + N_READY_Q_SIGNALS;
+               const unsigned int& _tUB) {
+            tUB = _tUB;
+            statusQ = CAST_TO(unsigned int, _bk);
+            taskSignal = statusQ + numberBlocks;
             taskSync = taskSignal + numberBlocks;
-            taskQSignals = taskSync + _syncTasksBound;
-            workItemQHead = taskQSignals + N_TASK_Q_SIGNALS;
-            workItemQ = CAST_TO(uint2, workItemQHead + 1);
-            taskQ = CAST_TO(Task, workItemQ + _commitLogBound);
+            tQHeads = taskSync + _syncTasksBound;
+            xTQHeads = tQHeads + numberSubscribers;
+            taskQ = CAST_TO(Task, xTQHeads + gtQCL);
+            xTaskQ = taskQ + numberBlocks * tQRl;
         }
     };
 
@@ -462,6 +465,16 @@ namespace aristos{
     __constant__ __inline__ Config moeConfig{};
     __constant__ __inline__ SchedulerConfig schedulerState{};
     __inline__ Config hostMoEConfig;
+
+    namespace heap {
+        template<unsigned int stage = 0, unsigned cell = 0>
+        requires (stage < STAGES && cell < CELLS)
+        __device__ __forceinline__
+        auto* advance(unsigned int const& peer, unsigned int const& expert) {
+            return moeConfig.sHeap + moeConfig.capacity * moeConfig.embedDim *
+                (moeConfig.numExperts * (CELLS * (peer * STAGES + stage) + cell) + expert);
+        }
+    }
 
     template<typename E = PacketStage> requires cuda::std::is_integral_v<cuda::std::underlying_type_t<E>>
     __device__ __forceinline__

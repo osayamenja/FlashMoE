@@ -90,7 +90,7 @@ namespace aristos{
             sizeof(unsigned int) * blocks + // taskSignal
             sizeof(unsigned int) * numNeighbors * numExperts * cute::ceil_div(seqLen, numExperts * BLOCK_M) + // taskSync
             sizeof(uint2) * workItemBound + // commit log
-            sizeof(Task) * taskBound + // taskQ
+            sizeof(Task) * (taskBound + blocks) + // taskQ
             sizeof(unsigned int) * N_READY_Q_SIGNALS + // rQS
             sizeof(unsigned int) * (N_TASK_Q_SIGNALS + 1);// tQS and doorbell
         // Initialize hostConfig

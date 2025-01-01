@@ -7,7 +7,6 @@
 
 #include "definition/tensor.cuh"
 #include "definition/types.cuh"
-#include "definition/memory_layout.cuh"
 #include "util/atomics.cuh"
 #include "util/indexing.cuh"
 #include "util/debug.cuh"

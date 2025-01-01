@@ -10,27 +10,23 @@
 #include <host/nvshmemx_api.h>
 
 #include "../definition/types.cuh"
-#include "../definition/memory_layout.cuh"
 #include "../util/atomics.cuh"
 
 namespace aristos::packet {
     namespace signal {
-        // Motivates the compiler to use 64-bit LD/ST instructions
-        // {batchIdx, numTokens, signal}
-        using SignalStruct = cuda::std::pair<unsigned int, ushort2>;
+        // {batchIdx, numTokens}
         __device__ __forceinline__
         // buffer is an 8-byte array, which we split into the following:
         // 4-byte integer denoting batch index
-        // 2 bytes denoting blockM dimension
-        // 2 bytes identifying the communication stage
-        void encode(cuda::std::byte* __restrict__ const& buffer, const SignalStruct& s) {
+        // 4 bytes denoting blockM dimension
+        void encode(cuda::std::byte* __restrict__ const& buffer, const uint2& s) {
             // assert(__isShared(buffer));
-            *CAST_TO(SignalStruct, buffer) = s;
+            *CAST_TO(uint2, buffer) = s;
         }
 
         __device__ __forceinline__
         auto decode(cuda::std::byte* __restrict__ const& buffer) {
-            return *CAST_TO(SignalStruct, buffer);
+            return *CAST_TO(uint2, buffer);
         }
     }
 
@@ -215,13 +211,13 @@ namespace aristos::packet {
         unsigned int* __restrict__ const& status,
         unsigned int* __restrict__ const& taskCount,
         unsigned int const& localExpertIdx,
-        cuda::std::byte* __restrict__ const& cInitialBase,
-        unsigned int* __restrict__ const& cBOffset,
-        cuda::std::byte* __restrict__ const& peerHeapBase,
-        unsigned int* __restrict__ const& pHOffset,
+        cuda::std::byte* __restrict__ const& pGB, //postGEMM buffer
         const cuda::std::array<cuda::std::byte*, GEMMs>& weights,
         const cuda::std::array<cuda::std::byte*, GEMMs>& bias,
-        unsigned int const& peer) const {
+        unsigned int const& peer, // relative to the EP group
+        unsigned int& lTQHead,
+        unsigned int* __restrict__ const& gTQHead) const {
+            // TODO put config in shared memory allocated to this block
             // process header
             const auto [totalTokens, routedTokens] = *CAST_TO(uint2, packet);
             const auto globalTaskTiles = Config::tiles<BLOCK_M>(totalTokens);
@@ -237,38 +233,33 @@ namespace aristos::packet {
             auto* __restrict__ scaleWeights = packet + sizeof(uint2);
             auto* __restrict__ tokens = scaleWeights + sizeof(ElementScale) * padM;
             const auto tokenSize = moeConfig.embedDim;
-            auto* __restrict__ schedulerDB = schedulerState.taskQSignals;
+            auto* __restrict__ tQ = schedulerState.taskQ + lTQHead;
 
-            auto* __restrict__ tQ = schedulerState.taskQ;
-            auto* __restrict__ tQHead = schedulerState.taskQSignals + 1;
-
-            const auto syncIdx = moeConfig.expertCapacity * (peer * moeConfig.numExperts + localExpertIdx);
+            // expert, peer offset
+            const auto pXo = moeConfig.capacity * (peer * moeConfig.numExperts + localExpertIdx);
             cuda::std::array<cuda::std::byte*, GEMMs> taskResults{};
             // Staging buffer for results of preGEMM
-            taskResults[0] = cInitialBase +
-                atomicAdd_block(cBOffset, padM) * BLOCK_M * tokenSize * sizeof(Element);
+            taskResults[0] = pGB + pXo * tokenSize * sizeof(Element);
             // Egress packet buffer
-            taskResults[1] = peerHeapBase +
-                atomicAdd_block(pHOffset, padM) * BLOCK_M * tokenSize * sizeof(Element);
+            taskResults[1] = p == PeerConnectivity::remote ? heap::advance<1, 0>(peer, localExpertIdx) :
+            heap::advance<1, 1>(peer, localExpertIdx);
             const auto tilesN = moeConfig.tilesN;
-            const auto totalTasks = Config::tiles<BLOCK_M>(totalTokens) * tilesN;
-            const auto flagIdx = moeConfig.capacity * (moeConfig.rank * moeConfig.numExperts + localExpertIdx);
-            const auto tQStart = atomicAdd(tQHead, totalTasks);
+            const auto totalTasks = Config::tiles<BLOCK_M>(routedTokens) * tilesN;
 
             for (uint i = 0; i < fTilesM; ++i) {
                 for (uint j = 0; j < tilesN; ++j) {
                     const auto tileIdx = j + i * tilesN;
-                    tQ[tQStart + tileIdx] = Task{
+                    tQ[tileIdx] = Task{
                         TaskType::preGEMM,
                         tokens,
                         weights,
                         taskResults,
                         bias,
                         scaleWeights,
-                        syncIdx + i,
+                        pXo + i,
                         tileIdx,
                         padM,
-                        flagIdx + (p == PeerConnectivity::remote ? i : tileIdx),
+                        pXo + (p == PeerConnectivity::remote ? i : tileIdx),
                         BLOCK_M,
                         peer,
                         i
@@ -280,17 +271,17 @@ namespace aristos::packet {
             const auto residue = routedTokens - fTilesM * BLOCK_M;
             for (uint j = 0; j < tilesN; ++j) {
                 const auto tileIdx = j + fTilesM * tilesN;
-                tQ[atomicIncrement(tQHead)] = Task{
+                tQ[tileIdx] = Task{
                     TaskType::preGEMM,
                     tokens,
                     weights,
                     taskResults,
                     bias,
                     scaleWeights,
-                    syncIdx + fTilesM,
+                    pXo + fTilesM,
                     tileIdx,
                     padM,
-                    flagIdx + (p == PeerConnectivity::remote ? fTilesM : tileIdx),
+                    pXo + (p == PeerConnectivity::remote ? fTilesM : tileIdx),
                     residue,
                     peer,
                     fTilesM
@@ -298,15 +289,10 @@ namespace aristos::packet {
             }
 
             if (routedTokens) {
-                // Two-phase commit
-                // fence to commit tasks
                 __threadfence();
-                const auto commitIdx = atomicIncrement(schedulerState.workItemQHead);
-                schedulerState.workItemQ[commitIdx] = uint2{tQStart, totalTasks};
-                // fence to commit work item of commited tasks
-                __threadfence();
-                // notify scheduler to check work item queue for new work
-                atomicIncrement(schedulerDB);
+                lTQHead += totalTasks;
+                // notifies scheduler of work
+                atomicAdd(gTQHead, totalTasks);
             }
         }
     };

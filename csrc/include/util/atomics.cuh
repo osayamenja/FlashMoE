@@ -101,6 +101,7 @@ namespace aristos{
         requires AtomicScope<scope> && AtomicType<T>
         __device__ __forceinline__
         void signal(T* const& addr) {
+            fence<scope>();
             if constexpr (scope == cuda::thread_scope_block || scope == cuda::thread_scope_thread) {
                 atomicAdd_block(addr, 1U);
             }

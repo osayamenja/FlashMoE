@@ -28,12 +28,13 @@ namespace aristos::moe{
         aristos::Matrix<MatrixBg> && aristos::Matrix<MatrixC>
         && aristos::Matrix<MatrixCg>)
     __global__ __maxnreg__(128) void forward(
-        cuda::std::byte* workspace,
         MatrixA const& activations,
         MatrixB const& expertsWeights,
         MatrixBg const& gateWeights,
         MatrixC moeOutput,
         MatrixCg gateOutput) {
+
+        __shared__ cuda::std::byte workspace[SHARED_SIZE];
 
         gate::forward<Arch, blocks, k, g, ElementC>(activations,
             gateWeights, gateOutput, CAST_TO(ElementC, workspace));

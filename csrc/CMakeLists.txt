@@ -55,7 +55,6 @@ add_executable(csrc main.cu
         include/util/indexing.cuh
         include/definition/tensor.cuh
         include/definition/types.cuh
-        include/definition/memory_layout.cuh
         include/util/atomics.cuh
         include/os/decider/decider.cuh
         include/os/decider/comps/edge.cuh

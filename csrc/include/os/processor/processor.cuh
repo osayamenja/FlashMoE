@@ -14,6 +14,7 @@
 
 #include "../../arch.cuh"
 #include "gemm.cuh"
+#include "../../moe/packet.cuh"
 
 namespace aristos::processor{
     enum class CombineMode {
@@ -391,14 +392,17 @@ namespace aristos::processor{
 
         while (!interrupt) {
             if (!threadIdx.x) {
+                auto* tQSignal = scState.taskSignal + blockIdx.x;
                 // Indicate readiness
-                atomicExch(scState.readyQ + blockIdx.x, ready);
+                atomicExch(scState.statusQ + blockIdx.x, ready);
                 // Grabs next task
-                auto nextTask = atomicLoad(scState.taskQSignals + blockIdx.x);
+                auto nextTask = atomicLoad(tQSignal);
                 while (nextTask == signal) {
-                    nextTask = atomicLoad(scState.taskQSignals + blockIdx.x);
+                    nextTask = atomicLoad(tQSignal);
                 }
                 signal = nextTask;
+                // below ensures task read happens after signal reception
+                __threadfence();
                 currentTask = scState.taskQ[signal - 1];
             }
             __syncthreads();
@@ -417,10 +421,9 @@ namespace aristos::processor{
                     if (!threadIdx.x &&
                         atomicAdd(scState.taskSync + currentTask.syncIdx, 1U) == cachedConfig.tilesN) {
                         const auto tasks = cachedConfig.tilesNx;
-                        auto* tQHead = scState.taskQSignals + 1;
-                        auto* tQ = scState.taskQ;
+                        auto* tQ = scState.xTaskQ + currentTask.syncIdx;
                         for (unsigned int i = 0; i < tasks; ++i) {
-                            tQ[atomicAdd(tQHead, 1U)] = Task{
+                            tQ[i] = Task{
                                 TaskType::postGEMM,
                                 currentTask.cData[preIndex],
                                 currentTask.bData,
@@ -438,7 +441,7 @@ namespace aristos::processor{
                         }
                         __threadfence();
                         // notify scheduler
-                        atomicAdd(scState.taskQSignals, tasks);
+                        atomicAdd(scState.xTQHeads, tasks);
                     }
                 }
                 break;
@@ -455,21 +458,26 @@ namespace aristos::processor{
                         currentTask.tileIdx,
                         nvshmem_ptr(cachedConfig.sHeap, currentTask.peerIdx) == nullptr);
                     if (!threadIdx.x) {
+                        uint64_t flagSignal = 0;
                         if (atomicIncrement(scState.taskSync + currentTask.syncIdx)
                             == cachedConfig.tilesN + cachedConfig.tilesNx) {
                             if (nvshmem_ptr(currentTask.cData[postIndex], currentTask.peerIdx) == nullptr) {
+                                packet::signal::encode(CAST_TO(cuda::std::byte, &flagSignal),
+                                    uint2{currentTask.batchIdx, currentTask.tileSize});
                                 // Batch remote network transfer to avoid overwhelming the NIC
                                 nvshmem_putmem_signal_nbi(currentTask.cData[postIndex], currentTask.cData[postIndex],
                                     cachedConfig.finalPacketSize<ElementA>(currentTask.tileSize),
                                     cachedConfig.flags + currentTask.flagIdx,
-                                    constructSignal(PacketStage::final), NVSHMEM_SIGNAL_SET,
+                                    flagSignal, NVSHMEM_SIGNAL_SET,
                                     currentTask.peerIdx);
                             }
                             else {
+                                // send individual tile, no batching here
+                                packet::signal::encode(CAST_TO(cuda::std::byte, &flagSignal),
+                                    uint2{currentTask.tileIdx, currentTask.tileSize});
                                 // Already did the network transfer in fGET, so set signal only
                                 nvshmemx_signal_op(cachedConfig.flags + currentTask.flagIdx,
-                                 constructSignal(PacketStage::final), NVSHMEM_SIGNAL_SET,
-                                 currentTask.peerIdx);
+                                 flagSignal, NVSHMEM_SIGNAL_SET, currentTask.peerIdx);
                             }
                         }
                     }
