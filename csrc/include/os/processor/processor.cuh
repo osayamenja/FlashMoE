@@ -61,9 +61,9 @@ namespace aristos::processor{
             const auto mA = make_tensor(cute::make_gmem_ptr(inputs),
                 make_layout(cute::make_shape(M, N), cute::LayoutRight{}));
 
-            const auto tilesM = M / cute::get<0>(tiler);
+            const auto tilesM = M / bM;
             // We assert the below prior to this point
-            const auto tilesN = N / cute::get<1>(tiler);
+            const auto tilesN = N / bN;
 
             const auto tileCoord = idx2crd(tileIdx, cute::Shape(tilesM, tilesN), cute::Stride(tilesN ,1));
             const auto ctaCoord = cute::make_coord(cute::get<0>(tileCoord), cute::get<1>(tileCoord));

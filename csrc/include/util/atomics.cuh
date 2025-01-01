@@ -4,9 +4,6 @@
 
 #ifndef CSRC_ATOMICS_CUH
 #define CSRC_ATOMICS_CUH
-
-#include <cuda/annotated_ptr>
-#include <thrust/system/cuda/error.h>
 #define USE_BARRIER 0
 
 namespace aristos{
@@ -111,6 +108,5 @@ namespace aristos{
             atomicAdd(addr, 1U);
         }
     }
-
 }
 #endif //CSRC_ATOMICS_CUH

@@ -198,13 +198,13 @@ namespace aristos::packet {
 
     /// Decodes a single packet from the initial stage
     template<
-        PacketStage s = PacketStage::initial,
+        PacketStage s,
         PeerConnectivity p,
-        typename Element,
-        typename ElementScale
+        typename Element = void,
+        typename ElementScale = void
     >
-    requires aristos::TensorValueType<Element> && aristos::TensorValueType<ElementScale>
     struct Decoder {
+        static_assert(aristos::TensorValueType<Element> && aristos::TensorValueType<ElementScale>);
         static_assert(s == PacketStage::initial);
         __device__ __forceinline__
         void operator()(cuda::std::byte* __restrict__ const& packet,
@@ -294,31 +294,83 @@ namespace aristos::packet {
                 __threadfence();
                 lTQHead += totalTasks;
                 // notifies scheduler of work
-                atomicAdd(gTQHead, totalTasks);
+                atomicAdd_block(gTQHead, totalTasks);
             }
         }
     };
 
 
-    template<
-        typename Element,
-        typename ElementScale
-    >
-    struct Decoder<PacketStage::final, PeerConnectivity::p2p, Element, ElementScale> {
+    template<>
+    struct Decoder<PacketStage::final, PeerConnectivity::p2p> {
         __device__ __forceinline__
-        void operator()() const {
-
+        void operator()(cuda::std::byte* __restrict__ const& packet,
+            cuda::std::byte* __restrict__ const& tokenIndices,
+            cuda::std::byte* __restrict__ const& activations,
+            const unsigned int& nTokens,
+            unsigned int& lTQHead,
+            const unsigned int& tileIdx,
+            unsigned int* __restrict__ const& gTQHead) const {
+            // now let's decode this single tile
+            auto* __restrict__ tQ = schedulerState.taskQ + lTQHead++;
+            *tQ = Task{
+                TaskType::combine,
+                tokenIndices,
+                cuda::std::array<cuda::std::byte*, GEMMs>{packet},
+                cuda::std::array<cuda::std::byte*, GEMMs>{activations},
+                nTokens,
+                tileIdx,
+                BLOCK_M
+            };
+            __threadfence();
+            // notifies scheduler of work
+            atomicIncrement<cuda::thread_scope_block>(gTQHead);
         }
     };
 
-    template<
-        typename Element,
-        typename ElementScale
-    >
-    struct Decoder<PacketStage::final, PeerConnectivity::remote, Element, ElementScale> {
+    template<>
+    struct Decoder<PacketStage::final, PeerConnectivity::remote> {
         __device__ __forceinline__
-        void operator()() const {
+        void operator()(cuda::std::byte* __restrict__ const& packet,
+            cuda::std::byte* __restrict__ const& tokenIndices,
+            cuda::std::byte* __restrict__ const& activations,
+            const unsigned int& nTokens,
+            unsigned int& lTQHead,
+            unsigned int* __restrict__ const& gTQHead) const {
+            auto* __restrict__ tQ = schedulerState.taskQ + lTQHead;
+            const auto tilesN = moeConfig.tilesN;
+            constexpr auto tB = 8;
+            const auto tBs = tilesN / tB;
+            for (uint i = 0; i < tBs; ++i) {
+                #pragma unroll
+                for (uint j = 0; j < tB; ++j) {
+                    tQ[j + i * tB] = Task{
+                        TaskType::combine,
+                        tokenIndices,
+                        cuda::std::array<cuda::std::byte*, GEMMs>{packet},
+                        cuda::std::array<cuda::std::byte*, GEMMs>{activations},
+                        nTokens,
+                        j + i * tB,
+                        BLOCK_M
+                    };
+                }
+            }
 
+            for (uint j = tBs * tB; j < tilesN; ++j) {
+                tQ[j] = Task{
+                    TaskType::combine,
+                    tokenIndices,
+                    cuda::std::array<cuda::std::byte*, GEMMs>{packet},
+                    cuda::std::array<cuda::std::byte*, GEMMs>{activations},
+                    nTokens,
+                    j,
+                    BLOCK_M
+                };
+            }
+
+            __threadfence();
+            lTQHead += tilesN;
+            // notifies scheduler
+            atomicIncrement<cuda::thread_scope_block>(gTQHead);
         }
     };
 }

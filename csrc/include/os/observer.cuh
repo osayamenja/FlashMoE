@@ -5,6 +5,8 @@
 #ifndef OBSERVER_CUH
 #define OBSERVER_CUH
 
+#include <cutlass/array.h>
+
 #include "../definition/types.cuh"
 #include "../util/atomics.cuh"
 namespace aristos::ReadyQ {
