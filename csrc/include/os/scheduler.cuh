@@ -20,8 +20,9 @@ namespace aristos::scheduler {
         const unsigned int& tQIdx,
         unsigned int* __restrict__ const& pDB) {
         while (tasks) {
-            const auto readyProcesses = atomicLoad<cuda::thread_scope_block>(rQHead) - rQTail;
-            const auto tasksToSchedule = cute::min(readyProcesses, tasks);
+            // min(readyProcesses, unscheduledTasks)
+            const auto tasksToSchedule = cute::min(atomicLoad<cuda::thread_scope_block>(rQHead) - rQTail,
+                tasks);
             tasks -= tasksToSchedule;
             scheduled += tasksToSchedule;
             if (tasksToSchedule) {
@@ -166,10 +167,12 @@ namespace aristos::scheduler {
         }
     }
     /// Making processorCount a compile-time constant is not a functional requirement but rather strictly
-    /// for optimizing the modulo operation, which is incredibly expensive.
-    /// Benchmarks show an order of magnitude performance difference for runtime vs. compile-time evaluation
-    template<unsigned int processorCount, unsigned int producerCount>
-    requires(processorCount > 0 && producerCount > 0 && producerCount < THREADS)
+    /// for globally optimizing the modulo operation, which is incredibly expensive.
+    /// Benchmarks confirm an order of magnitude performance improvement for that operation.
+    /// Benchmarks also show 16 to be a perfect number for rQSetSize.
+    /// We parametrize it here for consistency with downstream actors, depending on the parameter.
+    template<unsigned int processorCount, unsigned int producerCount, unsigned int rQSetSize>
+    requires(processorCount > 0 && producerCount > 0 && producerCount < THREADS && rQSetSize == 16)
     __device__ __forceinline__
     void start(const unsigned int& tQRl,
         const unsigned int& gtQCL,
@@ -181,14 +184,15 @@ namespace aristos::scheduler {
         unsigned int* __restrict__ const& taskBound,
         unsigned int* __restrict__ const& rQHead,
         const unsigned int* __restrict__ const& rQ,
-        unsigned int* __restrict__ const& pDB) {
+        unsigned int* __restrict__ const& pDB,
+        unsigned int* __restrict__ const& sTF, // subscriber termination flag
+        unsigned int* __restrict__ const& oTF) {
         // assert(__isShared(all arguments above) except gtQ* and alignment is 16)
         unsigned int scheduled = 0U;
         unsigned int rQTail = 0U;
         constexpr auto wSetSize = 16;
         cutlass::AlignedArray<unsigned int, wSetSize> rtQTails{};
         rtQTails.fill(0U);
-        constexpr auto rQSetSize = 16;
 
         while (scheduled < atomicLoad<cuda::thread_scope_block>(taskBound)) {
             // sweep all static wQHeads and schedule pending tasks
@@ -198,8 +202,9 @@ namespace aristos::scheduler {
             dynamicSchedule<processorCount, wSetSize, rQSetSize>(scheduled, rtQTails, gtQRl, gtQTails,
                 gtQHeads, rQHead, rQTail, rQ, pDB, gtQCL);
         }
+        atomicExch_block(sTF, 1U); // interrupt network subscribers
 
-        // Done with work scheduling, let's enqueue interrupts
+        // Done with work scheduling, let's enqueue interrupts for processors
         auto* __restrict__ tQ = schedulerState.taskQ + schedulerState.tUB;
 
         #pragma unroll
@@ -213,7 +218,7 @@ namespace aristos::scheduler {
         // schedule interrupt tasks
         scheduleLoop<processorCount, rQSetSize>(tasks, scheduled, rtQTail, rQHead,
                     rQTail, rQ, tQIdx, tQRl, pDB);
-
+        atomicExch_block(oTF, 1U); // interrupt observer
     }
 }
 #endif //SCHEDULER_CUH

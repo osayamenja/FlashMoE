@@ -362,10 +362,10 @@ namespace aristos{
     };
 
     enum class TaskType {
-        Interrupt,
         preGEMM,
         postGEMM,
-        combine
+        combine,
+        Interrupt,
     };
 
     struct __align__(16) Task {

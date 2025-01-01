@@ -94,7 +94,6 @@ namespace aristos::processor{
 
             if (threadIdx.x < tileSize) {
                 if constexpr (c == CombineMode::multithreaded) {
-                    // do conversion to float before combining
                     constexpr VAA<Arch, ElementCombine> vaa{};
                     vaa(&activations(tokenIdx, 0), registers);
                 }
@@ -211,7 +210,6 @@ namespace aristos::processor{
                 }
                 // Fused Bias Add and Activation Function on register fragment
                 // Also fuses copy to GMEM.
-                // TODO use vector instructions for epilogue
                 #pragma unroll
                 for (int j = 0; j < elems; ++j) {
                     tCgC(j + i * elems) = gCStoreOp(epilogueOp(accumulator(j + i * elems), gDLoadOp(rScratch[j])));
@@ -378,6 +376,8 @@ namespace aristos::processor{
             scState = schedulerState;
             signal = 0U;
             interrupt = 0U;
+            // Initially indicate this block's readiness
+            atomicExch(scState.statusQ + blockIdx.x, ready);
         }
         using Operation = BlockMM<Arch, ElementA, ElementB, ElementC, ActivationOp>;
         using OperationX = BlockMM<Arch, ElementA, ElementB, ElementC, ActivationOpX>;
@@ -393,8 +393,6 @@ namespace aristos::processor{
         while (!interrupt) {
             if (!threadIdx.x) {
                 auto* tQSignal = scState.taskSignal + blockIdx.x;
-                // Indicate readiness
-                atomicExch(scState.statusQ + blockIdx.x, ready);
                 // Grabs next task
                 auto nextTask = atomicLoad(tQSignal);
                 while (nextTask == signal) {
@@ -408,6 +406,8 @@ namespace aristos::processor{
             __syncthreads();
             switch (currentTask.taskType) {
                 case TaskType::preGEMM: {
+                    // Eagerly indicate readiness for the next task
+                    atomicExch(scState.statusQ + blockIdx.x, ready);
                     constexpr unsigned int preIndex = 0;
                     preGEMM(workspace, accumulator, rScratch,
                         CAST_TO(typename Operation::MatrixAType, currentTask.aData),
@@ -446,6 +446,8 @@ namespace aristos::processor{
                 }
                 break;
                 case TaskType::postGEMM: {
+                    // Eagerly indicate readiness for the next task
+                    atomicExch(scState.statusQ + blockIdx.x, ready);
                     constexpr unsigned int postIndex = 0;
                     postGEMM(workspace, accumulator, rScratch,
                         CAST_TO(typename Operation::MatrixAType, currentTask.aData),
@@ -484,6 +486,8 @@ namespace aristos::processor{
                 }
                 break;
                 case TaskType::combine: {
+                    // Eagerly indicate readiness for the next task
+                    atomicExch(scState.statusQ + blockIdx.x, ready);
                     combineOp(CAST_TO(ElementA, workspace), currentTask.aData, rScratch, currentTask.bData[0],
                         currentTask.cData[0], currentTask.M, cachedConfig.embedDim, currentTask.tileIdx,
                         currentTask.tileSize);

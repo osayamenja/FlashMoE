@@ -246,6 +246,7 @@ namespace aristos::packet {
             const auto tilesN = moeConfig.tilesN;
             const auto totalTasks = Config::tiles<BLOCK_M>(routedTokens) * tilesN;
 
+            // TODO unroll these loops
             for (uint i = 0; i < fTilesM; ++i) {
                 for (uint j = 0; j < tilesN; ++j) {
                     const auto tileIdx = j + i * tilesN;
@@ -269,6 +270,7 @@ namespace aristos::packet {
 
             // residue tile
             const auto residue = routedTokens - fTilesM * BLOCK_M;
+            // TODO unroll these loops
             for (uint j = 0; j < tilesN; ++j) {
                 const auto tileIdx = j + fTilesM * tilesN;
                 tQ[tileIdx] = Task{
