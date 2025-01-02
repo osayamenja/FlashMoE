@@ -6,7 +6,7 @@
 #define ARISTOS_MOE_CUH
 
 #include "gate.cuh"
-#include "packet.cuh"
+#include "../os/os.cuh"
 
 namespace aristos::moe{
     template<unsigned int Arch,
@@ -51,16 +51,7 @@ namespace aristos::moe{
                 ActivationOpX>(CAST_TO(ElementD, workspace));
         }
         else {
-            if (!threadIdx.x) {
-                *CAST_TO(unsigned int, workspace) = moeConfig.nTiles;
-            }
-            __syncthreads();
-            if (!threadIdx.x) {
-                scheduler::start<blocks>(CAST_TO(unsigned int, workspace));
-            }
-            else {
-                subscriber::start(workspace);
-            }
+            os::start<blocks>(workspace);
         }
     }
 

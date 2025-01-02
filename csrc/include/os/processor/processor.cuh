@@ -14,7 +14,7 @@
 
 #include "../../arch.cuh"
 #include "gemm.cuh"
-#include "../../moe/packet.cuh"
+#include "../packet.cuh"
 
 namespace aristos::processor{
     enum class CombineMode {

@@ -124,7 +124,7 @@ namespace aristos{
     };
 
     __device__
-    enum putSignal : uint64_t {
+    enum PutSignal : uint8_t {
         sent = 1
     };
 

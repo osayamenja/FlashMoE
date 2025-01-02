@@ -71,11 +71,12 @@ add_executable(csrc main.cu
         include/os/scheduler.cuh
         include/moe/gate.cuh
         include/os/processor/gemm.cuh
-        include/moe/packet.cuh
+        include/os/packet.cuh
         bench.cuh
         eval.cuh
         include/arch.cuh
         include/os/observer.cuh
+        include/os/os.cuh
 )
 set_target_properties(csrc PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
