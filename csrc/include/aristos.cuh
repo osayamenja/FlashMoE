@@ -5,8 +5,7 @@
 #ifndef ARISTOS_CUH
 #define ARISTOS_CUH
 
-#include "definition/tensor.cuh"
-#include "definition/types.cuh"
+#include "types.cuh"
 #include "util/atomics.cuh"
 #include "util/indexing.cuh"
 #include "util/debug.cuh"
@@ -19,7 +18,7 @@
 
 #include "moe/moe.cuh"
 
-#include "topo/topo.cuh"
+#include "topo.cuh"
 #include "prep.cuh"
 
 #endif //ARISTOS_CUH

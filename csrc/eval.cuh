@@ -15,9 +15,9 @@
 #include <host/nvshmemx_api.h>
 
 #include "include/os/decider/decider.cuh"
-#include "include/definition/types.cuh"
+#include "include/types.cuh"
 #include "include/prep.cuh"
-#include "include/topo/topo.cuh"
+#include "include/topo.cuh"
 
 namespace aristos {
     __forceinline__

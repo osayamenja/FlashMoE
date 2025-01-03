@@ -5,7 +5,7 @@
 #ifndef SCHEDULER_CUH
 #define SCHEDULER_CUH
 
-#include "../definition/types.cuh"
+#include "../types.cuh"
 
 namespace aristos::scheduler {
     template<unsigned int processorCount, unsigned int rQSetSize>

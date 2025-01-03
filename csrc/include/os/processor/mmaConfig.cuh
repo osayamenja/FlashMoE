@@ -10,7 +10,7 @@
 #include <cute/arch/copy_sm80.hpp>
 #include <cutlass/gemm/dispatch_policy.hpp>
 
-#include "../../definition/types.cuh"
+#include "../../types.cuh"
 
 namespace aristos {
     template<typename T>

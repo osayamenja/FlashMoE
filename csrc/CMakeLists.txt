@@ -53,8 +53,7 @@ add_executable(csrc main.cu
         include/aristos.cuh
         include/os/processor/processor.cuh
         include/util/indexing.cuh
-        include/definition/tensor.cuh
-        include/definition/types.cuh
+        include/types.cuh
         include/util/atomics.cuh
         include/os/decider/decider.cuh
         include/os/decider/comps/edge.cuh
@@ -65,7 +64,7 @@ add_executable(csrc main.cu
         include/os/decider/comps/functions.cuh
         include/util/debug.cuh
         include/os/decider/comps/niche.cuh
-        include/topo/topo.cuh
+        include/topo.cuh
         include/os/processor/mmaConfig.cuh
         include/prep.cuh
         include/os/scheduler.cuh

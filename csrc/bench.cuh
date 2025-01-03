@@ -17,7 +17,7 @@
 
 #include "include/util/indexing.cuh"
 #include "include/util/atomics.cuh"
-#include "include/definition/types.cuh"
+#include "include/types.cuh"
 
 namespace aristos {
     __global__ void benchAtomics(__grid_constant__ const int iter, unsigned int* flag, bool skip = false, bool shouldPersist = false){

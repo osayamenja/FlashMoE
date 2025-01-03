@@ -466,6 +466,7 @@ namespace aristos::processor{
                             if (nvshmem_ptr(currentTask.cData[postIndex], currentTask.peerIdx) == nullptr) {
                                 packet::signal::encode(CAST_TO(cuda::std::byte, &flagSignal),
                                     uint2{currentTask.batchIdx, currentTask.tileSize});
+                                // TODO further batch this transfer
                                 // Batch remote network transfer to avoid overwhelming the NIC
                                 nvshmem_putmem_signal_nbi(currentTask.cData[postIndex], currentTask.cData[postIndex],
                                     cachedConfig.finalPacketSize<ElementA>(currentTask.tileSize),

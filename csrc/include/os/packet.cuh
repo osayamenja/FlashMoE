@@ -9,7 +9,7 @@
 #include <nvshmem.h>
 #include <host/nvshmemx_api.h>
 
-#include "../definition/types.cuh"
+#include "../types.cuh"
 #include "../util/atomics.cuh"
 
 namespace aristos::packet {
@@ -205,7 +205,7 @@ namespace aristos::packet {
         PacketStage s,
         PeerConnectivity p,
         typename Element = void,
-        typename ElementScale = void
+        typename ElementScale = Element
     >
     struct Decoder {
         static_assert(aristos::TensorValueType<Element> && aristos::TensorValueType<ElementScale>);

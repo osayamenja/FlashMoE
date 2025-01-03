@@ -6,21 +6,21 @@
 #define TOPO_CUH
 
 #include <cuda/cmath>
-#include "../definition/types.cuh"
-#include "../util/atomics.cuh"
+#include "types.cuh"
+#include "util/atomics.cuh"
 
 namespace aristos::topology{
     __device__ __inline__ unsigned int blockade = 0U;
     template<typename T>
     requires(!cuda::std::is_same_v<T, void>)
-    CUTE_DEVICE
+    __device__ __forceinline__
     T* advancePtr(T* buffer, const unsigned int& slot) {
         return buffer + (slot * BETA_BUFFER);
     }
 
     template<size_t betaBuf = BETA_BUFFER, size_t alphaBuf = ALPHA_BUFFER, typename Put>
     requires (cuda::std::is_invocable_r_v<void, Put, void*, const void*, size_t, int>)
-    CUTE_DEVICE
+    __device__ __forceinline__
     void measureTransfer(const unsigned int& rank, cuda::std::byte* sHeap, floatPair* remoteDurations,
         const int& peer, const unsigned int& id, const Put& put, const unsigned int& peerIdx,
         const unsigned int& lBid = 0, const unsigned int& nb = 1) {
@@ -61,7 +61,7 @@ namespace aristos::topology{
         }
     }
 
-    CUTE_DEVICE
+    __device__ __forceinline__
     void singularBuilder(floatPair* scratchpad, const unsigned int& n, const unsigned int& rank, const unsigned long& processingRate,
         cuda::std::byte* sHeap, floatPair* results, uint64_t* flags) {
         for (unsigned int i = 1U; i < n; ++i) {
@@ -88,7 +88,7 @@ namespace aristos::topology{
         }
     }
 
-    CUTE_DEVICE
+    __device__ __forceinline__
     void pluralRemoteBuilder(floatPair* scratchpad, const unsigned int* peers, const unsigned int& n, const unsigned int& rank,
         const unsigned long& processingRate, const unsigned int numPeers, cuda::std::byte* sHeap, floatPair* results, uint64_t* flags) {
         for (unsigned int i = 0U; i < numPeers; ++i) {
@@ -119,7 +119,7 @@ namespace aristos::topology{
         }
     }
 
-    CUTE_DEVICE
+    __device__ __forceinline__
     void pluralP2PBuilder(floatPair* scratchpad,const unsigned int* peers, const unsigned int& n, const unsigned int& rank,
         const unsigned long& processingRate, const unsigned int numPeers, const bool& remotePresent,
         cuda::std::byte* sHeap, floatPair* results, uint64_t* flags) {

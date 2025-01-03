@@ -50,11 +50,27 @@
 #define TO_MB(b) (static_cast<float>(b) / (1024.0f*1024.0f))
 #define BETA_MB 1024.0f // 1GB
 
+#include <cuda/std/type_traits>
 #include <cuda/barrier>
 #include <cuda/std/array>
-#include "tensor.cuh"
+#include <cute/tensor.hpp>
 
 namespace aristos{
+    template<typename V>
+        concept TensorValueType = cuda::std::is_same_v<V, cute::half_t> ||
+            cuda::std::is_same_v<V, cute::bfloat16_t> ||
+            cuda::std::is_same_v<V, cute::tfloat32_t> ||
+            cuda::std::is_same_v<V, float> ||
+            cuda::std::is_same_v<V, cute::float_e4m3_t> ||
+            cuda::std::is_same_v<V, cute::float_e5m2_t>;
+
+    template<typename T>
+    concept Tensor = cute::is_tensor<T>::value && TensorValueType<typename T::value_type>;
+
+    template<typename M>
+    concept Matrix = requires(M m){
+        requires Tensor<M> && rank(m) == 2;
+    };
     using maxPrecision = float; // no support for double, unfortunately
     using specType = unsigned int;
     using flagsType = uint64_t;
@@ -175,11 +191,11 @@ namespace aristos{
         /// EP rank -> global rank
         unsigned int* peerTranslation;
         unsigned int* parallelismSpec;
-        unsigned long sequenceNumber;
         /// Expert parallel group rank
         unsigned int rank;
         unsigned int seqLen;
         unsigned int numExperts;
+        unsigned int numLocalExperts;
         unsigned int k;
         unsigned int worldSize;
         unsigned int embedDim;
@@ -201,10 +217,10 @@ namespace aristos{
                flagsType* _flags,
                cuda::std::byte* _bk,
                const unsigned int& _rank,
-               const unsigned long& _sequenceNumber,
                const unsigned int& _k,
                const unsigned int& _embedDim,
                const unsigned int& _numExperts,
+               const unsigned int& _numLExperts,
                const unsigned int& _seqLen,
                const unsigned int& _world,
                const unsigned int& _proj,
@@ -218,10 +234,9 @@ namespace aristos{
                 bookKeeping(_bk),
                 peerTranslation(CAST_TO(unsigned int, _bk)),
                 parallelismSpec(CAST_TO(unsigned int, _bk) + _world),
-                sequenceNumber(_sequenceNumber),
                 rank(_rank),
                 seqLen(_seqLen),
-                numExperts(_numExperts),
+                numExperts(_numExperts), numLocalExperts(_numLExperts),
                 k(_k), worldSize(_world),
                 embedDim(_embedDim),
                 upProjection(_proj),
@@ -257,16 +272,11 @@ namespace aristos{
             return CAST_TO(Element, bookKeeping);
         }
 
-        __device__ __forceinline__
-        auto* packetFlags() const {
-            return CAST_TO(unsigned short int, xMid<maxPrecision>() + pad<BLOCK_M>(seqLen) * embedDim);
-        }
-
         template<GateReductionLevel g = GateReductionLevel::multiBlock>
         __device__ __forceinline__
         unsigned int* getBRSFlags() const {
             static_assert(g == GateReductionLevel::multiBlock);
-            return CAST_TO(unsigned int, packetFlags() + worldSize);
+            return CAST_TO(unsigned int, xMid<maxPrecision>() + pad<BLOCK_M>(seqLen) * upProjection);
         }
 
         template<GateReductionLevel g = GateReductionLevel::multiBlock>
@@ -329,14 +339,18 @@ namespace aristos{
 
         __device__ __forceinline__
         unsigned int* getPeerXLookup() const {
-            return CAST_TO(unsigned int, getExpertCounts() + numExperts);
+            return getExpertCounts() + numExperts;
         }
 
         __device__ __forceinline__
         unsigned int* xSync() const {
-            return CAST_TO(unsigned int, getPeerXLookup() + numExperts + worldSize + 1);
+            return getPeerXLookup() + numExperts + worldSize + 1;
         }
 
+        __device__ __forceinline__
+        bool* fCheck() const {
+            return CAST_TO(bool, xSync() + numLocalExperts * worldSize * expertCapacity);
+        }
         // Packet stuff
         template<typename Element> requires aristos::TensorValueType<Element>
         __forceinline__
@@ -354,10 +368,9 @@ namespace aristos{
                    "\"World\": %u,\n\t"
                    "\"Rank\": %u,\n\t"
                    "\"SB\": %u,\n\t"
-                   "\"SequenceNumber\": %lu,\n\t"
                    "\"k\": %u\n}\n",
                    capacity, numExperts, embedDim, worldSize,
-                   rank, seqLen, sequenceNumber, k);
+                   rank, seqLen, k);
         }
     };
 
@@ -461,7 +474,7 @@ namespace aristos{
         }
     };
 
-    __constant__ __inline__ uint64_t seqNo;
+    __constant__ __inline__ unsigned int seqNo;
     __constant__ __inline__ Config moeConfig{};
     __constant__ __inline__ SchedulerConfig schedulerState{};
     __inline__ Config hostMoEConfig;

@@ -9,7 +9,7 @@
 #include <nvshmemx.h>
 #include <nvshmem.h>
 #include <host/nvshmemx_api.h>
-#include "definition/types.cuh"
+#include "types.cuh"
 
 #define SUPPORTED = 1;
 namespace aristos{
@@ -63,10 +63,12 @@ namespace aristos{
         void* bookKeeping;
         const auto taskBound = cute::ceil_div(seqLen, BLOCK_M) *
             (cute::ceil_div(embedDim, BLOCK_N) + cute::ceil_div(hiddenProjDim, BLOCK_N) + 1);
-        const auto tiles = cute::ceil_div(seqLen, BLOCK_M) * cute::ceil_div(embedDim, BLOCK_N);
-        const auto workItemBound = tiles + numNeighbors * numLocalExperts;
+        const auto tilesN = cute::ceil_div(embedDim, BLOCK_N);
+        const auto tilesM = cute::ceil_div(seqLen, BLOCK_M);
         const auto paddedSeqLen = Config::pad<BLOCK_M>(seqLen);
         const auto paddedNumExperts = Config::pad<BLOCK_N>(numExperts);
+        const auto flagCount = numNeighbors * numLocalExperts + tilesM * tilesN;
+
         const auto brsData = (numExperts > BLOCK_N) *
             (sizeof(unsigned int) * (paddedSeqLen * (paddedNumExperts / BLOCK_N)) + // sync flags for gate
             2 * sizeof(maxPrecision) * paddedSeqLen + // m and d for softmax
@@ -78,7 +80,6 @@ namespace aristos{
             // flags for ring aggregation of token indices
             sizeof(unsigned int) * (cute::ceil_div(seqLen, BLOCK_M) + cute::ceil_div(embedDim, BLOCK_N)) +
             sizeof(sizeof(Config::TokenIdxTuple)) * seqLen + // token ids and probabilities
-            sizeof(unsigned short int) * numNeighbors + // flags for packet construction
             sizeof(maxPrecision) * paddedSeqLen * paddedNumExperts + // gate routing
             sizeof(maxPrecision) * (2 * paddedNumExperts + 1) + // gate loss vectors, loss value
             sizeof(unsigned int) * paddedNumExperts + // expert counts,
@@ -87,12 +88,12 @@ namespace aristos{
             sizeof(unsigned int) * numNeighbors + // EP rank -> global rank
             sizeof(unsigned int) * numExperts * 2  + // Expert parallelism specification and EP -> heap
             sizeof(unsigned int) * blocks + // readyQ
-            sizeof(unsigned int) * blocks + // taskSignal
-            sizeof(unsigned int) * numNeighbors * numExperts * cute::ceil_div(seqLen, numExperts * BLOCK_M) + // taskSync
-            sizeof(uint2) * workItemBound + // commit log
-            sizeof(Task) * (taskBound + blocks) + // taskQ
+            sizeof(unsigned int) * blocks + // statusQ
+            sizeof(unsigned int) * numNeighbors * numLocalExperts * cute::ceil_div(seqLen, numExperts * BLOCK_M) + // taskSync
+            sizeof(bool) * flagCount +  // flag checkpoints
+            sizeof(Task) * (taskBound + blocks * tilesN) + // taskQ
             sizeof(unsigned int) * N_READY_Q_SIGNALS + // rQS
-            sizeof(unsigned int) * (N_TASK_Q_SIGNALS + 1);// tQS and doorbell
+            sizeof(unsigned int) * (N_TASK_Q_SIGNALS + 1); // tQS and doorbell
         // Initialize hostConfig
         CUTE_CHECK_ERROR(cudaMallocAsync(&bookKeeping, memoryBytes, aristosStream));
         CUTE_CHECK_ERROR(cudaMemsetAsync(bookKeeping, 0, memoryBytes, aristosStream));

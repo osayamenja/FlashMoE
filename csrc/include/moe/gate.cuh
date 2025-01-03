@@ -9,7 +9,7 @@
 #include <cuda/std/__algorithm/pop_heap.h>
 
 #include "../os/processor/gemm.cuh"
-#include "../definition/types.cuh"
+#include "../types.cuh"
 #include "../util/atomics.cuh"
 
 namespace aristos::gate {

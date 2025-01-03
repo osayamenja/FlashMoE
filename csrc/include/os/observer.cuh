@@ -7,7 +7,7 @@
 
 #include <cutlass/array.h>
 
-#include "../definition/types.cuh"
+#include "../types.cuh"
 #include "../util/atomics.cuh"
 namespace aristos::ReadyQ {
     /// readyQ Observer
