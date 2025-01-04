@@ -109,6 +109,7 @@ namespace aristos::topology{
             __threadfence();
             atomicAdd(&blockade, 1);
             while (atomicLoad(&blockade) % gridDim.x != 0) {}
+            __threadfence();
         }
         __syncthreads();
 
@@ -159,6 +160,7 @@ namespace aristos::topology{
             __threadfence();
             atomicAdd(&blockade, 1);
             while (atomicLoad(&blockade) % gridDim.x != 0) {}
+            __threadfence();
         }
 
         // Signal our vector, including FLOPs, to others

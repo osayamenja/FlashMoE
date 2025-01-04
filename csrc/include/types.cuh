@@ -14,10 +14,6 @@
 
 #define N_READY_Q_SIGNALS 1 // head
 #define N_TASK_Q_SIGNALS 3
-
-/// The symmetric heap is a 4-D tensor (P, S, C, T)
-/// where P, S, C, and T denote dimensions for peers, communication stages,
-/// cells and tokens.
 /// Number of communication stages S
 #define STAGES 2
 
@@ -150,6 +146,7 @@ namespace aristos{
         ready
     };
 
+    using SignalPayload = cuda::std::pair<uint, ushort2>;
     /// A more apropos name would be "static storage" rather than registers.
     template<class T>
     struct isRegister : cuda::std::false_type {};
@@ -201,8 +198,9 @@ namespace aristos{
         unsigned int embedDim;
         unsigned int upProjection;
         // per GPU
-        unsigned int capacity;
+        unsigned int expertSlots;
         unsigned int expertCapacity;
+        unsigned int cellSize;
         unsigned int nTiles;
         unsigned int tilesN;
         unsigned int tilesM;
@@ -227,6 +225,7 @@ namespace aristos{
                const unsigned int& _tilesN,
                const unsigned int& _tilesM,
                const unsigned int& _tilesNx,
+               const unsigned int& _expertSlots,
                cuda::barrier<cuda::thread_scope_device>* _blockade,
                const unsigned int& _capFactor = 1):
                 sHeap(_symmetricHeap),
@@ -240,8 +239,9 @@ namespace aristos{
                 k(_k), worldSize(_world),
                 embedDim(_embedDim),
                 upProjection(_proj),
-                capacity(cute::ceil_div(_seqLen, _world)),
+                expertSlots(_expertSlots),
                 expertCapacity(cute::ceil_div(_seqLen, _numExperts) * _capFactor),
+                cellSize(expertCapacity * (embedDim + 1)), // max packet frame size
                 nTiles(_tilesM * (_tilesN + _tilesNx)),
                 tilesN(_tilesN), tilesM(_tilesM),
                 tilesNx(_tilesNx), deviceBlockade(_blockade){}
@@ -348,8 +348,8 @@ namespace aristos{
         }
 
         __device__ __forceinline__
-        bool* fCheck() const {
-            return CAST_TO(bool, xSync() + numLocalExperts * worldSize * expertCapacity);
+        unsigned int* fCheck() const {
+            return CAST_TO(unsigned int, xSync() + numLocalExperts * worldSize * expertCapacity);
         }
         // Packet stuff
         template<typename Element> requires aristos::TensorValueType<Element>
@@ -359,17 +359,27 @@ namespace aristos{
             return  sizeof(maxPrecision) + (dim + 1) * Config::pad<BLOCK_M>(length) * sizeof(Element);
         }
 
+        /// The symmetric heap is a 6-D tensor (P, S, C, E, M, H)
+        /// where P, S, C, E, M, and H  denote dimensions for peers, communication stages,
+        /// cells, experts, expert capacity, and token hidden dimension, respectively.
+        template<unsigned int stage = 0, unsigned cell = 0, unsigned long int nBytes = 1>
+        requires (stage < STAGES && cell < CELLS)
+        __device__ __forceinline__
+        auto* advanceHeap(unsigned int const& peer, unsigned int const& expert) const {
+            return sHeap + cellSize * (expertSlots * (CELLS * (peer * STAGES + stage) + cell) + expert) * nBytes;
+        }
+
         __host__ __device__ __forceinline__
         void dump() const {
             printf("{\n\t"
-                   "\"Capacity\": %u,\n\t"
+                   "\"ExpertCapacity\": %u,\n\t"
                    "\"E\": %u,\n\t"
                    "\"H\": %u,\n\t"
                    "\"World\": %u,\n\t"
                    "\"Rank\": %u,\n\t"
                    "\"SB\": %u,\n\t"
                    "\"k\": %u\n}\n",
-                   capacity, numExperts, embedDim, worldSize,
+                   expertCapacity, numExperts, embedDim, worldSize,
                    rank, seqLen, k);
         }
     };
@@ -474,7 +484,7 @@ namespace aristos{
         }
     };
 
-    __constant__ __inline__ unsigned int seqNo;
+    __device__ __inline__ unsigned int seqNo;
     __constant__ __inline__ Config moeConfig{};
     __constant__ __inline__ SchedulerConfig schedulerState{};
     __inline__ Config hostMoEConfig;
@@ -484,7 +494,7 @@ namespace aristos{
         requires (stage < STAGES && cell < CELLS)
         __device__ __forceinline__
         auto* advance(unsigned int const& peer, unsigned int const& expert) {
-            return moeConfig.sHeap + moeConfig.capacity * moeConfig.embedDim *
+            return moeConfig.sHeap + moeConfig.expertCapacity * moeConfig.embedDim *
                 (moeConfig.numExperts * (CELLS * (peer * STAGES + stage) + cell) + expert);
         }
     }

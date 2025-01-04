@@ -30,6 +30,7 @@ namespace aristos::ReadyQ {
                 if (atomicExch(sQ + i, observed) == ready) {
                     cacheSet[readySeen++] = i;
                     if (readySeen == setSize) {
+                        readySeen = 0;
                         // batch insert pids to the readyQ
                         #pragma unroll
                         for (uint j = 0; j < setSize; ++j) {

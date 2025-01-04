@@ -43,8 +43,6 @@ namespace aristos{
         std::vector<specType> parallelSpec{};
         std::vector<specType> translation{};
         const unsigned int numNeighbors = translation.size();
-        assert(numExperts + numNeighbors <= 4 * 1024 &&
-            "This use case requires more shared memory than we allocated. Let us know and we will address.");
 
         // initialize communication backend
         nvshmem_init();
@@ -90,7 +88,7 @@ namespace aristos{
             sizeof(unsigned int) * blocks + // readyQ
             sizeof(unsigned int) * blocks + // statusQ
             sizeof(unsigned int) * numNeighbors * numLocalExperts * cute::ceil_div(seqLen, numExperts * BLOCK_M) + // taskSync
-            sizeof(bool) * flagCount +  // flag checkpoints
+            sizeof(unsigned int) * flagCount +  // flag checkpoints
             sizeof(Task) * (taskBound + blocks * tilesN) + // taskQ
             sizeof(unsigned int) * N_READY_Q_SIGNALS + // rQS
             sizeof(unsigned int) * (N_TASK_Q_SIGNALS + 1); // tQS and doorbell

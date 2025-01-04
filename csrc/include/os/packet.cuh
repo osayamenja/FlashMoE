@@ -86,7 +86,7 @@ namespace aristos::packet {
             const auto routedTokens = d == DropTokens::yes ?
                 cute::min(expertCounts[lIdx], cap) : expertCounts[lIdx];
             const auto peer = pS[lIdx];
-            const auto pTT = cute::min(peerTotalTokens[peer], moeConfig.capacity);
+            const auto pTT = cute::min(peerTotalTokens[peer], moeConfig.expertCapacity);
             const auto padded = Config::pad<BLOCK_M>(routedTokens);
             const auto isRemote = nvshmem_ptr(moeConfig.sHeap, peer) == nullptr;
             auto* peerHeap = static_cast<cuda::std::byte*>(isRemote ?
@@ -230,7 +230,7 @@ namespace aristos::packet {
             if (!atomicTAS<cuda::thread_scope_block>(status + peer)) {
                 // atomically reduce taskCount
                 const auto superfluous = (moeConfig.tilesN + moeConfig.tilesNx) *
-                    (Config::tiles<BLOCK_M>(moeConfig.capacity) - globalTaskTiles);
+                    (Config::tiles<BLOCK_M>(moeConfig.expertCapacity) - globalTaskTiles);
                 atomicSub_block(taskCount, superfluous);
             }
             // process payload
@@ -240,7 +240,7 @@ namespace aristos::packet {
             auto* __restrict__ tQ = schedulerState.taskQ + lTQHead;
 
             // expert, peer offset
-            const auto pXo = moeConfig.capacity * (peer * moeConfig.numExperts + localExpertIdx);
+            const auto pXo = moeConfig.expertCapacity * (peer * moeConfig.numExperts + localExpertIdx);
             cuda::std::array<cuda::std::byte*, GEMMs> taskResults{};
             // Staging buffer for results of preGEMM
             taskResults[0] = pGB + pXo * tokenSize * sizeof(Element);

@@ -34,7 +34,7 @@ namespace aristos::moe{
         MatrixC moeOutput,
         MatrixCg gateOutput) {
 
-        __shared__ cuda::std::byte workspace[SHARED_SIZE];
+        __shared__ __align__(16) cuda::std::byte workspace[SHARED_SIZE];
 
         gate::forward<Arch, blocks, k, g, ElementC>(activations,
             gateWeights, gateOutput, CAST_TO(ElementC, workspace));
