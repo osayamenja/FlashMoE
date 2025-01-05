@@ -15,8 +15,8 @@
 #include <cub/cub.cuh>
 #include <cute/tensor.hpp>
 
-#include "include/util/indexing.cuh"
-#include "include/util/atomics.cuh"
+#include "include/indexing.cuh"
+#include "include/atomics.cuh"
 #include "include/types.cuh"
 
 namespace aristos {

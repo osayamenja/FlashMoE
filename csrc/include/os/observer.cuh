@@ -8,7 +8,7 @@
 #include <cutlass/array.h>
 
 #include "../types.cuh"
-#include "../util/atomics.cuh"
+#include "../atomics.cuh"
 namespace aristos::ReadyQ {
     /// readyQ Observer
     /// only actor that writes to the rQ

@@ -5,7 +5,7 @@
 #ifndef ARISTOS_INDEXING_CUH
 #define ARISTOS_INDEXING_CUH
 
-#include <cute/config.hpp>
+#include <../cmake/cache/cutlass/3a9de332b38746b489cce3a24161f80aafa1feaa/include/cute/config.hpp>
 
 namespace aristos{
     namespace block{

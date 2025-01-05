@@ -4,7 +4,6 @@
 
 #ifndef CSRC_ATOMICS_CUH
 #define CSRC_ATOMICS_CUH
-#define USE_BARRIER 0
 
 namespace aristos{
     template<typename B>

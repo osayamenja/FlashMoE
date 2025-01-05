@@ -52,9 +52,9 @@ add_executable(csrc main.cu
         include/moe/moe.cuh
         include/aristos.cuh
         include/os/processor/processor.cuh
-        include/util/indexing.cuh
+        include/indexing.cuh
         include/types.cuh
-        include/util/atomics.cuh
+        include/atomics.cuh
         include/os/decider/decider.cuh
         include/os/decider/comps/edge.cuh
         include/os/decider/comps/expert.cuh
@@ -62,7 +62,7 @@ add_executable(csrc main.cu
         include/os/decider/comps/worker.cuh
         include/os/decider/comps/args.cuh
         include/os/decider/comps/functions.cuh
-        include/util/debug.cuh
+        include/debug.cuh
         include/os/decider/comps/niche.cuh
         include/topo.cuh
         include/os/processor/mmaConfig.cuh

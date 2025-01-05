@@ -10,7 +10,7 @@
 
 #include "../os/processor/gemm.cuh"
 #include "../types.cuh"
-#include "../util/atomics.cuh"
+#include "../atomics.cuh"
 
 namespace aristos::gate {
     /// Fused GEMM, softmax, topKMask, and loss, assuming blocks >= tiles.N and no bias.
@@ -573,7 +573,7 @@ namespace aristos::gate {
                         __threadfence();
                         ring::signal(sF);
                         // do copy
-                        auto* tIdxData = moeConfig.tIdx() + (threadIdx.x % elems + i * elems) * moeConfig.capacity;
+                        auto* tIdxData = moeConfig.tIdx() + (threadIdx.x % elems + i * elems) * moeConfig.expertCapacity;
                         auto* tokenIdx = tIdxData + msg;
                         for (uint j = 0; j < tIdx; ++j) {
                             auto rTI = regTokenIdx[j];

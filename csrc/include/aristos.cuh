@@ -6,9 +6,9 @@
 #define ARISTOS_CUH
 
 #include "types.cuh"
-#include "util/atomics.cuh"
-#include "util/indexing.cuh"
-#include "util/debug.cuh"
+#include "atomics.cuh"
+#include "indexing.cuh"
+#include "debug.cuh"
 
 #include "os/scheduler.cuh"
 #include "os/subscriber.cuh"

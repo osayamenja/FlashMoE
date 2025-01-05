@@ -177,16 +177,17 @@ namespace aristos{
                     p2pBuffer(p2PBuffer), gradBuffer(gradBuffer) {}
     };
 
+    // Index and gate combine weight
+    using TokenIdxTuple = cuda::std::pair<unsigned int, maxPrecision>;
     struct __align__(16) Config{
         using HeapTuple = cuda::std::pair<maxPrecision, unsigned int>;
-        // Index and gate combine weight
-        using TokenIdxTuple = cuda::std::pair<unsigned int, maxPrecision>;
         cuda::std::byte* sHeap;
         flagsType* flags;
         /// Needed for free
         cuda::std::byte* bookKeeping;
         /// EP rank -> global rank
         unsigned int* peerTranslation;
+        /// Expert index -> EP rank
         unsigned int* parallelismSpec;
         /// Expert parallel group rank
         unsigned int rank;
@@ -365,8 +366,9 @@ namespace aristos{
         template<unsigned int stage = 0, unsigned cell = 0, unsigned long int nBytes = 1>
         requires (stage < STAGES && cell < CELLS)
         __device__ __forceinline__
-        auto* advanceHeap(unsigned int const& peer, unsigned int const& expert) const {
-            return sHeap + cellSize * (expertSlots * (CELLS * (peer * STAGES + stage) + cell) + expert) * nBytes;
+        auto* advanceHeap(unsigned int const& peer, unsigned int const& expert, const unsigned int& token = 0) const {
+            return sHeap + (cellSize * (expertSlots * (CELLS * (peer * STAGES + stage) + cell) + expert) +
+                token * embedDim) * nBytes;
         }
 
         __host__ __device__ __forceinline__

@@ -10,7 +10,7 @@
 #include <host/nvshmemx_api.h>
 
 #include "../types.cuh"
-#include "../util/atomics.cuh"
+#include "../atomics.cuh"
 
 namespace aristos::packet {
     namespace signal {

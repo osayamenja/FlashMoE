@@ -7,7 +7,7 @@
 
 #include <cuda/cmath>
 #include "types.cuh"
-#include "util/atomics.cuh"
+#include "atomics.cuh"
 
 namespace aristos::topology{
     __device__ __inline__ unsigned int blockade = 0U;

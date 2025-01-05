@@ -37,7 +37,7 @@ namespace aristos::processor{
             cute::is_tensor_v<Activations> && isRegisterV<Registers>)
         __device__ __forceinline__
         void operator()(Element* __restrict__ workspace,
-            const unsigned int* __restrict__ tokenIndices,
+            const TokenIdxTuple* __restrict__ tokenIndices,
             Registers registers,
             Element* __restrict__ inputs,
             Activations const& activations,
@@ -56,7 +56,8 @@ namespace aristos::processor{
                                                                     "so no support for this operation yet");
 
             // Eagerly issue gmem read.
-            auto tokenIdx = tokenIndices[threadIdx.x];
+            // We only need the index
+            auto tokenIdx = tokenIndices[threadIdx.x].first;
             // Row-major
             const auto mA = make_tensor(cute::make_gmem_ptr(inputs),
                 make_layout(cute::make_shape(M, N), cute::LayoutRight{}));
