@@ -55,7 +55,7 @@ namespace aristos{
         memoryBytes = cute::max(memoryBytes, globalWorld * (BETA_BUFFER + (globalWorld + 1) * sizeof(floatPair)));
         /// Allocates symmetric heap
         /// assert alignment 16 bytes
-        auto sHeap = nvshmem_calloc(memoryBytes, sizeof(cuda::std::byte));
+        auto sHeap = static_cast<cuda::std::byte*>(nvshmem_calloc(memoryBytes, sizeof(cuda::std::byte)));
 
         //Final Initialization
         void* bookKeeping;
@@ -77,7 +77,7 @@ namespace aristos{
             brsData +
             // flags for ring aggregation of token indices
             sizeof(unsigned int) * (cute::ceil_div(seqLen, BLOCK_M) + cute::ceil_div(embedDim, BLOCK_N)) +
-            sizeof(sizeof(Config::TokenIdxTuple)) * seqLen + // token ids and probabilities
+            sizeof(sizeof(TokenIdxTuple)) * seqLen + // token ids and probabilities
             sizeof(maxPrecision) * paddedSeqLen * paddedNumExperts + // gate routing
             sizeof(maxPrecision) * (2 * paddedNumExperts + 1) + // gate loss vectors, loss value
             sizeof(unsigned int) * paddedNumExperts + // expert counts,

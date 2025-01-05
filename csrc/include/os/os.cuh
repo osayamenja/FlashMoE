@@ -17,18 +17,7 @@ namespace aristos::os {
     template<unsigned int blocks>
     __device__ __forceinline__
     void start(cuda::std::byte* __restrict__ const& workspace) {
-        if (!threadIdx.x) {
-            *CAST_TO(unsigned int, workspace) = moeConfig.nTiles;
-        }
-        __syncthreads();
-        if (!threadIdx.x) {
-            // last thread
-            scheduler::start<blocks>(CAST_TO(unsigned int, workspace));
-        }
-        else {
-            // first n threads
-            subscriber::start(CAST_TO(unsigned int, workspace));
-        }
+        // build arguments for scheduler, subscriber and observer
     }
 }
 #endif //OS_CUH

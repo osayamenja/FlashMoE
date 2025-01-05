@@ -275,23 +275,25 @@ namespace aristos::packet {
             // residue tile
             const auto residue = routedTokens - fTilesM * BLOCK_M;
             // TODO unroll these loops
-            for (uint j = 0; j < tilesN; ++j) {
-                const auto tileIdx = j + fTilesM * tilesN;
-                tQ[tileIdx] = Task{
-                    TaskType::preGEMM,
-                    tokens,
-                    weights,
-                    taskResults,
-                    bias,
-                    scaleWeights,
-                    pXo + fTilesM,
-                    tileIdx,
-                    padM,
-                    pXo + (p == PeerConnectivity::remote ? fTilesM : tileIdx),
-                    residue,
-                    peer,
-                    fTilesM
-                };
+            if (residue) {
+                for (uint j = 0; j < tilesN; ++j) {
+                    const auto tileIdx = j + fTilesM * tilesN;
+                    tQ[tileIdx] = Task{
+                        TaskType::preGEMM,
+                        tokens,
+                        weights,
+                        taskResults,
+                        bias,
+                        scaleWeights,
+                        pXo + fTilesM,
+                        tileIdx,
+                        padM,
+                        pXo + (p == PeerConnectivity::remote ? fTilesM : tileIdx),
+                        residue,
+                        peer,
+                        fTilesM
+                    };
+                }
             }
 
             if (routedTokens) {

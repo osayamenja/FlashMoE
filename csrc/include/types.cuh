@@ -86,7 +86,7 @@ namespace aristos{
 
         __device__ __forceinline__
         friend bool operator<=(const floatPair &lhs, const floatPair &rhs) {
-            return !(rhs < lhs);
+            return rhs >= lhs;
         }
 
         __device__ __forceinline__
@@ -97,17 +97,6 @@ namespace aristos{
         __device__ __forceinline__
         friend bool operator>=(const floatPair &lhs, const floatPair &rhs) {
             return !(lhs < rhs);
-        }
-
-        __device__ __forceinline__
-        friend bool operator==(const floatPair &lhs, const floatPair &rhs) {
-            return lhs.alpha == rhs.alpha
-                   && lhs.beta == rhs.beta;
-        }
-
-        __device__ __forceinline__
-        friend bool operator!=(const floatPair &lhs, const floatPair &rhs) {
-            return !(lhs == rhs);
         }
     };
 
@@ -146,7 +135,21 @@ namespace aristos{
         ready
     };
 
-    using SignalPayload = cuda::std::pair<uint, ushort2>;
+    template<PacketStage p = PacketStage::initial>
+    struct SignalPayload {
+        static_assert(p == PacketStage::initial);
+        uint routedTokens;
+        uint16_t seqNo;
+        uint16_t totalTilesM;
+    };
+
+    template<>
+    struct SignalPayload<PacketStage::final> {
+        uint batchIdx;
+        uint16_t seqNo;
+        uint16_t tokensM; // <= BLOCK_M
+    };
+
     /// A more apropos name would be "static storage" rather than registers.
     template<class T>
     struct isRegister : cuda::std::false_type {};
@@ -486,7 +489,7 @@ namespace aristos{
         }
     };
 
-    __device__ __inline__ unsigned int seqNo;
+    __device__ __inline__ uint16_t seqNo;
     __constant__ __inline__ Config moeConfig{};
     __constant__ __inline__ SchedulerConfig schedulerState{};
     __inline__ Config hostMoEConfig;
