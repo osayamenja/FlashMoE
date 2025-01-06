@@ -577,7 +577,7 @@ namespace aristos::gate {
                         auto* tokenIdx = tIdxData + msg;
                         for (uint j = 0; j < tIdx; ++j) {
                             auto rTI = regTokenIdx[j];
-                            tokenIdx[j] = Config::TokenIdxTuple{rTI, scratchpad[rTI % bM]};
+                            tokenIdx[j] = TokenIdxTuple{rTI, scratchpad[rTI % bM]};
                         }
                     }
                 }

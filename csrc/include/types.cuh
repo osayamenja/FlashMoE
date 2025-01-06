@@ -5,35 +5,32 @@
 #ifndef ARISTOS_TYPES_CUH
 #define ARISTOS_TYPES_CUH
 
-#define ARISTOS_BLOCK_SIZE 128
-#define ARISTOS_BLOCK_SIZE_WARP (128 / 32)
+#define ARISTOS_BLOCK_SIZE 128U
+#define ARISTOS_BLOCK_SIZE_WARP (128U / 32)
 // number of blocks
-#define ARISTOS_SUPER_BLOCK_SIZE 32
+#define ARISTOS_SUPER_BLOCK_SIZE 32U
 
 #define CAST_TO(T, p) static_cast<T*>(static_cast<void*>(p))
-
-#define N_READY_Q_SIGNALS 1 // head
-#define N_TASK_Q_SIGNALS 3
 /// Number of communication stages S
-#define STAGES 2
+#define STAGES 2U
 
 /// Per stage, there is one cell for sending and another for reception
-#define CELLS 2
-#define SEND_CELL 0
-#define RECEIVE_CELL 1
+#define CELLS 2U
+#define SEND_CELL 0U
+#define RECEIVE_CELL 1U
 
-#define HEAP_ALIGNMENT 16
+#define HEAP_ALIGNMENT 16U
 
 // GEMM configuration constants
-#define MIN_ARCH 700
-#define THREADS 128
-#define BLOCK_M 128
-#define BLOCK_M_EXP 64
-#define BLOCK_N 64
-#define BLOCK_K_HALF 16
-#define BLOCK_K_FULL 8
+#define MIN_ARCH 700U
+#define THREADS 128U
+#define BLOCK_M 128U
+#define BLOCK_M_EXP 64U
+#define BLOCK_N 64U
+#define BLOCK_K_HALF 16U
+#define BLOCK_K_FULL 8U
 #define MAX_REGS (BLOCK_M * BLOCK_N) / THREADS
-#define PIPELINE_STAGES 2
+#define PIPELINE_STAGES 2U
 #define SHARED_SIZE 16 * 1024U
 #define GEMMs 2U // per expert
 
@@ -355,13 +352,6 @@ namespace aristos{
         unsigned int* fCheck() const {
             return CAST_TO(unsigned int, xSync() + numLocalExperts * worldSize * expertCapacity);
         }
-        // Packet stuff
-        template<typename Element> requires aristos::TensorValueType<Element>
-        __forceinline__
-        static auto frameSize(const unsigned int& length, const unsigned int& dim){
-            // Header and payload
-            return  sizeof(maxPrecision) + (dim + 1) * Config::pad<BLOCK_M>(length) * sizeof(Element);
-        }
 
         /// The symmetric heap is a 6-D tensor (P, S, C, E, M, H)
         /// where P, S, C, E, M, and H  denote dimensions for peers, communication stages,
@@ -455,6 +445,204 @@ namespace aristos{
         taskType(_taskType) {}
     };
 
+    /// Information about auxiliary data structures comprising bookkeeping state
+    /// Includes length of data structures (arrays) and pointer arithmetic functions
+    struct __align__(16) Bookkeeping {
+        /// default type for bookkeeping data structures
+        using BookType = unsigned int;
+        using HeapTuple = cuda::std::pair<maxPrecision, BookType>;
+        cuda::std::byte* book;
+        /// gRl + gB + eDsA + sBfC + brs
+        unsigned long int bookSize;
+        /// gate routing and loss vectors in bytes
+        unsigned int gRl;
+        /// gate buffers in bytes
+        unsigned int gB;
+        /// EP group description and packet sync array in bytes
+        unsigned int eDsA;
+        /// Scheduler buffers and flag checkpoints in bytes
+        unsigned int sBfC;
+        /// Block Ring Softmax flags
+        unsigned int brs;
+
+        /// Task Q maximum length
+        unsigned int tQl;
+        /// EP world
+        unsigned int world;
+        /// sequence length
+        unsigned int sl;
+        /// number of experts
+        unsigned int nx;
+        /// number of local experts
+        unsigned int nLx;
+        /// hidden projection dimension
+        unsigned int pd;
+        /// padded number of experts
+        unsigned int px;
+        /// tiles spanning sequence length
+        unsigned int tM;
+        /// tiles spanning embedding dimension
+        unsigned int tN;
+        /// tiles spanning capacity
+        unsigned int tCM;
+        /// processors
+        unsigned int blocks;
+
+        Bookkeeping() = default;
+
+        explicit Bookkeeping(
+            cuda::std::byte* const& _book,
+            const unsigned int& _sl,
+            const unsigned int& _nx,
+            const unsigned int& _nLx,
+            const unsigned int& _pd,
+            const unsigned int& _px,
+            const unsigned int& _embedDim,
+            const unsigned int& _cap,
+            const unsigned int& _blocks,
+            const unsigned int& _world,
+            const unsigned int& _k) :
+        book(_book), world(_world), sl(_sl), nx(_nx), nLx(_nLx), pd(_pd), px(_px),
+        tM(Config::tiles<BLOCK_M>(_sl)),
+        tN(Config::tiles<BLOCK_N>(_embedDim)),
+        tCM(Config::tiles<BLOCK_M>(_cap)), blocks(_blocks) {
+            assert(__isGlobal(book));
+            gRl = sizeof(maxPrecision) * (_sl * px + (2 * px + 1));
+            gB = gRl + sizeof(TokenIdxTuple) * _sl + sizeof(BookType) * px;
+            eDsA = sizeof(BookType) * (3 * nx + world);
+            const unsigned int fCl = sizeof(bool) * (world * nLx + (nx * tCM * tN));
+            sBfC = sizeof(BookType) * (3 * blocks + THREADS - 2 + world * nLx * tCM) + fCl;
+            // total gemm tiles
+            const auto gT = world * nLx * tCM * (tN + Config::tiles<BLOCK_N>(pd));
+            // total combine tiles
+            const auto cT = tCM * tN * nx;
+            tQl = sizeof(Task) * (gT + cT);
+            brs = sizeof(BookType) * (tM * tN +  sl * Config::tiles<BLOCK_N>(px)) +
+                sizeof(maxPrecision) * (2 * sl) + sizeof(HeapTuple) * (_k * sl);
+            bookSize = gB + eDsA + sBfC + tQl + brs;
+        }
+
+        /// Needed for malloc
+        static unsigned long int computeBookSize(
+            const unsigned int& _sl,
+            const unsigned int& _nx,
+            const unsigned int& _nLx,
+            const unsigned int& _pd,
+            const unsigned int& _px,
+            const unsigned int& _embedDim,
+            const unsigned int& _cap,
+            const unsigned int& _blocks,
+            const unsigned int& _world,
+            const unsigned int& _k){
+            const auto tCM = Config::tiles<BLOCK_M>(_cap);
+            const auto tN = Config::tiles<BLOCK_N>(_embedDim);
+            const auto tM = Config::tiles<BLOCK_M>(_sl);
+            const unsigned int gRl = sizeof(maxPrecision) * (_sl * _px + (2 * _px + 1));
+            const unsigned int gB = gRl + sizeof(TokenIdxTuple) * _sl + sizeof(BookType) * _px;
+            const unsigned int eDsA = sizeof(BookType) * (3 * _nx + _world);
+            const unsigned int fCl = sizeof(bool) * (_world * _nLx + (_nx * tCM * tN));
+            const auto sBfC = sizeof(BookType) * (3 * _blocks + THREADS - 2 + _world * _nLx * tCM) + fCl;
+            // total gemm tiles
+            const auto gT = _world * _nLx * tCM * (tN + Config::tiles<BLOCK_N>(_pd));
+            // total combine tiles
+            const auto cT = tCM * tN * _nx;
+            const auto tQl = sizeof(Task) * (gT + cT);
+            const auto brs = sizeof(BookType) * (tM * tN +  _sl * Config::tiles<BLOCK_N>(_px)) +
+                sizeof(maxPrecision) * (2 * _sl) + sizeof(HeapTuple) * (_k * _sl);
+            return gB + eDsA + sBfC + tQl + brs;
+        }
+
+        template<typename Element>
+        __device__ __forceinline__
+        auto* gRt() const {
+            return CAST_TO(Element, book);
+        }
+        __device__ __forceinline__
+        auto* gLs() const {
+            return CAST_TO(maxPrecision, book + sizeof(maxPrecision) * (sl * px));
+        }
+        __device__ __forceinline__
+        auto* tP() const {
+            return CAST_TO(TokenIdxTuple, book + gRl);
+        }
+        __device__ __forceinline__
+        auto* eC() const {
+            return CAST_TO(BookType, tP() + sl);
+        }
+
+        /// Expert parallelism specification
+        /// Expert index -> resident GPU EP rank
+        __device__ __forceinline__
+        auto* ePs() const {
+            return CAST_TO(BookType, book + gB);
+        }
+        /// Inverse specification
+        /// GPU EP rank -> start index of {Expert indices}
+        __device__ __forceinline__
+        auto* iEPs() const {
+            return ePs() + nx;
+        }
+        /// Peer Translation
+        /// EP rank -> PE rank
+        __device__ __forceinline__
+        auto* pT() const {
+            return iEPs() + nx;
+        }
+        /// Packet Sync array
+        __device__ __forceinline__
+        auto* pSA() const {
+            return pT() + world;
+        }
+
+        /// Scheduler buffers and flag checkpoints
+        __device__ __forceinline__
+        auto* rQ() const {
+            return CAST_TO(BookType, book + eDsA + gB);
+        }
+        __device__ __forceinline__
+        auto* sQ() const {
+            return rQ() + blocks;
+        }
+        __device__ __forceinline__
+        auto* tQH() const {
+            return sQ() + blocks;
+        }
+        __device__ __forceinline__
+        auto* tQS() const {
+            return tQH() + blocks + THREADS - 2;
+        }
+        __device__ __forceinline__
+        auto* fC() const {
+            return CAST_TO(bool, tQS() + world * nLx * tCM);
+        }
+
+        __device__ __forceinline__
+        auto* tQ() const {
+            return CAST_TO(Task, book + sBfC + eDsA + gB);
+        }
+
+        // These must be together and last due to
+        // 1. Contiguity requirements
+        // 2. Dependency on GateReductionLevel
+        __device__ __forceinline__
+        auto* rAt() const {
+            return CAST_TO(BookType, tQ() + tQl);
+        }
+
+        __device__ __forceinline__
+        auto* bRSync() const {
+            return rAt() + tM * tN;
+        }
+        __device__ __forceinline__
+        auto* bRSoftM() const {
+            return CAST_TO(maxPrecision, bRSync() + sl * Config::tiles<BLOCK_N>(px));
+        }
+        __device__ __forceinline__
+        auto* bRsH() const {
+            return CAST_TO(HeapTuple, bRSoftM() + 2 * sl);
+        }
+    };
+
     struct __align__(16) SchedulerConfig{
         unsigned int* statusQ;
         unsigned int* taskSignal;
@@ -492,6 +680,7 @@ namespace aristos{
     __device__ __inline__ uint16_t seqNo;
     __constant__ __inline__ Config moeConfig{};
     __constant__ __inline__ SchedulerConfig schedulerState{};
+    __constant__ __inline__ Bookkeeping bookkeeping{};
     __inline__ Config hostMoEConfig;
 
     namespace heap {

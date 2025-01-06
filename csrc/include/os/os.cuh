@@ -17,6 +17,10 @@ namespace aristos::os {
     template<unsigned int blocks>
     __device__ __forceinline__
     void start(cuda::std::byte* __restrict__ const& workspace) {
+        constexpr auto subscriberCount = THREADS - 2;
+        __shared__ Config mC;
+        __shared__ SchedulerConfig sC;
+
         // build arguments for scheduler, subscriber and observer
     }
 }
