@@ -21,9 +21,11 @@
 
 #define HEAP_ALIGNMENT 16U
 
-// GEMM configuration constants
+// Hardware description
 #define MIN_ARCH 700U
 #define THREADS 128U
+#define SUBSCRIBERS (THREADS - 2U)
+// GEMM configuration constants
 #define BLOCK_M 128U
 #define BLOCK_M_EXP 64U
 #define BLOCK_N 64U
@@ -160,6 +162,7 @@ namespace aristos{
     template <class T>
     constexpr bool isRegisterV = isRegister<T>::value;
 
+    // Needed for decider
     struct ModelConfig{
         unsigned int numLayers;
         unsigned int globalBatch;
@@ -206,7 +209,6 @@ namespace aristos{
         unsigned int tilesN;
         unsigned int tilesM;
         unsigned int tilesNx;
-        cuda::barrier<cuda::thread_scope_device>* deviceBlockade;
 
         __device__ __forceinline__
         Config() = default;
@@ -227,7 +229,6 @@ namespace aristos{
                const unsigned int& _tilesM,
                const unsigned int& _tilesNx,
                const unsigned int& _expertSlots,
-               cuda::barrier<cuda::thread_scope_device>* _blockade,
                const unsigned int& _capFactor = 1):
                 sHeap(_symmetricHeap),
                 flags(_flags),
@@ -245,13 +246,8 @@ namespace aristos{
                 cellSize(expertCapacity * (embedDim + 1)), // max packet frame size
                 nTiles(_tilesM * (_tilesN + _tilesNx)),
                 tilesN(_tilesN), tilesM(_tilesM),
-                tilesNx(_tilesNx), deviceBlockade(_blockade){}
+                tilesNx(_tilesNx){}
 
-        template<typename Element>
-        __forceinline__ __device__
-        constexpr size_t finalPacketSize(const unsigned int& numTokens) const {
-            return numTokens * (sizeof(Element) * embedDim);
-        }
         template<unsigned int tileDimension>
         __host__ __device__ __forceinline__
         static constexpr unsigned int pad(const unsigned int& dimension) {
@@ -264,93 +260,6 @@ namespace aristos{
         static constexpr unsigned int tiles(const unsigned int& dimension) {
             // find next multiple of dimension.
             return cute::ceil_div(dimension, tileDimension);
-        }
-
-        template<typename Element>
-        requires aristos::TensorValueType<Element>
-        __device__ __forceinline__
-        auto* xMid() const {
-            return CAST_TO(Element, bookKeeping);
-        }
-
-        template<GateReductionLevel g = GateReductionLevel::multiBlock>
-        __device__ __forceinline__
-        unsigned int* getBRSFlags() const {
-            static_assert(g == GateReductionLevel::multiBlock);
-            return CAST_TO(unsigned int, xMid<maxPrecision>() + pad<BLOCK_M>(seqLen) * upProjection);
-        }
-
-        template<GateReductionLevel g = GateReductionLevel::multiBlock>
-        __device__ __forceinline__
-        float2* getBRSValues() const {
-            static_assert(g == GateReductionLevel::multiBlock);
-            return CAST_TO(float2, getBRSFlags() + (seqLen * pad<BLOCK_N>(numExperts)));
-        }
-
-        template<GateReductionLevel g = GateReductionLevel::multiBlock>
-        __device__ __forceinline__
-        HeapTuple* getBRSHeap() const {
-            static_assert(g == GateReductionLevel::multiBlock);
-            return static_cast<HeapTuple*>(static_cast<void*>(getBRSValues() + pad<BLOCK_M>(seqLen)));
-        }
-
-        template<GateReductionLevel g = GateReductionLevel::singleBlock>
-        unsigned int* tIdxFlag() const {
-            if constexpr (g == GateReductionLevel::multiBlock) {
-                return CAST_TO(unsigned int, getBRSHeap() + k * pad<BLOCK_M>(seqLen));
-            }
-            return CAST_TO(unsigned int, bookKeeping);
-        }
-
-        template<GateReductionLevel g = GateReductionLevel::singleBlock>
-        unsigned int* tIdxVal() const {
-            if constexpr (g == GateReductionLevel::multiBlock) {
-                return CAST_TO(unsigned int, tIdxFlag() + tilesM * pad<BLOCK_N>(numExperts));
-            }
-            return CAST_TO(unsigned int, tIdxFlag() + tilesM * BLOCK_N);
-        }
-        template<GateReductionLevel g = GateReductionLevel::singleBlock>
-        auto* tIdx() const {
-            if constexpr (g == GateReductionLevel::multiBlock) {
-                return static_cast<TokenIdxTuple*>(static_cast<void*>(tIdxVal() + pad<BLOCK_N>(numExperts)));
-            }
-            return static_cast<TokenIdxTuple*>(static_cast<void*>(tIdxVal() + BLOCK_N));
-        }
-
-        // Gate loss
-        __device__ __forceinline__
-        maxPrecision* getGateMeanLogits() const {
-            return CAST_TO(maxPrecision, tIdx() + seqLen);
-        }
-
-        __device__ __forceinline__
-        maxPrecision* getMeanExpertCounts() const {
-            return CAST_TO(maxPrecision, getGateMeanLogits() + pad<BLOCK_N>(numExperts));
-        }
-
-        __device__ __forceinline__
-        maxPrecision* getGateLoss() const {
-            return CAST_TO(maxPrecision, getMeanExpertCounts() + pad<BLOCK_N>(numExperts));
-        }
-
-        __device__ __forceinline__
-        unsigned int* getExpertCounts() const {
-            return CAST_TO(unsigned int, getGateLoss() + 1);
-        }
-
-        __device__ __forceinline__
-        unsigned int* getPeerXLookup() const {
-            return getExpertCounts() + numExperts;
-        }
-
-        __device__ __forceinline__
-        unsigned int* xSync() const {
-            return getPeerXLookup() + numExperts + worldSize + 1;
-        }
-
-        __device__ __forceinline__
-        unsigned int* fCheck() const {
-            return CAST_TO(unsigned int, xSync() + numLocalExperts * worldSize * expertCapacity);
         }
 
         /// The symmetric heap is a 6-D tensor (P, S, C, E, M, H)
@@ -455,15 +364,18 @@ namespace aristos{
         /// gRl + gB + eDsA + sBfC + brs
         unsigned long int bookSize;
         /// gate routing and loss vectors in bytes
-        unsigned int gRl;
-        /// gate buffers in bytes
-        unsigned int gB;
+        unsigned int gRl = 0U;
+        /// Note the below lengths are cumulative sums.
+        /// Gate buffers in bytes
+        unsigned long int gB = 0UL;
         /// EP group description and packet sync array in bytes
-        unsigned int eDsA;
+        unsigned long int eDsA = 0UL;
         /// Scheduler buffers and flag checkpoints in bytes
-        unsigned int sBfC;
-        /// Block Ring Softmax flags
-        unsigned int brs;
+        unsigned long int sBfC = 0UL;
+        /// Intermediate buffer and tQ length in bytes
+        unsigned long int xMtQ = 0UL;
+        /// Block Ring Softmax flags in bytes, non-cumulative
+        unsigned int brs = 0UL;
 
         /// Task Q maximum length
         unsigned int tQl;
@@ -487,6 +399,8 @@ namespace aristos{
         unsigned int tCM;
         /// processors
         unsigned int blocks;
+        /// Global device barrier
+        cuda::barrier<cuda::thread_scope_device>* deviceBlockade;
 
         Bookkeeping() = default;
 
@@ -498,58 +412,73 @@ namespace aristos{
             const unsigned int& _pd,
             const unsigned int& _px,
             const unsigned int& _embedDim,
-            const unsigned int& _cap,
+            const unsigned int& _eCapacity,
             const unsigned int& _blocks,
             const unsigned int& _world,
-            const unsigned int& _k) :
+            const unsigned int& _k,
+            cuda::barrier<cuda::thread_scope_device>* _blockade) :
         book(_book), world(_world), sl(_sl), nx(_nx), nLx(_nLx), pd(_pd), px(_px),
         tM(Config::tiles<BLOCK_M>(_sl)),
         tN(Config::tiles<BLOCK_N>(_embedDim)),
-        tCM(Config::tiles<BLOCK_M>(_cap)), blocks(_blocks) {
-            assert(__isGlobal(book));
-            gRl = sizeof(maxPrecision) * (_sl * px + (2 * px + 1));
-            gB = gRl + sizeof(TokenIdxTuple) * _sl + sizeof(BookType) * px;
-            eDsA = sizeof(BookType) * (3 * nx + world);
-            const unsigned int fCl = sizeof(bool) * (world * nLx + (nx * tCM * tN));
-            sBfC = sizeof(BookType) * (3 * blocks + THREADS - 2 + world * nLx * tCM) + fCl;
-            // total gemm tiles
-            const auto gT = world * nLx * tCM * (tN + Config::tiles<BLOCK_N>(pd));
-            // total combine tiles
-            const auto cT = tCM * tN * nx;
-            tQl = sizeof(Task) * (gT + cT);
-            brs = sizeof(BookType) * (tM * tN +  sl * Config::tiles<BLOCK_N>(px)) +
-                sizeof(maxPrecision) * (2 * sl) + sizeof(HeapTuple) * (_k * sl);
-            bookSize = gB + eDsA + sBfC + tQl + brs;
+        tCM(Config::tiles<BLOCK_M>(_eCapacity)), blocks(_blocks), deviceBlockade(_blockade) {
+            if (_nx == 1)[[unlikely]] {
+                // For this case, using any function other than xM yields undefined behavior
+                xMtQ = sizeof(maxPrecision) * _world * _nLx * tCM * tN;
+                bookSize = xMtQ;
+            }
+            else {
+                gRl = sizeof(maxPrecision) * (_sl * px + (2 * px + 1));
+                gB = gRl + sizeof(TokenIdxTuple) * _sl + sizeof(BookType) * px * (tM + 3);
+                eDsA = gB + sizeof(BookType) * (3 * nx + world);
+                const unsigned int fCl = sizeof(bool) * (world * nLx + (nx * tCM * tN));
+                sBfC = eDsA + sizeof(BookType) * (3 * blocks + SUBSCRIBERS + (world * nLx * tCM)) + fCl;
+                // maximum gemm tiles/tasks scheduled by subscriber threads
+                auto sT = world * nLx * tCM * tN + tCM * tN * nx;
+                sT = sT / SUBSCRIBERS * SUBSCRIBERS;
+                // maximum gemm tiles/tasks scheduled by processors
+                const auto pT = world * nLx * tCM * Config::tiles<BLOCK_N>(pd);
+                tQl = sizeof(Task) * (sT + pT);
+                xMtQ = sBfC + tQl + sizeof(maxPrecision) * world * nLx * tCM * tN;
+                brs = sizeof(BookType) * (tM * tN +  sl * Config::tiles<BLOCK_N>(px)) +
+                    sizeof(maxPrecision) * (2 * sl) + sizeof(HeapTuple) * (_k * sl);
+                bookSize = xMtQ + brs;
+            }
         }
 
         /// Needed for malloc
-        static unsigned long int computeBookSize(
+        static unsigned long int BookLength(
             const unsigned int& _sl,
             const unsigned int& _nx,
             const unsigned int& _nLx,
             const unsigned int& _pd,
             const unsigned int& _px,
             const unsigned int& _embedDim,
-            const unsigned int& _cap,
+            const unsigned int& _eCap,
             const unsigned int& _blocks,
             const unsigned int& _world,
             const unsigned int& _k){
-            const auto tCM = Config::tiles<BLOCK_M>(_cap);
+            const auto tCM = Config::tiles<BLOCK_M>(_eCap);
             const auto tN = Config::tiles<BLOCK_N>(_embedDim);
+            if (_nx == 1) {
+                return sizeof(maxPrecision) * _world * _nLx * tCM * tN;
+            }
             const auto tM = Config::tiles<BLOCK_M>(_sl);
-            const unsigned int gRl = sizeof(maxPrecision) * (_sl * _px + (2 * _px + 1));
-            const unsigned int gB = gRl + sizeof(TokenIdxTuple) * _sl + sizeof(BookType) * _px;
-            const unsigned int eDsA = sizeof(BookType) * (3 * _nx + _world);
-            const unsigned int fCl = sizeof(bool) * (_world * _nLx + (_nx * tCM * tN));
-            const auto sBfC = sizeof(BookType) * (3 * _blocks + THREADS - 2 + _world * _nLx * tCM) + fCl;
-            // total gemm tiles
-            const auto gT = _world * _nLx * tCM * (tN + Config::tiles<BLOCK_N>(_pd));
-            // total combine tiles
-            const auto cT = tCM * tN * _nx;
-            const auto tQl = sizeof(Task) * (gT + cT);
+            const auto gRl = sizeof(maxPrecision) * (_sl * _px + (2 * _px + 1));
+            const auto gB = gRl + sizeof(TokenIdxTuple) * _sl + sizeof(BookType) * _px * (tM + 3);
+            const auto eDsA = gB + sizeof(BookType) * (3 * _nx + _world);
+            const auto fCl = sizeof(bool) * (_world * _nLx + (_nx * tCM * tN));
+            const auto sBfC = eDsA + sizeof(BookType) * (3 * _blocks + THREADS - 2 + _world * _nLx * tCM) + fCl;
+            // maximum gemm tiles/tasks scheduled by subscriber threads
+            auto sT = _world * _nLx * tCM * tN + tCM * tN * _nx;
+            sT = sT / SUBSCRIBERS * SUBSCRIBERS;
+            // maximum gemm tiles/tasks scheduled by processors
+            const auto pT = _world * _nLx * tCM * Config::tiles<BLOCK_N>(_pd);
+            const auto tQl = sizeof(Task) * (sT + pT);
+
+            const auto xMtQ = sBfC + tQl + sizeof(maxPrecision) * _world * _nLx * tCM * tN;
             const auto brs = sizeof(BookType) * (tM * tN +  _sl * Config::tiles<BLOCK_N>(_px)) +
                 sizeof(maxPrecision) * (2 * _sl) + sizeof(HeapTuple) * (_k * _sl);
-            return gB + eDsA + sBfC + tQl + brs;
+            return xMtQ + brs;
         }
 
         template<typename Element>
@@ -557,17 +486,38 @@ namespace aristos{
         auto* gRt() const {
             return CAST_TO(Element, book);
         }
+
+        /// Gate mean logits
         __device__ __forceinline__
-        auto* gLs() const {
+        auto* gML() const {
             return CAST_TO(maxPrecision, book + sizeof(maxPrecision) * (sl * px));
         }
+        /// Gate mean expert counts
+        __device__ __forceinline__
+        auto* gMeC() const {
+            return gL() + nx;
+        }
+        /// Gate loss
+        __device__ __forceinline__
+        auto* gL() const {
+            return gMeC() + nx;
+        }
+
         __device__ __forceinline__
         auto* tP() const {
             return CAST_TO(TokenIdxTuple, book + gRl);
         }
         __device__ __forceinline__
-        auto* eC() const {
+        auto* tF() const {
             return CAST_TO(BookType, tP() + sl);
+        }
+        __device__ __forceinline__
+        auto* tV() const {
+            return tF() + tM * px;
+        }
+        __device__ __forceinline__
+        auto* eC() const {
+            return tV() + px;
         }
 
         /// Expert parallelism specification
@@ -597,7 +547,7 @@ namespace aristos{
         /// Scheduler buffers and flag checkpoints
         __device__ __forceinline__
         auto* rQ() const {
-            return CAST_TO(BookType, book + eDsA + gB);
+            return CAST_TO(BookType, book + eDsA);
         }
         __device__ __forceinline__
         auto* sQ() const {
@@ -607,9 +557,10 @@ namespace aristos{
         auto* tQH() const {
             return sQ() + blocks;
         }
+        /// tQ sync array
         __device__ __forceinline__
         auto* tQS() const {
-            return tQH() + blocks + THREADS - 2;
+            return tQH() + blocks + SUBSCRIBERS;
         }
         __device__ __forceinline__
         auto* fC() const {
@@ -618,7 +569,14 @@ namespace aristos{
 
         __device__ __forceinline__
         auto* tQ() const {
-            return CAST_TO(Task, book + sBfC + eDsA + gB);
+            return CAST_TO(Task, book + sBfC);
+        }
+
+        // Intermediate buffer
+        template<typename Element>
+        __device__ __forceinline__
+        auto* xM() const {
+            return CAST_TO(Element, tQ() + tQl);
         }
 
         // These must be together and last due to
@@ -626,7 +584,7 @@ namespace aristos{
         // 2. Dependency on GateReductionLevel
         __device__ __forceinline__
         auto* rAt() const {
-            return CAST_TO(BookType, tQ() + tQl);
+            return CAST_TO(BookType, book + xMtQ);
         }
 
         __device__ __forceinline__
