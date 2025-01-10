@@ -5,8 +5,7 @@
 #ifndef GATE_CUH
 #define GATE_CUH
 
-#include <cuda/std/__algorithm/make_heap.h>
-#include <cuda/std/__algorithm/pop_heap.h>
+#include <cub/cub.cuh>
 
 #include "../os/processor/gemm.cuh"
 #include "../types.cuh"
@@ -311,14 +310,14 @@ namespace aristos::gate {
         typename BlockGEMM,
         unsigned int k
     >
-    requires(k <= 16 && k > 0)
     struct FusedGate<GateReductionLevel::singleBlock, BlockGEMM, k> {
         template<
             class FrgTensorD,
             typename MatrixA,
             typename MatrixB,
             typename MatrixC,
-            typename ElementC
+            typename ElementC,
+            typename BlockScanTS
         >
         __device__ __forceinline__
         void operator()(const MatrixA& activations,
@@ -327,15 +326,14 @@ namespace aristos::gate {
             const unsigned int& tileIdx,
             Bookkeeping const& bk,
             ElementC* __restrict__ const& gateScratch,
-            ElementC* __restrict__ const& scratchpad,
-            ElementC* __restrict__ const& combineWeights,
-            unsigned int* __restrict__ const& sharedFlags,
-            unsigned int* __restrict__ const& sharedValues) {
+            ElementC* __restrict__ const& scratchpad) {
             static_assert(cuda::std::is_same_v<ElementC, float> && cuda::std::is_same_v<ElementC, maxPrecision>);
             typename BlockGEMM::CollectiveMainloop mainLoop{};
             cute::clear(accumulator);
             constexpr auto bM = cute::get<0>(BlockGEMM::BlockTiler{});
             constexpr auto bN = cute::get<1>(BlockGEMM::BlockTiler{});
+            static_assert(k < bN);
+            static_assert(cute::size(accumulator) == bN);
             constexpr auto threads = BlockGEMM::GEMM::block_dim.x;
 
             // padded to fill bM
@@ -343,11 +341,11 @@ namespace aristos::gate {
             // padded to fill bN
             const auto tilesN = cute::ceil_div(cute::get<1>(routing.shape()), bN);
 
-            auto tileCoord = idx2crd(tileIdx, cute::Shape(tilesM, tilesN), cute::Stride(tilesN, 1));
-            auto ctaCoord = make_coord(cute::get<0>(tileCoord), cute::get<1>(tileCoord), cute::_);
-            auto gA = cute::local_tile(activations, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1, cute::X,cute::_1>{});
-            auto gB = cute::local_tile(weights, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step< cute::X,cute::_1,cute::_1>{});
-            auto gC = cute::local_tile(routing, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1,cute::_1, cute::X>{});
+            const auto tileCoord = idx2crd(tileIdx, cute::Shape(tilesM, tilesN), cute::Stride(tilesN, 1));
+            const auto ctaCoord = make_coord(cute::get<0>(tileCoord), cute::get<1>(tileCoord), cute::_);
+            const auto gA = cute::local_tile(activations, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1, cute::X,cute::_1>{});
+            const auto gB = cute::local_tile(weights, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step< cute::X,cute::_1,cute::_1>{});
+            const auto gC = cute::local_tile(routing, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1,cute::_1, cute::X>{});
 
             static_assert(cuda::std::numeric_limits<ElementC>::is_iec559, "IEEE 754 required");
             static_assert(cuda::std::numeric_limits<ElementC>::has_infinity);
@@ -369,16 +367,15 @@ namespace aristos::gate {
             static_assert(SHARED_SIZE % (threads * sizeof(ElementC) == 0));
             constexpr auto elems = SHARED_SIZE / (threads * sizeof(ElementC));
             cutlass::AlignedArray<ElementC, elems> rScratch{};
-            static_assert(elems % 32 == 0);
             static_assert(bN % elems == 0);
-            const auto residue = tilesN * bN - moeConfig.numExperts;
+            const auto residue = tilesN * bN - bk.nx;
             constexpr auto trips = size(accumulator) / elems;
 
             // Transposed layout in shared memory to minimize bank conflicts
             constexpr auto sCLay = cute::make_layout(cute::Shape<cute::Int<bM>, cute::Int<elems>>{});
-            auto sC = cute::make_tensor(cute::make_smem_ptr(gateScratch), sCLay);
+            const auto sC = cute::make_tensor(cute::make_smem_ptr(gateScratch), sCLay);
             typename BlockGEMM::MMA tiledMMA{};
-            auto tCsC = tiledMMA.get_slice(threadIdx.x).partition_C(sC);
+            const auto tCsC = tiledMMA.get_slice(threadIdx.x).partition_C(sC);
             auto unsigned int padIterator = bN - residue;
 
             // Begin softmax
@@ -454,123 +451,88 @@ namespace aristos::gate {
             }
 
             if (threadIdx.x < bN) {
-                atomicAdd(bk.gMeC() + threadIdx.x,
-                    __fdividef(scratchpad[threadIdx.x], static_cast<float>(moeConfig.seqLen)));
+                atomicAdd(bk.gML() + threadIdx.x,
+                    __fdividef(scratchpad[threadIdx.x], static_cast<float>(bk.sl)));
                 scratchpad[threadIdx.x] = ElementC(0);
             }
             __syncthreads();
 
-            cutlass::AlignedArray<cuda::std::pair<ElementC, unsigned int>, k> heap{};
             // sum of the combine weights per token
             auto mCw = ElementC(0);
-            #pragma unroll
-            for (unsigned int i = 0; i < k; ++i) {
-                heap[i] = cuda::std::pair<ElementC, unsigned int>{accumulator(i), i};
-                mCw += accumulator(i);
-            }
+            // Now do online top-k mask
+            // Prep shared memory view tensors
+            constexpr auto tkTiler = cute::Shape<cute::_2, cute::Int<bN>>{};
+            // Ensures enough bytes per thread
+            static_assert(SHARED_SIZE / threads >= cute::size(tkTiler));
+            static_assert(cute::get<1>(sC.shape()) * (sizeof(typename decltype(sC)::value_type) / sizeof(uint8_t))
+                >= cute::size(tkTiler));
+            const auto tK = cute::make_tensor(cute::make_smem_ptr(CAST_TO(uint8_t, gateScratch)),
+                cute::Layout<cute::Shape<cute::Int<bM>, cute::Int<cute::size(tkTiler)>>>{});
 
-            // Now do "online" topKMask
-            // Build binary min heap on register memory
-            cuda::std::make_heap(heap.begin(), heap.end(), cuda::std::greater{});
-            cuda::std::pop_heap(heap.begin(), heap.end(), cuda::std::greater{});
-            // min element now at the end of the array
-            #pragma unroll
-            for (unsigned int i = k; i < size(accumulator); ++i) {
-                if (accumulator(i) > heap.back().first) {
-                    // update the sliding window sum
-                    mCw += accumulator(i) - heap.back().first;
-                    accumulator(heap.back().second) = ElementC(0);
-                    // Insert new element
-                    heap[k - 1] = Config::HeapTuple{accumulator(i), i + bN * cute::get<1>(tileCoord)};
-                    cuda::std::push_heap(heap.begin(), heap.end(), cuda::std::greater{});
-                    cuda::std::pop_heap(heap.begin(), heap.end(), cuda::std::greater{});
-                }
-                else {
-                    // applies mask
-                    accumulator(i) = ElementC(0);
-                }
-            }
+            // Get thread-owned slices: first for topK
+            const auto topK = cute::local_tile(tK, tkTiler,
+                cute::crd2idx(cute::make_coord(threadIdx.x, 0), tK.layout()));
 
+            // Repurpose floating-point register scratchpad as temporary byte storage
+            static_assert(bN * sizeof(uint8_t) <=
+                decltype(rScratch)::kElements * sizeof(typename decltype(rScratch)::value_type));
+            const auto rTopK = cute::make_tensor(CAST_TO(uint8_t, rScratch.data()),
+                cute::Layout<cute::Shape<cute::_1, cute::Int<bN>>,
+                            cute::Stride<cute::Int<bN>, cute::_1>>{});
             auto tIdx = 0U;
-            combineWeights[threadIdx.x] = mCw;
-            const bool inLastSection = threadIdx.x / elems + 1 == threads / elems;
-            auto* nF = threadIdx.x < elems ?
-                bk.tF() + (!cute::get<0>(tileCoord) ? 0 : cute::get<0>(tileCoord) - 1): sharedFlags + threadIdx.x;
-            auto* nV = threadIdx.x < elems ? bk.tV(): sharedValues;
-            auto* sF = inLastSection? bk.tF() + cute::get<0>(tileCoord) + 1: sharedFlags + threadIdx.x;
-            auto* sV = inLastSection? bk.tV() : sharedValues;
-            __syncthreads();
-
-            // Now accumulator has mask
-            // Transpose
             #pragma unroll
-            for (unsigned int i = 0; i < trips; ++i) {
-                #pragma unroll
-                for (unsigned int j = 0; j < elems; ++j) {
-                    sC(threadIdx.x, j) = accumulator(j + i * elems);
-                }
-                // Necessary to ensure THREADSx32 half-tile is ready
-                __syncthreads();
-
-                // 32x1 sub-tile from 128x32 tile
-                #pragma unroll
-                for (unsigned int j = 0; j < elems; ++j) {
-                    rScratch[j] = sC(j + threadIdx.x / elems * elems, threadIdx.x % elems);
-                }
-
-                if (rScratch[0] > ElementC(0)) {
-                    // reuse accumulator to store token indices
-                    //regTokenIdx[tIdx++] = bM * cute::get<0>(tileCoord);
-                    rScratch[0] += static_cast<ElementC>(1);
-                }
-                /// Reduce
-                #pragma unroll
-                for (unsigned int j = 1; j < rScratch.size(); ++j) {
-                    if (rScratch[j] > ElementC(0)) {
-                        tIdx++;
-                        rScratch[0] += static_cast<ElementC>(1);
-                    }
-                }
-                atomicAdd_block(scratchpad + (i * elems + threadIdx.x % elems), rScratch[0]);
-                // Now await signal from the north flag
-                if (threadIdx.x < elems) {
-                    // await the tile above us
-                    if (cute::get<0>(tileCoord) > 0) {
-                        ring::awaitTurn(nF, 1U);
-                    }
-                }
-                else {
-                    ring::awaitTurn<cuda::thread_scope_block>(nF, threadIdx.x / elems);
-                }
-                // received the expected message
-                const auto msg = *nV;
-                // update south peer's value
-                *sV = msg + tIdx;
-                // eagerly notify
-                ring::signal(sF);
-                auto gI = 0;
-                const auto intraTileIdx = threadIdx.x / elems * elems;
-                const auto idxBase = bM * cute::get<0>(tileCoord) + intraTileIdx;
-                auto* tokenIdx = bk.tP() + (threadIdx.x % elems + i * elems) * moeConfig.expertCapacity + msg;
-                // write to global memory
-                #pragma unroll
-                for (unsigned int j = 0; j < rScratch.size(); ++j) {
-                    if (rScratch[j] > ElementC(0)) {
-                        tokenIdx[gI++] = TokenIdxTuple{j + idxBase, combineWeights[intraTileIdx]};
-                    }
-                }
-                // Below is needed to avoid data races while loading the next batch
-                __syncthreads();
+            for (uint i = 0; i < bN; ++i) {
+                topK[i] = 0U;
             }
-
-            // No warp divergence since bN % warpSize == 0
-            if (threadIdx.x < bN) {
-                atomicAdd(bk.gMeC() + threadIdx.x,
-                    __fdividef(scratchpad[threadIdx.x], static_cast<float>(moeConfig.seqLen)));
-                atomicAdd(bk.eC() + threadIdx.x, static_cast<unsigned int>(scratchpad[threadIdx.x]));
-                scratchpad[threadIdx.x] = ElementC(0);
+            #pragma unroll
+            for (uint i = 0; i < k; ++i) {
+                auto sV = -cuda::std::numeric_limits<ElementC>::infinity();
+                uint sIdx = 0U;
+                #pragma unroll
+                for(uint j = 0; j < bN; ++j) {
+                    // prefetch from shared to registers;
+                    // this repetitive copy is a precondition
+                    // for the compiler to keep rTopK in registers
+                    rTopK(j) = topK[j];
+                }
+                #pragma unroll
+                for (uint j = 0; j < bN; ++j) {
+                    if (accumulator(j) > sV && !topK[j]) {
+                        sIdx = j;
+                        sV = accumulator(j);
+                    }
+                }
+                topK[sIdx] = 1U;
+                mCw += sV;
             }
+            // prefetch topK to registers, one last time :)
+            #pragma unroll
+            for(uint j = 0; j < bN; ++j) {
+                rTopK[j] = topK[j];
+            }
+            // needed for reusing shared memory
             __syncthreads();
+            using BlockScan = cub::BlockScan<uint8_t, threads>;
+            static_assert(sizeof(typename BlockScan::TempStorage + sizeof(uint)) * bN <= SHARED_SIZE);
+            auto* scanTempStorage = CAST_TO(typename BlockScan::TempStorage, gateScratch);
+            auto* startIndex = CAST_TO(uint, scanTempStorage + bN);
+
+            #pragma unroll
+            for (uint i = 0; i < bN; ++i) {
+                // Update the global token ordering with the block collective
+                uint8_t selected = 0U;
+                uint8_t myIdx;
+                BlockScan(scanTempStorage[i]).InclusiveSum(rTopK[i], myIdx, selected);
+                if (!threadIdx.x) {
+                    // get start index for global memory writes
+                    startIndex[i] = atomicAdd(bk.eC() + i, selected);
+                    atomicAdd(bk.gMeC() + i, __fdividef(selected, static_cast<ElementC>(bk.sl)));
+                }
+                __syncthreads();
+                if (rTopK[i]) {
+                    bk.tP()[startIndex[i] + myIdx - 1] = TokenIdxTuple{bM * cute::get<0>(tileCoord) + threadIdx.x, mCw};
+                }
+            }
         }
     };
 
@@ -601,17 +563,10 @@ namespace aristos::gate {
         constexpr auto bM = cute::get<0>(ctaTiler{});
         constexpr auto bN = cute::get<1>(ctaTiler{});
         constexpr auto elems = SHARED_SIZE / (threads * sizeof(ElementC));
-        // bN -> expert counts
-        // bM -> combine weights
-        // bM(threads) -> shared memory flags for ring collective
-        // elems -> shared memory values for ring collective
-        constexpr auto sD = (bM + bN) * sizeof(ElementC) + (elems + bN) * sizeof(unsigned int);
-        static_assert(sD % sizeof(uint4) == 0);
-        __shared__ __align__(16) cuda::std::byte lossStaging[sD];
-        constexpr auto vSD = sD / sizeof(uint4);
+        __shared__ __align__(16) ElementC scratchpad[bN];
         #pragma unroll
-        for (uint i = threadIdx.x; i < vSD; i += threads) {
-            CAST_TO(uint4, lossStaging)[i] = uint4{0U, 0U, 0U, 0U};
+        for (uint i = threadIdx.x; i < bN; i += threads) {
+            scratchpad[i] = ElementC(0);
         }
         FusedGate<g, Operation, k> fusedGate{};
 
@@ -619,11 +574,7 @@ namespace aristos::gate {
             cute::ceil_div(cute::get<1>(routing.shape()), bN);
 
         for (unsigned int i = blockIdx.x; i < nTiles; i += blocks) {
-            fusedGate(activations, weights, routing, accumulator, i, bk, nTiles, scratch,
-                CAST_TO(ElementC, lossStaging),
-                CAST_TO(ElementC, lossStaging + bN * sizeof(ElementC)),
-                CAST_TO(unsigned int, lossStaging + (bN + bM) * sizeof(ElementC)),
-                CAST_TO(unsigned int, lossStaging + (2 * bM + bN) * sizeof(unsigned int)));
+            fusedGate(activations, weights, routing, accumulator, i, bk, nTiles, scratch, scratchpad);
         }
 
         __threadfence();

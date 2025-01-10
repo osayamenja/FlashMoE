@@ -182,8 +182,8 @@ namespace aristos{
 
     // Index and gate combine weight
     using TokenIdxTuple = cuda::std::pair<unsigned int, maxPrecision>;
+    using HeapTuple = cuda::std::pair<maxPrecision, unsigned int>;
     struct __align__(16) Config{
-        using HeapTuple = cuda::std::pair<maxPrecision, unsigned int>;
         cuda::std::byte* sHeap;
         flagsType* flags;
         /// Needed for free
@@ -361,10 +361,6 @@ namespace aristos{
         using BookType = unsigned int;
         using HeapTuple = cuda::std::pair<maxPrecision, BookType>;
         cuda::std::byte* book;
-        /// gRl + gB + eDsA + sBfC + brs
-        unsigned long int bookSize;
-        /// gate routing and loss vectors in bytes
-        unsigned int gRl = 0U;
         /// Note the below lengths are cumulative sums.
         /// Gate buffers in bytes
         unsigned long int gB = 0UL;
@@ -376,6 +372,10 @@ namespace aristos{
         unsigned long int xMtQ = 0UL;
         /// Block Ring Softmax flags in bytes, non-cumulative
         unsigned int brs = 0UL;
+        /// gate routing and loss vectors in bytes
+        unsigned int gRl = 0U;
+        /// gRl + gB + eDsA + sBfC + brs
+        unsigned long int bookSize;
 
         /// Task Q maximum length
         unsigned int tQl;
@@ -399,6 +399,8 @@ namespace aristos{
         unsigned int tCM;
         /// processors
         unsigned int blocks;
+        /// expert capacity
+        unsigned int eCap;
         /// Global device barrier
         cuda::barrier<cuda::thread_scope_device>* deviceBlockade;
 
@@ -420,7 +422,8 @@ namespace aristos{
         book(_book), world(_world), sl(_sl), nx(_nx), nLx(_nLx), pd(_pd), px(_px),
         tM(Config::tiles<BLOCK_M>(_sl)),
         tN(Config::tiles<BLOCK_N>(_embedDim)),
-        tCM(Config::tiles<BLOCK_M>(_eCapacity)), blocks(_blocks), deviceBlockade(_blockade) {
+        tCM(Config::tiles<BLOCK_M>(_eCapacity)), blocks(_blocks), eCap(_eCapacity),
+        deviceBlockade(_blockade) {
             if (_nx == 1)[[unlikely]] {
                 // For this case, using any function other than xM yields undefined behavior
                 xMtQ = sizeof(maxPrecision) * _world * _nLx * tCM * tN;
@@ -428,7 +431,7 @@ namespace aristos{
             }
             else {
                 gRl = sizeof(maxPrecision) * (_sl * px + (2 * px + 1));
-                gB = gRl + sizeof(TokenIdxTuple) * _sl + sizeof(BookType) * px * (tM + 3);
+                gB = gRl + sizeof(TokenIdxTuple) * (px * _eCapacity) + sizeof(BookType) * px * (tM + 3);
                 eDsA = gB + sizeof(BookType) * (3 * nx + world);
                 const unsigned int fCl = sizeof(bool) * (world * nLx + (nx * tCM * tN));
                 sBfC = eDsA + sizeof(BookType) * (3 * blocks + SUBSCRIBERS + (world * nLx * tCM)) + fCl;
@@ -464,7 +467,7 @@ namespace aristos{
             }
             const auto tM = Config::tiles<BLOCK_M>(_sl);
             const auto gRl = sizeof(maxPrecision) * (_sl * _px + (2 * _px + 1));
-            const auto gB = gRl + sizeof(TokenIdxTuple) * _sl + sizeof(BookType) * _px * (tM + 3);
+            const auto gB = gRl + sizeof(TokenIdxTuple) * (_px * _eCap) + sizeof(BookType) * _px * (tM + 3);
             const auto eDsA = gB + sizeof(BookType) * (3 * _nx + _world);
             const auto fCl = sizeof(bool) * (_world * _nLx + (_nx * tCM * tN));
             const auto sBfC = eDsA + sizeof(BookType) * (3 * _blocks + THREADS - 2 + _world * _nLx * tCM) + fCl;
@@ -509,7 +512,7 @@ namespace aristos{
         }
         __device__ __forceinline__
         auto* tF() const {
-            return CAST_TO(BookType, tP() + sl);
+            return CAST_TO(BookType, tP() + px * eCap);
         }
         __device__ __forceinline__
         auto* tV() const {
@@ -580,8 +583,12 @@ namespace aristos{
         }
 
         // These must be together and last due to
-        // 1. Contiguity requirements
+        // 1. Contiguity requirements as we erase this region of memory after every step.
         // 2. Dependency on GateReductionLevel
+        __device__ __forceinline__
+        auto* tPT() const {
+            return CAST_TO()
+        }
         __device__ __forceinline__
         auto* rAt() const {
             return CAST_TO(BookType, book + xMtQ);
