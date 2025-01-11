@@ -182,7 +182,6 @@ namespace aristos{
 
     // Index and gate combine weight
     using TokenIdxTuple = cuda::std::pair<unsigned int, maxPrecision>;
-    using HeapTuple = cuda::std::pair<maxPrecision, unsigned int>;
     struct __align__(16) Config{
         cuda::std::byte* sHeap;
         flagsType* flags;
@@ -359,7 +358,7 @@ namespace aristos{
     struct __align__(16) Bookkeeping {
         /// default type for bookkeeping data structures
         using BookType = unsigned int;
-        using HeapTuple = cuda::std::pair<maxPrecision, BookType>;
+        using TKTuple = cuda::std::tuple<BookType, maxPrecision, maxPrecision>;
         cuda::std::byte* book;
         /// Note the below lengths are cumulative sums.
         /// Gate buffers in bytes
@@ -442,8 +441,8 @@ namespace aristos{
                 const auto pT = world * nLx * tCM * Config::tiles<BLOCK_N>(pd);
                 tQl = sizeof(Task) * (sT + pT);
                 xMtQ = sBfC + tQl + sizeof(maxPrecision) * world * nLx * tCM * tN;
-                brs = sizeof(BookType) * (tM * tN +  sl * Config::tiles<BLOCK_N>(px)) +
-                    sizeof(maxPrecision) * (2 * sl) + sizeof(HeapTuple) * (_k * sl);
+                brs = sizeof(BookType) * (2 * sl * Config::tiles<BLOCK_N>(px)) +
+                    sizeof(float2) * sl + sizeof(TKTuple) * (_k * sl);
                 bookSize = xMtQ + brs;
             }
         }
@@ -479,8 +478,8 @@ namespace aristos{
             const auto tQl = sizeof(Task) * (sT + pT);
 
             const auto xMtQ = sBfC + tQl + sizeof(maxPrecision) * _world * _nLx * tCM * tN;
-            const auto brs = sizeof(BookType) * (tM * tN +  _sl * Config::tiles<BLOCK_N>(_px)) +
-                sizeof(maxPrecision) * (2 * _sl) + sizeof(HeapTuple) * (_k * _sl);
+            const auto brs = sizeof(BookType) * (2 * _sl * Config::tiles<BLOCK_N>(_px)) +
+                sizeof(float2) * _sl + sizeof(TKTuple) * (_k * _sl);
             return xMtQ + brs;
         }
 
@@ -498,7 +497,7 @@ namespace aristos{
         /// Gate mean expert counts
         __device__ __forceinline__
         auto* gMeC() const {
-            return gL() + nx;
+            return gML() + nx;
         }
         /// Gate loss
         __device__ __forceinline__
@@ -586,25 +585,22 @@ namespace aristos{
         // 1. Contiguity requirements as we erase this region of memory after every step.
         // 2. Dependency on GateReductionLevel
         __device__ __forceinline__
-        auto* tPT() const {
-            return CAST_TO()
-        }
-        __device__ __forceinline__
-        auto* rAt() const {
-            return CAST_TO(BookType, book + xMtQ);
-        }
-
-        __device__ __forceinline__
         auto* bRSync() const {
-            return rAt() + tM * tN;
+            return CAST_TO(BookType, book + xMtQ);
         }
         __device__ __forceinline__
         auto* bRSoftM() const {
-            return CAST_TO(maxPrecision, bRSync() + sl * Config::tiles<BLOCK_N>(px));
+            return CAST_TO(float2, bRSync() + sl * Config::tiles<BLOCK_N>(px));
         }
+        /// Ring top k values
         __device__ __forceinline__
-        auto* bRsH() const {
-            return CAST_TO(HeapTuple, bRSoftM() + 2 * sl);
+        auto* rTv() const {
+            return CAST_TO(TKTuple, bRSoftM() + sl);
+        }
+        /// Ring top k flags
+        __device__ __forceinline__
+        auto* rTf() const {
+            return CAST_TO(BookType, rTv() + sl);
         }
     };
 
