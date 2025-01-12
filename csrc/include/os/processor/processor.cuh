@@ -31,21 +31,23 @@ namespace aristos::processor{
         template<
             class Activations,
             class Registers,
-            typename Element = typename Activations::value_type
+            typename Element = typename Activations::value_type,
+            typename RegisterScratch
         >
         requires(TensorValueType<Element> &&
-            cute::is_tensor_v<Activations> && isRegisterV<Registers>)
+            cute::is_tensor_v<Activations> && isRegisterV<Registers> && isRegisterV<RegisterScratch>)
         __device__ __forceinline__
         void operator()(Element* __restrict__ workspace,
             const TokenIdxTuple* __restrict__ tokenIndices,
-            Registers registers,
-            Element* __restrict__ inputs,
+            Registers& registers,
+            RegisterScratch rScratch,
+            const Element* __restrict__& inputs,
             Activations const& activations,
+            const Element* __restrict__& scaleWeights,
             const unsigned int& M,
             const unsigned int& N,
             const unsigned int& tileIdx,
             const unsigned int& tileSize) const {
-
             using BlockTiler = cute::Shape<cute::Int<BLOCK_M>, cute::Int<BLOCK_N>>;
             constexpr BlockTiler tiler{};
             constexpr auto bM = cute::get<0>(tiler);
@@ -57,7 +59,12 @@ namespace aristos::processor{
 
             // Eagerly issue gmem read.
             // We only need the index
-            auto tokenIdx = tokenIndices[threadIdx.x].first;
+            auto [tokenIdx, combineWeight] = TokenIdxTuple{};
+            auto scaleWeight = Element(0);
+            if (threadIdx.x < tileSize) {
+                auto [tokenIdx, combineWeight] = tokenIndices[threadIdx.x];
+                scaleWeight = scaleWeights[threadIdx.x];
+            }
             // Row-major
             const auto mA = make_tensor(cute::make_gmem_ptr(inputs),
                 make_layout(cute::make_shape(M, N), cute::LayoutRight{}));
@@ -72,6 +79,7 @@ namespace aristos::processor{
             constexpr auto elems = SHARED_SIZE / (threads * sizeof(Element));
             static_assert(bN % elems == 0);
             constexpr auto trips = bN / elems;
+            static_assert(RegisterScratch::kElements == elems);
 
             // Transposed layout
             constexpr auto sCLay = cute::make_layout(cute::Shape<cute::Int<bM>, cute::Int<elems>>{}, cute::LayoutRight{});
@@ -93,14 +101,19 @@ namespace aristos::processor{
                 }
             }
 
+            constexpr VAA<Arch, ElementCombine> vaa{};
             if (threadIdx.x < tileSize) {
+                // do scale
                 if constexpr (c == CombineMode::multithreaded) {
-                    constexpr VAA<Arch, ElementCombine> vaa{};
+                    #pragma unroll
+                    for (uint i = 0; i < bN; ++i) {
+                        registers[i] *= __fdividef(scaleWeight, combineWeight);
+                    }
                     vaa(&activations(tokenIdx, 0), registers);
                 }
                 else {
                     // vector copy from registers to global directly
-                    constexpr auto vL = registers.size() * sizeof(Element) / sizeof(uint4);
+                    constexpr auto vL = Registers::kElements * sizeof(Element) / sizeof(uint4);
                     auto* __restrict__ aP = CAST_TO(uint4, &activations(tokenIdx, 0));
                     const auto* __restrict__ rD = CAST_TO(uint4, registers.data());
                     #pragma unroll
@@ -134,7 +147,7 @@ namespace aristos::processor{
         const unsigned int& tileIdx) const {
             static_assert(size(accumulator) % rScratch.size() == 0 && cutlass::detail::is_Array_v<RegisterScratch>);
             // Instantiate mainloop
-            constexpr typename BlockGEMM::CollectiveMainloop mainLoop{};
+            typename BlockGEMM::CollectiveMainloop mainLoop{};
             cute::clear(accumulator);
 
             // Row-major
@@ -150,9 +163,9 @@ namespace aristos::processor{
                 make_layout(cute::make_shape(M, N), cute::make_stride(0, 1)));
 
             // M is padded, such that the below is correct
-            const auto tilesM = M / cute::get<0>(BlockGEMM::BlockTiler{});
+            const auto tilesM = M / cute::get<0>(typename BlockGEMM::BlockTiler{});
             // We assert the below prior to this point
-            const auto tilesN = N / cute::get<1>(BlockGEMM::BlockTiler{});
+            const auto tilesN = N / cute::get<1>(typename BlockGEMM::BlockTiler{});
 
             const auto tileCoord = idx2crd(tileIdx, cute::Shape(tilesM, tilesN), cute::Stride(tilesN ,1));
             const auto ctaCoord = make_coord(cute::get<0>(tileCoord), cute::get<1>(tileCoord), cute::_);
@@ -177,7 +190,7 @@ namespace aristos::processor{
             /// There is a block-wide barrier at the end of the above ^
 
             // Epilogue
-            constexpr typename BlockGEMM::MMA tiledMMA{};
+            typename BlockGEMM::MMA tiledMMA{};
             const auto tCgC = tiledMMA.get_slice(threadIdx.x).partition_C(gC);
             const auto tDgD = tiledMMA.get_slice(threadIdx.x).partition_C(gD);
 
@@ -189,7 +202,7 @@ namespace aristos::processor{
                                                         ElementD>{};
 
             // Assume elementwise operator
-            constexpr typename BlockGEMM::FusedEpilogue epilogueOp{};
+            typename BlockGEMM::FusedEpilogue epilogueOp{};
             constexpr auto trips = size(accumulator) / rScratch.size();
             constexpr auto elems = rScratch.size();
 
@@ -237,7 +250,6 @@ namespace aristos::processor{
         const typename BlockGEMM::MatrixBType* __restrict__& weights,
         typename BlockGEMM::MatrixDType* __restrict__& output,
         const typename BlockGEMM::MatrixDType* __restrict__& bias,
-        const typename BlockGEMM::MatrixDType* __restrict__& scaleWeights,
         const unsigned int& M,
         const unsigned int& N,
         const unsigned int& K,
@@ -245,7 +257,7 @@ namespace aristos::processor{
         const unsigned int& isRemote) const {
             static_assert(size(accumulator) % rScratch.size() == 0 && cutlass::detail::is_Array_v<RegisterScratch>);
             // Instantiate mainloop
-            constexpr typename BlockGEMM::CollectiveMainloop mainLoop{};
+            typename BlockGEMM::CollectiveMainloop mainLoop{};
             cute::clear(accumulator);
 
             // Row-major
@@ -259,13 +271,11 @@ namespace aristos::processor{
                 make_layout(cute::make_shape(M, N), cute::make_stride(N, 1))));
             const auto mD = make_tensor(cute::make_gmem_ptr(bias),
                 make_layout(cute::make_shape(M, N), cute::make_stride(0, 1)));
-            const auto mS = make_tensor(cute::make_gmem_ptr(scaleWeights),
-                make_layout(cute::make_shape(M, N), cute::make_stride(1, 0)));
 
             // M is padded, such that the below is correct
-            const auto tilesM = M / cute::get<0>(BlockGEMM::BlockTiler{});
+            const auto tilesM = M / cute::get<0>(typename BlockGEMM::BlockTiler{});
             // We assert the below prior to this point
-            const auto tilesN = N / cute::get<1>(BlockGEMM::BlockTiler{});
+            const auto tilesN = N / cute::get<1>(typename BlockGEMM::BlockTiler{});
 
             const auto tileCoord = idx2crd(tileIdx, cute::Shape(tilesM, tilesN), cute::Stride(tilesN ,1));
             const auto ctaCoord = make_coord(cute::get<0>(tileCoord), cute::get<1>(tileCoord), cute::_);
@@ -273,7 +283,6 @@ namespace aristos::processor{
             const auto gB = cute::local_tile(mB, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step< cute::X,cute::_1,cute::_1>{});
             const auto gC = cute::local_tile(mC, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1,cute::_1, cute::X>{});
             const auto gD = cute::local_tile(mD, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1,cute::_1, cute::X>{});
-            const auto gS = cute::local_tile(mS, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1,cute::_1, cute::X>{});
 
             auto k_tile_iter = cute::make_coord_iterator(size<2>(gA));
             int k_tile_count = size<2>(gA);
@@ -294,7 +303,6 @@ namespace aristos::processor{
             constexpr typename BlockGEMM::MMA tiledMMA{};
             const auto tCgC = tiledMMA.get_slice(threadIdx.x).partition_C(gC);
             const auto tDgD = tiledMMA.get_slice(threadIdx.x).partition_C(gD);
-            const auto tSgS = tiledMMA.get_slice(threadIdx.x).partition_C(gS);
 
             // Accounts for GEMMs that accumulate in types differing from input types,
             // given that the result may moonlight as the input for the succeeding GEMM.
@@ -302,7 +310,6 @@ namespace aristos::processor{
                                                         typename decltype(accumulator)::value_type>{};
             constexpr auto gDLoadOp = cutlass::NumericConverter<typename decltype(accumulator)::value_type,
                                                         ElementD>{};
-            constexpr auto scaleOp = cutlass::epilogue::thread::Scale<typename decltype(accumulator)::value_type>{};
 
             // Assume elementwise operator
             constexpr typename BlockGEMM::FusedEpilogue epilogueOp{};
@@ -320,21 +327,15 @@ namespace aristos::processor{
                 #pragma unroll
                 for (unsigned int j = 0; j < elems; ++j) {
                     rScratch[j] = workspace[threadIdx.x + j * THREADS];
-                    // Eagerly start loads for scale weights
-                    workspace[threadIdx.x + j * THREADS] = tSgS(j + i * elems);
+                    if (i + 1 < trips) {
+                        // Eagerly start loads for the next batch, if needed
+                        workspace[threadIdx.x + j * THREADS] = tDgD(j + (i + 1) * elems);
+                    }
                 }
 
                 #pragma unroll
                 for (int j = 0; j < elems; ++j) {
-                    accumulator(j + i * elems) = gCStoreOp(epilogueOp(accumulator(j + i * elems), gDLoadOp(rScratch[j])));
-                    rScratch[i] = workspace[threadIdx.x + j * THREADS];
-                }
-
-                // Do scale
-                #pragma unroll
-                for (int j = 0; j < elems; ++j) {
-                    // Copy to GMEM will be an NVLink transfer if the peer is p2p connected.
-                    tCgC(j + i * elems) = scaleOp(accum(j + i * elems), gDLoadOp(rScratch[j]));
+                    tCgC(j + i * elems) = gCStoreOp(epilogueOp(accumulator(j + i * elems), gDLoadOp(rScratch[j])));
                 }
             }
 
@@ -364,14 +365,15 @@ namespace aristos::processor{
         typename ActivationOpX = cute::identity
     > requires(processorCount > 0 && Arch >= MIN_ARCH)
     __device__ __forceinline__
-    void start(cuda::std::byte* __restrict__ const& workspace){
+    void start(cuda::std::byte* __restrict__ const& workspace, const uint16_t& _seqBit){
         assert(__isShared(workspace));
+        static_assert(sizeof(SignalPayload<PacketStage::final>) == sizeof(uint64_t));
         __shared__ unsigned int signal;
         __shared__ Task currentTask;
         __shared__ Config cachedConfig;
         __shared__ SchedulerConfig scState;
         __shared__ unsigned int interrupt;
-        
+        auto rSeqBit = _seqBit;
         if (!threadIdx.x) {
             cachedConfig = moeConfig;
             scState = schedulerState;
@@ -455,30 +457,29 @@ namespace aristos::processor{
                         CAST_TO(typename Operation::MatrixBType, currentTask.bData[postIndex]),
                         CAST_TO(typename Operation::MatrixDType, currentTask.cData[postIndex]),
                         CAST_TO(typename Operation::MatrixDType, currentTask.dData[postIndex]),
-                        CAST_TO(typename Operation::MatrixDType, currentTask.scale),
                         cachedConfig.embedDim,
                         cachedConfig.upProjection,
                         currentTask.tileIdx,
                         nvshmem_ptr(cachedConfig.sHeap, currentTask.peerIdx) == nullptr);
                     if (!threadIdx.x) {
                         uint64_t flagSignal = 0;
+                        *CAST_TO(SignalPayload<PacketStage::final>, &flagSignal) = SignalPayload<PacketStage::final>{
+                            currentTask.batchIdx,
+                            rSeqBit,
+                            currentTask.tileSize
+                        };
                         if (atomicIncrement(scState.taskSync + currentTask.syncIdx)
                             == cachedConfig.tilesN + cachedConfig.tilesNx) {
                             if (nvshmem_ptr(currentTask.cData[postIndex], currentTask.peerIdx) == nullptr) {
-                                packet::signal::encode(CAST_TO(cuda::std::byte, &flagSignal),
-                                    uint2{currentTask.batchIdx, currentTask.tileSize});
-                                // TODO further batch this transfer
                                 // Batch remote network transfer to avoid overwhelming the NIC
                                 nvshmem_putmem_signal_nbi(currentTask.cData[postIndex], currentTask.cData[postIndex],
-                                    cachedConfig.finalPacketSize<ElementA>(currentTask.tileSize),
+                                    currentTask.tileSize * cachedConfig.embedDim * sizeof(ElementA),
                                     cachedConfig.flags + currentTask.flagIdx,
                                     flagSignal, NVSHMEM_SIGNAL_SET,
                                     currentTask.peerIdx);
                             }
                             else {
                                 // send individual tile, no batching here
-                                packet::signal::encode(CAST_TO(cuda::std::byte, &flagSignal),
-                                    uint2{currentTask.tileIdx, currentTask.tileSize});
                                 // Already did the network transfer in fGET, so set signal only
                                 nvshmemx_signal_op(cachedConfig.flags + currentTask.flagIdx,
                                  flagSignal, NVSHMEM_SIGNAL_SET, currentTask.peerIdx);

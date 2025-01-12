@@ -13,15 +13,6 @@
 #include "mmaConfig.cuh"
 
 namespace aristos {
-    template<typename Element>
-    requires aristos::TensorValueType<Element>
-    struct Scale {
-        __forceinline__ __device__
-        Element operator()(const Element& accumulator, const Element& scale) const {
-            return scale * accumulator;
-        }
-    };
-
     /// Vector atomic add
     template<unsigned int Arch, typename Element = float>
     requires SupportedArch<Arch> && TensorValueType<Element>
@@ -30,13 +21,13 @@ namespace aristos {
         requires isRegisterV<Registers> &&
             cuda::std::is_same_v<typename Registers::value_type, Element>
         __device__ __forceinline__
-        void operator()(Element* __restrict__ const& gS, Registers registers) const {
+        void operator()(Element* __restrict__ const& gS, Registers const& registers) const {
             // Float is the "safe accumulator type"
             // We acknowledge this by converting registers to float before accumulating.
             auto regLoadOp = cutlass::NumericConverter<float, typename Registers::value_type>{};
             #pragma unroll
-            for (uint i = 0; i < registers.size(); ++i) {
-                atomicAdd(gS + i, regLoadOp(registers(i)));
+            for (uint i = 0; i < Registers::kElements; ++i) {
+                atomicAdd(gS + i, regLoadOp(registers[i]));
             }
         }
     };
@@ -48,9 +39,9 @@ namespace aristos {
         requires isRegisterV<Registers> &&
             cuda::std::is_same_v<typename Registers::value_type, cute::half_t>
         __device__ __forceinline__
-        void operator()(cute::half_t* __restrict__ const& gS, Registers registers) const {
-            using vType = cuda::std::conditional_t<registers.size() % 2 == 0, __half2, __half>;
-            constexpr auto len = registers.size() / (sizeof(vType) / sizeof(__half));
+        void operator()(cute::half_t* __restrict__ const& gS, Registers const& registers) const {
+            using vType = cuda::std::conditional_t<Registers::kElements % 2 == 0, __half2, __half>;
+            constexpr auto len = Registers::kElements / (sizeof(vType) / sizeof(__half));
             auto* __restrict__ gSv = CAST_TO(vType, gS);
             const auto* __restrict__ vRegs = CAST_TO(vType, registers.data());
             #pragma unroll
@@ -67,9 +58,9 @@ namespace aristos {
         requires isRegisterV<Registers> &&
             cuda::std::is_same_v<typename Registers::value_type, cute::bfloat16_t>
         __device__ __forceinline__
-        void operator()(cute::bfloat16_t* __restrict__ const& gS, Registers registers) const {
-            using vType = cuda::std::conditional_t<registers.size() % 2 == 0, __nv_bfloat162, __nv_bfloat16>;
-            constexpr auto len = registers.size() / (sizeof(vType) / sizeof(__half));
+        void operator()(cute::bfloat16_t* __restrict__ const& gS, Registers const& registers) const {
+            using vType = cuda::std::conditional_t<Registers::kElements % 2 == 0, __nv_bfloat162, __nv_bfloat16>;
+            constexpr auto len = Registers::kElements / (sizeof(vType) / sizeof(__half));
             auto* __restrict__ gSv = CAST_TO(vType, gS);
             const auto* __restrict__ vRegs = CAST_TO(vType, registers.data());
             #pragma unroll
@@ -86,11 +77,11 @@ namespace aristos {
         requires isRegisterV<Registers> &&
             cuda::std::is_same_v<typename Registers::value_type, float>
         __device__ __forceinline__
-        void operator()(float* __restrict__ const& gS, Registers registers) const {
-            static_assert(registers.size() % 2 == 0, "Register tensor does not vectorize");
-            using vType = cuda::std::conditional_t<registers.size() % 4 == 0, float4,
-                cuda::std::conditional_t<registers.size() % 2 == 0, float2, float>>;
-            constexpr auto len = registers.size() / (sizeof(vType) / sizeof(float));
+        void operator()(float* __restrict__ const& gS, Registers const& registers) const {
+            static_assert(Registers::kElements % 2 == 0, "Register tensor does not vectorize");
+            using vType = cuda::std::conditional_t<Registers::kElements % 4 == 0, float4,
+                cuda::std::conditional_t<Registers::kElements % 2 == 0, float2, float>>;
+            constexpr auto len = Registers::kElements / (sizeof(vType) / sizeof(float));
             auto* __restrict__ gSv = CAST_TO(vType, gS);
             const auto* __restrict__ vRegs = CAST_TO(vType, registers.data());
             #pragma unroll
@@ -104,8 +95,7 @@ namespace aristos {
     template <typename Element, typename ActivationFunction>
     requires(aristos::TensorValueType<Element> && cuda::std::is_invocable_r_v<Element, ActivationFunction, Element>)
     struct FAA {
-        // fp8
-        static_assert(sizeof(Element) == 2);
+        static_assert(sizeof(Element) == 1 || sizeof(Element) >= 4);
         __forceinline__ __device__
         Element operator()(const Element& accumulator, const Element& term) const {
             constexpr ActivationFunction op{};

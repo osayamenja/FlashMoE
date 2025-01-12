@@ -138,14 +138,14 @@ namespace aristos{
     struct SignalPayload {
         static_assert(p == PacketStage::initial);
         uint routedTokens;
-        uint16_t seqNo;
+        uint16_t seqBit;
         uint16_t totalTilesM;
     };
 
     template<>
     struct SignalPayload<PacketStage::final> {
         uint batchIdx;
-        uint16_t seqNo;
+        uint16_t seqBit;
         uint16_t tokensM; // <= BLOCK_M
     };
 
@@ -305,7 +305,7 @@ namespace aristos{
         // crd2Idx(peer, expertIdx, offset)
         unsigned int syncIdx = 0UL;
         unsigned int tileIdx = 0U;
-        unsigned int tileSize = 0U;
+        uint16_t tileSize = 0U; // <= BLOCK_M
         unsigned int peerIdx = 0U;
         //padded
         unsigned int M = 0U;
@@ -642,7 +642,7 @@ namespace aristos{
         }
     };
 
-    __device__ __inline__ uint16_t seqNo;
+    __device__ __inline__ uint16_t seqBit;
     __constant__ __inline__ Config moeConfig{};
     __constant__ __inline__ SchedulerConfig schedulerState{};
     __constant__ __inline__ Bookkeeping bookkeeping{};
@@ -661,7 +661,7 @@ namespace aristos{
     template<typename E = PacketStage> requires cuda::std::is_integral_v<cuda::std::underlying_type_t<E>>
     __device__ __forceinline__
     uint64_t constructSignal(E const& signal, uint64_t const& tagAlong = 0U){
-        return tagAlong + signal + seqNo;
+        return tagAlong + signal + seqBit;
     }
 }
 #endif //ARISTOS_TYPES_CUH

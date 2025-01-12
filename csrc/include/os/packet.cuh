@@ -13,27 +13,6 @@
 #include "../atomics.cuh"
 
 namespace aristos::packet {
-    namespace signal {
-        template<PacketStage p = PacketStage::final>
-        __device__ __forceinline__
-        // {{batchIdx, numTokens}, sequence number}
-        // buffer is an 8-byte array, which we split into the following:
-        // 2-byte integer denoting batch index
-        // 2-byte integer blockM dimension
-        // 4-byte sequence number.
-        void encode(cuda::std::byte* __restrict__ const& buffer, const uint2& s) {
-            static_assert(p == PacketStage::final);
-            *CAST_TO(uint2, buffer) = uint2{s.x, s.y + 1};
-        }
-
-        template<PacketStage p = PacketStage::final>
-        __device__ __forceinline__
-        auto decode(cuda::std::byte* __restrict__ const& buffer) {
-            static_assert(p == PacketStage::final);
-            return *CAST_TO(uint2, buffer);
-        }
-    }
-
     template<unsigned int blocks,
     DropTokens d = DropTokens::yes,
     unsigned int superBlockSize = ARISTOS_SUPER_BLOCK_SIZE,
