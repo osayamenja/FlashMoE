@@ -58,8 +58,7 @@ namespace aristos::gate {
             const auto gC = cute::local_tile(routing, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1,cute::_1, cute::X>{});
 
             /// Pointers for flags needed in epilogue
-            /// col-major indexing
-            /// TODO use cute tensor
+            /// col-major indexing to facilitate coalescing
             const auto myTileOffset = bM * (cute::get<0>(tileCoord) + cute::get<1>(tileCoord) * tilesM) + threadIdx.x;
             const auto nextTileOffset = bM * (cute::get<0>(tileCoord) +
                 (cute::get<1>(tileCoord) + 1 == tilesN ? 0 : cute::get<1>(tileCoord) + 1) * tilesM) + threadIdx.x;
@@ -70,21 +69,11 @@ namespace aristos::gate {
             auto* __restrict__ nextFlag = bk.bRSync() + nextTileOffset;
             auto* __restrict__ values = bk.bRSoftM() + bM * cute::get<0>(tileCoord) + threadIdx.x;
 
+            constexpr auto phases = 2U;
             // Block Ring top k pointers
-            auto* __restrict__ tKv = bk.rTv() + k * (bM * cute::get<0>(tileCoord) + threadIdx.x);
-            auto* __restrict__ tKf = bk.rTf() + myTileOffset;
-            auto* __restrict__ tKfN = bk.rTf() + nextTileOffset;
-
-            /// Below needed for assigning -infinity
-            /// See https://stackoverflow.com/a/20016972
-            static_assert(cuda::std::numeric_limits<ElementC>::is_iec559, "IEEE 754 required");
-            static_assert(cuda::std::numeric_limits<ElementC>::has_infinity);
-            if (!cute::get<0>(tileCoord)) {
-                // We are on the extreme west and need to preset our flags and values
-                *tFlag = 1U;
-                *values.x = ElementC(0);
-                *values.y = -cuda::std::numeric_limits<ElementC>::infinity();
-            }
+            auto* __restrict__ tKv = bk.rTv() + phases * (bM * cute::get<0>(tileCoord) + threadIdx.x);
+            auto* __restrict__ tKf = bk.rTf() + phases * myTileOffset;
+            auto* __restrict__ tKfN = bk.rTf() + phases * nextTileOffset;
 
             auto k_tile_iter = cute::make_coord_iterator(size<2>(gA));
             int k_tile_count = size<2>(gA);
@@ -138,11 +127,21 @@ namespace aristos::gate {
                 }
             }
 
+            auto dI = ElementC(0);
+            /// Below needed for assigning -infinity
+            /// See https://stackoverflow.com/a/20016972
+            static_assert(cuda::std::numeric_limits<ElementC>::is_iec559, "IEEE 754 required");
+            static_assert(cuda::std::numeric_limits<ElementC>::has_infinity);
+            auto mI = -cuda::std::numeric_limits<ElementC>::infinity();
             // Begin Block-Ring softmax
-            ring::awaitTurn(tFlag, 1U);
-            // Unpack message
-            // using notation from https://courses.cs.washington.edu/courses/cse599m/23sp/notes/flashattn.pdf
-            auto [dI, mI] = *values;
+            if (cute::get<1>(tileCoord) > 0) {
+                ring::awaitTurn(tFlag, 1U);
+                // Unpack message
+                // using notation from https://courses.cs.washington.edu/courses/cse599m/23sp/notes/flashattn.pdf
+                auto v = *values;
+                dI = v.x;
+                mI = v.y;
+            }
 
             /// Reduce
             #pragma unroll
@@ -152,17 +151,27 @@ namespace aristos::gate {
                 dI = fmaf(dI, __expf(pM - mI),__expf(accumulator(i) - mI));
             }
 
-            *values = float2{mI, dI};
-            ring::signal(nextFlag);
-
-            if (cute::get<1>(tileCoord) < tilesN - 1) {
+            if (cute::get<1>(tileCoord) + 1 < tilesN) {
+                ring::signal(nextFlag);
                 ring::awaitTurn(tFlag, 2U);
                 auto msg = *values;
-                dI = values.x;
-                mI = values.y;
-                // Eagerly notify neighbor
-                *values = float2{mI, dI};
-                ring::signal(nextFlag);
+                dI = msg.x;
+                mI = msg.y;
+            }
+            else {
+                // Ring ends with me, let's unblock everyone else
+                *values = float2{dI, mI};
+                // Gets the base pointer
+                auto* __restrict__ sFlagB = nextFlag - nextTileOffset;
+                auto* __restrict__ sFlag = sFlagB + bM * cute::get<0>(tileCoord) + threadIdx.x;
+                // Issue fence
+                aristos::fence<cuda::thread_scope_device>();
+                // Signal tile 0 separately
+                ring::signal<cuda::thread_scope_device, ring::FencedSignal::no, 2U>(sFlag);
+                for (uint j = 1; j < tilesM; ++j) {
+                    sFlag = sFlagB + bM * (cute::get<0>(tileCoord) + j * tilesM) + threadIdx.x;
+                    ring::signal<cuda::thread_scope_device, ring::FencedSignal::no>(sFlag);
+                }
             }
 
             #pragma unroll
@@ -179,7 +188,7 @@ namespace aristos::gate {
 
             // Begin loss computation and global token ordering construction
             constexpr auto wS = 32U; // warpSize
-            ElementC cache[bN / wS];
+            ElementC cache[bN / wS]; // |cache| == 2
             using BlockReduce = cub::BlockReduce<ElementC, threads>;
             auto* __restrict__ cS = CAST_TO(typename BlockReduce::TempStorage, gateScratch);
             const auto sl = static_cast<float>(bk.sl);
@@ -225,35 +234,119 @@ namespace aristos::gate {
             auto sV = -cuda::std::numeric_limits<ElementC>::infinity();
             uint sIdx = 0U;
             auto mCw = ElementC(0);
-
-            // TODO first column initiate all k 
-
+            auto lSV = sV;
+            auto lSIdx = sIdx;
+            auto bool shouldSweep = true;
             #pragma unroll
             for (uint i = 0; i < k; ++i) {
-                ring::awaitTurn(tKf, i + 1);
-                auto [sV, sIdx, mCw] = *tKv;
+                const auto batonPrefix = phases * i / 2; // needed as we alternate between two buffers
                 #pragma unroll
                 for(uint j = 0; j < bN; ++j) {
-                    // prefetch from shared to registers;
-                    // this repetitive, sweeping copy is a precondition
-                    // for the compiler to keep rTopK in registers
-                    // as dynamic indexing is impossible for registers
                     rTopK[j] = topK[j];
                 }
-                #pragma unroll
-                for (uint j = 0; j < bN; ++j) {
-                    if (accumulator(j) > sV && !topK[j]) {
-                        sIdx = j;
-                        sV = accumulator(j);
+                // Sentinel that applies to the most westwards peer, as they initiate the proposal per round
+                sV = -cuda::std::numeric_limits<ElementC>::infinity();
+                if (cute::get<1>(tileCoord) > 0) {
+                    ring::awaitTurn(tKf + i % phases, batonPrefix + 1);
+                    auto [sV, sIdx] = tKv[i % phases];
+                }
+                if (!shouldSweep) {
+                    // No need to sweep locally, we either relay the received values or propagate our proposal
+                    if (lSV > sV) {
+                        // propagate our proposal
+                        sV = lSV;
+                        sIdx = lSIdx;
                     }
                 }
-                topK[sIdx] = 1U;
-                if (cute::get<1>(tileCoord) + 1 == tilesM) {
-                    mCw += sV;
+                else {
+                    #pragma unroll
+                    for (uint j = 0; j < bN; ++j) {
+                        // local maximum
+                        if (accumulator(j) > lSV && !rTopK[j]) {
+                            lSIdx = cute::get<0>(tileCoord) * bN + j;
+                            lSV = accumulator(j);
+                        }
+                        // proposal
+                        if (accumulator(j) > sV && !rTopK[j]) {
+                            sIdx = cute::get<0>(tileCoord) * bN + j;
+                            sV = accumulator(j);
+                        }
+                    }
+                    shouldSweep = false;
+                }
+                // Every tile except the most eastwards
+                if (cute::get<1>(tileCoord) + 1 < tilesN) {
+                    // Now we pass our proposal through the ring
+                    tKv[i % phases] = Bookkeeping::TKTuple{sIdx, sV};
+                    ring::signal(tKfN + i % 2);
+                    // Now we await the results to return
+                    ring::awaitTurn(tKf + i % phases, batonPrefix + 2);
+                    auto [sV, sIdx] = tKv[i % phases];
+                }
+                else {
+                    // Phase 0 ends with me, let's unblock everyone else in one go
+                    // Write first and signal subsequently
+                    tKv[i % phases] = Bookkeeping::TKTuple{sIdx, sV};
+                    // Fence prior to batched signals
+                    aristos::fence<cuda::thread_scope_device>();
+                    // Signal tile 0 separately as they skip the first phase
+                    // Gets the base pointer, do this rather than read from shared memory
+                    auto* __restrict__ tkFlagB = tKfN - phases * nextTileOffset;
+                    auto* __restrict__ tkFlag = tkFlagB + phases * (bM * cute::get<0>(tileCoord) + threadIdx.x);
+                    ring::signal<cuda::thread_scope_device, ring::FencedSignal::no, phases>(tkFlag + i % 2);
+                    for (uint j = 1; j < tilesM; ++j) {
+                        tkFlag = tkFlagB + phases * (bM * (cute::get<0>(tileCoord) + j * tilesM) + threadIdx.x);
+                        ring::signal<cuda::thread_scope_device, ring::FencedSignal::no>(tkFlag + i % 2);
+                    }
                 }
 
+                if (sIdx / bN == cute::get<1>(tileCoord)) {
+                    // Our proposal won in this round!
+                    topK[sIdx % bN] = 1U;
+                    // We need to sweep in the next round
+                    shouldSweep = true;
+                }
+                mCw += sV;
             }
 
+            // prefetch topK to registers, one last time :)
+            #pragma unroll
+            for(uint j = 0; j < bN; ++j) {
+                rTopK[j] = topK[j];
+            }
+
+            // needed for reusing shared memory
+            __syncthreads();
+            using BlockScan = cub::BlockScan<uint8_t, threads>;
+            static_assert(sizeof(typename BlockScan::TempStorage + sizeof(uint)) * bN <= SHARED_SIZE);
+            auto* __restrict__ scanTempStorage = CAST_TO(typename BlockScan::TempStorage, gateScratch);
+            auto* __restrict__ startIndices = CAST_TO(uint, scanTempStorage + bN);
+            // Ensures we can safely use uint8_t without any concern for overflow
+            static_assert(bM <= cuda::std::numeric_limits<uint8_t>::max());
+
+            uint8_t cachedSelected = 0U;
+            cutlass::AlignedArray<uint8_t, bN> myIndices{};
+            // scan down the column
+            #pragma unroll
+            for (uint i = 0; i < bN; ++i) {
+                uint8_t selected = 0U;
+                BlockScan(scanTempStorage[i]).InclusiveSum(rTopK[i], myIndices[i], selected);
+                cachedSelected = threadIdx.x == i ? selected : cachedSelected;
+            }
+
+            if (threadIdx.x < bN) {
+                startIndices[threadIdx.x] = atomicAdd(bk.eC() + threadIdx.x, cachedSelected);
+                atomicAdd(bk.gMeC() + threadIdx.x, __fdividef(static_cast<ElementC>(cachedSelected),
+                    static_cast<ElementC>(sl)));
+            }
+            __syncthreads();
+            #pragma unroll
+            for (uint i = 0; i < bN; ++i) {
+                if (rTopK[i]) {
+                    bk.tP()[startIndices[i] + myIndices[i] - 1] =
+                        TokenIdxTuple{bM * cute::get<0>(tileCoord) + threadIdx.x, mCw};
+                }
+            }
         }
     };
 
@@ -427,15 +520,11 @@ namespace aristos::gate {
                 uint sIdx = 0U;
                 #pragma unroll
                 for(uint j = 0; j < bN; ++j) {
-                    // prefetch from shared to registers;
-                    // this repetitive, sweeping copy is a precondition
-                    // for the compiler to keep rTopK in registers
-                    // as dynamic indexing is impossible for registers
                     rTopK[j] = topK[j];
                 }
                 #pragma unroll
                 for (uint j = 0; j < bN; ++j) {
-                    if (accumulator(j) > sV && !topK[j]) {
+                    if (accumulator(j) > sV && !rTopK[j]) {
                         sIdx = j;
                         sV = accumulator(j);
                     }
@@ -532,6 +621,18 @@ namespace aristos::gate {
             const auto me = bk.gML()[i];
             const auto ce = bk.gMeC()[i];
             atomicAdd(bk.gL(),__fdividef(me * ce, static_cast<maxPrecision>(moeConfig.numExperts)));
+        }
+
+        // wipe flags clean for next iteration
+        constexpr auto vF = sizeof(uint4) / sizeof(Bookkeeping::BookType);
+        const auto fE = bk.brs / sizeof(Bookkeeping::BookType);
+        const auto vBRs = fE / vF;
+        for (unsigned int i = threads * blockIdx.x + threadIdx.x; i < vBRs; i+= threads * blocks) {
+            bk.gateBk()[i] = uint4{0U, 0U, 0U, 0U};
+        }
+
+        for (unsigned int i = threads * blockIdx.x + threadIdx.x + vBRs * vF; i < fE; i += threads * blocks) {
+            CAST_TO(uint, bk.gateBk())[i] = 0U;
         }
     }
 }

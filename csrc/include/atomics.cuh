@@ -73,6 +73,11 @@ namespace aristos{
 
 
     namespace ring {
+        __device__
+        enum class FencedSignal {
+            yes,
+            no
+        };
         //TODO use partially specialized struct for this
         // Ring-based polling.
         template<cuda::thread_scope scope = cuda::thread_scope_device, typename T>
@@ -93,18 +98,26 @@ namespace aristos{
             return false;
         }
 
-        template<cuda::thread_scope scope = cuda::thread_scope_device, typename T>
+        template<
+            cuda::thread_scope scope = cuda::thread_scope_device,
+            FencedSignal useFence = FencedSignal::yes,
+            unsigned int value = 1U,
+            typename T
+        >
         requires AtomicScope<scope> && AtomicType<T>
         __device__ __forceinline__
         void signal(T* const& addr) {
-            fence<scope>();
+            if constexpr (useFence == FencedSignal::yes) {
+                // Necessary for batch signaling, where one fence, invoked outside, suffices.
+                fence<scope>();
+            }
             if constexpr (scope == cuda::thread_scope_block || scope == cuda::thread_scope_thread) {
-                atomicAdd_block(addr, 1U);
+                atomicAdd_block(addr, static_cast<T>(value));
             }
             if constexpr (scope == cuda::thread_scope_system) {
-                atomicAdd_system(addr, 1U);
+                atomicAdd_system(addr, static_cast<T>(value));
             }
-            atomicAdd(addr, 1U);
+            atomicAdd(addr, static_cast<T>(value));
         }
     }
 }

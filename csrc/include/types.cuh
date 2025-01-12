@@ -358,7 +358,7 @@ namespace aristos{
     struct __align__(16) Bookkeeping {
         /// default type for bookkeeping data structures
         using BookType = unsigned int;
-        using TKTuple = cuda::std::tuple<BookType, maxPrecision, maxPrecision>;
+        using TKTuple = cuda::std::pair<BookType, maxPrecision>;
         cuda::std::byte* book;
         /// Note the below lengths are cumulative sums.
         /// Gate buffers in bytes
@@ -416,7 +416,6 @@ namespace aristos{
             const unsigned int& _eCapacity,
             const unsigned int& _blocks,
             const unsigned int& _world,
-            const unsigned int& _k,
             cuda::barrier<cuda::thread_scope_device>* _blockade) :
         book(_book), world(_world), sl(_sl), nx(_nx), nLx(_nLx), pd(_pd), px(_px),
         tM(Config::tiles<BLOCK_M>(_sl)),
@@ -441,8 +440,8 @@ namespace aristos{
                 const auto pT = world * nLx * tCM * Config::tiles<BLOCK_N>(pd);
                 tQl = sizeof(Task) * (sT + pT);
                 xMtQ = sBfC + tQl + sizeof(maxPrecision) * world * nLx * tCM * tN;
-                brs = sizeof(BookType) * (2 * sl * Config::tiles<BLOCK_N>(px)) +
-                    sizeof(float2) * sl + sizeof(TKTuple) * (_k * sl);
+                brs = sizeof(BookType) * _sl * (2 + Config::tiles<BLOCK_N>(_px)) +
+                    sizeof(float2) * sl + sizeof(TKTuple) * sl;
                 bookSize = xMtQ + brs;
             }
         }
@@ -457,8 +456,7 @@ namespace aristos{
             const unsigned int& _embedDim,
             const unsigned int& _eCap,
             const unsigned int& _blocks,
-            const unsigned int& _world,
-            const unsigned int& _k){
+            const unsigned int& _world){
             const auto tCM = Config::tiles<BLOCK_M>(_eCap);
             const auto tN = Config::tiles<BLOCK_N>(_embedDim);
             if (_nx == 1) {
@@ -478,8 +476,8 @@ namespace aristos{
             const auto tQl = sizeof(Task) * (sT + pT);
 
             const auto xMtQ = sBfC + tQl + sizeof(maxPrecision) * _world * _nLx * tCM * tN;
-            const auto brs = sizeof(BookType) * (2 * _sl * Config::tiles<BLOCK_N>(_px)) +
-                sizeof(float2) * _sl + sizeof(TKTuple) * (_k * _sl);
+            const auto brs = sizeof(BookType) * _sl * (2 + Config::tiles<BLOCK_N>(_px)) +
+                sizeof(float2) * _sl + sizeof(TKTuple) * _sl;
             return xMtQ + brs;
         }
 
@@ -585,8 +583,13 @@ namespace aristos{
         // 1. Contiguity requirements as we erase this region of memory after every step.
         // 2. Dependency on GateReductionLevel
         __device__ __forceinline__
+        auto* gateBk() const {
+            // Entrypoint for vectorized memory cleaning
+            return CAST_TO(uint4, book + xMtQ);
+        }
+        __device__ __forceinline__
         auto* bRSync() const {
-            return CAST_TO(BookType, book + xMtQ);
+            return CAST_TO(BookType, gateBk());
         }
         __device__ __forceinline__
         auto* bRSoftM() const {
@@ -598,6 +601,7 @@ namespace aristos{
             return CAST_TO(TKTuple, bRSoftM() + sl);
         }
         /// Ring top k flags
+        /// Two sets for pipelining termination phase of round i and initial phase of round i + 1
         __device__ __forceinline__
         auto* rTf() const {
             return CAST_TO(BookType, rTv() + sl);
