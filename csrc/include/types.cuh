@@ -301,7 +301,6 @@ namespace aristos{
         cuda::std::array<cuda::std::byte*, GEMMs> bData = {};
         cuda::std::array<cuda::std::byte*, GEMMs> cData = {};
         cuda::std::array<cuda::std::byte*, GEMMs> dData = {};
-        cuda::std::byte* scale = nullptr;
         // crd2Idx(peer, expertIdx, offset)
         unsigned int syncIdx = 0UL;
         unsigned int tileIdx = 0U;
@@ -323,7 +322,6 @@ namespace aristos{
             const cuda::std::array<cuda::std::byte*, GEMMs>& _bData,
             const cuda::std::array<cuda::std::byte*, GEMMs>& _cData,
             const cuda::std::array<cuda::std::byte*, GEMMs>& _dData,
-            cuda::std::byte*  const& _scale,
             const unsigned int& _syncIdx,
             const unsigned int& _tile,
             const unsigned int& _M,
@@ -332,7 +330,7 @@ namespace aristos{
             const unsigned int& _peerIdx,
             const unsigned int& _batchIdx):
         aData(_aData), bData(_bData),
-        cData(_cData), dData(_dData), scale(_scale),
+        cData(_cData), dData(_dData),
         syncIdx(_syncIdx), tileIdx(_tile), tileSize(_size), peerIdx(_peerIdx), M(_M), flagIdx(_flagIdx),
         batchIdx(_batchIdx), taskType(_taskType){}
 
