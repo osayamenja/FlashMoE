@@ -23,7 +23,7 @@ namespace aristos::packet {
         // assert(blocks <= gridDim.x - 1)
         static_assert(blocks % superBlockSize == 0);
         using ElementAct = typename Activations::value_type;
-        using ElementGate = maxPrecision;
+        using ElementGate = mp_t;
 
         // Map a static set of blocks to an expert and stride as thus
         constexpr auto numSuperBlocks = blocks / superBlockSize;

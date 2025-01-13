@@ -71,17 +71,17 @@ namespace aristos{
 
         const auto brsData = (numExperts > BLOCK_N) *
             (sizeof(unsigned int) * (seqLen * (paddedNumExperts / BLOCK_N)) + // sync flags for gate
-            2 * sizeof(maxPrecision) * seqLen + // m and d for softmax
-            sizeof(cuda::std::pair<maxPrecision, unsigned int>) * k * seqLen);  // binary min heap
+            2 * sizeof(mp_t) * seqLen + // m and d for softmax
+            sizeof(cuda::std::pair<mp_t, unsigned int>) * k * seqLen);  // binary min heap
 
         // Allocate all memory needed once
-        memoryBytes = sizeof(maxPrecision) * seqLen * hiddenProjDim + // intermediary results of expert GEMM
+        memoryBytes = sizeof(mp_t) * seqLen * hiddenProjDim + // intermediary results of expert GEMM
             brsData +
             // flags for ring aggregation of token indices
             sizeof(unsigned int) * (tilesM + tilesN) +
             sizeof(sizeof(TokenIdxTuple)) * seqLen + // token ids and probabilities
-            sizeof(maxPrecision) * seqLen * paddedNumExperts + // gate routing
-            sizeof(maxPrecision) * (2 * paddedNumExperts + 1) + // gate loss vectors, loss value
+            sizeof(mp_t) * seqLen * paddedNumExperts + // gate routing
+            sizeof(mp_t) * (2 * paddedNumExperts + 1) + // gate loss vectors, loss value
             sizeof(unsigned int) * paddedNumExperts + // expert counts,
             sizeof(unsigned int) * (numExperts + numNeighbors + 1) + // GPU -> expert lookup table and sentinel for prefix
             sizeof(unsigned int) * numExperts + // sync array for packet Construction

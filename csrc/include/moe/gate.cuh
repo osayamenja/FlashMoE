@@ -37,8 +37,7 @@ namespace aristos::gate {
             const unsigned int& tileIdx,
             Bookkeeping const& bk,
             ElementC* __restrict__ gateScratch) {
-            static_assert(cuda::std::is_same_v<ElementC, float> &&
-                cuda::std::is_same_v<ElementC, maxPrecision> &&
+            static_assert(cuda::std::is_same_v<ElementC, mp_t> &&
                 cuda::std::is_same_v<typename MatrixC::value_type, ElementC>);
             typename BlockGEMM::CollectiveMainloop mainLoop{};
             cute::clear(accumulator);
@@ -65,15 +64,17 @@ namespace aristos::gate {
 
             const auto nx = bk.nx;
             // Block Ring SoftMax pointers
-            auto* __restrict__ tFlag = bk.bRSync() + myTileOffset;
-            auto* __restrict__ nextFlag = bk.bRSync() + nextTileOffset;
-            auto* __restrict__ values = bk.bRSoftM() + bM * cute::get<0>(tileCoord) + threadIdx.x;
+            auto* __restrict__ brsMailbox = bk.bRsP() + myTileOffset;
+            auto* __restrict__ brsXMailbox = bk.bRsP() + nextTileOffset;
+
+            cutlass::NumericConverter<cute::half_t, ElementC> quantize{};
+            cutlass::NumericConverter<ElementC, cute::half_t> deQuantize{};
+            RingSoftmaxPayload rSp{};
 
             // Block Ring top k pointers
-            auto* __restrict__ tKv = bk.rTv() + bM * cute::get<0>(tileCoord) + threadIdx.x;
-            auto* __restrict__ tKf = bk.rTf() + myTileOffset;
-            auto* __restrict__ tKfN = bk.rTf() + nextTileOffset;
-            const auto flagLength = bk.sl;
+            auto* __restrict__ tkMailbox = bk.rTp() + myTileOffset;
+            auto* __restrict__ tkXMailbox = bk.rTp() + nextTileOffset;
+            RingTopKPayload rTp{};
 
             auto k_tile_iter = cute::make_coord_iterator(size<2>(gA));
             int k_tile_count = size<2>(gA);
@@ -127,20 +128,20 @@ namespace aristos::gate {
                 }
             }
 
-            auto dI = ElementC(0);
             /// Below needed for assigning -infinity
             /// See https://stackoverflow.com/a/20016972
             static_assert(cuda::std::numeric_limits<ElementC>::is_iec559, "IEEE 754 required");
             static_assert(cuda::std::numeric_limits<ElementC>::has_infinity);
+            // using notation from https://courses.cs.washington.edu/courses/cse599m/23sp/notes/flashattn.pdf
+            auto dI = ElementC(0);
             auto mI = -cuda::std::numeric_limits<ElementC>::infinity();
             // Begin Block-Ring softmax
             if (cute::get<1>(tileCoord) > 0) {
-                ring::awaitTurn(tFlag, 1U);
-                // Unpack message
-                // using notation from https://courses.cs.washington.edu/courses/cse599m/23sp/notes/flashattn.pdf
-                auto v = *values;
-                dI = v.x;
-                mI = v.y;
+                ring::awaitPayload(brsMailbox, rSp, 1U);
+                // We quantize dI from mp_t to half, and this yields no loss in precision.
+                // We leave as an exercise to the reader to determine why this conversion is lossless.
+                dI = deQuantize(rSp.dI);
+                mI = rSp.mI;
             }
 
             /// Reduce
@@ -152,25 +153,17 @@ namespace aristos::gate {
             }
 
             if (cute::get<1>(tileCoord) + 1 < tilesN) {
-                ring::signal(nextFlag);
-                ring::awaitTurn(tFlag, 2U);
-                auto msg = *values;
-                dI = msg.x;
-                mI = msg.y;
+                const auto sP = RingSoftmaxPayload{mI, quantize(dI), 1U};
+                ring::signal(brsXMailbox, sP);
+                ring::awaitPayload(brsMailbox, rSp, 2U);
+                dI = deQuantize(rSp.dI);
+                mI = rSp.mI;
             }
             else {
                 // Ring ends with me, let's unblock everyone else
-                *values = float2{dI, mI};
-                // Gets the base pointer
-                auto* __restrict__ sFlagB = nextFlag - nextTileOffset;
-                auto* __restrict__ sFlag = sFlagB + bM * cute::get<0>(tileCoord) + threadIdx.x;
-                // Issue fence
-                aristos::fence<cuda::thread_scope_device>();
-                // Signal tile 0 separately
-                ring::signal<cuda::thread_scope_device, ring::FencedSignal::no, 2U>(sFlag);
-                for (uint j = 1; j < tilesM; ++j) {
-                    sFlag = sFlagB + bM * (cute::get<0>(tileCoord) + j * tilesM) + threadIdx.x;
-                    ring::signal<cuda::thread_scope_device, ring::FencedSignal::no>(sFlag);
+                auto sP = RingSoftmaxPayload{mI, quantize(dI), 2U};
+                for (uint j = 0; j < tilesM; ++j) {
+                    ring::signal(brsXMailbox + bM * j * tilesM, sP);
                 }
             }
 
@@ -262,7 +255,7 @@ namespace aristos::gate {
             for (uint i = 0; i < k; ++i) {
                 constexpr auto phases = 2U;
                 const auto batonPrefix = phases * i / 2; // needed as we alternate between two buffers
-                const auto flagPrefix = i % phases * flagLength;
+                const auto flagPrefix = i % phases * bM * tilesM;
                 #pragma unroll
                 for(uint j = 0; j < bN; ++j) {
                     rTopK[j] = topK[j];
@@ -270,8 +263,9 @@ namespace aristos::gate {
                 // Sentinel that applies to the most westwards peer, as they initiate the proposal per round
                 sV = -cuda::std::numeric_limits<ElementC>::infinity();
                 if (cute::get<1>(tileCoord) > 0) {
-                    ring::awaitTurn(tKf + flagPrefix, batonPrefix + 1);
-                    auto [sV, sIdx] = tKv[flagPrefix];
+                    ring::awaitPayload(tkMailbox + flagPrefix, rTp, batonPrefix + 1);
+                    sV = rTp.sV;
+                    sIdx = rTp.sIdx;
                 }
                 if (!shouldSweep) {
                     // No need to sweep locally, we either relay the received values or propagate our proposal
@@ -300,26 +294,20 @@ namespace aristos::gate {
                 // Every tile except the most eastwards
                 if (cute::get<1>(tileCoord) + 1 < tilesN) {
                     // Now we pass our proposal through the ring
-                    tKv[flagPrefix] = Bookkeeping::TKTuple{sIdx, sV};
-                    ring::signal(tKfN + flagPrefix);
+                    const auto sP = RingTopKPayload{sV, sIdx, batonPrefix + 1};
+                    ring::signal(tkXMailbox + flagPrefix, sP);
                     // Now we await the results to return
-                    ring::awaitTurn(tKf + flagPrefix, batonPrefix + 2);
-                    auto [sV, sIdx] = tKv[flagPrefix];
+                    ring::awaitPayload(tkMailbox + flagPrefix, rTp, batonPrefix + 2);
+                    sV = rTp.sV;
+                    sIdx = rTp.sIdx;
                 }
                 else {
                     // Phase 0 ends with me, let's unblock everyone else in one go
-                    // Write first and signal subsequently
-                    tKv[flagPrefix] = Bookkeeping::TKTuple{sIdx, sV};
-                    // Fence prior to batched signals
-                    aristos::fence<cuda::thread_scope_device>();
-                    // Signal tile 0 separately as they skip the first phase
-                    // Gets the base pointer, do this rather than read from shared memory
-                    auto* __restrict__ tkFlagB = tKfN - nextTileOffset;
-                    auto* __restrict__ tkFlag = tkFlagB + (bM * cute::get<0>(tileCoord) + threadIdx.x);
-                    ring::signal<cuda::thread_scope_device, ring::FencedSignal::no, phases>(tkFlag + flagPrefix);
-                    for (uint j = 1; j < tilesM; ++j) {
-                        tkFlag = tkFlagB + bM * (cute::get<0>(tileCoord) + j * tilesM) + threadIdx.x;
-                        ring::signal<cuda::thread_scope_device, ring::FencedSignal::no>(tkFlag + flagPrefix);
+                    const auto sP = RingTopKPayload{sV, sIdx, batonPrefix + 2};
+                    auto* __restrict__ mailboxes = tkXMailbox;
+                    for (uint j = 0; j < tilesM; ++j) {
+                        mailboxes += phases * j * bM * tilesM;
+                        ring::signal(mailboxes + flagPrefix, sP);
                     }
                 }
 
@@ -393,7 +381,7 @@ namespace aristos::gate {
             const unsigned int& tileIdx,
             Bookkeeping const& bk,
             ElementC* __restrict__ const& gateScratch) {
-            static_assert(cuda::std::is_same_v<ElementC, float> && cuda::std::is_same_v<ElementC, maxPrecision>);
+            static_assert(cuda::std::is_same_v<ElementC, float> && cuda::std::is_same_v<ElementC, mp_t>);
             typename BlockGEMM::CollectiveMainloop mainLoop{};
             cute::clear(accumulator);
             constexpr auto bM = cute::get<0>(typename BlockGEMM::BlockTiler{});
@@ -612,7 +600,7 @@ namespace aristos::gate {
         MatrixC& routing,
         ElementC* __restrict__ scratch){
         assert(__isShared(scratch));
-        static_assert(cuda::std::is_same_v<maxPrecision, ElementC>);
+        static_assert(cuda::std::is_same_v<mp_t, ElementC>);
         using ElementA = typename MatrixA::value_type;
         using ElementB = typename MatrixB::value_type;
         using Operation = BlockMM<Arch, ElementA, ElementB, ElementC>;
@@ -643,7 +631,7 @@ namespace aristos::gate {
         for (unsigned int i = threads * blockIdx.x + threadIdx.x; i < moeConfig.numExperts; i+= threads * blocks) {
             const auto me = bk.gML()[i];
             const auto ce = bk.gMeC()[i];
-            atomicAdd(bk.gL(),__fdividef(me * ce, static_cast<maxPrecision>(moeConfig.numExperts)));
+            atomicAdd(bk.gL(),__fdividef(me * ce, static_cast<mp_t>(moeConfig.numExperts)));
         }
 
         // wipe flags clean for next iteration

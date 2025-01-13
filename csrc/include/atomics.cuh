@@ -5,6 +5,7 @@
 #ifndef CSRC_ATOMICS_CUH
 #define CSRC_ATOMICS_CUH
 
+#include "types.cuh"
 namespace aristos{
     template<typename B>
     concept AtomicType = cuda::std::same_as<B, int> || cuda::std::same_as<B, unsigned int>
@@ -78,46 +79,35 @@ namespace aristos{
             yes,
             no
         };
-        //TODO use partially specialized struct for this
-        // Ring-based polling.
-        template<cuda::thread_scope scope = cuda::thread_scope_device, typename T>
+        // no fences are needed because the payload and signal comprise the atomically received data word
+        template<typename Payload, cuda::thread_scope scope = cuda::thread_scope_device>
+        requires(sizeof(Payload) == sizeof(unsigned long long int))
         __device__ __forceinline__
-        void awaitTurn(T* const& addr, const T& baton = static_cast<T>(1U)) {
-            while (atomicLoad<scope>(addr) != baton){}
-            fence<scope>();
-        }
-
-        // non-blocking await routine
-        template<cuda::thread_scope scope = cuda::thread_scope_device, typename T>
-        __device__ __forceinline__
-        bool tryAwait(T* const& addr, const T& baton = static_cast<T>(1U)) {
-            if (atomicLoad<scope>(addr) == baton) {
-                fence<scope>();
-                return true;
+        void awaitPayload(Payload* const& addr, Payload* const& dest, const uint16_t& baton = 1U) {
+            auto mail = atomicLoad<scope>(CAST_TO(unsigned long long int, addr));
+            auto* payload = CAST_TO(Payload, &mail);
+            while (payload->signal != baton) {
+                mail = atomicLoad<scope>(CAST_TO(unsigned long long int, addr));
+                payload = CAST_TO(Payload, &mail);
             }
-            return false;
+            *dest = *payload;
         }
 
         template<
-            cuda::thread_scope scope = cuda::thread_scope_device,
-            FencedSignal useFence = FencedSignal::yes,
-            unsigned int value = 1U,
-            typename T
+            typename Payload,
+            cuda::thread_scope scope = cuda::thread_scope_device
         >
-        requires AtomicScope<scope> && AtomicType<T>
+        requires(AtomicScope<scope>
+            && sizeof(unsigned long long int) == sizeof(Payload))
         __device__ __forceinline__
-        void signal(T* const& addr) {
-            if constexpr (useFence == FencedSignal::yes) {
-                // Necessary for batch signaling, where one fence, invoked outside, suffices.
-                fence<scope>();
-            }
+        void signal(Payload* const& addr, Payload const& payload) {
             if constexpr (scope == cuda::thread_scope_block || scope == cuda::thread_scope_thread) {
-                atomicAdd_block(addr, static_cast<T>(value));
+                atomicExch_block(CAST_TO(unsigned long long int, addr), CAST_TO(unsigned long long int, payload));
             }
             if constexpr (scope == cuda::thread_scope_system) {
-                atomicAdd_system(addr, static_cast<T>(value));
+                atomicExch_system(CAST_TO(unsigned long long int, addr), CAST_TO(unsigned long long int, payload));
             }
-            atomicAdd(addr, static_cast<T>(value));
+            atomicExch(CAST_TO(unsigned long long int, addr), CAST_TO(unsigned long long int, payload));
         }
     }
 }

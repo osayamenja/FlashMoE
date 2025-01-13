@@ -66,7 +66,7 @@ namespace aristos{
     concept Matrix = requires(M m){
         requires Tensor<M> && rank(m) == 2;
     };
-    using maxPrecision = float; // no support for double, unfortunately
+    using mp_t = float; // no support for double, unfortunately
     using specType = unsigned int;
     using flagsType = uint64_t;
 
@@ -134,8 +134,22 @@ namespace aristos{
         ready
     };
 
+    __device__
+    struct RingSoftmaxPayload {
+        mp_t mI;
+        cute::half_t dI;
+        uint16_t signal;
+    };
+    __device__
+    struct RingTopKPayload {
+        mp_t sV;
+        uint16_t sIdx;
+        uint16_t signal;
+    };
+    
     template<PacketStage p = PacketStage::initial>
-    struct SignalPayload {
+    __device__
+    struct __align__(8) SignalPayload {
         static_assert(p == PacketStage::initial);
         uint routedTokens;
         uint16_t seqBit;
@@ -143,7 +157,8 @@ namespace aristos{
     };
 
     template<>
-    struct SignalPayload<PacketStage::final> {
+    __device__
+    struct __align__(8) SignalPayload<PacketStage::final> {
         uint batchIdx;
         uint16_t seqBit;
         uint16_t tokensM; // <= BLOCK_M
@@ -181,7 +196,7 @@ namespace aristos{
     };
 
     // Index and gate combine weight
-    using TokenIdxTuple = cuda::std::pair<unsigned int, maxPrecision>;
+    using TokenIdxTuple = cuda::std::pair<unsigned int, mp_t>;
     struct __align__(16) Config{
         cuda::std::byte* sHeap;
         flagsType* flags;
@@ -356,7 +371,7 @@ namespace aristos{
     struct __align__(16) Bookkeeping {
         /// default type for bookkeeping data structures
         using BookType = unsigned int;
-        using TKTuple = cuda::std::pair<BookType, maxPrecision>;
+        using TKTuple = cuda::std::pair<BookType, mp_t>;
         cuda::std::byte* book;
         /// Note the below lengths are cumulative sums.
         /// Gate buffers in bytes
@@ -422,11 +437,11 @@ namespace aristos{
         deviceBlockade(_blockade) {
             if (_nx == 1)[[unlikely]] {
                 // For this case, using any function other than xM yields undefined behavior
-                xMtQ = sizeof(maxPrecision) * _world * _nLx * tCM * tN;
+                xMtQ = sizeof(mp_t) * _world * _nLx * tCM * tN;
                 bookSize = xMtQ;
             }
             else {
-                gRl = sizeof(maxPrecision) * (_sl * px + (2 * px + 1));
+                gRl = sizeof(mp_t) * (_sl * px + (2 * px + 1));
                 gB = gRl + sizeof(TokenIdxTuple) * (px * _eCapacity) + sizeof(BookType) * px * (tM + 3);
                 eDsA = gB + sizeof(BookType) * (3 * nx + world);
                 const unsigned int fCl = sizeof(bool) * (world * nLx + (nx * tCM * tN));
@@ -437,9 +452,8 @@ namespace aristos{
                 // maximum gemm tiles/tasks scheduled by processors
                 const auto pT = world * nLx * tCM * Config::tiles<BLOCK_N>(pd);
                 tQl = sizeof(Task) * (sT + pT);
-                xMtQ = sBfC + tQl + sizeof(maxPrecision) * world * nLx * tCM * tN;
-                brs = sizeof(BookType) * _sl * (2 + Config::tiles<BLOCK_N>(_px)) +
-                    sizeof(float2) * sl + sizeof(TKTuple) * sl;
+                xMtQ = sBfC + tQl + sizeof(mp_t) * world * nLx * tCM * tN;
+                brs = _sl * Config::tiles<BLOCK_N>(_px) * (sizeof(RingSoftmaxPayload) + 2 * sizeof(RingTopKPayload));
                 bookSize = xMtQ + brs;
             }
         }
@@ -458,10 +472,10 @@ namespace aristos{
             const auto tCM = Config::tiles<BLOCK_M>(_eCap);
             const auto tN = Config::tiles<BLOCK_N>(_embedDim);
             if (_nx == 1) {
-                return sizeof(maxPrecision) * _world * _nLx * tCM * tN;
+                return sizeof(mp_t) * _world * _nLx * tCM * tN;
             }
             const auto tM = Config::tiles<BLOCK_M>(_sl);
-            const auto gRl = sizeof(maxPrecision) * (_sl * _px + (2 * _px + 1));
+            const auto gRl = sizeof(mp_t) * (_sl * _px + (2 * _px + 1));
             const auto gB = gRl + sizeof(TokenIdxTuple) * (_px * _eCap) + sizeof(BookType) * _px * (tM + 3);
             const auto eDsA = gB + sizeof(BookType) * (3 * _nx + _world);
             const auto fCl = sizeof(bool) * (_world * _nLx + (_nx * tCM * tN));
@@ -473,9 +487,8 @@ namespace aristos{
             const auto pT = _world * _nLx * tCM * Config::tiles<BLOCK_N>(_pd);
             const auto tQl = sizeof(Task) * (sT + pT);
 
-            const auto xMtQ = sBfC + tQl + sizeof(maxPrecision) * _world * _nLx * tCM * tN;
-            const auto brs = sizeof(BookType) * _sl * (2 + Config::tiles<BLOCK_N>(_px)) +
-                sizeof(float2) * _sl + sizeof(TKTuple) * _sl;
+            const auto xMtQ = sBfC + tQl + sizeof(mp_t) * _world * _nLx * tCM * tN;
+            const auto brs = _sl * Config::tiles<BLOCK_N>(_px) * (sizeof(RingSoftmaxPayload) + 2 * sizeof(RingTopKPayload));
             return xMtQ + brs;
         }
 
@@ -488,7 +501,7 @@ namespace aristos{
         /// Gate mean logits
         __device__ __forceinline__
         auto* gML() const {
-            return CAST_TO(maxPrecision, book + sizeof(maxPrecision) * (sl * px));
+            return CAST_TO(mp_t, book + sizeof(mp_t) * (sl * px));
         }
         /// Gate mean expert counts
         __device__ __forceinline__
@@ -586,23 +599,14 @@ namespace aristos{
             return CAST_TO(uint4, book + xMtQ);
         }
         __device__ __forceinline__
-        auto* bRSync() const {
-            return CAST_TO(BookType, gateBk());
-        }
-        __device__ __forceinline__
-        auto* bRSoftM() const {
-            return CAST_TO(float2, bRSync() + sl * Config::tiles<BLOCK_N>(px));
-        }
-        /// Ring top k values
-        __device__ __forceinline__
-        auto* rTv() const {
-            return CAST_TO(TKTuple, bRSoftM() + sl);
+        auto* bRsP() const {
+            return CAST_TO(RingSoftmaxPayload, gateBk());
         }
         /// Ring top k flags
         /// Two sets for pipelining termination phase of round i and initial phase of round i + 1
         __device__ __forceinline__
-        auto* rTf() const {
-            return CAST_TO(BookType, rTv() + sl);
+        auto* rTp() const {
+            return CAST_TO(RingTopKPayload, bRsP() + sl * Config::tiles<BLOCK_N>(px));
         }
     };
 
@@ -645,16 +649,6 @@ namespace aristos{
     __constant__ __inline__ SchedulerConfig schedulerState{};
     __constant__ __inline__ Bookkeeping bookkeeping{};
     __inline__ Config hostMoEConfig;
-
-    namespace heap {
-        template<unsigned int stage = 0, unsigned cell = 0>
-        requires (stage < STAGES && cell < CELLS)
-        __device__ __forceinline__
-        auto* advance(unsigned int const& peer, unsigned int const& expert) {
-            return moeConfig.sHeap + moeConfig.expertCapacity * moeConfig.embedDim *
-                (moeConfig.numExperts * (CELLS * (peer * STAGES + stage) + cell) + expert);
-        }
-    }
 
     template<typename E = PacketStage> requires cuda::std::is_integral_v<cuda::std::underlying_type_t<E>>
     __device__ __forceinline__
