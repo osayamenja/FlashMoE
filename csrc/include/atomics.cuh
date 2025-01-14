@@ -62,6 +62,7 @@ namespace aristos{
     }
 
     template<cuda::thread_scope scope = cuda::thread_scope_device>
+    __device__ __forceinline__
     void fence() {
         if constexpr (scope == cuda::thread_scope_block) {
             __threadfence_block();
@@ -74,11 +75,6 @@ namespace aristos{
 
 
     namespace ring {
-        __device__
-        enum class FencedSignal {
-            yes,
-            no
-        };
         // no fences are needed because the payload and signal comprise the atomically received data word
         template<typename Payload, cuda::thread_scope scope = cuda::thread_scope_device>
         requires(sizeof(Payload) == sizeof(unsigned long long int))
