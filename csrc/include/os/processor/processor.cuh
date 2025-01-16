@@ -396,7 +396,6 @@ namespace aristos::processor{
         typename ElementA,
         typename ElementB,
         typename ElementC = float,
-        typename ElementD = ElementA,
         typename ActivationOp = cute::identity,
         typename ActivationOpX = cute::identity
     > requires(processorCount > 0 && Arch >= MIN_ARCH)
@@ -494,6 +493,7 @@ namespace aristos::processor{
                         nvshmem_ptr(cachedConfig.sHeap, currentTask.peerIdx) == nullptr);
                     if (!threadIdx.x) {
                         uint64_t flagSignal = 0;
+                        // Pack payload into single signal word
                         *CAST_TO(SignalPayload<PacketStage::final>, &flagSignal) = SignalPayload<PacketStage::final>{
                             currentTask.batchIdx,
                             rSeqBit,
@@ -524,7 +524,7 @@ namespace aristos::processor{
                     atomicExch(scState.statusQ + blockIdx.x, ready);
                     combineOp(CAST_TO(ElementA, workspace), currentTask.aData, currentTask.bData[0],
                         currentTask.cData[0], currentTask.M, cachedConfig.embedDim, currentTask.tileIdx,
-                        currentTask.tileSize);
+                        currentTask.tileSize, currentTask.expertIdx);
                 }
                 break;
                 case TaskType::Interrupt: {

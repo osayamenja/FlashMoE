@@ -135,13 +135,13 @@ namespace aristos{
     };
 
     __device__
-    struct RingSoftmaxPayload {
+    struct __align__(8) RingSoftmaxPayload {
         mp_t mI;
         cute::half_t dI;
         uint16_t signal;
     };
     __device__
-    struct RingTopKPayload {
+    struct __align__(8) RingTopKPayload {
         mp_t sV;
         uint16_t sIdx;
         uint16_t signal;
@@ -325,6 +325,7 @@ namespace aristos{
         unsigned int M = 0U;
         unsigned int flagIdx = 0U;
         unsigned int batchIdx = 0U;
+        unsigned int expertIdx = 0U;
         TaskType taskType = TaskType::Interrupt;
 
         __forceinline__ __device__
@@ -357,8 +358,10 @@ namespace aristos{
         const cuda::std::array<cuda::std::byte*, GEMMs>& _cData,
         const unsigned int& _size,
         const unsigned int& _tile,
-        const unsigned int& _M):
-        aData(_aData), bData(_bData), cData(_cData), tileIdx(_tile), tileSize(_size), M(_M), taskType(_taskType){}
+        const unsigned int& _M,
+        const unsigned int& _expertIdx):
+        aData(_aData), bData(_bData), cData(_cData), tileIdx(_tile), tileSize(_size), M(_M), expertIdx(_expertIdx),
+        taskType(_taskType){}
 
 
         __device__ __forceinline__

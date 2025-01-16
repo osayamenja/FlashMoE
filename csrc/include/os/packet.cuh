@@ -292,7 +292,8 @@ namespace aristos::packet {
             const unsigned int& nTokens,
             unsigned int& lTQHead,
             const unsigned int& tileIdx,
-            unsigned int* __restrict__ const& gTQHead) const {
+            unsigned int* __restrict__ const& gTQHead,
+            const unsigned int& expertIdx) const {
             // now let's decode this single tile
             auto* __restrict__ tQ = schedulerState.taskQ + lTQHead++;
             *tQ = Task{
@@ -302,7 +303,8 @@ namespace aristos::packet {
                 cuda::std::array<cuda::std::byte*, GEMMs>{activations},
                 nTokens,
                 tileIdx,
-                BLOCK_M
+                BLOCK_M,
+                expertIdx
             };
             __threadfence();
             // notifies scheduler of work
@@ -318,7 +320,8 @@ namespace aristos::packet {
             cuda::std::byte* __restrict__ const& activations,
             const unsigned int& nTokens,
             unsigned int& lTQHead,
-            unsigned int* __restrict__ const& gTQHead) const {
+            unsigned int* __restrict__ const& gTQHead,
+            const unsigned int& expertIdx) const {
             auto* __restrict__ tQ = schedulerState.taskQ + lTQHead;
             const auto tilesN = moeConfig.tilesN;
             constexpr auto tB = 8;
@@ -333,7 +336,8 @@ namespace aristos::packet {
                         cuda::std::array<cuda::std::byte*, GEMMs>{activations},
                         nTokens,
                         j + i * tB,
-                        BLOCK_M
+                        BLOCK_M,
+                        expertIdx
                     };
                 }
             }
@@ -346,7 +350,8 @@ namespace aristos::packet {
                     cuda::std::array<cuda::std::byte*, GEMMs>{activations},
                     nTokens,
                     j,
-                    BLOCK_M
+                    BLOCK_M,
+                    expertIdx
                 };
             }
 

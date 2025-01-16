@@ -229,53 +229,20 @@ namespace aristos::gate {
             auto mCw = ElementC(0);
             auto lSV = sV;
             auto lSIdx = sIdx;
-            auto bool shouldSweep = false;
-
-            // Eagerly sweep prior to starting ring collective
-            #pragma unroll
-            for(uint j = 0; j < bN; ++j) {
-                rTopK[j] = topK[j];
-            }
-
-            #pragma unroll
-            for (uint j = 0; j < bN; ++j) {
-                // local maximum
-                if (accumulator(j) > lSV && !rTopK[j]) {
-                    lSIdx = cute::get<0>(tileCoord) * bN + j;
-                    lSV = accumulator(j);
-                }
-                // proposal
-                if (accumulator(j) > sV && !rTopK[j]) {
-                    sIdx = cute::get<0>(tileCoord) * bN + j;
-                    sV = accumulator(j);
-                }
-            }
+            auto bool shouldSweep = true;
 
             #pragma unroll
             for (uint i = 0; i < k; ++i) {
                 constexpr auto phases = 2U;
                 const auto batonPrefix = phases * i / 2; // needed as we alternate between two buffers
                 const auto flagPrefix = i % phases * bM * tilesM;
-                #pragma unroll
-                for(uint j = 0; j < bN; ++j) {
-                    rTopK[j] = topK[j];
-                }
                 // Sentinel that applies to the most westwards peer, as they initiate the proposal per round
                 sV = -cuda::std::numeric_limits<ElementC>::infinity();
-                if (cute::get<1>(tileCoord) > 0) {
-                    ring::awaitPayload(tkMailbox + flagPrefix, rTp, batonPrefix + 1);
-                    sV = rTp.sV;
-                    sIdx = rTp.sIdx;
-                }
-                if (!shouldSweep) {
-                    // No need to sweep locally, we either relay the received values or propagate our proposal
-                    if (lSV > sV) {
-                        // propagate our proposal
-                        sV = lSV;
-                        sIdx = lSIdx;
+                if (shouldSweep) {
+                    #pragma unroll
+                    for(uint j = 0; j < bN; ++j) {
+                        rTopK[j] = topK[j];
                     }
-                }
-                else {
                     #pragma unroll
                     for (uint j = 0; j < bN; ++j) {
                         // local maximum
@@ -291,8 +258,20 @@ namespace aristos::gate {
                     }
                     shouldSweep = false;
                 }
+                if (cute::get<1>(tileCoord) > 0) {
+                    ring::awaitPayload(tkMailbox + flagPrefix, rTp, batonPrefix + 1);
+                    sV = rTp.sV;
+                    sIdx = rTp.sIdx;
+                    if (lSV > sV) {
+                        //we either relay the received values or propagate our proposal
+                        sV = lSV;
+                        sIdx = lSIdx;
+                    }
+                }
+
                 // Every tile except the most eastwards
                 if (cute::get<1>(tileCoord) + 1 < tilesN) {
+                    // propagate our proposal
                     // Now we pass our proposal through the ring
                     const auto sP = RingTopKPayload{sV, sIdx, batonPrefix + 1};
                     ring::signal(tkXMailbox + flagPrefix, sP);
