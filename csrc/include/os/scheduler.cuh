@@ -5,220 +5,218 @@
 #ifndef SCHEDULER_CUH
 #define SCHEDULER_CUH
 
+#include <cub/cub.cuh>
+#include <cuda/std/cstddef>
+#include <cutlass/array.h>
 #include "../types.cuh"
 
 namespace aristos::scheduler {
-    template<unsigned int processorCount, unsigned int rQSetSize>
-    requires(processorCount > 0 && rQSetSize > 1 && cutlass::ispow2(rQSetSize))
+    template<
+        unsigned int processors,
+        typename WarpScan = cub::WarpScan<uint>,
+        unsigned int wS = 32,
+        unsigned int subscribers = 128 - wS,
+        unsigned int sL = subscribers / wS,
+        typename SQState,
+        typename TQState
+    >
+    requires (processors > 0 && wS == 32 &&
+        cuda::std::is_same_v<WarpScan, cub::WarpScan<uint>> &&
+        isRegisterV<SQState> && isRegisterV<TQState> && subscribers % wS == 0)
     __device__ __forceinline__
-    void scheduleLoop(unsigned int& tasks,
-        unsigned int& scheduled,
-        unsigned int& rtQTail,
-        unsigned int* __restrict__ const& rQHead,
-        unsigned int& rQTail,
-        const unsigned int* __restrict__ const& rQ,
-        const unsigned int& tQIdx,
-        unsigned int* __restrict__ const& pDB) {
-        while (tasks) {
-            // min(readyProcesses, unscheduledTasks)
-            const auto tasksToSchedule = cute::min(atomicLoad<cuda::thread_scope_block>(rQHead) - rQTail,
-                tasks);
-            tasks -= tasksToSchedule;
-            scheduled += tasksToSchedule;
-            if (tasksToSchedule) {
-                // ensures reads to ready Q happen after signal reception
-                __threadfence_block();
-            }
-            const auto tSb = tasksToSchedule / rQSetSize; // tasks to schedule batches
-            for (uint i = 0; i < tSb; ++i) {
+    void schedulerLoop(SQState& sQState, TQState& tqState,
+        const unsigned int& tQRl,
+        uint& lTt, uint& taskTally, uint& processorTally,
+        uint& gRQIdx, bool& pTEpilog, uint& scheduled,
+        typename WarpScan::TempStorage* __restrict__ const& wSt,
+        unsigned int* __restrict__ const& sQ,
+        uint* __restrict__ const& rQ,
+        unsigned int* __restrict__ const& pDB,
+        const bool isMedley = false) {
+        uint lRQIdx;
+        // things are about to get warped :)
+        // Aggregate tally across the warp
+        WarpScan(wSt[0]).InclusiveSum(lTt, lRQIdx, taskTally);
+        lRQIdx -= lTt;
+        while (taskTally) {
+            // Find processors if we are not currently aware of any
+            while (!processorTally) {
+                // sweep sQ to identify ready processes
+                uint lPt = 0U; // local processor tally
+                constexpr auto pL = processors / wS;
                 #pragma unroll
-                for (uint j = 0; j < rQSetSize; ++j) {
-                    const auto pid = rQ[rQTail++ % processorCount];
-                    ++rtQTail;
-                    atomicExch(pDB + pid, tQIdx + rtQTail);
+                for (uint j = 0; j < pL; ++j) {
+                    const auto readiness = atomicExch(sQ + (j * wS + threadIdx.x),
+                        observed) == ready;
+                    lPt += readiness;
+                    sQState[j] = readiness;
+                }
+                if (threadIdx.x < processors - pL * wS) {
+                    const auto readiness = atomicExch(sQ + (pL * wS + threadIdx.x),
+                        observed) == ready;
+                    lPt += readiness;
+                    sQState[pL] = readiness;
+                }
+                uint startIdx;
+                // Aggregate tally across the warp
+                WarpScan(wSt[1]).InclusiveSum(lPt, startIdx, processorTally);
+                startIdx -= lPt;
+                // write to rQ
+                if (lPt) {
+                    #pragma unroll
+                    for (uint j = 0; j < SQState::kElements; ++j) {
+                        if (sQState[j]) {
+                            // write ready process pid to rQ
+                            rQ[(gRQIdx + startIdx++) % processors] = j * wS + threadIdx.x;
+                        }
+                    }
+                }
+                pTEpilog = true;
+            }
+            if (pTEpilog) {
+                pTEpilog = false;
+                gRQIdx += processorTally;
+                // Below ensures writes to rQ in shared memory are visible warp-wide
+                __syncwarp();
+            }
+            // schedule tasks
+            const auto tasks = cute::min(processorTally, taskTally);
+            scheduled += tasks;
+            processorTally -= tasks;
+            taskTally -= tasks;
+            // these will get scheduled now
+            if (lRQIdx < tasks) {
+                auto tasksToSchedule = cute::min(tasks - lRQIdx, lTt);
+                lTt -= tasksToSchedule;
+                if (isMedley) {
+                    #pragma unroll
+                    for (uint j = 0; j < sL; ++j) {
+                        if (tqState[j].tasks && tasksToSchedule) {
+                            tqState[j].tasks = 0U;
+                            const auto canSchedule = cute::min(tasksToSchedule, tqState[j].tasks);
+                            tasksToSchedule -= canSchedule;
+                            tqState[j].tasks -= canSchedule;
+                            const auto taskIdx = j * wS + threadIdx.x + tqState[j].tQTail;
+                            for (uint k = 0; k < canSchedule; ++k) {
+                                // signal processor
+                                atomicExch(pDB + rQ[gRQIdx + lRQIdx++ % processors], taskIdx + k);
+                            }
+                        }
+                    }
+                }
+                #pragma unroll
+                for (uint j = sL; j < TQState::kElements; ++j) {
+                    if (tqState[j].tasks && tasksToSchedule) {
+                        tqState[j].tasks = 0U;
+                        const auto canSchedule = cute::min(tasksToSchedule, tqState[j].tasks);
+                        tasksToSchedule -= canSchedule;
+                        tqState[j].tasks -= canSchedule;
+                        const auto taskIdx = tQRl * subscribers + (j - sL) * wS + threadIdx.x + tqState[j].tQTail;
+                        for (uint k = 0; k < canSchedule; ++k) {
+                            // signal processor
+                            atomicExch(pDB + rQ[gRQIdx + lRQIdx++ % processors], taskIdx + k);
+                        }
+                    }
                 }
             }
-            const auto residue = tasksToSchedule - tSb * rQSetSize;
-            for (uint i = 0; i < residue; ++i) {
-                const auto pid = rQ[rQTail++ % processorCount];
-                ++rtQTail;
-                // Fence is not needed prior to signal given task producers already issue one.
-                atomicExch(pDB + pid, tQIdx + rtQTail);
-            }
         }
     }
 
-    // all loops are unrolled
-    template<unsigned int processorCount, unsigned int producerCount, unsigned int wSetSize, unsigned int rQSetSize,
-    typename Registers>
-    requires(processorCount > 0 && producerCount > 0 && producerCount < 128 && wSetSize > 1 && wSetSize % 4 == 0
-        && isRegisterV<Registers> && Registers::kElements == wSetSize)
-    __device__ __forceinline__
-    void staticSchedule(unsigned int& scheduled,
-        Registers& rtQTails,
-        const unsigned int& tQRl,
-        unsigned int* __restrict__ const& tQTails,
-        unsigned int* __restrict__ const& tQHeads,
-        unsigned int* __restrict__ const& rQHead,
-        unsigned int& rQTail,
-        const unsigned int* __restrict__ const& rQ,
-        unsigned int* __restrict__ const& pDB) {
-        constexpr auto producerBatches = producerCount / wSetSize;
-
-        #pragma unroll
-        for (uint i = 0; i < producerBatches; ++i) {
-            // load wQ tails to registers
-            #pragma unroll
-            for (uint j = 0; j < wSetSize; ++j) {
-                rtQTails[j] = tQTails[j + i * wSetSize];
-            }
-            #pragma unroll
-            for (uint j = 0; j < wSetSize; ++j) {
-                const auto tQRow = j + i * wSetSize;
-                auto tasks = atomicLoad<cuda::thread_scope_block>(tQHeads + tQRow) - rtQTails[j];
-                // Let's schedule these tasks
-                scheduleLoop<processorCount, rQSetSize>(tasks, scheduled, rtQTails[j], rQHead,
-                    rQTail, rQ, tQRow * tQRl, pDB);
-            }
-
-            // persist wQ tails
-            #pragma unroll
-            for (uint j = 0; j < wSetSize; ++j) {
-                tQTails[j + i * wSetSize] = rtQTails[j];
-            }
-        }
-        constexpr auto residue = producerCount - producerBatches * wSetSize;
-        #pragma unroll
-        for (uint j = 0; j < residue; ++j) {
-            // prefetch to registers
-            rtQTails[j] = tQTails[j + producerBatches * wSetSize];
-        }
-
-        // complete static scheduling
-        #pragma unroll
-        for (uint j = 0; j < residue; ++j) {
-            const auto tQRow = j + producerBatches * wSetSize;
-            auto tasks = atomicLoad<cuda::thread_scope_block>(tQHeads + tQRow) - rtQTails[j];
-            scheduleLoop<processorCount, rQSetSize>(tasks, scheduled, rtQTails[j], rQHead,
-                    rQTail, rQ, tQRow * tQRl, pDB);
-        }
-
-        #pragma unroll
-        for (uint j = 0; j < residue; ++j) {
-            // persist
-            tQTails[j + producerBatches * wSetSize] = rtQTails[j];
-        }
-    }
-
-    // dynamic trip, used for external task queue whose heads are in global memory not shared.
-    template<unsigned int processorCount, unsigned int wSetSize, unsigned int rQSetSize, typename Registers>
-    requires(processorCount > 0 && wSetSize > 1 && wSetSize % 4 == 0
-        && isRegisterV<Registers> && Registers::kElements == wSetSize)
-    __device__ __forceinline__
-    void dynamicSchedule(unsigned int& scheduled,
-        Registers& rtQTails,
-        const unsigned int& tQRl,
-        unsigned int* __restrict__ const& tQTails,
-        unsigned int* __restrict__ const& tQHeads,
-        unsigned int* __restrict__ const& rQHead,
-        unsigned int& rQTail,
-        const unsigned int* __restrict__ const& rQ,
-        unsigned int* __restrict__ const& pDB,
-        unsigned int const& taskMailboxes) {
-        const auto mailboxBatches = taskMailboxes / wSetSize;
-
-        for (uint i = 0; i < mailboxBatches; ++i) {
-            // load wQ tails to registers
-            #pragma unroll
-            for (uint j = 0; j < wSetSize; ++j) {
-                rtQTails[j] = tQTails[j + i * wSetSize];
-            }
-            #pragma unroll
-            for (uint j = 0; j < wSetSize; ++j) {
-                const auto tQRow = j + i * wSetSize;
-                auto tasks = atomicLoad(tQHeads + tQRow) - rtQTails[j];
-                // Let's schedule these tasks
-                scheduleLoop<processorCount, rQSetSize>(tasks, scheduled, rtQTails[j], rQHead,
-                    rQTail, rQ, tQRow * tQRl, pDB);
-            }
-
-            // persist wQ tails
-            #pragma unroll
-            for (uint j = 0; j < wSetSize; ++j) {
-                tQTails[j + i * wSetSize] = rtQTails[j];
-            }
-        }
-        const auto residue = taskMailboxes - mailboxBatches * wSetSize;
-        for (uint j = 0; j < residue; ++j) {
-            // prefetch to registers
-            rtQTails[j] = tQTails[j + mailboxBatches * wSetSize];
-        }
-
-        for (uint j = 0; j < residue; ++j) {
-            const auto tQRow = j + mailboxBatches * wSetSize;
-            auto tasks = atomicLoad(tQHeads + tQRow) - rtQTails[j];
-            scheduleLoop<processorCount, rQSetSize>(tasks, scheduled, rtQTails[j], rQHead,
-                    rQTail, rQ, tQRow * tQRl, pDB);
-        }
-
-        for (uint j = 0; j < residue; ++j) {
-            // persist
-            tQTails[j + mailboxBatches * wSetSize] = rtQTails[j];
-        }
-    }
     /// Making processorCount a compile-time constant is not a functional requirement but rather strictly
     /// for globally optimizing the modulo operation, which is incredibly expensive.
     /// Benchmarks confirm an order of magnitude performance improvement for that operation.
-    /// Benchmarks also show 16 to be a perfect number for rQSetSize.
-    /// We parametrize it here for consistency with downstream actors, depending on the parameter.
-    template<unsigned int processorCount, unsigned int producerCount, unsigned int rQSetSize>
-    requires(processorCount > 0 && producerCount > 0 && producerCount < THREADS && rQSetSize == 16)
+    template<unsigned int processors>
+    requires(processors > 0)
     __device__ __forceinline__
-    void start(const unsigned int& tQRl,
+    void start(cuda::std::byte* __restrict__ workspace,
+        const unsigned int& tQRl,
         const unsigned int& gtQCL,
-        const unsigned int& gtQRl,
-        unsigned int* __restrict__ const& tQHeads,
-        unsigned int* __restrict__ const& gtQHeads,
-        unsigned int* __restrict__ const& gtQTails,
-        unsigned int* __restrict__ const& tQTails,
-        unsigned int* __restrict__ const& taskBound,
-        unsigned int* __restrict__ const& rQHead,
-        const unsigned int* __restrict__ const& rQ,
-        unsigned int* __restrict__ const& pDB,
-        unsigned int* __restrict__ const& sTF, // subscriber termination flag
-        unsigned int* __restrict__ const& oTF) {
-        // assert(__isShared(all arguments above) except gtQ* and alignment is 16)
-        unsigned int scheduled = 0U;
-        unsigned int rQTail = 0U;
-        constexpr auto wSetSize = 16;
-        cutlass::AlignedArray<unsigned int, wSetSize> rtQTails{};
-        rtQTails.fill(0U);
+        unsigned int* __restrict__ const& tQHeads, // shared
+        unsigned int* __restrict__ const& gtQHeads, // global
+        unsigned int* __restrict__ const& taskBound, // shared
+        unsigned int* __restrict__ const& rQ, // shared
+        unsigned int* __restrict__ const& sQ, // global
+        unsigned int* __restrict__ const& pDB) { //  global
+        uint scheduled = 0U;
+        constexpr auto wS = 32U;
+        constexpr auto sQsL = cute::ceil_div(processors, wS);
+        static_assert(sQsL <= 32);
 
+        constexpr auto subscribers = 128 - wS;
+        static_assert(subscribers % wS == 0);
+        constexpr auto sL = subscribers / wS;
+        // initialize register buffers
+        cutlass::Array<TQState, 16 + sL> tqState{};
+        cutlass::Array<uint8_t, sQsL> sQState{};
+        tqState.fill({0U,0U});
+        sQState.fill(0U);
+
+        constexpr auto dQL = decltype(tqState)::kElements - sL;
+        const uint dT = gtQCL / (wS * dQL);
+
+        // cub stuff
+        using WarpScan = cub::WarpScan<uint>;
+        auto* __restrict__ wSt = CAST_TO(WarpScan::TempStorage, workspace);
+        uint gRQIdx = 0U;
+        uint taskTally = 0U;
+        uint processorTally = processors; // initially, all processors are available, ensure that rQ has all pids
+        bool pTEpilog = false;
         while (scheduled < atomicLoad<cuda::thread_scope_block>(taskBound)) {
-            // sweep all static wQHeads and schedule pending tasks
-            staticSchedule<processorCount, producerCount, wSetSize, rQSetSize>(scheduled, rtQTails, tQRl, tQTails,
-                tQHeads, rQHead, rQTail, rQ, pDB);
-            // Now do dynamic scheduling
-            dynamicSchedule<processorCount, wSetSize, rQSetSize>(scheduled, rtQTails, gtQRl, gtQTails,
-                gtQHeads, rQHead, rQTail, rQ, pDB, gtQCL);
-        }
-        atomicExch_block(sTF, 1U); // interrupt network subscribers
+            // statically sweep tQ for tasks
+            uint lTt = 0U; // local task tally
+            #pragma unroll
+            for (uint i = 0; i < sL; ++i) {
+                const auto tasks = atomicLoad<cuda::thread_scope_block>(tQHeads + i * wS + threadIdx.x) -
+                    tqState[i].tQTail;
+                tqState[i].tasks = tasks;
+                lTt += tasks;
+            }
 
-        // Done with work scheduling, let's enqueue interrupts for processors
-        auto* __restrict__ tQ = schedulerState.taskQ + schedulerState.tUB;
+            // Abstract queues as a 3-D tensor (B, Q, T),
+            // where B is the batch dimension or total queue / (Q * T);
+            // Q is the number of queues a thread observes in one-pass;
+            // and T is the number of threads in a warp
+            if (dT > 0) {
+                // special case, where i == 0
+                #pragma unroll
+                for (uint j = sL; j < decltype(tqState)::kElements; ++j) {
+                    const auto qIdx = wS * (j - sL) + threadIdx.x;
+                    const auto tasks = atomicLoad(gtQHeads + qIdx) - tqState[j].tQTail;
+                    tqState[j].tasks = tasks;
+                    lTt += tasks;
+                }
+                // schedule observed tasks
+                schedulerLoop<processors>(sQState, tqState, tQRl, lTt, taskTally,
+                    processorTally, gRQIdx, pTEpilog, scheduled, wSt, sQ, rQ, pDB, true);
 
-        #pragma unroll
-        for (uint i = 0; i < processorCount; ++i) {
-            tQ[i] = Task{TaskType::Interrupt};
+                for (uint i = 1; i < dT; ++i) {
+                    // Needed to enforce register storage
+                    #pragma unroll
+                    for (uint j = sL; j < decltype(tqState)::kElements; ++j) {
+                        const auto qIdx = wS * (dQL * i + (j - sL)) + threadIdx.x;
+                        const auto tasks = atomicLoad(gtQHeads + qIdx) - tqState[j].tQTail;
+                        tqState[j].tasks = tasks;
+                        lTt += tasks;
+                    }
+                    // schedule observed tasks
+                    schedulerLoop<processors>(sQState, tqState, tQRl, lTt, taskTally,
+                        processorTally, gRQIdx, pTEpilog, scheduled, wSt, sQ, rQ, pDB);
+                }
+            }
+
+            // residue
+            #pragma unroll
+            for (uint j = sL; j < decltype(tqState)::kElements; ++j) {
+                if (const auto qIdx = wS * (dQL * dT + (j - sL)) + threadIdx.x; qIdx < gtQCL) {
+                    const auto tasks = atomicLoad(gtQHeads + qIdx) - tqState[j].tQTail;
+                    tqState[j].tasks = tasks;
+                    lTt += tasks;
+                }
+            }
+            // schedule observed tasks
+            schedulerLoop<processors>(sQState, tqState, tQRl, lTt, taskTally,
+                processorTally, gRQIdx, pTEpilog, scheduled, wSt, sQ, rQ, pDB, dT == 0);
         }
-        __threadfence();
-        auto tasks = processorCount;
-        auto rtQTail = 0U;
-        const auto tQIdx = schedulerState.tUB;
-        // schedule interrupt tasks
-        scheduleLoop<processorCount, rQSetSize>(tasks, scheduled, rtQTail, rQHead,
-                    rQTail, rQ, tQIdx, tQRl, pDB);
-        atomicExch_block(oTF, 1U); // interrupt observer
     }
 }
 #endif //SCHEDULER_CUH

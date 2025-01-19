@@ -100,6 +100,12 @@ namespace aristos{
     };
 
     __device__
+    struct __align__(4) TQState {
+        uint16_t tQTail;
+        uint16_t tasks;
+    };
+
+    __device__
     enum class PacketStage {
         initial,
         final,
