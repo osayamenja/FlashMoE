@@ -40,7 +40,7 @@ namespace aristos::subscriber{
         BiasTensor const& biasT){
         static_assert(sizeof(unsigned long long int) == sizeof(flagsType));
         static_assert(sizeof(SignalPayload<>) == sizeof(uint64_t));
-        static_assert(sizeof(SignalPayload<PacketStage::final>) == sizeof(uint64_t));
+        static_assert(sizeof(SignalPayload<PacketStage::last>) == sizeof(uint64_t));
         /*assert(__isShared(workspace) &&
             __isShared(&mC) && // faster to retrieve from shared than constant memory due to strewn accesses
             __isShared(&sC) &&
@@ -96,8 +96,8 @@ namespace aristos::subscriber{
         // Decoders
         packet::Decoder<PacketStage::initial, PeerConnectivity::p2p, Element> fPd{};
         packet::Decoder<PacketStage::initial, PeerConnectivity::remote, Element> fRd{};
-        packet::Decoder<PacketStage::final, PeerConnectivity::p2p> lPd{};
-        packet::Decoder<PacketStage::final, PeerConnectivity::remote> lRd{};
+        packet::Decoder<PacketStage::last, PeerConnectivity::p2p> lPd{};
+        packet::Decoder<PacketStage::last, PeerConnectivity::remote> lRd{};
 
         while (!atomicLoad<cuda::thread_scope_block>(interrupt)) {
             auto* __restrict__ flags = sFlags;
@@ -254,7 +254,7 @@ namespace aristos::subscriber{
                         // SignalPayload -> {batchIdx, {seqNo, M}}, where M <= BLOCK_M
                         // we do not necessarily need
                         // to transmit batchIdx as we can deduce it locally
-                        const auto sP = CAST_TO(SignalPayload<PacketStage::final>, &signal);
+                        const auto sP = CAST_TO(SignalPayload<PacketStage::last>, &signal);
                         rWSet[j] = sP->seqNo == sequenceNumber;
                         fSp -= rWSet[j];
                         if (rWSet[j]) {
@@ -289,7 +289,7 @@ namespace aristos::subscriber{
                         auto signal = atomicLoad<cuda::thread_scope_system>(
                                 CAST_TO(unsigned long long int, flags + flagIdx));
                         // SignalPayload -> {batchIdx, {seqNo, M}}, where M <= BLOCK_M
-                        const auto sP = CAST_TO(SignalPayload<PacketStage::final>, &signal);
+                        const auto sP = CAST_TO(SignalPayload<PacketStage::last>, &signal);
                         rWSet[j] = sP->seqNo == sequenceNumber;
                         fSp -= rWSet[j];
                         if (rWSet[j]) {
@@ -337,7 +337,7 @@ namespace aristos::subscriber{
                         auto signal = atomicLoad<cuda::thread_scope_system>(
                                 CAST_TO(unsigned long long int, flags + flagIdx));
                         // SignalPayload -> {batchIdx, {seqNo, M}}, where M <= BLOCK_M
-                        const auto sP = CAST_TO(SignalPayload<PacketStage::final>, &signal);
+                        const auto sP = CAST_TO(SignalPayload<PacketStage::last>, &signal);
                         rWSet[j] = sP->seqNo == sequenceNumber;
                         fSp -= rWSet[j];
                         if (rWSet[j]) {
@@ -374,7 +374,7 @@ namespace aristos::subscriber{
                         auto signal = atomicLoad<cuda::thread_scope_system>(
                                 CAST_TO(unsigned long long int, flags + flagIdx));
                         // SignalPayload -> {batchIdx, {seqNo, M}}, where M <= BLOCK_M
-                        const auto sP = CAST_TO(SignalPayload<PacketStage::final>, &signal);
+                        const auto sP = CAST_TO(SignalPayload<PacketStage::last>, &signal);
                         rWSet[j] = sP->seqNo == sequenceNumber;
                         fSp -= rWSet[j];
                         if (rWSet[j]) {

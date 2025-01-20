@@ -108,7 +108,7 @@ namespace aristos{
     __device__
     enum class PacketStage {
         initial,
-        final,
+        last,
     };
 
     __device__
@@ -164,7 +164,7 @@ namespace aristos{
 
     template<>
     __device__
-    struct __align__(8) SignalPayload<PacketStage::final> {
+    struct __align__(8) SignalPayload<PacketStage::last> {
         uint batchIdx;
         uint16_t seqBit;
         uint16_t tokensM; // <= BLOCK_M
@@ -280,17 +280,6 @@ namespace aristos{
         static constexpr unsigned int tiles(const unsigned int& dimension) {
             // find next multiple of dimension.
             return cute::ceil_div(dimension, tileDimension);
-        }
-
-        /// The symmetric heap is a 6-D tensor (P, S, C, E, M, H)
-        /// where P, S, C, E, M, and H  denote dimensions for peers, communication stages,
-        /// cells, experts, expert capacity, and token hidden dimension, respectively.
-        template<unsigned int stage = 0, unsigned cell = 0, unsigned long int nBytes = 1>
-        requires (stage < STAGES && cell < CELLS)
-        __device__ __forceinline__
-        auto* advanceHeap(unsigned int const& peer, unsigned int const& expert, const unsigned int& token = 0) const {
-            return sHeap + (cellSize * (expertSlots * (CELLS * (peer * STAGES + stage) + cell) + expert) +
-                token * embedDim) * nBytes;
         }
 
         __host__ __device__ __forceinline__
@@ -535,9 +524,15 @@ namespace aristos{
         auto* tV() const {
             return tF() + tM * px;
         }
+
+        /// Packet data structures
+        __device__ __forceinline__
+        auto* pDs() const {
+            return tV() + px;
+        }
         __device__ __forceinline__
         auto* eC() const {
-            return tV() + px;
+            return pDs();
         }
 
         /// Expert parallelism specification
@@ -546,17 +541,16 @@ namespace aristos{
         auto* ePs() const {
             return CAST_TO(BookType, book + gB);
         }
-        /// Inverse specification
-        /// GPU EP rank -> start index of {Expert indices}
+        /// Expert index to local expert index
         __device__ __forceinline__
-        auto* iEPs() const {
+        auto* eLs() const {
             return ePs() + nx;
         }
         /// Peer Translation
         /// EP rank -> PE rank
         __device__ __forceinline__
         auto* pT() const {
-            return iEPs() + nx;
+            return eLs() + nx;
         }
         /// Packet Sync array
         __device__ __forceinline__
@@ -663,6 +657,20 @@ namespace aristos{
     __device__ __forceinline__
     uint64_t constructSignal(E const& signal, uint64_t const& tagAlong = 0U){
         return tagAlong + signal + seqBit;
+    }
+
+    namespace heap {
+        // The symmetric heap is a 6-D tensor (P, S, C, E, M, H)
+        /// where P, S, C, E, M, and H  denote dimensions for peers, communication stages,
+        /// cells, experts, expert capacity, and token hidden dimension, respectively.
+        template<unsigned int stage = 0, unsigned cell = 0, unsigned long int nBytes = 1>
+        requires (stage < STAGES && cell < CELLS)
+        __device__ __forceinline__
+        auto* advance(cuda::std::byte* __restrict__ const& sHeap, const uint& cellSize, const uint& expertSlots,
+            const uint& tokenDim, const uint& peer, const uint& expert, const uint& token = 0){
+            return sHeap + (cellSize * (expertSlots * (CELLS * (peer * STAGES + stage) + cell) + expert) +
+                token * tokenDim) * nBytes;
+        }
     }
 }
 #endif //ARISTOS_TYPES_CUH

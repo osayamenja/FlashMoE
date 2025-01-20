@@ -402,7 +402,7 @@ namespace aristos::processor{
     __device__ __forceinline__
     void start(cuda::std::byte* __restrict__ const& workspace, const uint16_t& _seqBit){
         assert(__isShared(workspace));
-        static_assert(sizeof(SignalPayload<PacketStage::final>) == sizeof(uint64_t));
+        static_assert(sizeof(SignalPayload<PacketStage::last>) == sizeof(uint64_t));
         __shared__ unsigned int signal;
         __shared__ Task currentTask;
         __shared__ Config cachedConfig;
@@ -494,7 +494,7 @@ namespace aristos::processor{
                     if (!threadIdx.x) {
                         uint64_t flagSignal = 0;
                         // Pack payload into single signal word
-                        *CAST_TO(SignalPayload<PacketStage::final>, &flagSignal) = SignalPayload<PacketStage::final>{
+                        *CAST_TO(SignalPayload<PacketStage::last>, &flagSignal) = SignalPayload<PacketStage::last>{
                             currentTask.batchIdx,
                             rSeqBit,
                             currentTask.tileSize

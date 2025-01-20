@@ -62,7 +62,13 @@ namespace aristos::gate {
             const auto nextTileOffset = bM * (cute::get<0>(tileCoord) +
                 (cute::get<1>(tileCoord) + 1 == tilesN ? 0 : cute::get<1>(tileCoord) + 1) * tilesM) + threadIdx.x;
 
+            // cache
             const auto nx = bk.nx;
+            auto* __restrict__ tP = bk.tP();
+            auto* __restrict__ eC = bk.eC();
+            auto* __restrict__ gMeC = bk.gMeC();
+            auto* __restrict__ gML = bk.gML();
+
             // Block Ring SoftMax pointers
             auto* __restrict__ brsMailbox = bk.bRsP() + myTileOffset;
             auto* __restrict__ brsXMailbox = bk.bRsP() + nextTileOffset;
@@ -201,7 +207,7 @@ namespace aristos::gate {
                 // Only the first warp aggregates atomically, as other warps have garbage values
                 #pragma unroll
                 for (uint i = 0; i < bN / wS; ++i) {
-                    atomicAdd(bk.gML() + (threadIdx.x + i * wS), __fdividef(cache[i], sl));
+                    atomicAdd(gML + (threadIdx.x + i * wS), __fdividef(cache[i], sl));
                 }
             }
 
@@ -325,15 +331,15 @@ namespace aristos::gate {
             }
 
             if (threadIdx.x < bN) {
-                startIndices[threadIdx.x] = atomicAdd(bk.eC() + threadIdx.x, cachedSelected);
-                atomicAdd(bk.gMeC() + threadIdx.x, __fdividef(static_cast<ElementC>(cachedSelected),
+                startIndices[threadIdx.x] = atomicAdd(eC + threadIdx.x, cachedSelected);
+                atomicAdd(gMeC + threadIdx.x, __fdividef(static_cast<ElementC>(cachedSelected),
                     static_cast<ElementC>(sl)));
             }
             __syncthreads();
             #pragma unroll
             for (uint i = 0; i < bN; ++i) {
                 if (rTopK[i]) {
-                    bk.tP()[startIndices[i] + myIndices[i] - 1] =
+                    tP[startIndices[i] + myIndices[i] - 1] =
                         TokenIdxTuple{bM * cute::get<0>(tileCoord) + threadIdx.x, mCw};
                 }
             }
@@ -407,7 +413,12 @@ namespace aristos::gate {
             const auto sC = cute::make_tensor(cute::make_smem_ptr(gateScratch), sCLay);
             typename BlockGEMM::MMA tiledMMA{};
             const auto tCsC = tiledMMA.get_slice(threadIdx.x).partition_C(sC);
+            // cache
             const auto nx = bk.nx;
+            auto* __restrict__ tP = bk.tP();
+            auto* __restrict__ eC = bk.eC();
+            auto* __restrict__ gMeC = bk.gMeC();
+            auto* __restrict__ gML = bk.gML();
 
             // Begin softmax
             // using notation from https://courses.cs.washington.edu/courses/cse599m/23sp/notes/flashattn.pdf
@@ -478,7 +489,7 @@ namespace aristos::gate {
                 // Only the first warp aggregates atomically, as other warps have garbage values
                 #pragma unroll
                 for (uint i = 0; i < bN / wS; ++i) {
-                    atomicAdd(bk.gML() + (threadIdx.x + i * wS), __fdividef(cache[i], sl));
+                    atomicAdd(gML + (threadIdx.x + i * wS), __fdividef(cache[i], sl));
                 }
             }
 
@@ -547,15 +558,15 @@ namespace aristos::gate {
             }
 
             if (threadIdx.x < bN) {
-                startIndices[threadIdx.x] = atomicAdd(bk.eC() + threadIdx.x, cachedSelected);
-                atomicAdd(bk.gMeC() + threadIdx.x, __fdividef(static_cast<ElementC>(cachedSelected),
+                startIndices[threadIdx.x] = atomicAdd(eC + threadIdx.x, cachedSelected);
+                atomicAdd(gMeC() + threadIdx.x, __fdividef(static_cast<ElementC>(cachedSelected),
                     static_cast<ElementC>(sl)));
             }
             __syncthreads();
             #pragma unroll
             for (uint i = 0; i < bN; ++i) {
                 if (rTopK[i]) {
-                    bk.tP()[startIndices[i] + myIndices[i] - 1] =
+                    tP()[startIndices[i] + myIndices[i] - 1] =
                         TokenIdxTuple{bM * cute::get<0>(tileCoord) + threadIdx.x, mCw};
                 }
             }
@@ -607,10 +618,16 @@ namespace aristos::gate {
         __syncthreads();
 
         // Compute Gate loss
-        for (unsigned int i = threads * blockIdx.x + threadIdx.x; i < moeConfig.numExperts; i+= threads * blocks) {
-            const auto me = bk.gML()[i];
-            const auto ce = bk.gMeC()[i];
-            atomicAdd(bk.gL(),__fdividef(me * ce, static_cast<mp_t>(moeConfig.numExperts)));
+        const auto nx = bk.nx;
+        const auto* __restrict__ gMeC = bk.gMeC();
+        const auto* __restrict__ gML = bk.gML();
+        auto* __restrict__ gBK = bk.gateBk();
+        auto* __restrict__ gL = bk.gL();
+
+        for (unsigned int i = threads * blockIdx.x + threadIdx.x; i < nx; i+= threads * blocks) {
+            const auto me = gML[i];
+            const auto ce = gMeC[i];
+            atomicAdd(gL(),__fdividef(me * ce, static_cast<mp_t>(nx)));
         }
 
         // wipe flags clean for next iteration
@@ -618,11 +635,11 @@ namespace aristos::gate {
         const auto fE = bk.brs / sizeof(Bookkeeping::BookType);
         const auto vBRs = fE / vF;
         for (unsigned int i = threads * blockIdx.x + threadIdx.x; i < vBRs; i+= threads * blocks) {
-            bk.gateBk()[i] = uint4{0U, 0U, 0U, 0U};
+            gBK[i] = uint4{0U, 0U, 0U, 0U};
         }
 
         for (unsigned int i = threads * blockIdx.x + threadIdx.x + vBRs * vF; i < fE; i += threads * blocks) {
-            CAST_TO(uint, bk.gateBk())[i] = 0U;
+            CAST_TO(uint, gBK)[i] = 0U;
         }
     }
 }
