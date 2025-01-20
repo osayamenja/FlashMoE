@@ -11,6 +11,40 @@
 #include "../types.cuh"
 
 namespace aristos::scheduler {
+    template<unsigned int processors, typename WSet>
+    requires(processors > 0 && isRegisterV<WSet>)
+    __device__ __forceinline__
+    void schedule(WSet& wSet, const uint& cSetB,
+    const uint& canSchedule, const uint& taskIdx, uint& lRQIdx,
+    const uint& gRQIdx, uint* __restrict__ const& rQ,
+    unsigned int* __restrict__ const& pDB) {
+        for (uint k = 0; k < cSetB; ++k) {
+            #pragma unroll
+            for (uint l = 0; l < WSet::kElements; ++l) {
+                wSet[l] = rQ[(gRQIdx + lRQIdx++) % processors];
+            }
+            #pragma unroll
+            for (uint l = 0; l < WSet::kElements; ++l) {
+                // signal processor
+                atomicExch(pDB + wSet[l], taskIdx + (k * WSet::kElements + l));
+            }
+        }
+        // Residual scheduling
+        const auto residue = canSchedule - cSetB * WSet::kElements;
+        #pragma unroll
+        for (uint l = 0; l < WSet::kElements; ++l) {
+            if (l < residue) {
+                wSet[l] = rQ[(gRQIdx + lRQIdx++) % processors];
+            }
+        }
+        #pragma unroll
+        for (uint l = 0; l < WSet::kElements; ++l) {
+            if (l < residue) {
+                atomicExch(pDB + wSet[l], taskIdx + (cSetB * WSet::kElements + l));
+            }
+        }
+    }
+
     template<
         unsigned int processors,
         typename WarpScan = cub::WarpScan<uint>,
@@ -18,13 +52,15 @@ namespace aristos::scheduler {
         unsigned int subscribers = 128 - wS,
         unsigned int sL = subscribers / wS,
         typename SQState,
-        typename TQState
+        typename TQState,
+        typename WSet
     >
     requires (processors > 0 && wS == 32 &&
         cuda::std::is_same_v<WarpScan, cub::WarpScan<uint>> &&
-        isRegisterV<SQState> && isRegisterV<TQState> && subscribers % wS == 0)
+        isRegisterV<SQState> && isRegisterV<TQState> && isRegisterV<WSet> &&
+        subscribers % wS == 0)
     __device__ __forceinline__
-    void schedulerLoop(SQState& sQState, TQState& tqState,
+    void schedulerLoop(SQState& sQState, TQState& tqState, WSet& wSet,
         const unsigned int& tQRl,
         uint& lTt, uint& taskTally, uint& processorTally,
         uint& gRQIdx, bool& pTEpilog, uint& scheduled,
@@ -92,30 +128,24 @@ namespace aristos::scheduler {
                     #pragma unroll
                     for (uint j = 0; j < sL; ++j) {
                         if (tqState[j].tasks && tasksToSchedule) {
-                            tqState[j].tasks = 0U;
                             const auto canSchedule = cute::min(tasksToSchedule, tqState[j].tasks);
                             tasksToSchedule -= canSchedule;
                             tqState[j].tasks -= canSchedule;
                             const auto taskIdx = j * wS + threadIdx.x + tqState[j].tQTail;
-                            for (uint k = 0; k < canSchedule; ++k) {
-                                // signal processor
-                                atomicExch(pDB + rQ[gRQIdx + lRQIdx++ % processors], taskIdx + k);
-                            }
+                            const auto cSetB = canSchedule / WSet::kElements;
+                            schedule<processors>(wSet, cSetB, canSchedule, taskIdx, lRQIdx, gRQIdx, rQ, pDB);
                         }
                     }
                 }
                 #pragma unroll
                 for (uint j = sL; j < TQState::kElements; ++j) {
                     if (tqState[j].tasks && tasksToSchedule) {
-                        tqState[j].tasks = 0U;
                         const auto canSchedule = cute::min(tasksToSchedule, tqState[j].tasks);
                         tasksToSchedule -= canSchedule;
                         tqState[j].tasks -= canSchedule;
                         const auto taskIdx = tQRl * subscribers + (j - sL) * wS + threadIdx.x + tqState[j].tQTail;
-                        for (uint k = 0; k < canSchedule; ++k) {
-                            // signal processor
-                            atomicExch(pDB + rQ[gRQIdx + lRQIdx++ % processors], taskIdx + k);
-                        }
+                        const auto cSetB = canSchedule / WSet::kElements;
+                        schedule<processors>(wSet, cSetB, canSchedule, taskIdx, lRQIdx, gRQIdx, rQ, pDB);
                     }
                 }
             }
@@ -161,7 +191,8 @@ namespace aristos::scheduler {
         uint taskTally = 0U;
         uint processorTally = processors; // initially, all processors are available, ensure that rQ has all pids
         bool pTEpilog = false;
-        while (scheduled < atomicLoad<cuda::thread_scope_block>(taskBound)) {
+        auto tTB = atomicLoad<cuda::thread_scope_block>(taskBound);
+        while (scheduled < tTB) {
             // statically sweep tQ for tasks
             uint lTt = 0U; // local task tally
             #pragma unroll
@@ -215,7 +246,12 @@ namespace aristos::scheduler {
             }
             // schedule observed tasks
             schedulerLoop<processors>(sQState, tqState, tQRl, lTt, taskTally,
-                processorTally, gRQIdx, pTEpilog, scheduled, wSt, sQ, rQ, pDB, dT == 0);
+                processorTally, gRQIdx, pTEpilog, scheduled,
+                wSt, sQ, rQ, pDB, dT == 0);
+            if (!threadIdx.x) {
+                tTB = atomicLoad<cuda::thread_scope_block>(taskBound);
+            }
+            tTB = __shfl_sync(0xffffffff, tTB, 0);
         }
     }
 }

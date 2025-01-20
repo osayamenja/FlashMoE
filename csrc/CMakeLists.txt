@@ -74,7 +74,6 @@ add_executable(csrc main.cu
         bench.cuh
         eval.cuh
         include/arch.cuh
-        include/os/observer.cuh
         include/os/os.cuh
 )
 set_target_properties(csrc PROPERTIES
