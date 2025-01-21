@@ -84,8 +84,6 @@ namespace aristos::packet {
         __syncthreads();
 
         for (uint expertIdx = superBlockIdx; expertIdx < nx; expertIdx += numSuperBlocks) {
-            // prefix array of routed tokens
-            // logical expert index
             const auto pLIdx = xLs[expertIdx]; // local index for current expert on peer
             const auto routedTokens = d == DropTokens::yes ?
                 cute::min(expertCounts[expertIdx], eCap) : expertCounts[expertIdx];
@@ -188,7 +186,6 @@ namespace aristos::packet {
             unsigned int* __restrict__ const& gTQHead) const {
 
             auto* __restrict__ sHeap = moeConfig.sHeap;
-            auto* __restrict__ flags = moeConfig.flags;
             const auto cellSize = moeConfig.cellSize;
             const auto expertSlots = moeConfig.expertSlots;
             const auto tN = bk.tN;
@@ -215,7 +212,9 @@ namespace aristos::packet {
             taskResults[1] = p == PeerConnectivity::remote ?
                 heap::advance<1, 0>(sHeap, cellSize, expertSlots, tokenSize, peer, localExpertIdx) :
             heap::advance<1, 1>(sHeap, cellSize, expertSlots, tokenSize, peer, localExpertIdx);
-
+            constexpr auto uF = 16;
+            const auto tMb = fTilesM / uF;
+            const auto tNb = tN  / uF;
             for (uint i = 0; i < fTilesM; ++i) {
                 for (uint j = 0; j < tN; ++j) {
                     const auto tileIdx = j + i * tN;
