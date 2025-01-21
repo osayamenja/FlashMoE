@@ -15,7 +15,7 @@
 namespace aristos::subscriber{
     ///Receive and decode packets deposited
     template<
-        unsigned int subscriberCount = THREADS - 2,
+        unsigned int subscriberCount = SUBSCRIBERS,
         typename ExpertsTensor,
         typename BiasTensor,
         typename Activations,
@@ -34,7 +34,7 @@ namespace aristos::subscriber{
         const unsigned int& rEl, // number of remote peers
         unsigned int* __restrict__ const& status,
         unsigned int* __restrict__ const& taskCount,
-        const Config& mC, const SchedulerConfig& sC,
+        const Bookkeeping& bk,
         Activations const& activations,
         ExpertsTensor const& experts,
         BiasTensor const& biasT){
@@ -46,54 +46,65 @@ namespace aristos::subscriber{
             __isShared(&sC) &&
             __isShared(interrupt) &&
             __isShared(status) && __isShared(taskCount));*/
-        
+
+        const auto dA = packet::DecoderArg{
+            moeConfig.sHeap,
+            bk.tQ(),
+            moeConfig.cellSize,
+            bk.eCap,
+            moeConfig.embedDim,
+            bk.tPs,
+            bk.tN,
+            Config::tiles<BLOCK_N>(bk.px),
+            moeConfig.expertSlots,
+            bk.nx
+        };
+
         // each thread gets 64 bytes of workspace
         constexpr auto wSet = 16U; // working set size
-        const auto eC = mC.expertCapacity;
         cutlass::AlignedArray<unsigned int, wSet> rWSet{};
 
         // token indices
-        auto* __restrict__ tokenIds = mC.tIdx();
+        auto* __restrict__ tokenIds = bk.tP();
 
         // tQ things
-        auto* __restrict__ gTQHead = sC.tQHeads + threadIdx.x;
+        auto* __restrict__ gTQHead = bk.tQH() + subscriberCount + threadIdx.x;
         auto lTQHead = 0U; // local tQ Head
 
         // pointers
         auto* __restrict__ sharedSpace = CAST_TO(unsigned int, workspace);
-        auto* __restrict__ sFlags = mC.flags;
-        auto* __restrict__ pGB = mC.xMid<Element>(); // post GEMM buffer
+        auto* __restrict__ sFlags = moeConfig.flags;
+        auto* __restrict__ pGB = bk.xM(); // post GEMM buffer
 
         // Constants
-        const auto sequenceNumber = seqNo;
-        const auto nX = mC.numLocalExperts;
+        const auto lSeqBit = seqBit;
+        const auto nLx = bk.nLx;
 
         // first stage
-        const auto fSfC = mC.worldSize * nX; // first stage flag count
+        const auto fSfC = bk.world * nLx; // first stage flag count
         const auto fSl = fSfC / subscriberCount + (threadIdx.x < fSfC % subscriberCount);
         const auto fSt = fSl / wSet;
         auto fSp = fSl; // first stage pending
 
         // second stage: remote
-        const auto tilesMc = Config::tiles<BLOCK_M>(mC.expertCapacity);
+        const auto tilesMc = Config::tiles<BLOCK_M>(dA.eCap);
         const auto sRfC = rEl * tilesMc;
         const auto sRl = sRfC / subscriberCount + (threadIdx.x < sRfC % subscriberCount);
         const auto sRt = sRl / wSet;
 
         // second stage: p2p
-        const auto tilesN = mC.tilesN;
-        const auto sPfC = (mC.numExperts - rEl) * tilesMc * tilesN;
+        const auto sPfC = (dA.nx - rEl) * tilesMc * dA.tN;
         const auto sPl = sPfC / subscriberCount + (threadIdx.x < sPfC % subscriberCount);
         const auto sPt = sPl / wSet;
-        const auto iPfS = cute::make_shape(tilesMc, tilesN);
-        const auto fS = make_shape(mC.numExperts - rEl, iPfS);
-        const auto fStride = make_stride(size(iPfS), cute::make_stride(tilesN, 1));
+        const auto iPfS = cute::make_shape(tilesMc, dA.tN);
+        const auto fS = make_shape(dA.nx - rEl, iPfS);
+        const auto fStride = make_stride(size(iPfS), cute::make_stride(dA.tN, 1));
 
-        auto* __restrict__ ffC = mC.fCheck(); // flags checkpoint
+        auto* __restrict__ ffC = bk.fC(); // flags checkpoint
         auto* __restrict__ rfC = ffC + fSfC; // second stage: remote flags checkpoint
         auto* __restrict__ pfC = rfC + sRfC; // second stage: p2p flags checkpoint
 
-        // Decoders
+        // Decoder stuff
         packet::Decoder<PacketStage::initial, PeerConnectivity::p2p, Element> fPd{};
         packet::Decoder<PacketStage::initial, PeerConnectivity::remote, Element> fRd{};
         packet::Decoder<PacketStage::last, PeerConnectivity::p2p> lPd{};
@@ -125,13 +136,13 @@ namespace aristos::subscriber{
                             // we need to check this flag
                             auto signal = atomicLoad<cuda::thread_scope_system>(
                                 CAST_TO(unsigned long long int, flags + flagIdx));
-                            const auto sP = CAST_TO(SignalPayload<PacketStage::initial>, &signal);
-                            rWSet[j] = sP->seqNo == sequenceNumber;
+                            const auto sP = CAST_TO(SignalPayload<>, &signal);
+                            rWSet[j] = sP->seqBit == lSeqBit;
                             fSp -= rWSet[j];
                             if (rWSet[j]) {
                                 // decode the received packet
-                                auto expertIdx = flagIdx % nX;
-                                auto peerIdx = flagIdx / nX;
+                                auto expertIdx = flagIdx % nLx;
+                                auto peerIdx = flagIdx / nLx;
                                 cuda::std::array weights{
                                     CAST_TO(cuda::std::byte, &experts(expertIdx, 0)),
                                     CAST_TO(cuda::std::byte, &experts(expertIdx, 1))
@@ -140,14 +151,15 @@ namespace aristos::subscriber{
                                     CAST_TO(cuda::std::byte, &biasT(expertIdx, 0)),
                                     CAST_TO(cuda::std::byte, &biasT(expertIdx, 1))
                                 };
-                                auto* __restrict__ packet = mC.advanceHeap<0, 1, sizeof(Element)>(peerIdx, expertIdx);
+                                auto* __restrict__ packet = heap::advance<0, 1, sizeof(Element)>(dA.sHeap, dA.cellSize,
+                                    dA.expertSlots, dA.tokenSize, peerIdx, expertIdx);
                                 if (nvshmem_ptr(packet, peerTranslation[peerIdx]) != nullptr) {
                                     // P2P peer
                                     // Enforce consistency
                                     // before decoding the packet
                                     __threadfence_system();
-                                    fPd(packet, status, taskCount, expertIdx, pGB, weights, bias,
-                                        peerIdx, lTQHead, gTQHead);
+                                    fPd(dA, packet, status, taskCount, sP->routedTokens, sP->totalTilesM,
+                                        expertIdx, pGB, weights, bias, peerIdx, lTQHead, gTQHead);
                                 }
                                 else {
                                     // Remote peer
@@ -155,9 +167,9 @@ namespace aristos::subscriber{
                                     // before reading the packet
                                     // we cannot decouple the API, unfortunately,
                                     // as the consistency function is internal.
-                                    nvshmem_ushort_test(&sP->seqNo, NVSHMEM_CMP_EQ, sequenceNumber);
-                                    fRd(packet, status, taskCount, expertIdx, pGB, weights, bias,
-                                        peerIdx, lTQHead, gTQHead);
+                                    nvshmem_ushort_test(&sP->seqBit, NVSHMEM_CMP_EQ, lSeqBit);
+                                    fRd(dA, packet, status, taskCount, sP->routedTokens, sP->totalTilesM,
+                                        expertIdx, pGB, weights, bias, peerIdx, lTQHead, gTQHead);
                                 }
                             }
                         }
@@ -186,13 +198,13 @@ namespace aristos::subscriber{
                             // we need to check this flag
                             auto signal = atomicLoad<cuda::thread_scope_system>(
                                     CAST_TO(unsigned long long int, flags + flagIdx));
-                            const auto sP = CAST_TO(SignalPayload<PacketStage::initial>, &signal);
-                            rWSet[j] = sP->seqNo == sequenceNumber;
+                            const auto sP = CAST_TO(SignalPayload<>, &signal);
+                            rWSet[j] = sP->seqBit == lSeqBit;
                             fSp -= rWSet[j];
                             if (rWSet[j]) {
                                 // decode the received packet
-                                auto expertIdx = flagIdx % nX;
-                                auto peerIdx = flagIdx / nX;
+                                auto expertIdx = flagIdx % nLx;
+                                auto peerIdx = flagIdx / nLx;
                                 cuda::std::array weights{
                                     CAST_TO(cuda::std::byte, &experts(expertIdx, 0)),
                                     CAST_TO(cuda::std::byte, &experts(expertIdx, 1))
@@ -202,17 +214,18 @@ namespace aristos::subscriber{
                                     CAST_TO(cuda::std::byte, &biasT(expertIdx, 1))
                                 };
 
-                                if (auto* packet = mC.advanceHeap<0, 1, sizeof(Element)>(peerIdx, expertIdx);
+                                if (auto* packet = heap::advance<0, 1, sizeof(Element)>(dA.sHeap, dA.cellSize,
+                                    dA.expertSlots, dA.tokenSize, peerIdx, expertIdx);
                                     nvshmem_ptr(packet, peerTranslation[peerIdx]) != nullptr) {
                                     // Enforce consistency before decoding the packet
                                     __threadfence_system();
-                                    fPd(packet, status, taskCount, expertIdx, pGB, weights, bias,
-                                        peerIdx, lTQHead, gTQHead);
+                                    fPd(dA, packet, status, taskCount, sP->routedTokens, sP->totalTilesM,
+                                        expertIdx, pGB, weights, bias, peerIdx, lTQHead, gTQHead);
                                 }
                                 else {
-                                    nvshmem_ushort_test(&sP->seqNo, NVSHMEM_CMP_EQ, sequenceNumber);
-                                    fRd(packet, status, taskCount, expertIdx, pGB, weights, bias,
-                                        peerIdx, lTQHead, gTQHead);
+                                    nvshmem_ushort_test(&sP->seqBit, NVSHMEM_CMP_EQ, lSeqBit);
+                                    fRd(bk, packet, status, taskCount, sP->routedTokens, sP->totalTilesM,
+                                        expertIdx, pGB, weights, bias, peerIdx, lTQHead, gTQHead);
                                 }
                             }
                         }
@@ -255,16 +268,16 @@ namespace aristos::subscriber{
                         // we do not necessarily need
                         // to transmit batchIdx as we can deduce it locally
                         const auto sP = CAST_TO(SignalPayload<PacketStage::last>, &signal);
-                        rWSet[j] = sP->seqNo == sequenceNumber;
+                        rWSet[j] = sP->seqBit == lSeqBit;
                         fSp -= rWSet[j];
                         if (rWSet[j]) {
                             // enforce remote memory consistency
-                            nvshmem_ushort_test(&sP->seqNo, NVSHMEM_CMP_EQ, sequenceNumber);
+                            nvshmem_ushort_test(&sP->seqBit, NVSHMEM_CMP_EQ, lSeqBit);
                             const auto [aEIdx, lEIdx, pIdx] = rE[flagIdx / tilesMc];
-                            auto* __restrict__ packet = mC.advanceHeap<1, 1, sizeof(Element)>(pIdx, lEIdx,
-                                sP->batchIdx * BLOCK_M);
-                            lRd(packet, CAST_TO(cuda::std::byte, tokenIds + (aEIdx * eC + sP->batchIdx * BLOCK_M)),
-                                CAST_TO(cuda::std::byte, activations.data()), sP->tokensM, lTQHead, gTQHead);
+                            auto* __restrict__ packet = heap::advance<1, 1, sizeof(Element)>(dA.sHeap, dA.cellSize,
+                                dA.expertSlots, dA.tokenSize, pIdx, lEIdx, sP->batchIdx * BLOCK_M);
+                            lRd(dA, packet, CAST_TO(cuda::std::byte, tokenIds + (aEIdx * dA.eCap + sP->batchIdx * BLOCK_M)),
+                                CAST_TO(cuda::std::byte, activations.data()), sP->tokensM, lTQHead, gTQHead, aEIdx);
                         }
                     }
                 }
@@ -290,17 +303,18 @@ namespace aristos::subscriber{
                                 CAST_TO(unsigned long long int, flags + flagIdx));
                         // SignalPayload -> {batchIdx, {seqNo, M}}, where M <= BLOCK_M
                         const auto sP = CAST_TO(SignalPayload<PacketStage::last>, &signal);
-                        rWSet[j] = sP->seqNo == sequenceNumber;
+                        rWSet[j] = sP->seqBit == lSeqBit;
                         fSp -= rWSet[j];
                         if (rWSet[j]) {
                             // enforce remote memory consistency
-                            nvshmem_ushort_test(&sP->seqNo, NVSHMEM_CMP_EQ, sequenceNumber);
+                            nvshmem_ushort_test(&sP->seqBit, NVSHMEM_CMP_EQ, lSeqBit);
                             const auto [aEIdx, lEIdx, pIdx] = rE[flagIdx / tilesMc];
-                            auto* __restrict__ packet = mC.advanceHeap<1, 1, sizeof(Element)>(pIdx, lEIdx,
-                                sP->batchIdx * BLOCK_M);
-                            lRd(packet, CAST_TO(cuda::std::byte, tokenIds + (aEIdx * eC + sP->batchIdx * BLOCK_M)),
+                            auto* __restrict__ packet = heap::advance<1, 1, sizeof(Element)>(dA.sHeap, dA.cellSize,
+                                dA.expertSlots, dA.tokenSize,
+                                pIdx, lEIdx, sP->batchIdx * BLOCK_M);
+                            lRd(dA, packet, CAST_TO(cuda::std::byte, tokenIds + (aEIdx * dA.eCap + sP->batchIdx * BLOCK_M)),
                                 CAST_TO(cuda::std::byte, activations.data()),
-                                sP->tokensM, lTQHead, gTQHead);
+                                sP->tokensM, lTQHead, gTQHead, aEIdx);
                         }
                     }
                 }
@@ -338,7 +352,7 @@ namespace aristos::subscriber{
                                 CAST_TO(unsigned long long int, flags + flagIdx));
                         // SignalPayload -> {batchIdx, {seqNo, M}}, where M <= BLOCK_M
                         const auto sP = CAST_TO(SignalPayload<PacketStage::last>, &signal);
-                        rWSet[j] = sP->seqNo == sequenceNumber;
+                        rWSet[j] = sP->seqBit == lSeqBit;
                         fSp -= rWSet[j];
                         if (rWSet[j]) {
                             // enforce memory consistency
@@ -346,11 +360,12 @@ namespace aristos::subscriber{
                             // [index to nRe, batchIdx, tileIdx]
                             const auto coord = idx2crd(flagIdx, fS, fStride);
                             const auto [aEIdx, lEIdx, pIdx] = nRe[cute::get<0>(coord)];
-                            auto* __restrict__ packet = mC.advanceHeap<1, 1, sizeof(Element)>(pIdx, lEIdx,
-                                sP->batchIdx * BLOCK_M);
-                            lPd(packet, CAST_TO(cuda::std::byte, tokenIds + (aEIdx * eC + sP->batchIdx * BLOCK_M)),
-                                CAST_TO(cuda::std::byte, activations.data()), sP->tokensM, lTQHead,
-                                cute::get<2>(coord), gTQHead);
+                            auto* __restrict__ packet = heap::advance<1, 1, sizeof(Element)>(dA.sHeap, dA.cellSize,
+                                dA.expertSlots, dA.tokenSize,
+                                pIdx, lEIdx, sP->batchIdx * BLOCK_M);
+                            lPd(dA.tQ + (threadIdx.x * dA.tPs + lTQHead++), packet, CAST_TO(cuda::std::byte, tokenIds + (aEIdx * dA.eCap + sP->batchIdx * BLOCK_M)),
+                                CAST_TO(cuda::std::byte, activations.data()), sP->tokensM,
+                                cute::get<2>(coord), gTQHead, aEIdx);
                         }
                     }
                 }
@@ -375,7 +390,7 @@ namespace aristos::subscriber{
                                 CAST_TO(unsigned long long int, flags + flagIdx));
                         // SignalPayload -> {batchIdx, {seqNo, M}}, where M <= BLOCK_M
                         const auto sP = CAST_TO(SignalPayload<PacketStage::last>, &signal);
-                        rWSet[j] = sP->seqNo == sequenceNumber;
+                        rWSet[j] = sP->seqBit == lSeqBit;
                         fSp -= rWSet[j];
                         if (rWSet[j]) {
                             // enforce memory consistency
@@ -383,11 +398,11 @@ namespace aristos::subscriber{
                             // [index to nRe, batchIdx, tileIdx]
                             const auto coord = idx2crd(flagIdx, fS, fStride);
                             const auto [aEIdx, lEIdx, pIdx] = nRe[cute::get<0>(coord)];
-                            auto* __restrict__ packet = mC.advanceHeap<1, 1, sizeof(Element)>(pIdx, lEIdx,
+                            auto* __restrict__ packet = heap::advance<1, 1, sizeof(Element)>(pIdx, lEIdx,
                                 sP->batchIdx * BLOCK_M);
-                            lPd(packet, CAST_TO(cuda::std::byte, tokenIds + (aEIdx * eC + sP->batchIdx * BLOCK_M)),
-                                CAST_TO(cuda::std::byte, activations.data()), sP->tokensM, lTQHead,
-                                cute::get<2>(coord), gTQHead);
+                            lPd(dA.tQ + (threadIdx.x * dA.tPs + lTQHead++), packet, CAST_TO(cuda::std::byte, tokenIds + (aEIdx * dA.eCap + sP->batchIdx * BLOCK_M)),
+                                CAST_TO(cuda::std::byte, activations.data()), sP->tokensM,
+                                cute::get<2>(coord), gTQHead, aEIdx);
                         }
                     }
                 }

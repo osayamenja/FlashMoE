@@ -24,7 +24,8 @@
 // Hardware description
 #define MIN_ARCH 700U
 #define THREADS 128U
-#define SUBSCRIBERS (THREADS - 2U)
+#define WARP_SIZE 32U
+#define SUBSCRIBERS (THREADS - WARP_SIZE)
 // GEMM configuration constants
 #define BLOCK_M 128U
 #define BLOCK_M_EXP 64U
@@ -387,6 +388,8 @@ namespace aristos{
         /// gRl + gB + eDsA + sBfC + brs
         unsigned long int bookSize;
 
+        /// Task Q length per producer
+        unsigned int tPs;
         /// Task Q maximum length
         unsigned int tQl;
         /// EP world
@@ -446,7 +449,8 @@ namespace aristos{
                 sBfC = eDsA + sizeof(BookType) * (3 * blocks + SUBSCRIBERS + (world * nLx * tCM)) + fCl;
                 // maximum gemm tiles/tasks scheduled by subscriber threads
                 auto sT = world * nLx * tCM * tN + tCM * tN * nx;
-                sT = sT / SUBSCRIBERS * SUBSCRIBERS;
+                tPs = cute::ceil_div(sT, SUBSCRIBERS);
+                sT = tPs * SUBSCRIBERS;
                 // maximum gemm tiles/tasks scheduled by processors
                 const auto pT = world * nLx * tCM * Config::tiles<BLOCK_N>(pd);
                 tQl = sizeof(Task) * (sT + pT);
@@ -480,7 +484,7 @@ namespace aristos{
             const auto sBfC = eDsA + sizeof(BookType) * (3 * _blocks + THREADS - 2 + _world * _nLx * tCM) + fCl;
             // maximum gemm tiles/tasks scheduled by subscriber threads
             auto sT = _world * _nLx * tCM * tN + tCM * tN * _nx;
-            sT = sT / SUBSCRIBERS * SUBSCRIBERS;
+            sT = cute::ceil_div(sT, SUBSCRIBERS) * SUBSCRIBERS;
             // maximum gemm tiles/tasks scheduled by processors
             const auto pT = _world * _nLx * tCM * Config::tiles<BLOCK_N>(_pd);
             const auto tQl = sizeof(Task) * (sT + pT);
@@ -587,7 +591,7 @@ namespace aristos{
         }
 
         // Intermediate buffer
-        template<typename Element>
+        template<typename Element = cuda::std::byte>
         __device__ __forceinline__
         auto* xM() const {
             return CAST_TO(Element, tQ() + tQl);

@@ -91,8 +91,8 @@ namespace aristos::packet {
             const auto pTT = cute::min(peerTotalTokens[peer], eCap);
             const auto isRemote = nvshmem_ptr(sHeap, peer) == nullptr;
             auto* __restrict__ peerHeap = static_cast<cuda::std::byte*>(isRemote ?
-                heap::advance<0, 0>(sHeap, cellSize, expertSlots, tokenDim, peer, pLIdx):
-                nvshmem_ptr(heap::advance<0, 1>(sHeap, cellSize, expertSlots, tokenDim, peer, pLIdx), peer));
+                heap::advance<0, 0, sizeof(Element)>(sHeap, cellSize, expertSlots, tokenDim, peer, pLIdx):
+                nvshmem_ptr(heap::advance<0, 1, sizeof(Element)>(sHeap, cellSize, expertSlots, tokenDim, peer, pLIdx), peer));
             if (!routedTokens) {
                 if (isLeader && !pTT) {
                     // single thread sends a noop packet to unblock the remote peer
@@ -161,6 +161,35 @@ namespace aristos::packet {
         }
     }
 
+    // Resident in registers
+    struct __align__(16) DecoderArg {
+        cuda::std::byte* sHeap;
+        Task* tQ;
+        const unsigned int cellSize;
+        const unsigned int eCap;
+        const unsigned int tokenSize;
+        const unsigned int tPs;
+        const unsigned int tN;
+        const unsigned int tNx;
+        const unsigned int expertSlots;
+        const unsigned int nx;
+
+        DecoderArg(
+            cuda::std::byte* const& _sHeap,
+            Task* const& _tQ,
+            unsigned int const& _cellSize,
+            unsigned int const& _eCap,
+            unsigned int const& _tokenSize,
+            unsigned int const& _tPs,
+            unsigned int const& _tN,
+            unsigned int const& _tNx,
+            unsigned int const& _expertSlots,
+            unsigned int const& _nx) :
+        sHeap(_sHeap), tQ(_tQ), cellSize(_cellSize),
+        eCap(_eCap), tokenSize(_tokenSize), tPs(_tPs), tN(_tN),
+        tNx(_tNx), expertSlots(_expertSlots), nx(_nx) {}
+    };
+
     /// Decodes a single packet from the initial stage
     template<
         PacketStage s,
@@ -172,7 +201,7 @@ namespace aristos::packet {
         static_assert(aristos::TensorValueType<Element> && aristos::TensorValueType<ElementScale>);
         static_assert(s == PacketStage::initial);
         __device__ __forceinline__
-        void operator()(Bookkeeping const& bk,
+        void operator()(const DecoderArg& dA,
             cuda::std::byte* __restrict__ const& packet,
             unsigned int* __restrict__ const& status,
             unsigned int* __restrict__ const& taskCount,
@@ -184,40 +213,30 @@ namespace aristos::packet {
             unsigned int const& peer, // relative to the EP group
             unsigned int& lTQHead,
             unsigned int* __restrict__ const& gTQHead) const {
-
-            auto* __restrict__ sHeap = moeConfig.sHeap;
-            const auto cellSize = moeConfig.cellSize;
-            const auto expertSlots = moeConfig.expertSlots;
-            const auto tN = bk.tN;
-            const auto tNx = moeConfig.tilesNx;
-            const auto eCap = bk.eCap;
-            const auto nx = bk.nx;
-            const auto tokenSize = moeConfig.embedDim;
-            auto* __restrict__ tQ = bk.tQ();
+            //assert(!__isShared(&dA) && !__isGlobal(&dA) && !__isLocal(&dA))
+            auto* __restrict__ sHeap = dA.sHeap;
+            auto* __restrict__ tQ = dA.tQ + (threadIdx.x * dA.tPs + lTQHead);
             const auto fTilesM = routedTokens / BLOCK_M;
             const auto padM = Config::pad<BLOCK_M>(routedTokens);
 
             if (!atomicTAS<cuda::thread_scope_block>(status + peer)) {
                 // atomically reduce taskCount
-                const auto superfluous = (tN + tNx) * (Config::tiles<BLOCK_M>(eCap) - globalTaskTiles);
+                const auto superfluous = (dA.tN + dA.tNx) * (Config::tiles<BLOCK_M>(dA.eCap) - globalTaskTiles);
                 atomicSub_block(taskCount, superfluous);
             }
 
             // expert, peer offset
-            const auto pXo = eCap * (peer * nx + localExpertIdx);
+            const auto pXo = dA.eCap * (peer * dA.nx + localExpertIdx);
             cuda::std::array<cuda::std::byte*, GEMMs> taskResults{};
             // Staging buffer for results of preGEMM
-            taskResults[0] = pGB + pXo * tokenSize * sizeof(Element);
+            taskResults[0] = pGB + pXo * dA.tokenSize * sizeof(Element);
             // Egress packet buffer
             taskResults[1] = p == PeerConnectivity::remote ?
-                heap::advance<1, 0>(sHeap, cellSize, expertSlots, tokenSize, peer, localExpertIdx) :
-            heap::advance<1, 1>(sHeap, cellSize, expertSlots, tokenSize, peer, localExpertIdx);
-            constexpr auto uF = 16;
-            const auto tMb = fTilesM / uF;
-            const auto tNb = tN  / uF;
+                heap::advance<1, 0>(sHeap, dA.cellSize, dA.expertSlots, dA.tokenSize, peer, localExpertIdx) :
+            heap::advance<1, 1>(sHeap, dA.cellSize, dA.expertSlots, dA.tokenSize, peer, localExpertIdx);
             for (uint i = 0; i < fTilesM; ++i) {
-                for (uint j = 0; j < tN; ++j) {
-                    const auto tileIdx = j + i * tN;
+                for (uint j = 0; j < dA.tN; ++j) {
+                    const auto tileIdx = j + i * dA.tN;
                     tQ[tileIdx] = Task{
                         TaskType::preGEMM,
                         packet,
@@ -237,8 +256,8 @@ namespace aristos::packet {
 
             // residue tile
             if (const auto residue = routedTokens - fTilesM * BLOCK_M; residue) {
-                for (uint j = 0; j < tN; ++j) {
-                    const auto tileIdx = j + fTilesM * tN;
+                for (uint j = 0; j < dA.tN; ++j) {
+                    const auto tileIdx = j + fTilesM * dA.tN;
                     tQ[tileIdx] = Task{
                         TaskType::preGEMM,
                         packet,
@@ -258,7 +277,7 @@ namespace aristos::packet {
 
             if (routedTokens) {
                 __threadfence();
-                const auto totalTasks = Config::tiles<BLOCK_M>(routedTokens) * tN;
+                const auto totalTasks = Config::tiles<BLOCK_M>(routedTokens) * dA.tN;
                 lTQHead += totalTasks;
                 // notifies scheduler of work
                 atomicAdd_block(gTQHead, totalTasks);
@@ -270,16 +289,15 @@ namespace aristos::packet {
     template<>
     struct Decoder<PacketStage::last, PeerConnectivity::p2p> {
         __device__ __forceinline__
-        void operator()(cuda::std::byte* __restrict__ const& packet,
+        void operator()(Task* __restrict__ tQ,
+            cuda::std::byte* __restrict__ const& packet,
             cuda::std::byte* __restrict__ const& tokenIndices,
             cuda::std::byte* __restrict__ const& activations,
             const unsigned int& nTokens,
-            unsigned int& lTQHead,
             const unsigned int& tileIdx,
             unsigned int* __restrict__ const& gTQHead,
             const unsigned int& expertIdx) const {
             // now let's decode this single tile
-            auto* __restrict__ tQ = schedulerState.taskQ + lTQHead++;
             *tQ = Task{
                 TaskType::combine,
                 tokenIndices,
@@ -299,17 +317,17 @@ namespace aristos::packet {
     template<>
     struct Decoder<PacketStage::last, PeerConnectivity::remote> {
         __device__ __forceinline__
-        void operator()(cuda::std::byte* __restrict__ const& packet,
+        void operator()(const DecoderArg& dA,
+            cuda::std::byte* __restrict__ const& packet,
             cuda::std::byte* __restrict__ const& tokenIndices,
             cuda::std::byte* __restrict__ const& activations,
             const unsigned int& nTokens,
             unsigned int& lTQHead,
             unsigned int* __restrict__ const& gTQHead,
             const unsigned int& expertIdx) const {
-            auto* __restrict__ tQ = schedulerState.taskQ + lTQHead;
-            const auto tilesN = moeConfig.tilesN;
+            auto* __restrict__ tQ = dA.tQ + (threadIdx.x * dA.tPs + lTQHead);
             constexpr auto tB = 8;
-            const auto tBs = tilesN / tB;
+            const auto tBs = dA.tN / tB;
             for (uint i = 0; i < tBs; ++i) {
                 #pragma unroll
                 for (uint j = 0; j < tB; ++j) {
@@ -326,7 +344,7 @@ namespace aristos::packet {
                 }
             }
 
-            for (uint j = tBs * tB; j < tilesN; ++j) {
+            for (uint j = tBs * tB; j < dA.tN; ++j) {
                 tQ[j] = Task{
                     TaskType::combine,
                     tokenIndices,
@@ -340,7 +358,7 @@ namespace aristos::packet {
             }
 
             __threadfence();
-            lTQHead += tilesN;
+            lTQHead += dA.tN;
             // notifies scheduler
             atomicIncrement<cuda::thread_scope_block>(gTQHead);
         }

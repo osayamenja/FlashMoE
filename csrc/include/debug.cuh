@@ -10,6 +10,7 @@
 #include <cxxabi.h>
 namespace aristos{
     template<typename T>
+    __host__ __forceinline__
     void printType() {
         // Get the mangled name
         const char* mangledName = typeid(T).name();

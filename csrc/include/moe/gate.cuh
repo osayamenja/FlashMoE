@@ -12,6 +12,10 @@
 #include "../atomics.cuh"
 
 namespace aristos::gate {
+    // Resident in registers
+    struct __align__(16) GateArg{
+
+    };
     /// Fused GEMM, softmax, topKMask, and loss, assuming blocks >= tiles.N and no bias.
     /// Supporting the latter is trivial; the former requires a completely new algorithm
     template<

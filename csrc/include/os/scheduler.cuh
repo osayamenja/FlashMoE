@@ -218,7 +218,8 @@ namespace aristos::scheduler {
                 }
                 // schedule observed tasks
                 schedulerLoop<processors>(sQState, tqState, tQRl, lTt, taskTally,
-                    processorTally, gRQIdx, pTEpilog, scheduled, wSt, sQ, rQ, pDB, true);
+                    processorTally, gRQIdx, pTEpilog, scheduled,
+                    wSt, sQ, rQ, pDB, true);
 
                 for (uint i = 1; i < dT; ++i) {
                     // Needed to enforce register storage
@@ -231,7 +232,8 @@ namespace aristos::scheduler {
                     }
                     // schedule observed tasks
                     schedulerLoop<processors>(sQState, tqState, tQRl, lTt, taskTally,
-                        processorTally, gRQIdx, pTEpilog, scheduled, wSt, sQ, rQ, pDB);
+                        processorTally, gRQIdx, pTEpilog, scheduled,
+                        wSt, sQ, rQ, pDB);
                 }
             }
 
