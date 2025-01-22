@@ -38,6 +38,8 @@ namespace aristos::subscriber{
         Activations const& activations,
         ExpertsTensor const& experts,
         BiasTensor const& biasT){
+        // offset due to warp specialization for the scheduler
+        const auto tIdx = threadIdx.x - WARP_SIZE;
         static_assert(sizeof(unsigned long long int) == sizeof(flagsType));
         static_assert(sizeof(SignalPayload<>) == sizeof(uint64_t));
         static_assert(sizeof(SignalPayload<PacketStage::last>) == sizeof(uint64_t));
@@ -68,7 +70,7 @@ namespace aristos::subscriber{
         auto* __restrict__ tokenIds = bk.tP();
 
         // tQ things
-        auto* __restrict__ gTQHead = bk.tQH() + subscriberCount + threadIdx.x;
+        auto* __restrict__ tQHead = bk.tQH() + tIdx;
         auto lTQHead = 0U; // local tQ Head
 
         // pointers
@@ -82,19 +84,19 @@ namespace aristos::subscriber{
 
         // first stage
         const auto fSfC = bk.world * nLx; // first stage flag count
-        const auto fSl = fSfC / subscriberCount + (threadIdx.x < fSfC % subscriberCount);
+        const auto fSl = fSfC / subscriberCount + (tIdx < fSfC % subscriberCount);
         const auto fSt = fSl / wSet;
         auto fSp = fSl; // first stage pending
 
         // second stage: remote
         const auto tilesMc = Config::tiles<BLOCK_M>(dA.eCap);
         const auto sRfC = rEl * tilesMc;
-        const auto sRl = sRfC / subscriberCount + (threadIdx.x < sRfC % subscriberCount);
+        const auto sRl = sRfC / subscriberCount + (tIdx < sRfC % subscriberCount);
         const auto sRt = sRl / wSet;
 
         // second stage: p2p
         const auto sPfC = (dA.nx - rEl) * tilesMc * dA.tN;
-        const auto sPl = sPfC / subscriberCount + (threadIdx.x < sPfC % subscriberCount);
+        const auto sPl = sPfC / subscriberCount + (tIdx < sPfC % subscriberCount);
         const auto sPt = sPl / wSet;
         const auto iPfS = cute::make_shape(tilesMc, dA.tN);
         const auto fS = make_shape(dA.nx - rEl, iPfS);
@@ -120,17 +122,17 @@ namespace aristos::subscriber{
                     #pragma unroll
                     for (uint j = 0; j < wSet; ++j) {
                         // global to shared memory
-                        const auto flagIdx = threadIdx.x + (j + i * wSet) * subscriberCount;
-                        sharedSpace[threadIdx.x + j * subscriberCount] = ffC[flagIdx];
+                        const auto flagIdx = tIdx + (j + i * wSet) * subscriberCount;
+                        sharedSpace[tIdx + j * subscriberCount] = ffC[flagIdx];
                     }
                     #pragma unroll
                     for (uint j = 0; j < wSet; ++j) {
-                        rWSet[j] = sharedSpace[threadIdx.x + j * subscriberCount];
+                        rWSet[j] = sharedSpace[tIdx + j * subscriberCount];
                     }
                     // no need for overlapping the next stage, as most likely, only one trip will occur
                     #pragma unroll
                     for (uint j = 0; j < wSet; ++j) {
-                        const auto flagIdx = threadIdx.x + (j + i * wSet) * subscriberCount;
+                        const auto flagIdx = tIdx + (j + i * wSet) * subscriberCount;
                         // main loop
                         if (!rWSet[j]) {
                             // we need to check this flag
@@ -159,7 +161,7 @@ namespace aristos::subscriber{
                                     // before decoding the packet
                                     __threadfence_system();
                                     fPd(dA, packet, status, taskCount, sP->routedTokens, sP->totalTilesM,
-                                        expertIdx, pGB, weights, bias, peerIdx, lTQHead, gTQHead);
+                                        expertIdx, pGB, weights, bias, peerIdx, lTQHead, tQHead);
                                 }
                                 else {
                                     // Remote peer
@@ -169,7 +171,7 @@ namespace aristos::subscriber{
                                     // as the consistency function is internal.
                                     nvshmem_ushort_test(&sP->seqBit, NVSHMEM_CMP_EQ, lSeqBit);
                                     fRd(dA, packet, status, taskCount, sP->routedTokens, sP->totalTilesM,
-                                        expertIdx, pGB, weights, bias, peerIdx, lTQHead, gTQHead);
+                                        expertIdx, pGB, weights, bias, peerIdx, lTQHead, tQHead);
                                 }
                             }
                         }
@@ -177,7 +179,7 @@ namespace aristos::subscriber{
                     // update checkpoints
                     #pragma unroll
                     for (uint j = 0; j < wSet; ++j) {
-                        const auto flagIdx = threadIdx.x + (j + i * wSet) * subscriberCount;
+                        const auto flagIdx = tIdx + (j + i * wSet) * subscriberCount;
                         ffC[flagIdx] = rWSet[j];
                     }
                 }
@@ -185,14 +187,14 @@ namespace aristos::subscriber{
                 if (const auto residue = fSl - fSt * wSet) {
                     for (uint j = 0; j < residue; ++j) {
                         // global to shared memory
-                        const auto flagIdx = threadIdx.x + (j + fSt * wSet) * subscriberCount;
-                        sharedSpace[threadIdx.x + j * subscriberCount] = ffC[flagIdx];
+                        const auto flagIdx = tIdx + (j + fSt * wSet) * subscriberCount;
+                        sharedSpace[tIdx + j * subscriberCount] = ffC[flagIdx];
                     }
                     for (uint j = 0; j < residue; ++j) {
-                        rWSet[j] = sharedSpace[threadIdx.x + j * subscriberCount];
+                        rWSet[j] = sharedSpace[tIdx + j * subscriberCount];
                     }
                     for (uint j = 0; j < residue; ++j) {
-                        const auto flagIdx = threadIdx.x + (j + fSt * wSet) * subscriberCount;
+                        const auto flagIdx = tIdx + (j + fSt * wSet) * subscriberCount;
                         // main loop
                         if (!rWSet[j]) {
                             // we need to check this flag
@@ -220,18 +222,18 @@ namespace aristos::subscriber{
                                     // Enforce consistency before decoding the packet
                                     __threadfence_system();
                                     fPd(dA, packet, status, taskCount, sP->routedTokens, sP->totalTilesM,
-                                        expertIdx, pGB, weights, bias, peerIdx, lTQHead, gTQHead);
+                                        expertIdx, pGB, weights, bias, peerIdx, lTQHead, tQHead);
                                 }
                                 else {
                                     nvshmem_ushort_test(&sP->seqBit, NVSHMEM_CMP_EQ, lSeqBit);
                                     fRd(bk, packet, status, taskCount, sP->routedTokens, sP->totalTilesM,
-                                        expertIdx, pGB, weights, bias, peerIdx, lTQHead, gTQHead);
+                                        expertIdx, pGB, weights, bias, peerIdx, lTQHead, tQHead);
                                 }
                             }
                         }
                     }
                     for (uint j = 0; j < residue; ++j) {
-                        const auto flagIdx = threadIdx.x + (j + fSt * wSet) * subscriberCount;
+                        const auto flagIdx = tIdx + (j + fSt * wSet) * subscriberCount;
                         rWSet[j] = ffC[flagIdx];
                     }
                 }
@@ -245,22 +247,22 @@ namespace aristos::subscriber{
                 // prefetch to shared memory
                 #pragma unroll
                 for (uint j = 0; j < wSet; ++j) {
-                    const auto flagIdx = threadIdx.x + j * subscriberCount;
-                    sharedSpace[threadIdx.x + j * subscriberCount] = rfC[flagIdx];
+                    const auto flagIdx = tIdx + j * subscriberCount;
+                    sharedSpace[tIdx + j * subscriberCount] = rfC[flagIdx];
                 }
             }
             for (uint i = 0; i < sRt; ++i) {
                 #pragma unroll
                 for (uint j = 0; j < wSet; ++j) {
-                    rWSet[j] = sharedSpace[threadIdx.x + j * subscriberCount];
+                    rWSet[j] = sharedSpace[tIdx + j * subscriberCount];
                     if (i + 1 < sRt) {
-                        const auto flagIdx = threadIdx.x + (j + (i + 1) * wSet) * subscriberCount;
-                        sharedSpace[threadIdx.x + j * subscriberCount] = rfC[flagIdx];
+                        const auto flagIdx = tIdx + (j + (i + 1) * wSet) * subscriberCount;
+                        sharedSpace[tIdx + j * subscriberCount] = rfC[flagIdx];
                     }
                 }
                 #pragma unroll
                 for (uint j = 0; j < wSet; ++j) {
-                    const auto flagIdx = threadIdx.x + (j + i * wSet) * subscriberCount;
+                    const auto flagIdx = tIdx + (j + i * wSet) * subscriberCount;
                     if (!rWSet[j]) {
                         auto signal = atomicLoad<cuda::thread_scope_system>(
                                 CAST_TO(unsigned long long int, flags + flagIdx));
@@ -277,27 +279,27 @@ namespace aristos::subscriber{
                             auto* __restrict__ packet = heap::advance<1, 1, sizeof(Element)>(dA.sHeap, dA.cellSize,
                                 dA.expertSlots, dA.tokenSize, pIdx, lEIdx, sP->batchIdx * BLOCK_M);
                             lRd(dA, packet, CAST_TO(cuda::std::byte, tokenIds + (aEIdx * dA.eCap + sP->batchIdx * BLOCK_M)),
-                                CAST_TO(cuda::std::byte, activations.data()), sP->tokensM, lTQHead, gTQHead, aEIdx);
+                                CAST_TO(cuda::std::byte, activations.data()), sP->tokensM, lTQHead, tQHead, aEIdx);
                         }
                     }
                 }
                 // update checkpoints
                 #pragma unroll
                 for (uint j = 0; j < wSet; ++j) {
-                    const auto flagIdx = threadIdx.x + (j + i * wSet) * subscriberCount;
+                    const auto flagIdx = tIdx + (j + i * wSet) * subscriberCount;
                     rfC[flagIdx] = rWSet[j];
                 }
             }
             if (const auto residue = sRl - sRt * wSet) {
                 for (uint j = 0; j < residue; ++j) {
-                    const auto flagIdx = threadIdx.x + (j + sRt * wSet) * subscriberCount;
-                    sharedSpace[threadIdx.x + j * subscriberCount] = ffC[flagIdx];
+                    const auto flagIdx = tIdx + (j + sRt * wSet) * subscriberCount;
+                    sharedSpace[tIdx + j * subscriberCount] = ffC[flagIdx];
                 }
                 for (uint j = 0; j < residue; ++j) {
-                    rWSet[j] = sharedSpace[threadIdx.x + j * subscriberCount];
+                    rWSet[j] = sharedSpace[tIdx + j * subscriberCount];
                 }
                 for (uint j = 0; j < residue; ++j) {
-                    const auto flagIdx = threadIdx.x + (j + sRt * wSet) * subscriberCount;
+                    const auto flagIdx = tIdx + (j + sRt * wSet) * subscriberCount;
                     if (!rWSet[j]) {
                         auto signal = atomicLoad<cuda::thread_scope_system>(
                                 CAST_TO(unsigned long long int, flags + flagIdx));
@@ -314,12 +316,12 @@ namespace aristos::subscriber{
                                 pIdx, lEIdx, sP->batchIdx * BLOCK_M);
                             lRd(dA, packet, CAST_TO(cuda::std::byte, tokenIds + (aEIdx * dA.eCap + sP->batchIdx * BLOCK_M)),
                                 CAST_TO(cuda::std::byte, activations.data()),
-                                sP->tokensM, lTQHead, gTQHead, aEIdx);
+                                sP->tokensM, lTQHead, tQHead, aEIdx);
                         }
                     }
                 }
                 for (uint j = 0; j < residue; ++j) {
-                    const auto flagIdx = threadIdx.x + (j + sRt * wSet) * subscriberCount;
+                    const auto flagIdx = tIdx + (j + sRt * wSet) * subscriberCount;
                     rfC[flagIdx] = rWSet[j];
                 }
             }
@@ -331,22 +333,22 @@ namespace aristos::subscriber{
                 // prefetch to shared memory
                 #pragma unroll
                 for (uint j = 0; j < wSet; ++j) {
-                    const auto flagIdx = threadIdx.x + j * subscriberCount;
-                    sharedSpace[threadIdx.x + j * subscriberCount] = pfC[flagIdx];
+                    const auto flagIdx = tIdx + j * subscriberCount;
+                    sharedSpace[tIdx + j * subscriberCount] = pfC[flagIdx];
                 }
             }
             for (uint i = 0; i < sPt; ++i) {
                 #pragma unroll
                 for (uint j = 0; j < wSet; ++j) {
-                    rWSet[j] = sharedSpace[threadIdx.x + j * subscriberCount];
+                    rWSet[j] = sharedSpace[tIdx + j * subscriberCount];
                     if (i + 1 < sPt) {
-                        const auto flagIdx = threadIdx.x + (j + (i + 1) * wSet) * subscriberCount;
-                        sharedSpace[threadIdx.x + j * subscriberCount] = pfC[flagIdx];
+                        const auto flagIdx = tIdx + (j + (i + 1) * wSet) * subscriberCount;
+                        sharedSpace[tIdx + j * subscriberCount] = pfC[flagIdx];
                     }
                 }
                 #pragma unroll
                 for (uint j = 0; j < wSet; ++j) {
-                    const auto flagIdx = threadIdx.x + (j + i * wSet) * subscriberCount;
+                    const auto flagIdx = tIdx + (j + i * wSet) * subscriberCount;
                     if (!rWSet[j]) {
                         auto signal = atomicLoad<cuda::thread_scope_system>(
                                 CAST_TO(unsigned long long int, flags + flagIdx));
@@ -363,28 +365,28 @@ namespace aristos::subscriber{
                             auto* __restrict__ packet = heap::advance<1, 1, sizeof(Element)>(dA.sHeap, dA.cellSize,
                                 dA.expertSlots, dA.tokenSize,
                                 pIdx, lEIdx, sP->batchIdx * BLOCK_M);
-                            lPd(dA.tQ + (threadIdx.x * dA.tPs + lTQHead++), packet, CAST_TO(cuda::std::byte, tokenIds + (aEIdx * dA.eCap + sP->batchIdx * BLOCK_M)),
+                            lPd(dA.tQ + (tIdx * dA.tPs + lTQHead++), packet, CAST_TO(cuda::std::byte, tokenIds + (aEIdx * dA.eCap + sP->batchIdx * BLOCK_M)),
                                 CAST_TO(cuda::std::byte, activations.data()), sP->tokensM,
-                                cute::get<2>(coord), gTQHead, aEIdx);
+                                cute::get<2>(coord), tQHead, aEIdx);
                         }
                     }
                 }
                 #pragma unroll
                 for (uint j = 0; j < wSet; ++j) {
-                    const auto flagIdx = threadIdx.x + (j + i * wSet) * subscriberCount;
+                    const auto flagIdx = tIdx + (j + i * wSet) * subscriberCount;
                     pfC[flagIdx] = rWSet[j];
                 }
             }
             if (const auto residue = sPl - sPt * wSet) {
                 for (uint j = 0; j < residue; ++j) {
-                    const auto flagIdx = threadIdx.x + (j + sPt * wSet) * subscriberCount;
-                    sharedSpace[threadIdx.x + j * subscriberCount] = pfC[flagIdx];
+                    const auto flagIdx = tIdx + (j + sPt * wSet) * subscriberCount;
+                    sharedSpace[tIdx + j * subscriberCount] = pfC[flagIdx];
                 }
                 for (uint j = 0; j < residue; ++j) {
-                    rWSet[j] = sharedSpace[threadIdx.x + j * subscriberCount];
+                    rWSet[j] = sharedSpace[tIdx + j * subscriberCount];
                 }
                 for (uint j = 0; j < residue; ++j) {
-                    const auto flagIdx = threadIdx.x + (j + sPt * wSet) * subscriberCount;
+                    const auto flagIdx = tIdx + (j + sPt * wSet) * subscriberCount;
                     if (!rWSet[j]) {
                         auto signal = atomicLoad<cuda::thread_scope_system>(
                                 CAST_TO(unsigned long long int, flags + flagIdx));
@@ -400,14 +402,14 @@ namespace aristos::subscriber{
                             const auto [aEIdx, lEIdx, pIdx] = nRe[cute::get<0>(coord)];
                             auto* __restrict__ packet = heap::advance<1, 1, sizeof(Element)>(pIdx, lEIdx,
                                 sP->batchIdx * BLOCK_M);
-                            lPd(dA.tQ + (threadIdx.x * dA.tPs + lTQHead++), packet, CAST_TO(cuda::std::byte, tokenIds + (aEIdx * dA.eCap + sP->batchIdx * BLOCK_M)),
+                            lPd(dA.tQ + (tIdx * dA.tPs + lTQHead++), packet, CAST_TO(cuda::std::byte, tokenIds + (aEIdx * dA.eCap + sP->batchIdx * BLOCK_M)),
                                 CAST_TO(cuda::std::byte, activations.data()), sP->tokensM,
-                                cute::get<2>(coord), gTQHead, aEIdx);
+                                cute::get<2>(coord), tQHead, aEIdx);
                         }
                     }
                 }
                 for (uint j = 0; j < residue; ++j) {
-                    const auto flagIdx = threadIdx.x + (j + sPt * wSet) * subscriberCount;
+                    const auto flagIdx = tIdx + (j + sPt * wSet) * subscriberCount;
                     pfC[flagIdx] = rWSet[j];
                 }
             }

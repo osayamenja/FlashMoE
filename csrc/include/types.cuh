@@ -371,7 +371,7 @@ namespace aristos{
         /// default type for bookkeeping data structures
         using BookType = unsigned int;
         using TKTuple = cuda::std::pair<BookType, mp_t>;
-        cuda::std::byte* book;
+        cuda::std::byte* book = nullptr;
         /// Note the below lengths are cumulative sums.
         /// Gate buffers in bytes
         unsigned long int gB = 0UL;
@@ -386,34 +386,36 @@ namespace aristos{
         /// gate routing and loss vectors in bytes
         unsigned int gRl = 0U;
         /// gRl + gB + eDsA + sBfC + brs
-        unsigned long int bookSize;
+        unsigned long int bookSize = 0UL;
 
         /// Task Q length per producer
-        unsigned int tPs;
+        unsigned int tPs = 0U;
         /// Task Q maximum length
-        unsigned int tQl;
+        unsigned int tQml = 0U;
+        /// Task Q length
+        unsigned int tQl = 0U;
         /// EP world
-        unsigned int world;
+        unsigned int world = 0U;
         /// sequence length
-        unsigned int sl;
+        unsigned int sl = 0U;
         /// number of experts
-        unsigned int nx;
+        unsigned int nx = 0U;
         /// number of local experts
-        unsigned int nLx;
+        unsigned int nLx = 0U;
         /// hidden projection dimension
-        unsigned int pd;
+        unsigned int pd = 0U;
         /// padded number of experts
-        unsigned int px;
+        unsigned int px = 0U;
         /// tiles spanning sequence length
-        unsigned int tM;
+        unsigned int tM = 0U;
         /// tiles spanning embedding dimension
-        unsigned int tN;
+        unsigned int tN = 0U;
         /// tiles spanning capacity
-        unsigned int tCM;
+        unsigned int tCM = 0U;
         /// processors
-        unsigned int blocks;
+        unsigned int blocks = 0U;
         /// expert capacity
-        unsigned int eCap;
+        unsigned int eCap = 0U;
         /// Global device barrier
         cuda::barrier<cuda::thread_scope_device>* deviceBlockade;
 
@@ -445,8 +447,8 @@ namespace aristos{
                 gRl = sizeof(mp_t) * (_sl * px + (2 * px + 1));
                 gB = gRl + sizeof(TokenIdxTuple) * (px * _eCapacity) + sizeof(BookType) * px * (tM + 3);
                 eDsA = gB + sizeof(BookType) * (3 * nx + world);
-                const unsigned int fCl = sizeof(bool) * (world * nLx + (nx * tCM * tN));
-                sBfC = eDsA + sizeof(BookType) * (3 * blocks + SUBSCRIBERS + (world * nLx * tCM)) + fCl;
+                const unsigned int fCl = sizeof(bool) * (world * nLx + nx * tCM * tN);
+                sBfC = eDsA + sizeof(BookType) * (3 * blocks + SUBSCRIBERS + world * nLx * tCM) + fCl;
                 // maximum gemm tiles/tasks scheduled by subscriber threads
                 auto sT = world * nLx * tCM * tN + tCM * tN * nx;
                 tPs = cute::ceil_div(sT, SUBSCRIBERS);
@@ -454,7 +456,8 @@ namespace aristos{
                 // maximum gemm tiles/tasks scheduled by processors
                 const auto pT = world * nLx * tCM * Config::tiles<BLOCK_N>(pd);
                 tQl = sizeof(Task) * (sT + pT);
-                xMtQ = sBfC + tQl + sizeof(mp_t) * world * nLx * tCM * tN;
+                tQml = tQl + blocks; // interrupt tasks
+                xMtQ = sBfC + tQml + sizeof(mp_t) * world * nLx * tCM * tN;
                 brs = _sl * Config::tiles<BLOCK_N>(_px) * (sizeof(RingSoftmaxPayload) + 2 * sizeof(RingTopKPayload));
                 bookSize = xMtQ + brs;
             }
@@ -480,7 +483,7 @@ namespace aristos{
             const auto gRl = sizeof(mp_t) * (_sl * _px + (2 * _px + 1));
             const auto gB = gRl + sizeof(TokenIdxTuple) * (_px * _eCap) + sizeof(BookType) * _px * (tM + 3);
             const auto eDsA = gB + sizeof(BookType) * (3 * _nx + _world);
-            const auto fCl = sizeof(bool) * (_world * _nLx + (_nx * tCM * tN));
+            const auto fCl = sizeof(bool) * (_world * _nLx + _nx * tCM * tN);
             const auto sBfC = eDsA + sizeof(BookType) * (3 * _blocks + THREADS - 2 + _world * _nLx * tCM) + fCl;
             // maximum gemm tiles/tasks scheduled by subscriber threads
             auto sT = _world * _nLx * tCM * tN + tCM * tN * _nx;
@@ -488,8 +491,8 @@ namespace aristos{
             // maximum gemm tiles/tasks scheduled by processors
             const auto pT = _world * _nLx * tCM * Config::tiles<BLOCK_N>(_pd);
             const auto tQl = sizeof(Task) * (sT + pT);
-
-            const auto xMtQ = sBfC + tQl + sizeof(mp_t) * _world * _nLx * tCM * tN;
+            const auto tQml = tQl + _blocks; // interrupt tasks
+            const auto xMtQ = sBfC + tQml + sizeof(mp_t) * _world * _nLx * tCM * tN;
             const auto brs = _sl * Config::tiles<BLOCK_N>(_px) * (sizeof(RingSoftmaxPayload) + 2 * sizeof(RingTopKPayload));
             return xMtQ + brs;
         }
@@ -563,13 +566,14 @@ namespace aristos{
         }
 
         /// Scheduler buffers and flag checkpoints
+        /// processors' doorbell
         __device__ __forceinline__
-        auto* rQ() const {
+        auto* pDB() const {
             return CAST_TO(BookType, book + eDsA);
         }
         __device__ __forceinline__
         auto* sQ() const {
-            return rQ() + blocks;
+            return pDB() + blocks;
         }
         __device__ __forceinline__
         auto* tQH() const {
@@ -590,11 +594,17 @@ namespace aristos{
             return CAST_TO(Task, book + sBfC);
         }
 
+        // processor interrupts
+        __device__ __forceinline__
+        auto* tQI() const {
+            return tQ() + tQl;
+        }
+
         // Intermediate buffer
         template<typename Element = cuda::std::byte>
         __device__ __forceinline__
         auto* xM() const {
-            return CAST_TO(Element, tQ() + tQl);
+            return CAST_TO(Element, tQ() + tQml);
         }
 
         // These must be together and last due to
@@ -653,7 +663,6 @@ namespace aristos{
 
     __device__ __inline__ uint16_t seqBit;
     __constant__ __inline__ Config moeConfig{};
-    __constant__ __inline__ SchedulerConfig schedulerState{};
     __constant__ __inline__ Bookkeeping bookkeeping{};
     __inline__ Config hostMoEConfig;
 

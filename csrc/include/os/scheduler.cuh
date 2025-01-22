@@ -47,22 +47,19 @@ namespace aristos::scheduler {
 
     template<
         unsigned int processors,
+        unsigned int sL = (THREADS - WARP_SIZE) / WARP_SIZE,
+        unsigned int wS = WARP_SIZE,
         typename WarpScan = cub::WarpScan<uint>,
-        unsigned int wS = 32,
-        unsigned int subscribers = 128 - wS,
-        unsigned int sL = subscribers / wS,
         typename SQState,
         typename TQState,
         typename WSet
     >
     requires (processors > 0 && wS == 32 &&
-        cuda::std::is_same_v<WarpScan, cub::WarpScan<uint>> &&
-        isRegisterV<SQState> && isRegisterV<TQState> && isRegisterV<WSet> &&
-        subscribers % wS == 0)
+        isRegisterV<SQState> && isRegisterV<TQState> && isRegisterV<WSet>)
     __device__ __forceinline__
     void schedulerLoop(SQState& sQState, TQState& tqState, WSet& wSet,
-        const unsigned int& tQRl,
-        uint& lTt, uint& taskTally, uint& processorTally,
+        const unsigned int& tQOffset,
+        uint& lTt, uint& processorTally,
         uint& gRQIdx, bool& pTEpilog, uint& scheduled,
         typename WarpScan::TempStorage* __restrict__ const& wSt,
         unsigned int* __restrict__ const& sQ,
@@ -70,6 +67,7 @@ namespace aristos::scheduler {
         unsigned int* __restrict__ const& pDB,
         const bool isMedley = false) {
         uint lRQIdx;
+        uint taskTally;
         // things are about to get warped :)
         // Aggregate tally across the warp
         WarpScan(wSt[0]).InclusiveSum(lTt, lRQIdx, taskTally);
@@ -129,9 +127,10 @@ namespace aristos::scheduler {
                     for (uint j = 0; j < sL; ++j) {
                         if (tqState[j].tasks && tasksToSchedule) {
                             const auto canSchedule = cute::min(tasksToSchedule, tqState[j].tasks);
+                            const auto taskIdx = j * wS + threadIdx.x + tqState[j].tQTail;
                             tasksToSchedule -= canSchedule;
                             tqState[j].tasks -= canSchedule;
-                            const auto taskIdx = j * wS + threadIdx.x + tqState[j].tQTail;
+                            tqState[j].tQTail += canSchedule;
                             const auto cSetB = canSchedule / WSet::kElements;
                             schedule<processors>(wSet, cSetB, canSchedule, taskIdx, lRQIdx, gRQIdx, rQ, pDB);
                         }
@@ -141,9 +140,10 @@ namespace aristos::scheduler {
                 for (uint j = sL; j < TQState::kElements; ++j) {
                     if (tqState[j].tasks && tasksToSchedule) {
                         const auto canSchedule = cute::min(tasksToSchedule, tqState[j].tasks);
+                        const auto taskIdx = tQOffset + (j - sL) * wS + threadIdx.x + tqState[j].tQTail;
                         tasksToSchedule -= canSchedule;
                         tqState[j].tasks -= canSchedule;
-                        const auto taskIdx = tQRl * subscribers + (j - sL) * wS + threadIdx.x + tqState[j].tQTail;
+                        tqState[j].tQTail += canSchedule;
                         const auto cSetB = canSchedule / WSet::kElements;
                         schedule<processors>(wSet, cSetB, canSchedule, taskIdx, lRQIdx, gRQIdx, rQ, pDB);
                     }
@@ -161,6 +161,7 @@ namespace aristos::scheduler {
     void start(cuda::std::byte* __restrict__ workspace,
         const unsigned int& tQRl,
         const unsigned int& gtQCL,
+        unsigned int* __restrict__ const& sInterrupts,
         unsigned int* __restrict__ const& tQHeads, // shared
         unsigned int* __restrict__ const& gtQHeads, // global
         unsigned int* __restrict__ const& taskBound, // shared
@@ -170,7 +171,7 @@ namespace aristos::scheduler {
         uint scheduled = 0U;
         constexpr auto wS = 32U;
         constexpr auto sQsL = cute::ceil_div(processors, wS);
-        static_assert(sQsL <= 32);
+        static_assert(sQsL <= 64);
 
         constexpr auto subscribers = 128 - wS;
         static_assert(subscribers % wS == 0);
@@ -178,6 +179,7 @@ namespace aristos::scheduler {
         // initialize register buffers
         cutlass::Array<TQState, 16 + sL> tqState{};
         cutlass::Array<uint8_t, sQsL> sQState{};
+        cutlass::Array<uint, 16> wSet{};
         tqState.fill({0U,0U});
         sQState.fill(0U);
 
@@ -188,7 +190,6 @@ namespace aristos::scheduler {
         using WarpScan = cub::WarpScan<uint>;
         auto* __restrict__ wSt = CAST_TO(WarpScan::TempStorage, workspace);
         uint gRQIdx = 0U;
-        uint taskTally = 0U;
         uint processorTally = processors; // initially, all processors are available, ensure that rQ has all pids
         bool pTEpilog = false;
         auto tTB = atomicLoad<cuda::thread_scope_block>(taskBound);
@@ -217,7 +218,7 @@ namespace aristos::scheduler {
                     lTt += tasks;
                 }
                 // schedule observed tasks
-                schedulerLoop<processors>(sQState, tqState, tQRl, lTt, taskTally,
+                schedulerLoop<processors>(sQState, tqState, wSet, tQRl * subscribers, lTt,
                     processorTally, gRQIdx, pTEpilog, scheduled,
                     wSt, sQ, rQ, pDB, true);
 
@@ -231,7 +232,7 @@ namespace aristos::scheduler {
                         lTt += tasks;
                     }
                     // schedule observed tasks
-                    schedulerLoop<processors>(sQState, tqState, tQRl, lTt, taskTally,
+                    schedulerLoop<processors>(sQState, tqState, wSet, tQRl * subscribers, lTt,
                         processorTally, gRQIdx, pTEpilog, scheduled,
                         wSt, sQ, rQ, pDB);
                 }
@@ -247,7 +248,7 @@ namespace aristos::scheduler {
                 }
             }
             // schedule observed tasks
-            schedulerLoop<processors>(sQState, tqState, tQRl, lTt, taskTally,
+            schedulerLoop<processors>(sQState, tqState, wSet, tQRl * subscribers, lTt,
                 processorTally, gRQIdx, pTEpilog, scheduled,
                 wSt, sQ, rQ, pDB, dT == 0);
             if (!threadIdx.x) {
@@ -255,6 +256,50 @@ namespace aristos::scheduler {
             }
             tTB = __shfl_sync(0xffffffff, tTB, 0);
         }
+        // interrupt subscribers
+        #pragma unroll
+        for (uint i = threadIdx.x; i < subscribers; i += wS) {
+            atomicExch_block(sInterrupts + i, 1U);
+        }
+        // enqueue interrupts and schedule them
+        auto* __restrict__ tQI = bookkeeping.tQI();
+        #pragma unroll
+        for (uint i = threadIdx.x; i < processors; i += wS) {
+            tQI[i] = Task{TaskType::Interrupt};
+        }
+        __threadfence();
+        __syncwarp();
+
+        uint lTt = 0U; // local task tally
+        constexpr auto trips = processors / (dQL * WARP_SIZE);
+        #pragma unroll
+        for (uint i = 0; i < trips; ++i) {
+            #pragma unroll
+            for (uint j = 0; j < decltype(tqState)::kElements; ++j) {
+                tqState[j].tasks = 1U;
+                tqState[j].tQTail = 0U;
+                lTt += 1U;
+            }
+            schedulerLoop<processors, 0U>(sQState, tqState, wSet, 0U, lTt,
+                processorTally, gRQIdx, pTEpilog, scheduled,
+                wSt, sQ, rQ, pDB);
+        }
+        lTt = 0U;
+        constexpr auto pT = processors / WARP_SIZE;
+        #pragma unroll
+        for (uint j = 0; j < pT; ++j) {
+            tqState[j].tasks = 1U;
+            tqState[j].tQTail = 0U;
+            lTt += 1U;
+        }
+        constexpr auto rT = processors - pT * WARP_SIZE;
+        const uint residue = threadIdx.x < rT;
+        tqState[pT].tQTail = 0U;
+        tqState[pT].tasks = residue;
+        lTt += residue;
+        schedulerLoop<processors, 0U>(sQState, tqState, wSet, 0U, lTt,
+                processorTally, gRQIdx, pTEpilog, scheduled,
+                wSt, sQ, rQ, pDB);
     }
 }
 #endif //SCHEDULER_CUH

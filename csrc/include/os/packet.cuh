@@ -212,7 +212,7 @@ namespace aristos::packet {
             const cuda::std::array<cuda::std::byte*, GEMMs>& bias,
             unsigned int const& peer, // relative to the EP group
             unsigned int& lTQHead,
-            unsigned int* __restrict__ const& gTQHead) const {
+            unsigned int* __restrict__ const& tQHead) const {
             //assert(!__isShared(&dA) && !__isGlobal(&dA) && !__isLocal(&dA))
             auto* __restrict__ sHeap = dA.sHeap;
             auto* __restrict__ tQ = dA.tQ + (threadIdx.x * dA.tPs + lTQHead);
@@ -280,7 +280,7 @@ namespace aristos::packet {
                 const auto totalTasks = Config::tiles<BLOCK_M>(routedTokens) * dA.tN;
                 lTQHead += totalTasks;
                 // notifies scheduler of work
-                atomicAdd_block(gTQHead, totalTasks);
+                atomicAdd_block(tQHead, totalTasks);
             }
         }
     };
@@ -295,7 +295,7 @@ namespace aristos::packet {
             cuda::std::byte* __restrict__ const& activations,
             const unsigned int& nTokens,
             const unsigned int& tileIdx,
-            unsigned int* __restrict__ const& gTQHead,
+            unsigned int* __restrict__ const& tQHead,
             const unsigned int& expertIdx) const {
             // now let's decode this single tile
             *tQ = Task{
@@ -310,7 +310,7 @@ namespace aristos::packet {
             };
             __threadfence();
             // notifies scheduler of work
-            atomicIncrement<cuda::thread_scope_block>(gTQHead);
+            atomicIncrement<cuda::thread_scope_block>(tQHead);
         }
     };
 
@@ -323,7 +323,7 @@ namespace aristos::packet {
             cuda::std::byte* __restrict__ const& activations,
             const unsigned int& nTokens,
             unsigned int& lTQHead,
-            unsigned int* __restrict__ const& gTQHead,
+            unsigned int* __restrict__ const& tQHead,
             const unsigned int& expertIdx) const {
             auto* __restrict__ tQ = dA.tQ + (threadIdx.x * dA.tPs + lTQHead);
             constexpr auto tB = 8;
@@ -360,7 +360,7 @@ namespace aristos::packet {
             __threadfence();
             lTQHead += dA.tN;
             // notifies scheduler
-            atomicIncrement<cuda::thread_scope_block>(gTQHead);
+            atomicIncrement<cuda::thread_scope_block>(tQHead);
         }
     };
 }

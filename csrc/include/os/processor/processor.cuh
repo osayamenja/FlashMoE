@@ -51,10 +51,6 @@ namespace aristos::processor{
             constexpr auto bN = cute::get<1>(tiler);
             constexpr auto threads = THREADS;
             cutlass::AlignedArray<Element, bN> registers{};
-            static_assert(!(cuda::std::is_same_v<Element, cute::float_e4m3_t> &&
-                cuda::std::is_same_v<Element, cute::float_e4m3_t>), "fp8 atomic addition is not available, "
-                                                                    "so no support for this operation yet");
-
             // Eagerly issue gmem read.
             auto [tokenIdx, combineWeight] = TokenIdxTuple{};
             auto scaleWeight = Element(0);
@@ -62,7 +58,7 @@ namespace aristos::processor{
                 const auto t = tokenIndices[threadIdx.x];
                 tokenIdx = t.first;
                 combineWeight = t.second;
-                scaleWeight = scale(tokenIdx, expertIdx);
+                scaleWeight = scale(tokenIdx, expertIdx) / combineWeight;
             }
             // Row-major
             const auto mA = make_tensor(cute::make_gmem_ptr(inputs),
@@ -105,7 +101,7 @@ namespace aristos::processor{
                 if constexpr (c == CombineMode::multithreaded) {
                     #pragma unroll
                     for (uint i = 0; i < bN; ++i) {
-                        registers[i] *= __fdividef(scaleWeight, combineWeight);
+                        registers[i] *= scaleWeight;
                     }
                     vaa(&activations(tokenIdx, 0), registers);
                 }
@@ -130,11 +126,8 @@ namespace aristos::processor{
     >
     struct FGT {
         static_assert(t == TaskType::preGEMM);
-        template<class FrgTensorD, class RegisterScratch>
         __forceinline__ __device__
         void operator()(typename BlockGEMM::MatrixDType* __restrict__ workspace,
-        FrgTensorD& accumulator,
-        RegisterScratch& rScratch,
         const typename BlockGEMM::MatrixAType* __restrict__ inputs,
         const typename BlockGEMM::MatrixBType* __restrict__ weights,
         typename BlockGEMM::MatrixDType* __restrict__ output,
@@ -143,8 +136,11 @@ namespace aristos::processor{
         const unsigned int& N,
         const unsigned int& K,
         const unsigned int& tileIdx) const {
+            auto accumulator = cute::partition_fragment_C(typename BlockGEMM::MMA{}, typename BlockGEMM::TilerOut{});
+            constexpr auto elems = SHARED_SIZE / (THREADS * sizeof(typename BlockGEMM::MatrixDType));
+            static_assert(cute::size(accumulator) % elems == 0);
+            cutlass::AlignedArray<typename BlockGEMM::MatrixDType, elems> rScratch{};
             constexpr auto bM = cute::get<0>(typename BlockGEMM::BlockTiler{});
-            static_assert(size(accumulator) % rScratch.size() == 0 && cutlass::detail::is_Array_v<RegisterScratch>);
             // Instantiate mainloop
             typename BlockGEMM::CollectiveMainloop mainLoop{};
             cute::clear(accumulator);
@@ -202,7 +198,6 @@ namespace aristos::processor{
             // Assume elementwise operator
             typename BlockGEMM::FusedEpilogue epilogueOp{};
             constexpr auto trips = size(accumulator) / rScratch.size();
-            constexpr auto elems = rScratch.size();
 
             // Prefetch from global to shared memory
             #pragma unroll
@@ -239,7 +234,7 @@ namespace aristos::processor{
             for (unsigned int i = 0; i < trips; ++i) {
                 #pragma unroll
                 for (unsigned int j = 0; j < elems; ++j) {
-                    tCsC(j) = gCStoreOp(accum(j + i * elems));
+                    tCsC(j) = gCStoreOp(accumulator(j + i * elems));
                 }
                 __syncthreads();
                 #pragma unroll
@@ -389,6 +384,38 @@ namespace aristos::processor{
     };
 
 
+    struct ProcessorArgs{
+        // sensible sentinel values
+        cuda::std::byte* __restrict__ sHeap = nullptr;
+        unsigned int* __restrict__ sQ = nullptr;
+        unsigned int* __restrict__ pDB = nullptr;
+        unsigned int* __restrict__ tQH = nullptr;
+        flagsType* __restrict__ flags = nullptr;
+        Task* __restrict__ gtQ = nullptr;
+        Task* __restrict__ tQ = nullptr;
+        unsigned int* __restrict__ tQS = nullptr;
+        unsigned int pd = 0U;
+        unsigned int tokenSize = 0U;
+        unsigned int tN = 0U;
+        unsigned int tNx = 0U;
+
+        ProcessorArgs() = default;
+        ProcessorArgs(cuda::std::byte* const& _sHeap,
+            unsigned int* const& _sQ,
+            unsigned int* const& _pDB,
+            unsigned int* const& _tQH,
+            flagsType* const& _flags,
+            Task* const& _gtQ,
+            Task* const& _tQ,
+            unsigned int* const& _tQS,
+            unsigned int const& _pd,
+            unsigned int const& _tokenSize,
+            unsigned int const& _tN,
+            unsigned int const& _tNx) :
+        sHeap(_sHeap), sQ(_sQ), pDB(_pDB), tQH(_tQH), flags(_flags), gtQ(_gtQ), tQ(_tQ), tQS(_tQS), pd(_pd),
+        tokenSize(_tokenSize), tN(_tN), tNx(_tNx) {}
+    };
+
     template<
         unsigned int processorCount,
         unsigned int Arch,
@@ -403,19 +430,28 @@ namespace aristos::processor{
     void start(cuda::std::byte* __restrict__ const& workspace, const uint16_t& _seqBit){
         assert(__isShared(workspace));
         static_assert(sizeof(SignalPayload<PacketStage::last>) == sizeof(uint64_t));
-        __shared__ unsigned int signal;
         __shared__ Task currentTask;
-        __shared__ Config cachedConfig;
-        __shared__ SchedulerConfig scState;
-        __shared__ unsigned int interrupt;
-        auto rSeqBit = _seqBit;
+        __shared__ ProcessorArgs pA;
+        unsigned int signal = 0U;
+        unsigned int interrupt = 0U;
+        const auto rSeqBit = _seqBit;
         if (!threadIdx.x) {
-            cachedConfig = moeConfig;
-            scState = schedulerState;
-            signal = 0U;
-            interrupt = 0U;
+            pA = ProcessorArgs{
+                moeConfig.sHeap,
+                bookkeeping.sQ() + blockIdx.x,
+                bookkeeping.pDB() + blockIdx.x,
+                bookkeeping.tQH() + SUBSCRIBERS,
+                moeConfig.flags,
+                bookkeeping.tQ(),
+                bookkeeping.tQ() + bookkeeping.tPs * SUBSCRIBERS, // should be the external Q
+                bookkeeping.tQS(),
+                bookkeeping.px,
+                moeConfig.embedDim,
+                bookkeeping.tN,
+                Config::tiles<BLOCK_N>(bookkeeping.pd)
+            };
             // Initially indicate this block's readiness
-            atomicExch(scState.statusQ + blockIdx.x, ready);
+            atomicExch(pA.sQ, ready);
         }
         using Operation = BlockMM<Arch, ElementA, ElementB, ElementC, ActivationOp>;
         using OperationX = BlockMM<Arch, ElementA, ElementB, ElementC, ActivationOpX>;
@@ -426,7 +462,8 @@ namespace aristos::processor{
 
         while (!interrupt) {
             if (!threadIdx.x) {
-                auto* tQSignal = scState.taskSignal + blockIdx.x;
+                auto* __restrict__ tQSignal = pA.pDB;
+                const auto* __restrict__ gtQ = pA.gtQ;
                 // Grabs next task
                 auto nextTask = atomicLoad(tQSignal);
                 while (nextTask == signal) {
@@ -435,13 +472,13 @@ namespace aristos::processor{
                 signal = nextTask;
                 // below ensures task read happens after signal reception
                 __threadfence();
-                currentTask = scState.taskQ[signal - 1];
+                currentTask = gtQ[signal - 1];
             }
             __syncthreads();
             switch (currentTask.taskType) {
                 case TaskType::preGEMM: {
                     // Eagerly indicate readiness for the next task
-                    atomicExch(scState.statusQ + blockIdx.x, ready);
+                    atomicExch(pA.sQ, ready);
                     constexpr unsigned int preIndex = 0;
                     preGEMM(workspace,
                         CAST_TO(typename Operation::MatrixAType, currentTask.aData),
@@ -449,13 +486,13 @@ namespace aristos::processor{
                         CAST_TO(typename Operation::MatrixDType, currentTask.cData[preIndex]),
                         CAST_TO(typename Operation::MatrixDType, currentTask.dData[preIndex]),
                         currentTask.M,
-                        cachedConfig.upProjection,
-                        cachedConfig.embedDim,
+                        pA.pd,
+                        pA.tokenSize,
                         currentTask.tileIdx);
                     if (!threadIdx.x &&
-                        atomicAdd(scState.taskSync + currentTask.syncIdx, 1U) == cachedConfig.tilesN) {
-                        const auto tasks = cachedConfig.tilesNx;
-                        auto* tQ = scState.xTaskQ + currentTask.syncIdx;
+                        atomicAdd(pA.tQS + currentTask.syncIdx, 1U) == pA.tN) {
+                        const auto tasks = pA.tNx;
+                        auto* tQ = pA.tQ + currentTask.syncIdx;
                         for (unsigned int i = 0; i < tasks; ++i) {
                             tQ[i] = Task{
                                 TaskType::postGEMM,
@@ -474,23 +511,23 @@ namespace aristos::processor{
                         }
                         __threadfence();
                         // notify scheduler
-                        atomicAdd(scState.xTQHeads, tasks);
+                        atomicAdd(pA.tQH, tasks);
                     }
                 }
                 break;
                 case TaskType::postGEMM: {
                     // Eagerly indicate readiness for the next task
-                    atomicExch(scState.statusQ + blockIdx.x, ready);
+                    atomicExch(pA.sQ, ready);
                     constexpr unsigned int postIndex = 0;
                     postGEMM(workspace,
                         CAST_TO(typename Operation::MatrixAType, currentTask.aData),
                         CAST_TO(typename Operation::MatrixBType, currentTask.bData[postIndex]),
                         CAST_TO(typename Operation::MatrixDType, currentTask.cData[postIndex]),
                         CAST_TO(typename Operation::MatrixDType, currentTask.dData[postIndex]),
-                        cachedConfig.embedDim,
-                        cachedConfig.upProjection,
+                        pA.tokenSize,
+                        pA.pd,
                         currentTask.tileIdx,
-                        nvshmem_ptr(cachedConfig.sHeap, currentTask.peerIdx) == nullptr);
+                        nvshmem_ptr(pA.sHeap, currentTask.peerIdx) == nullptr);
                     if (!threadIdx.x) {
                         uint64_t flagSignal = 0;
                         // Pack payload into single signal word
@@ -499,20 +536,20 @@ namespace aristos::processor{
                             rSeqBit,
                             currentTask.tileSize
                         };
-                        if (atomicIncrement(scState.taskSync + currentTask.syncIdx)
-                            == cachedConfig.tilesN + cachedConfig.tilesNx) {
+                        if (atomicIncrement(pA.tQS + currentTask.syncIdx)
+                            == pA.tN + pA.tNx) {
                             if (nvshmem_ptr(currentTask.cData[postIndex], currentTask.peerIdx) == nullptr) {
                                 // Batch remote network transfer to avoid overwhelming the NIC
                                 nvshmem_putmem_signal_nbi(currentTask.cData[postIndex], currentTask.cData[postIndex],
-                                    currentTask.tileSize * cachedConfig.embedDim * sizeof(ElementA),
-                                    cachedConfig.flags + currentTask.flagIdx,
+                                    currentTask.tileSize * pA.tokenSize * sizeof(ElementA),
+                                    pA.flags + currentTask.flagIdx,
                                     flagSignal, NVSHMEM_SIGNAL_SET,
                                     currentTask.peerIdx);
                             }
                             else {
                                 // send individual tile, no batching here
                                 // Already did the network transfer in fGET, so set signal only
-                                nvshmemx_signal_op(cachedConfig.flags + currentTask.flagIdx,
+                                nvshmemx_signal_op(pA.flags + currentTask.flagIdx,
                                  flagSignal, NVSHMEM_SIGNAL_SET, currentTask.peerIdx);
                             }
                         }
@@ -521,17 +558,14 @@ namespace aristos::processor{
                 break;
                 case TaskType::combine: {
                     // Eagerly indicate readiness for the next task
-                    atomicExch(scState.statusQ + blockIdx.x, ready);
+                    atomicExch(pA.sQ, ready);
                     combineOp(CAST_TO(ElementA, workspace), currentTask.aData, currentTask.bData[0],
-                        currentTask.cData[0], currentTask.M, cachedConfig.embedDim, currentTask.tileIdx,
+                        currentTask.cData[0], currentTask.M, pA.tokenSize, currentTask.tileIdx,
                         currentTask.tileSize, currentTask.expertIdx);
                 }
                 break;
                 case TaskType::Interrupt: {
-                    if (!threadIdx.x) {
-                        interrupt = 1U;
-                    }
-                    __syncthreads();
+                    interrupt = 1U;
                 }
             }
         }
