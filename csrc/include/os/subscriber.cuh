@@ -15,6 +15,7 @@
 namespace aristos::subscriber{
     ///Receive and decode packets deposited
     template<
+        unsigned int wSet = 16U,
         unsigned int subscriberCount = SUBSCRIBERS,
         typename ExpertsTensor,
         typename BiasTensor,
@@ -23,16 +24,17 @@ namespace aristos::subscriber{
     >
     requires(cuda::std::is_same_v<typename ExpertsTensor::value_type, typename BiasTensor::value_type>
         && aristos::Tensor<ExpertsTensor>
-        && aristos::Matrix<BiasTensor> && aristos::Matrix<Activations>)
+        && aristos::Matrix<BiasTensor> && aristos::Matrix<Activations> && cutlass::ispow2(wSet)
+        && wSet > 1 && wSet <= 32)
     __device__ __forceinline__
     void start(cuda::std::byte* __restrict__ const& workspace,
         unsigned int* __restrict__ const& interrupt,
-        const unsigned int* __restrict__& peerTranslation,
+        const unsigned int* __restrict__& peerTranslation, // shared
         // remote experts: {actual & local expert idx, peer idx}
-        const cuda::std::tuple<uint, uint, uint>* __restrict__& rE,
+        const cuda::std::tuple<uint, uint, uint>* __restrict__& rE, // shared
         const cuda::std::tuple<uint, uint, uint>* __restrict__& nRe, // p2p experts: like above
         const unsigned int& rEl, // number of remote peers
-        unsigned int* __restrict__ const& status,
+        unsigned int* __restrict__ const& status, // shared
         unsigned int* __restrict__ const& taskCount,
         const Bookkeeping& bk,
         Activations const& activations,
@@ -63,7 +65,6 @@ namespace aristos::subscriber{
         };
 
         // each thread gets 64 bytes of workspace
-        constexpr auto wSet = 16U; // working set size
         cutlass::AlignedArray<unsigned int, wSet> rWSet{};
 
         // token indices

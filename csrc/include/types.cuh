@@ -371,6 +371,7 @@ namespace aristos{
         /// default type for bookkeeping data structures
         using BookType = unsigned int;
         using TKTuple = cuda::std::pair<BookType, mp_t>;
+        using EDT = cuda::std::tuple<uint, uint, uint>;
         cuda::std::byte* book = nullptr;
         /// Note the below lengths are cumulative sums.
         /// Gate buffers in bytes
@@ -446,7 +447,7 @@ namespace aristos{
             else {
                 gRl = sizeof(mp_t) * (_sl * px + (2 * px + 1));
                 gB = gRl + sizeof(TokenIdxTuple) * (px * _eCapacity) + sizeof(BookType) * px * (tM + 3);
-                eDsA = gB + sizeof(BookType) * (3 * nx + world);
+                eDsA = gB + sizeof(BookType) * (4 * nx + world + 1);
                 const unsigned int fCl = sizeof(bool) * (world * nLx + nx * tCM * tN);
                 sBfC = eDsA + sizeof(BookType) * (3 * blocks + SUBSCRIBERS + world * nLx * tCM) + fCl;
                 // maximum gemm tiles/tasks scheduled by subscriber threads
@@ -482,7 +483,7 @@ namespace aristos{
             const auto tM = Config::tiles<BLOCK_M>(_sl);
             const auto gRl = sizeof(mp_t) * (_sl * _px + (2 * _px + 1));
             const auto gB = gRl + sizeof(TokenIdxTuple) * (_px * _eCap) + sizeof(BookType) * _px * (tM + 3);
-            const auto eDsA = gB + sizeof(BookType) * (3 * _nx + _world);
+            const auto eDsA = gB + sizeof(BookType) * (4 * _nx + _world + 1);
             const auto fCl = sizeof(bool) * (_world * _nLx + _nx * tCM * tN);
             const auto sBfC = eDsA + sizeof(BookType) * (3 * _blocks + THREADS - 2 + _world * _nLx * tCM) + fCl;
             // maximum gemm tiles/tasks scheduled by subscriber threads
@@ -553,11 +554,22 @@ namespace aristos{
         auto* eLs() const {
             return ePs() + nx;
         }
+        /// Expert Data
+        /// remote experts first: {actual & local expert idx, peer idx}
+        __device__ __forceinline__
+        auto* eD() const {
+            return CAST_TO(EDT, ePs() + nx);
+        }
+        /// number of remote experts
+        __device__ __forceinline__
+        auto* nRx() const {
+            return CAST_TO(BookType, eD() + nx);
+        }
         /// Peer Translation
         /// EP rank -> PE rank
         __device__ __forceinline__
         auto* pT() const {
-            return eLs() + nx;
+            return nRx() + 1;
         }
         /// Packet Sync array
         __device__ __forceinline__
@@ -624,40 +636,6 @@ namespace aristos{
         __device__ __forceinline__
         auto* rTp() const {
             return CAST_TO(RingTopKPayload, bRsP() + sl * Config::tiles<BLOCK_N>(px));
-        }
-    };
-
-    struct __align__(16) SchedulerConfig{
-        unsigned int* statusQ;
-        unsigned int* taskSignal;
-        unsigned int* taskSync;
-        // at least the upper bound for number of tasks, excluding interrupt tasks.
-        // ceiling rounded to allow uniform strides for each producer's slice
-        unsigned int tUB;
-        unsigned int* tQHeads;
-        unsigned int* xTQHeads;
-        Task* taskQ;
-        Task* xTaskQ;
-
-        __forceinline__ __device__
-        SchedulerConfig() = default;
-
-        __forceinline__ __device__ __host__
-        SchedulerConfig(cuda::std::byte* _bk,
-               const unsigned int& numberBlocks,
-               const unsigned int& numberSubscribers,
-               const unsigned int& gtQCL,
-               const unsigned int& tQRl,
-               const unsigned int& _syncTasksBound,
-               const unsigned int& _tUB) {
-            tUB = _tUB;
-            statusQ = CAST_TO(unsigned int, _bk);
-            taskSignal = statusQ + numberBlocks;
-            taskSync = taskSignal + numberBlocks;
-            tQHeads = taskSync + _syncTasksBound;
-            xTQHeads = tQHeads + numberSubscribers;
-            taskQ = CAST_TO(Task, xTQHeads + gtQCL);
-            xTaskQ = taskQ + numberBlocks * tQRl;
         }
     };
 

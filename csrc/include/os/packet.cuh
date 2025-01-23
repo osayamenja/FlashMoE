@@ -13,10 +13,12 @@
 #include "../atomics.cuh"
 
 namespace aristos::packet {
-    template<unsigned int blocks,
-    DropTokens d = DropTokens::yes,
-    unsigned int superBlockSize = ARISTOS_SUPER_BLOCK_SIZE,
-    typename Activations>
+    template<
+        unsigned int blocks,
+        DropTokens d = DropTokens::yes,
+        unsigned int superBlockSize = ARISTOS_SUPER_BLOCK_SIZE,
+        typename Activations
+    >
     requires aristos::Matrix<Activations>
     __forceinline__ __device__
     void encode(Bookkeeping const& bk, const Activations& activations, unsigned int* const& __restrict__ workspace) {
@@ -79,7 +81,8 @@ namespace aristos::packet {
         __syncthreads();
         #pragma unroll
         for (uint i = threadIdx.x; i < nx; i += THREADS) {
-            atomicAdd_block(pTTx + pS[i], expertCounts[i]);
+            const auto peer = __ldg(pS + i);
+            atomicAdd_block(pTTx + peer, expertCounts[i]);
         }
         __syncthreads();
 
@@ -110,7 +113,6 @@ namespace aristos::packet {
                 continue;
             }
             // copy tokens: not padded
-            #pragma unroll 16
             for (uint j = lBid; j < routedTokens; j += superBlockSize) {
                 const auto [tokenIdx, _] = tokenIds(expertIdx, j);
                 auto* __restrict__ localPH = peerHeap + j * tokenDim * sizeof(Element);
@@ -360,7 +362,7 @@ namespace aristos::packet {
             __threadfence();
             lTQHead += dA.tN;
             // notifies scheduler
-            atomicIncrement<cuda::thread_scope_block>(tQHead);
+            atomicAdd_block(tQHead, dA.tN);
         }
     };
 }
