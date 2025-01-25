@@ -19,6 +19,25 @@ namespace aristos::topology{
         return buffer + slot * BETA_BUFFER;
     }
 
+    __device__ __forceinline__
+    void awaitResponses(uint64_t* __restrict__ const& flags,
+        uint* __restrict__ const& syncArray, uint* __restrict__ const& rates,
+        const uint& rank, const uint& n, const uint& seqNo) {
+        using Payload = TopologySignal;
+        auto result = Payload{};
+        for (int i = threadIdx.x; i < n; i += ARISTOS_BLOCK_SIZE) {
+            if (i != rank) {
+                awaitPayload<cuda::thread_scope_system>(CAST_TO(unsigned long long int, flags + i), &result, seqNo);
+                rates[i] = result.throughput;
+                // Enforce consistency
+                nvshmem_uint_test(&CAST_TO(Payload, flags + i)->signal, NVSHMEM_CMP_EQ, seqNo);
+            }
+        }
+        if (!threadIdx.x) {
+            *syncArray = seqNo;
+        }
+    }
+
     template<size_t betaBuf = BETA_BUFFER, size_t alphaBuf = ALPHA_BUFFER, typename Put>
     requires (cuda::std::is_invocable_r_v<void, Put, void*, const void*, size_t, int> && betaBuf > 0 && alphaBuf > 0)
     __device__ __forceinline__
@@ -88,16 +107,7 @@ namespace aristos::topology{
         }
 
         // await responses from other GPUs
-        auto result = TopologySignal{};
-        for (int i = threadIdx.x; i < n; i += ARISTOS_BLOCK_SIZE) {
-            if (i != rank) {
-                awaitPayload<cuda::thread_scope_system>(CAST_TO(unsigned long long int, flags + i), &result, seqNo);
-                rates[i] = result.throughput;
-            }
-        }
-        if (!threadIdx.x) {
-            *syncArray = seqNo;
-        }
+        awaitResponses(flags, syncArray, rates, rank, n, seqNo);
     }
 
     __device__ __forceinline__
@@ -148,16 +158,7 @@ namespace aristos::topology{
         // If num of other P2P peers == 0, then we adjourn early after conditional subscription
         if (numPeers <= 1)[[unlikely]] {
             if (blockIdx.x == (gridDim.x - 1)) {
-                auto result = TopologySignal{};
-                for (int i = threadIdx.x; i < n; i += ARISTOS_BLOCK_SIZE) {
-                    if (i != rank) {
-                        awaitPayload<cuda::thread_scope_system>(CAST_TO(unsigned long long int, flags + i), &result, seqNo);
-                        rates[i] = result.throughput;
-                    }
-                }
-                if (!threadIdx.x) {
-                    *syncArray = seqNo;
-                }
+                awaitResponses(flags, syncArray, rates, rank, n, seqNo);
             }
             return;
         }
@@ -205,16 +206,7 @@ namespace aristos::topology{
         // Most likely this block will not partake in the above thus, they would do the below in parallel
         // Could potentially enlist more blocks if n > THREADS, but that's unlikely
         if (blockIdx.x == gridDim.x - 1) {
-            auto result = TopologySignal{};
-            for (int i = threadIdx.x; i < n; i += ARISTOS_BLOCK_SIZE) {
-                if (i != rank) {
-                    awaitPayload<cuda::thread_scope_system>(CAST_TO(unsigned long long int, flags + i), &result, seqNo);
-                    rates[i] = result.throughput;
-                }
-            }
-            if (!threadIdx.x) {
-                *syncArray = seqNo;
-            }
+            awaitResponses(flags, syncArray, rates, rank, n, seqNo);
         }
     }
 
