@@ -14,11 +14,9 @@ namespace aristos::topology{
         unsigned int throughput;
         unsigned int signal;
     };
-    template<typename T>
-    requires(!cuda::std::is_same_v<T, void>)
     __device__ __forceinline__
-    T* advancePtr(T* buffer, const unsigned int& slot) {
-        return buffer + (slot * BETA_BUFFER);
+    auto* advancePtr(cuda::std::byte* __restrict__ const& buffer, const unsigned int& slot) {
+        return buffer + slot * BETA_BUFFER;
     }
 
     template<size_t betaBuf = BETA_BUFFER, size_t alphaBuf = ALPHA_BUFFER, typename Put>
@@ -99,7 +97,6 @@ namespace aristos::topology{
         }
         if (!threadIdx.x) {
             *syncArray = seqNo;
-            rates[rank] = processingRate;
         }
     }
 
@@ -147,7 +144,7 @@ namespace aristos::topology{
         cuda::std::byte* __restrict__ const& sHeap, floatPair* __restrict__ const& results,
         uint64_t* __restrict__ const& flags, uint* __restrict__ const& syncArray, uint* __restrict__ const& rates) {
         const auto seqNo = (__ldg(syncArray) + 1) % 2; // Equivalent to a bit flip
-        auto* blockade = syncArray + 1;
+        auto* blockade = syncArray + 1; // barrier
         // If num of other P2P peers == 0, then we adjourn early after conditional subscription
         if (numPeers <= 1)[[unlikely]] {
             if (blockIdx.x == (gridDim.x - 1)) {
@@ -160,7 +157,6 @@ namespace aristos::topology{
                 }
                 if (!threadIdx.x) {
                     *syncArray = seqNo;
-                    rates[rank] = processingRate;
                 }
             }
             return;
@@ -218,7 +214,6 @@ namespace aristos::topology{
             }
             if (!threadIdx.x) {
                 *syncArray = seqNo;
-                rates[rank] = processingRate;
             }
         }
     }
