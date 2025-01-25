@@ -10,7 +10,10 @@
 #include "atomics.cuh"
 
 namespace aristos::topology{
-    __device__ __inline__ unsigned int blockade = 0U;
+    struct __align__(8) TopologySignal{
+        unsigned int throughput;
+        unsigned int signal;
+    };
     template<typename T>
     requires(!cuda::std::is_same_v<T, void>)
     __device__ __forceinline__
@@ -19,10 +22,11 @@ namespace aristos::topology{
     }
 
     template<size_t betaBuf = BETA_BUFFER, size_t alphaBuf = ALPHA_BUFFER, typename Put>
-    requires (cuda::std::is_invocable_r_v<void, Put, void*, const void*, size_t, int>)
+    requires (cuda::std::is_invocable_r_v<void, Put, void*, const void*, size_t, int> && betaBuf > 0 && alphaBuf > 0)
     __device__ __forceinline__
-    void measureTransfer(const unsigned int& rank, cuda::std::byte* sHeap, floatPair* remoteDurations,
-        const int& peer, const unsigned int& id, const Put& put, const unsigned int& peerIdx,
+    void measureTransfer(const unsigned int& rank, cuda::std::byte* __restrict__ const& sHeap,
+        floatPair* __restrict__ const& remoteDurations, const int& peer,
+        const unsigned int& id, const Put& put, const unsigned int& peerIdx,
         const unsigned int& lBid = 0, const unsigned int& nb = 1) {
         ull_t start, end;
         float duration = 0.0;
@@ -62,11 +66,14 @@ namespace aristos::topology{
     }
 
     __device__ __forceinline__
-    void singularBuilder(floatPair* scratchpad, const unsigned int& n, const unsigned int& rank, const unsigned long& processingRate,
-        cuda::std::byte* sHeap, floatPair* results, uint64_t* flags) {
+    void singularBuilder(floatPair* __restrict__ const& scratchpad, const unsigned int& n,
+        const unsigned int& rank, const unsigned int& processingRate,
+        cuda::std::byte* __restrict__ const& sHeap, floatPair* __restrict__ const& results,
+        uint64_t* __restrict__ const& flags, uint* __restrict__ const& syncArray, uint* __restrict__ const& rates) {
+        const auto seqNo = (__ldg(syncArray) + 1) % 2; // Equivalent to a bit flip
         for (unsigned int i = 1U; i < n; ++i) {
-            measureTransfer(rank, sHeap, scratchpad, (rank + i) % n,
-                threadIdx.x, nvshmemx_putmem_block, (rank + i) % n);
+            const auto peer = (rank + i) % n;
+            measureTransfer(rank, sHeap, scratchpad, peer, threadIdx.x, nvshmemx_putmem_block, peer);
         }
         __syncthreads();
 
@@ -75,25 +82,38 @@ namespace aristos::topology{
             results[i] = scratchpad[i];
         }
 
+        auto signal = TopologySignal{processingRate, seqNo};
         // Signal my vector, including FLOPs, to others
         for (unsigned int i = 1U; i < n; ++i) {
-            nvshmemx_putmem_signal_nbi_block(results, results, n*sizeof(floatPair), flags + rank,
-                constructSignal(sent, processingRate), NVSHMEM_SIGNAL_SET, (rank + i) % n);
+            nvshmemx_putmem_signal_nbi_block(results, results, n * sizeof(floatPair), flags + rank,
+                *CAST_TO(uint64_t, &signal), NVSHMEM_SIGNAL_SET, (rank + i) % n);
         }
 
         // await responses from other GPUs
-        for (int i = threadIdx.x + 1; i < n; i += ARISTOS_BLOCK_SIZE) {
-            nvshmem_signal_wait_until(flags + (rank + i) % n, NVSHMEM_CMP_GT, sent + seqNo);
-            flags[(rank + i) % n] -= sent + seqNo;
+        auto result = TopologySignal{};
+        for (int i = threadIdx.x; i < n; i += ARISTOS_BLOCK_SIZE) {
+            if (i != rank) {
+                awaitPayload<cuda::thread_scope_system>(CAST_TO(unsigned long long int, flags + i), &result, seqNo);
+                rates[i] = result.throughput;
+            }
+        }
+        if (!threadIdx.x) {
+            *syncArray = seqNo;
+            rates[rank] = processingRate;
         }
     }
 
     __device__ __forceinline__
-    void pluralRemoteBuilder(floatPair* scratchpad, const unsigned int* peers, const unsigned int& n, const unsigned int& rank,
-        const unsigned long& processingRate, const unsigned int numPeers, cuda::std::byte* sHeap, floatPair* results, uint64_t* flags) {
+    void pluralRemoteBuilder(floatPair* __restrict__ const& scratchpad, const unsigned int* __restrict__& peers,
+        const unsigned int& n, const unsigned int& rank,
+        const unsigned int& processingRate, const unsigned int numPeers, cuda::std::byte* __restrict__ const& sHeap,
+        floatPair* __restrict__ const& results, uint64_t* __restrict__ const& flags,
+        uint* __restrict__ const& syncArray) {
+        const auto seqNo = (__ldg(syncArray) + 1) % 2; // Equivalent to a bit flip
+        auto* blockade = syncArray + 1;
         for (unsigned int i = 0U; i < numPeers; ++i) {
-            measureTransfer(rank, sHeap, scratchpad, peers[(i + rank) % numPeers],
-                threadIdx.x, nvshmemx_putmem_block, (i + rank) % numPeers);
+            const auto idx = (i + rank) % numPeers;
+            measureTransfer(rank, sHeap, scratchpad, peers[idx], threadIdx.x, nvshmemx_putmem_block, idx);
         }
         __syncthreads();
 
@@ -107,29 +127,40 @@ namespace aristos::topology{
         // if num remote peers < n - 1, then we must await the contribution of our p2p siblings
         if (!threadIdx.x && numPeers < n - 1) {
             __threadfence();
-            atomicAdd(&blockade, 1);
-            while (atomicLoad(&blockade) % gridDim.x != 0) {}
+            atomicAdd(blockade, 1);
+            while (atomicLoad(blockade) % gridDim.x != 0) {}
             __threadfence();
         }
         __syncthreads();
-
+        auto signal = TopologySignal{processingRate, seqNo};
         // Signal our vector, including FLOPs, to others
         for (unsigned int i = threadIdx.x; i < numPeers; i += ARISTOS_BLOCK_SIZE) {
             nvshmem_putmem_signal_nbi(results, results, n * sizeof(floatPair), flags + rank,
-                    constructSignal(sent, processingRate), NVSHMEM_SIGNAL_SET, peers[i]);
+                    *CAST_TO(uint64_t, &signal), NVSHMEM_SIGNAL_SET, peers[i]);
         }
     }
 
     __device__ __forceinline__
-    void pluralP2PBuilder(floatPair* scratchpad,const unsigned int* peers, const unsigned int& n, const unsigned int& rank,
-        const unsigned long& processingRate, const unsigned int numPeers, const bool& remotePresent,
-        cuda::std::byte* sHeap, floatPair* results, uint64_t* flags) {
+    void pluralP2PBuilder(floatPair* __restrict__ const& scratchpad, const unsigned int* __restrict__ peers,
+        const unsigned int& n, const unsigned int& rank,
+        const unsigned int& processingRate, const unsigned int numPeers, const bool& remotePresent,
+        cuda::std::byte* __restrict__ const& sHeap, floatPair* __restrict__ const& results,
+        uint64_t* __restrict__ const& flags, uint* __restrict__ const& syncArray, uint* __restrict__ const& rates) {
+        const auto seqNo = (__ldg(syncArray) + 1) % 2; // Equivalent to a bit flip
+        auto* blockade = syncArray + 1;
         // If num of other P2P peers == 0, then we adjourn early after conditional subscription
         if (numPeers <= 1)[[unlikely]] {
             if (blockIdx.x == (gridDim.x - 1)) {
-                for (int i = threadIdx.x + 1; i < n; i += ARISTOS_BLOCK_SIZE) {
-                    nvshmem_signal_wait_until(flags + (rank + i) % n, NVSHMEM_CMP_GT, sent + seqNo);
-                    flags[(rank + i) % n] -= sent + seqNo;
+                auto result = TopologySignal{};
+                for (int i = threadIdx.x; i < n; i += ARISTOS_BLOCK_SIZE) {
+                    if (i != rank) {
+                        awaitPayload<cuda::thread_scope_system>(CAST_TO(unsigned long long int, flags + i), &result, seqNo);
+                        rates[i] = result.throughput;
+                    }
+                }
+                if (!threadIdx.x) {
+                    *syncArray = seqNo;
+                    rates[rank] = processingRate;
                 }
             }
             return;
@@ -138,9 +169,9 @@ namespace aristos::topology{
         const unsigned int numP2PBlocks = gridDim.x - remotePresent;
 
         for (unsigned int i = 1U; i < numPeers; ++i) {
-            measureTransfer(rank, sHeap, scratchpad, peers[(i + rank) % numPeers],
-                threadIdx.x, nvshmemx_putmem_block,
-                (i + rank) % numPeers, localBlockIdx, numP2PBlocks);
+            const auto idx = (i + rank) % numPeers;
+            measureTransfer(rank, sHeap, scratchpad, peers[idx],
+                threadIdx.x, nvshmemx_putmem_block, idx, localBlockIdx, numP2PBlocks);
         }
         __syncthreads();
 
@@ -158,17 +189,19 @@ namespace aristos::topology{
         // because there is already one at the beginning of the succeeding cooperative put API.
         if (!threadIdx.x) {
             __threadfence();
-            atomicAdd(&blockade, 1);
-            while (atomicLoad(&blockade) % gridDim.x != 0) {}
+            atomicAdd(blockade, 1);
+            while (atomicLoad(blockade) % gridDim.x != 0) {}
             __threadfence();
         }
 
         // Signal our vector, including FLOPs, to others
         // Inter-block slicing
+        // pack payload and signal into single word
+        auto signal = TopologySignal{processingRate, seqNo};
         for(unsigned int i = localBlockIdx; i < numPeers; i += numP2PBlocks){
             nvshmemx_putmem_signal_nbi_block(results, results,
                                              (peers[i] != rank) * sizeof(floatPair) * n, flags + rank,
-                                             constructSignal(sent, processingRate),
+                                             *CAST_TO(uint64_t, &signal),
                                              NVSHMEM_SIGNAL_SET, peers[i]);
         }
 
@@ -176,17 +209,25 @@ namespace aristos::topology{
         // Most likely this block will not partake in the above thus, they would do the below in parallel
         // Could potentially enlist more blocks if n > THREADS, but that's unlikely
         if (blockIdx.x == gridDim.x - 1) {
-            for (int i = threadIdx.x + 1; i < n; i += ARISTOS_BLOCK_SIZE) {
-                nvshmem_signal_wait_until(flags + (rank + i) % n, NVSHMEM_CMP_GT, sent + seqNo);
-                flags[(rank + i) % n] -= sent + seqNo;
+            auto result = TopologySignal{};
+            for (int i = threadIdx.x; i < n; i += ARISTOS_BLOCK_SIZE) {
+                if (i != rank) {
+                    awaitPayload<cuda::thread_scope_system>(CAST_TO(unsigned long long int, flags + i), &result, seqNo);
+                    rates[i] = result.throughput;
+                }
+            }
+            if (!threadIdx.x) {
+                *syncArray = seqNo;
+                rates[rank] = processingRate;
             }
         }
     }
 
     /// Build Adjacency Matrix
-    __global__ void discover(CUTE_GRID_CONSTANT const int n, CUTE_GRID_CONSTANT const int rank,
-        CUTE_GRID_CONSTANT const bool remotePresent, const unsigned long processingRate,
-        cuda::std::byte* sHeap, uint64_t* flags, floatPair* results) {
+    __global__ void discover(__grid_constant__ const int n, __grid_constant__ const int rank,
+        __grid_constant__ const bool remotePresent, __grid_constant__ const unsigned int processingRate,
+        cuda::std::byte* __restrict__ sHeap, uint64_t* flags,
+        floatPair* __restrict__ results, uint* __restrict__ syncArray, uint* __restrict__ rates) {
         assert(blockDim.x == ARISTOS_BLOCK_SIZE);
         assert(blockDim.y * blockDim.z == 1);
         assert(gridDim.x <= ARISTOS_SUPER_BLOCK_SIZE + remotePresent);
@@ -196,36 +237,43 @@ namespace aristos::topology{
         // However, empirical results show identical performance (1.024 𝜇s) for 128 threads copying 256 floats,
         // which is a likely practical upper bound for n.
         extern __shared__ __align__(16) floatPair scratchpad[];
-
+        for (uint i = threadIdx.x; i < n; i += ARISTOS_BLOCK_SIZE) {
+            scratchpad[i] = floatPair{0, 0};
+        }
         if(gridDim.x == 1){
             /// number of blocks is insufficient for remote specialization
-            singularBuilder(scratchpad, n, rank, processingRate, sHeap, results, flags);
+            singularBuilder(scratchpad, n, rank, processingRate, sHeap, results, flags, syncArray, rates);
         }
         else{
             // Specialization
+            auto nP = 0;
             __shared__ unsigned int numPeers;
-            __shared__ unsigned int* peers;
             if (!threadIdx.x) {
-                numPeers = 0;
-                peers = static_cast<unsigned int*>(static_cast<void*>(scratchpad + n));
+                auto* __restrict__ peersX = CAST_TO(unsigned int, scratchpad + n);
                 /// Block 0 gets remote peers, if present; otherwise, joins the others in getting proximal peers
                 for(unsigned int i = 0U; i < n; ++i) {
                     if (const bool b = nvshmem_ptr(results, i) == nullptr;
                         (!b && blockIdx.x > 0) || ((!remotePresent && !b ) || (remotePresent && (b && blockIdx.x == 0)))) {
-                        peers[numPeers++] = i;
+                        peersX[nP++] = i;
                     }
                 }
+                numPeers = nP;
             }
             __syncthreads();
+            nP = numPeers;
+            const auto* __restrict__ peers = CAST_TO(unsigned int, scratchpad + n);
+
             /// local publisher block 0 will service remote communication requests
             /// while other blocks will further specialize to serve parallel P2P, à la NVLink, transfers
             if(!blockIdx.x && remotePresent){
                 /// remote publisher
-                pluralRemoteBuilder(scratchpad, peers, n, rank, processingRate, numPeers, sHeap, results, flags);
+                pluralRemoteBuilder(scratchpad, peers, n, rank, processingRate, nP, sHeap, results, flags,
+                    syncArray);
             }
             else{
                 /// P2P publisher only at most one super block
-                pluralP2PBuilder(scratchpad, peers, n, rank, processingRate, numPeers, remotePresent, sHeap, results, flags);
+                pluralP2PBuilder(scratchpad, peers, n, rank, processingRate, nP, remotePresent, sHeap,
+                    results, flags, syncArray, rates);
             }
         }
     }

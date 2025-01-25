@@ -75,7 +75,7 @@ namespace aristos{
     using Milli = cuda::std::chrono::duration<float, cuda::std::milli>;
     using ull_t = unsigned long long int;
 
-    struct floatPair {
+    struct __align__(8) floatPair {
         float alpha;
         float beta;
 
@@ -180,6 +180,11 @@ namespace aristos{
 
     template<class T, int N, bool RegisterSized>
     struct isRegister<cutlass::Array<T, N, RegisterSized>> : cuda::std::true_type {};
+
+    template<class Engine, class Layout>
+    struct isRegister<cute::Tensor<Engine, Layout>> :
+    cuda::std::conditional_t<cute::is_rmem_v<cute::Tensor<Engine, Layout>>,
+    cuda::std::true_type, cuda::std::false_type> {};
 
     template <class T>
     constexpr bool isRegisterV = isRegister<T>::value;
@@ -367,12 +372,12 @@ namespace aristos{
 
     /// Information about auxiliary data structures comprising bookkeeping state
     /// Includes length of data structures (arrays) and pointer arithmetic functions
+    using BookType = unsigned int;
+    using TKTuple = cuda::std::pair<BookType, mp_t>;
+    using EDT = cuda::std::tuple<uint, uint, uint>;
     struct __align__(16) Bookkeeping {
         /// default type for bookkeeping data structures
-        using BookType = unsigned int;
-        using TKTuple = cuda::std::pair<BookType, mp_t>;
-        using EDT = cuda::std::tuple<uint, uint, uint>;
-        cuda::std::byte* book = nullptr;
+        cuda::std::byte *book = nullptr;
         /// Note the below lengths are cumulative sums.
         /// Gate buffers in bytes
         unsigned long int gB = 0UL;
@@ -418,10 +423,12 @@ namespace aristos{
         /// expert capacity
         unsigned int eCap = 0U;
         /// Global device barrier
-        cuda::barrier<cuda::thread_scope_device>* deviceBlockade;
+        cuda::barrier<cuda::thread_scope_device>* deviceBlockade = nullptr;
 
+        __device__ __forceinline__
         Bookkeeping() = default;
 
+        __host__ __forceinline__
         explicit Bookkeeping(
             cuda::std::byte* const& _book,
             const unsigned int& _sl,
@@ -643,6 +650,8 @@ namespace aristos{
     __constant__ __inline__ Config moeConfig{};
     __constant__ __inline__ Bookkeeping bookkeeping{};
     __inline__ Config hostMoEConfig;
+    __inline__ bool isInitialized = false;
+    __inline__ auto aristosStream = cudaStreamPerThread;
 
     template<typename E = PacketStage> requires cuda::std::is_integral_v<cuda::std::underlying_type_t<E>>
     __device__ __forceinline__

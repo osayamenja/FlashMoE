@@ -12,10 +12,6 @@
 #include "../atomics.cuh"
 
 namespace aristos::gate {
-    // Resident in registers
-    struct __align__(16) GateArg{
-
-    };
     /// Fused GEMM, softmax, topKMask, and loss, assuming blocks >= tiles.N and no bias.
     /// Supporting the latter is trivial; the former requires a completely new algorithm
     template<
@@ -147,7 +143,7 @@ namespace aristos::gate {
             auto mI = -cuda::std::numeric_limits<ElementC>::infinity();
             // Begin Block-Ring softmax
             if (cute::get<1>(tileCoord) > 0) {
-                ring::awaitPayload(brsMailbox, rSp, 1U);
+                awaitPayload(brsMailbox, rSp, 1U);
                 // We quantize dI from mp_t to half, and this yields no loss in precision.
                 // We leave as an exercise to the reader to determine why this conversion is lossless.
                 dI = deQuantize(rSp.dI);
@@ -164,8 +160,8 @@ namespace aristos::gate {
 
             if (cute::get<1>(tileCoord) + 1 < tilesN) {
                 const auto sP = RingSoftmaxPayload{mI, quantize(dI), 1U};
-                ring::signal(brsXMailbox, sP);
-                ring::awaitPayload(brsMailbox, rSp, 2U);
+                signal(brsXMailbox, sP);
+                awaitPayload(brsMailbox, rSp, 2U);
                 dI = deQuantize(rSp.dI);
                 mI = rSp.mI;
             }
@@ -173,7 +169,7 @@ namespace aristos::gate {
                 // Ring ends with me, let's unblock everyone else
                 auto sP = RingSoftmaxPayload{mI, quantize(dI), 2U};
                 for (uint j = 0; j < tilesM; ++j) {
-                    ring::signal(brsXMailbox + bM * j * tilesM, sP);
+                    signal(brsXMailbox + bM * j * tilesM, sP);
                 }
             }
 
@@ -269,7 +265,7 @@ namespace aristos::gate {
                     shouldSweep = false;
                 }
                 if (cute::get<1>(tileCoord) > 0) {
-                    ring::awaitPayload(tkMailbox + flagPrefix, rTp, batonPrefix + 1);
+                    awaitPayload(tkMailbox + flagPrefix, rTp, batonPrefix + 1);
                     sV = rTp.sV;
                     sIdx = rTp.sIdx;
                     if (lSV > sV) {
@@ -284,9 +280,9 @@ namespace aristos::gate {
                     // propagate our proposal
                     // Now we pass our proposal through the ring
                     const auto sP = RingTopKPayload{sV, sIdx, batonPrefix + 1};
-                    ring::signal(tkXMailbox + flagPrefix, sP);
+                    signal(tkXMailbox + flagPrefix, sP);
                     // Now we await the results to return
-                    ring::awaitPayload(tkMailbox + flagPrefix, rTp, batonPrefix + 2);
+                    awaitPayload(tkMailbox + flagPrefix, rTp, batonPrefix + 2);
                     sV = rTp.sV;
                     sIdx = rTp.sIdx;
                 }
@@ -296,7 +292,7 @@ namespace aristos::gate {
                     auto* __restrict__ mailboxes = tkXMailbox;
                     for (uint j = 0; j < tilesM; ++j) {
                         mailboxes += phases * j * bM * tilesM;
-                        ring::signal(mailboxes + flagPrefix, sP);
+                        signal(mailboxes + flagPrefix, sP);
                     }
                 }
 
@@ -635,8 +631,8 @@ namespace aristos::gate {
         }
 
         // wipe flags clean for next iteration
-        constexpr auto vF = sizeof(uint4) / sizeof(Bookkeeping::BookType);
-        const auto fE = bk.brs / sizeof(Bookkeeping::BookType);
+        constexpr auto vF = sizeof(uint4) / sizeof(BookType);
+        const auto fE = bk.brs / sizeof(BookType);
         const auto vBRs = fE / vF;
         for (unsigned int i = threads * blockIdx.x + threadIdx.x; i < vBRs; i+= threads * blocks) {
             gBK[i] = uint4{0U, 0U, 0U, 0U};

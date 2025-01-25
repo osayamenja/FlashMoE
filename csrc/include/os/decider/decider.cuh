@@ -13,6 +13,7 @@
 #include <set>
 #include <boost/pending/disjoint_sets.hpp>
 
+#include "../../types.cuh"
 #include "comps/edge.cuh"
 #include "comps/niche.cuh"
 #include "comps/expert.cuh"

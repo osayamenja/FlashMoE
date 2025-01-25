@@ -8,6 +8,24 @@
 #include <iostream>
 #include <typeinfo>
 #include <cxxabi.h>
+#if !defined(CHECK_ERROR_EXIT)
+#  define CHECK_ERROR_EXIT(e)                                         \
+do {                                                           \
+cudaError_t code = (e);                                      \
+if (code != cudaSuccess) {                                   \
+fprintf(stderr, "<%s:%d> %s:\n    %s: %s\n",               \
+__FILE__, __LINE__, #e,                            \
+cudaGetErrorName(code), cudaGetErrorString(code)); \
+fflush(stderr);                                            \
+exit(1);                                                   \
+}                                                            \
+} while (0)
+#endif
+
+#if !defined(CHECK_LAST)
+# define CHECK_LAST() CHECK_ERROR_EXIT(cudaPeekAtLastError()); CHECK_ERROR_EXIT(cudaDeviceSynchronize())
+#endif
+
 namespace aristos{
     template<typename T>
     __host__ __forceinline__
@@ -30,7 +48,7 @@ namespace aristos{
     }
 
     __device__ __forceinline__
-    bool isRegister(const void* p) {
+    bool isRegisterMemory(const void* p) {
         return !(__isShared(p) &&
             __isLocal(p) &&
             __isConstant(p) &&

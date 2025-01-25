@@ -216,7 +216,6 @@ namespace aristos::processor{
                     }
                 }
                 // Fused Bias Add and Activation Function on register fragment
-                // Also fuses copy to GMEM.
                 #pragma unroll
                 for (int j = 0; j < elems; ++j) {
                     accumulator(j + i * elems) = gCStoreOp(epilogueOp(accumulator(j + i * elems), gDLoadOp(rScratch[j])));
@@ -529,9 +528,8 @@ namespace aristos::processor{
                         currentTask.tileIdx,
                         nvshmem_ptr(pA.sHeap, currentTask.peerIdx) == nullptr);
                     if (!threadIdx.x) {
-                        uint64_t flagSignal = 0;
                         // Pack payload into single signal word
-                        *CAST_TO(SignalPayload<PacketStage::last>, &flagSignal) = SignalPayload<PacketStage::last>{
+                        auto flagSignal = SignalPayload<PacketStage::last>{
                             currentTask.batchIdx,
                             rSeqBit,
                             currentTask.tileSize
@@ -543,7 +541,7 @@ namespace aristos::processor{
                                 nvshmem_putmem_signal_nbi(currentTask.cData[postIndex], currentTask.cData[postIndex],
                                     currentTask.tileSize * pA.tokenSize * sizeof(ElementA),
                                     pA.flags + currentTask.flagIdx,
-                                    flagSignal, NVSHMEM_SIGNAL_SET,
+                                    *CAST_TO(uint64_t, &flagSignal), NVSHMEM_SIGNAL_SET,
                                     currentTask.peerIdx);
                             }
                             else {

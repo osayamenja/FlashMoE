@@ -13,8 +13,6 @@
 
 #define SUPPORTED = 1;
 namespace aristos{
-    __inline__ bool isInitialized = false;
-    __inline__ auto aristosStream = cudaStreamPerThread;
     template<typename Element>
     requires(aristos::TensorValueType<Element>)
     __host__ __forceinline__
