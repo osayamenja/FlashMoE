@@ -46,7 +46,6 @@
 #define TO_MB(b) (static_cast<float>(b) / (1024.0f*1024.0f))
 #define BETA_MB 1024.0f // 1GB
 
-#include <cuda/std/type_traits>
 #include <cuda/barrier>
 #include <cuda/std/array>
 #include <cute/tensor.hpp>
@@ -128,11 +127,6 @@ namespace aristos{
     enum class DropTokens {
         yes,
         no
-    };
-
-    __device__
-    enum PutSignal : uint8_t {
-        sent = 1
     };
 
     __device__
@@ -373,20 +367,19 @@ namespace aristos{
     /// Information about auxiliary data structures comprising bookkeeping state
     /// Includes length of data structures (arrays) and pointer arithmetic functions
     using BookType = unsigned int;
-    using TKTuple = cuda::std::pair<BookType, mp_t>;
     using EDT = cuda::std::tuple<uint, uint, uint>;
     struct __align__(16) Bookkeeping {
         /// default type for bookkeeping data structures
         cuda::std::byte *book = nullptr;
         /// Note the below lengths are cumulative sums.
-        /// Gate buffers in bytes
-        unsigned long int gB = 0UL;
+        /// Gate buffer and intermediate in bytes
+        unsigned long int gBxM = 0UL;
         /// EP group description and packet sync array in bytes
         unsigned long int eDsA = 0UL;
         /// Scheduler buffers and flag checkpoints in bytes
         unsigned long int sBfC = 0UL;
-        /// Intermediate buffer and tQ length in bytes
-        unsigned long int xMtQ = 0UL;
+        /// tQ length, expert data and token probabilities in bytes
+        unsigned long int tQXt = 0UL;
         /// Block Ring Softmax flags in bytes, non-cumulative
         unsigned int brs = 0UL;
         /// gate routing and loss vectors in bytes
@@ -428,6 +421,7 @@ namespace aristos{
         __device__ __forceinline__
         Bookkeeping() = default;
 
+        template<typename Element>
         __host__ __forceinline__
         explicit Bookkeeping(
             cuda::std::byte* const& _book,
@@ -440,35 +434,32 @@ namespace aristos{
             const unsigned int& _eCapacity,
             const unsigned int& _blocks,
             const unsigned int& _world,
-            cuda::barrier<cuda::thread_scope_device>* _blockade) :
+            cuda::barrier<cuda::thread_scope_device>* _blockade,
+            const bool isSingleBlockGate = true) :
         book(_book), world(_world), sl(_sl), nx(_nx), nLx(_nLx), pd(_pd), px(_px),
         tM(Config::tiles<BLOCK_M>(_sl)),
         tN(Config::tiles<BLOCK_N>(_embedDim)),
         tCM(Config::tiles<BLOCK_M>(_eCapacity)), blocks(_blocks), eCap(_eCapacity),
         deviceBlockade(_blockade) {
-            if (_nx == 1)[[unlikely]] {
-                // For this case, using any function other than xM yields undefined behavior
-                xMtQ = sizeof(mp_t) * _world * _nLx * tCM * tN;
-                bookSize = xMtQ;
-            }
-            else {
-                gRl = sizeof(mp_t) * (_sl * px + (2 * px + 1));
-                gB = gRl + sizeof(TokenIdxTuple) * (px * _eCapacity) + sizeof(BookType) * px * (tM + 3);
-                eDsA = gB + sizeof(BookType) * (4 * nx + world + 1);
-                const unsigned int fCl = sizeof(bool) * (world * nLx + nx * tCM * tN);
-                sBfC = eDsA + sizeof(BookType) * (3 * blocks + SUBSCRIBERS + world * nLx * tCM) + fCl;
+            if (_nx > 1)[[likely]] {
+                // maximum gemm tiles/tasks scheduled by processors
+                const auto prT = world * nLx * tCM * Config::tiles<BLOCK_N>(pd);
                 // maximum gemm tiles/tasks scheduled by subscriber threads
                 auto sT = world * nLx * tCM * tN + tCM * tN * nx;
                 tPs = cute::ceil_div(sT, SUBSCRIBERS);
                 sT = tPs * SUBSCRIBERS;
-                // maximum gemm tiles/tasks scheduled by processors
-                const auto pT = world * nLx * tCM * Config::tiles<BLOCK_N>(pd);
-                tQl = sizeof(Task) * (sT + pT);
-                tQml = tQl + blocks; // interrupt tasks
-                xMtQ = sBfC + tQml + sizeof(mp_t) * world * nLx * tCM * tN;
-                brs = _sl * Config::tiles<BLOCK_N>(_px) * (sizeof(RingSoftmaxPayload) + 2 * sizeof(RingTopKPayload));
-                bookSize = xMtQ + brs;
+                tQl = sizeof(Task) * (sT + prT);
+                tQml = tQl + blocks * sizeof(Task); // interrupt tasks
+                tQXt = tQml + sizeof(EDT) * _nx + sizeof(TokenIdxTuple) * (px * _eCapacity);
+                brs = tQXt + (isSingleBlockGate ? 0U : sl * Config::tiles<BLOCK_N>(_px) *
+                    (sizeof(RingSoftmaxPayload) + 2 * sizeof(RingTopKPayload)));
+                gRl = brs + 2 * nx + 1;
+                eDsA = gRl + sizeof(BookType) * (4 * nx + world + 1);
+                const unsigned int fCl = sizeof(bool) * (world * nLx + nx * tCM * tN);
+                sBfC = eDsA + sizeof(BookType) * 2 * (blocks + world * nLx * tCM) + fCl;
             }
+            gBxM = sBfC + sizeof(Element) * (_world * _nLx * tCM * tN + sl * px);
+            bookSize = gBxM;
         }
 
         /// Needed for malloc
@@ -505,16 +496,53 @@ namespace aristos{
             return xMtQ + brs;
         }
 
-        template<typename Element>
         __device__ __forceinline__
-        auto* gRt() const {
-            return CAST_TO(Element, book);
+        auto* tQ() const {
+            return CAST_TO(Task, book);
+        }
+
+        // processor interrupts
+        __device__ __forceinline__
+        auto* tQI() const {
+            return tQ() + tQl;
+        }
+
+        static_assert(sizeof(Task) >= sizeof(EDT));
+        /// Expert Data
+        /// remote experts first: {actual & local expert idx, peer idx}
+        __device__ __forceinline__
+        auto* eD() const {
+            return CAST_TO(EDT, book + tQml);
+        }
+
+        static_assert(sizeof(EDT) >= sizeof(TokenIdxTuple));
+        __device__ __forceinline__
+        auto* tP() const {
+            return CAST_TO(TokenIdxTuple, eD() + nx);
+        }
+
+        static_assert(sizeof(TokenIdxTuple) >= sizeof(RingSoftmaxPayload) &&
+            sizeof(TokenIdxTuple) >= sizeof(RingTopKPayload));
+        __device__ __forceinline__
+        auto* gateBk() const {
+            // Entrypoint for vectorized memory cleaning
+            return CAST_TO(uint2, book + tQXt);
+        }
+        __device__ __forceinline__
+        auto* bRsP() const {
+            return CAST_TO(RingSoftmaxPayload, gateBk());
+        }
+        /// Ring top k flags
+        /// Two sets for pipelining termination phase of round i and initial phase of round i + 1
+        __device__ __forceinline__
+        auto* rTp() const {
+            return CAST_TO(RingTopKPayload, bRsP() + sl * Config::tiles<BLOCK_N>(px));
         }
 
         /// Gate mean logits
         __device__ __forceinline__
         auto* gML() const {
-            return CAST_TO(mp_t, book + sizeof(mp_t) * (sl * px));
+            return CAST_TO(mp_t, book + brs);
         }
         /// Gate mean expert counts
         __device__ __forceinline__
@@ -527,23 +555,11 @@ namespace aristos{
             return gMeC() + nx;
         }
 
-        __device__ __forceinline__
-        auto* tP() const {
-            return CAST_TO(TokenIdxTuple, book + gRl);
-        }
-        __device__ __forceinline__
-        auto* tF() const {
-            return CAST_TO(BookType, tP() + px * eCap);
-        }
-        __device__ __forceinline__
-        auto* tV() const {
-            return tF() + tM * px;
-        }
-
+        static_assert(sizeof(mp_t) >= sizeof(BookType));
         /// Packet data structures
         __device__ __forceinline__
         auto* pDs() const {
-            return tV() + px;
+            return CAST_TO(BookType, book + gRl);
         }
         __device__ __forceinline__
         auto* eC() const {
@@ -554,33 +570,29 @@ namespace aristos{
         /// Expert index -> resident GPU EP rank
         __device__ __forceinline__
         auto* ePs() const {
-            return CAST_TO(BookType, book + gB);
+            return pDs() + nx;
         }
         /// Expert index to local expert index
         __device__ __forceinline__
         auto* eLs() const {
             return ePs() + nx;
         }
-        /// Expert Data
-        /// remote experts first: {actual & local expert idx, peer idx}
+
+        /// Packet Sync array
         __device__ __forceinline__
-        auto* eD() const {
-            return CAST_TO(EDT, ePs() + nx);
+        auto* pSA() const {
+            return eLs() + nx;
         }
-        /// number of remote experts
-        __device__ __forceinline__
-        auto* nRx() const {
-            return CAST_TO(BookType, eD() + nx);
-        }
+
         /// Peer Translation
         /// EP rank -> PE rank
         __device__ __forceinline__
         auto* pT() const {
-            return nRx() + 1;
+            return pSA() + nx;
         }
-        /// Packet Sync array
+        /// number of remote experts
         __device__ __forceinline__
-        auto* pSA() const {
+        auto* nRx() const {
             return pT() + world;
         }
 
@@ -601,48 +613,26 @@ namespace aristos{
         /// tQ sync array
         __device__ __forceinline__
         auto* tQS() const {
-            return tQH() + blocks + SUBSCRIBERS;
+            return tQH() + world * nLx * tCM;
         }
         __device__ __forceinline__
         auto* fC() const {
-            return CAST_TO(bool, tQS() + world * nLx * tCM);
+            return CAST_TO(BookType, tQS() + world * nLx * tCM);
         }
 
+        /// Gate routing buffer
+        template<typename Element>
+        requires(sizeof(BookType) >= sizeof(Element))
         __device__ __forceinline__
-        auto* tQ() const {
-            return CAST_TO(Task, book + sBfC);
-        }
-
-        // processor interrupts
-        __device__ __forceinline__
-        auto* tQI() const {
-            return tQ() + tQl;
+        auto* gRt() const {
+            return CAST_TO(Element, book + sBfC);
         }
 
         // Intermediate buffer
-        template<typename Element = cuda::std::byte>
+        template<typename Element>
         __device__ __forceinline__
         auto* xM() const {
-            return CAST_TO(Element, tQ() + tQml);
-        }
-
-        // These must be together and last due to
-        // 1. Contiguity requirements as we erase this region of memory after every step.
-        // 2. Dependency on GateReductionLevel
-        __device__ __forceinline__
-        auto* gateBk() const {
-            // Entrypoint for vectorized memory cleaning
-            return CAST_TO(uint4, book + xMtQ);
-        }
-        __device__ __forceinline__
-        auto* bRsP() const {
-            return CAST_TO(RingSoftmaxPayload, gateBk());
-        }
-        /// Ring top k flags
-        /// Two sets for pipelining termination phase of round i and initial phase of round i + 1
-        __device__ __forceinline__
-        auto* rTp() const {
-            return CAST_TO(RingTopKPayload, bRsP() + sl * Config::tiles<BLOCK_N>(px));
+            return gRt<Element>() + sl * px;
         }
     };
 
@@ -652,12 +642,6 @@ namespace aristos{
     __inline__ Config hostMoEConfig;
     __inline__ bool isInitialized = false;
     __inline__ auto aristosStream = cudaStreamPerThread;
-
-    template<typename E = PacketStage> requires cuda::std::is_integral_v<cuda::std::underlying_type_t<E>>
-    __device__ __forceinline__
-    uint64_t constructSignal(E const& signal, uint64_t const& tagAlong = 0U){
-        return tagAlong + signal + seqBit;
-    }
 
     namespace heap {
         // The symmetric heap is a 6-D tensor (P, S, C, E, M, H)

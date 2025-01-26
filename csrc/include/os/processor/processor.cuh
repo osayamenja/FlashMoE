@@ -436,7 +436,7 @@ namespace aristos::processor{
                 moeConfig.sHeap,
                 bookkeeping.sQ() + blockIdx.x,
                 bookkeeping.pDB() + blockIdx.x,
-                bookkeeping.tQH() + SUBSCRIBERS,
+                bookkeeping.tQH(),
                 moeConfig.flags,
                 bookkeeping.tQ(),
                 bookkeeping.tQ() + bookkeeping.tPs * SUBSCRIBERS, // should be the external Q

@@ -601,7 +601,7 @@ namespace aristos::gate {
         const MatrixB& weights,
         MatrixC& routing,
         const unsigned int& k,
-        ElementC* __restrict__ scratch){
+        ElementC* __restrict__ const& scratch){
         const auto gArg = GateArgs {
                 bookkeeping.sl,
                 bookkeeping.nx,
@@ -643,23 +643,17 @@ namespace aristos::gate {
         // Compute Gate loss
         auto* __restrict__ gBK = bookkeeping.gateBk();
         auto* __restrict__ gL = bookkeeping.gL();
+        const auto fl = bookkeeping.brs;
 
         for (unsigned int i = threads * blockIdx.x + threadIdx.x; i < gArg.nx; i+= threads * blocks) {
             const auto me = gArg.gML[i];
             const auto ce = gArg.gMeC[i];
-            atomicAdd(gL(),__fdividef(me * ce, static_cast<mp_t>(gArg.nx)));
+            atomicAdd(gL(), __fdividef(me * ce, static_cast<mp_t>(gArg.nx)));
         }
 
         // wipe flags clean for next iteration
-        constexpr auto vF = sizeof(uint4) / sizeof(BookType);
-        const auto fE = bookkeeping.brs / sizeof(BookType);
-        const auto vBRs = fE / vF;
-        for (unsigned int i = threads * blockIdx.x + threadIdx.x; i < vBRs; i+= threads * blocks) {
-            gBK[i] = uint4{0U, 0U, 0U, 0U};
-        }
-
-        for (unsigned int i = threads * blockIdx.x + threadIdx.x + vBRs * vF; i < fE; i += threads * blocks) {
-            CAST_TO(uint, gBK)[i] = 0U;
+        for (unsigned int i = threads * blockIdx.x + threadIdx.x; i < fl; i += threads * blocks) {
+            gBK[i] = uint2{0U, 0U};
         }
     }
 }
