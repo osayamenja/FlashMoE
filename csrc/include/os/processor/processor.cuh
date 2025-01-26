@@ -241,11 +241,7 @@ namespace aristos::processor{
                     gC(rIdx + j, cIdx + i * elems) = sC(rIdx + j, cIdx);
                 }
             }
-
             __syncthreads();
-            if (!threadIdx.x) {
-                __threadfence();
-            }
         }
     };
 
@@ -431,6 +427,7 @@ namespace aristos::processor{
         static_assert(sizeof(SignalPayload<PacketStage::last>) == sizeof(uint64_t));
         __shared__ Task currentTask;
         __shared__ ProcessorArgs pA;
+        __shared__ uint enqueue;
         unsigned int signal = 0U;
         unsigned int interrupt = 0U;
         const auto rSeqBit = _seqBit;
@@ -452,6 +449,7 @@ namespace aristos::processor{
             // Initially indicate this block's readiness
             atomicExch(pA.sQ, ready);
         }
+        atomicExch(&enqueue, 0U);
         using Operation = BlockMM<Arch, ElementA, ElementB, ElementC, ActivationOp>;
         using OperationX = BlockMM<Arch, ElementA, ElementB, ElementC, ActivationOpX>;
         constexpr auto preGEMM = FGT<TaskType::preGEMM, Operation>{};
@@ -488,29 +486,38 @@ namespace aristos::processor{
                         pA.pd,
                         pA.tokenSize,
                         currentTask.tileIdx);
-                    if (!threadIdx.x &&
-                        atomicAdd(pA.tQS + currentTask.syncIdx, 1U) == pA.tN) {
+                    if (!threadIdx.x) {
+                        __threadfence();
+                        enqueue = atomicAdd(pA.tQS + currentTask.syncIdx, 1U) == pA.tN;
+                    }
+                    __syncthreads();
+                    if (enqueue) {
                         const auto tasks = pA.tNx;
                         auto* tQ = pA.tQ + currentTask.syncIdx;
-                        for (unsigned int i = 0; i < tasks; ++i) {
-                            tQ[i] = Task{
-                                TaskType::postGEMM,
-                                currentTask.cData[preIndex],
-                                currentTask.bData,
-                                currentTask.cData,
-                                currentTask.dData,
-                                currentTask.syncIdx,
-                                i,
-                                currentTask.M,
-                                currentTask.flagIdx,
-                                currentTask.tileSize,
-                                currentTask.peerIdx,
-                                currentTask.batchIdx
-                            };
+                        auto nextTask = Task {
+                            TaskType::postGEMM,
+                            currentTask.cData[preIndex],
+                            currentTask.bData,
+                            currentTask.cData,
+                            currentTask.dData,
+                            currentTask.syncIdx,
+                            0,
+                            currentTask.M,
+                            currentTask.flagIdx,
+                            currentTask.tileSize,
+                            currentTask.peerIdx,
+                            currentTask.batchIdx
+                        };
+                        for (unsigned int i = threadIdx.x; i < tasks; i += THREADS) {
+                            nextTask.tileIdx = i;
+                            tQ[i] = nextTask;
                         }
-                        __threadfence();
-                        // notify scheduler
-                        atomicAdd(pA.tQH, tasks);
+                        __syncthreads();
+                        if (!threadIdx.x) {
+                            __threadfence();
+                            // notify scheduler
+                            atomicAdd(pA.tQH, tasks);
+                        }
                     }
                 }
                 break;
@@ -548,7 +555,7 @@ namespace aristos::processor{
                                 // send individual tile, no batching here
                                 // Already did the network transfer in fGET, so set signal only
                                 nvshmemx_signal_op(pA.flags + currentTask.flagIdx,
-                                 flagSignal, NVSHMEM_SIGNAL_SET, currentTask.peerIdx);
+                                 *CAST_TO(uint64_t, &flagSignal), NVSHMEM_SIGNAL_SET, currentTask.peerIdx);
                             }
                         }
                     }
