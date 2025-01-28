@@ -371,6 +371,8 @@ namespace aristos{
     struct __align__(16) Bookkeeping {
         /// default type for bookkeeping data structures
         cuda::std::byte *book = nullptr;
+        /// Global device barrier
+        cuda::barrier<cuda::thread_scope_device>* deviceBlockade = nullptr;
         /// Note the below lengths are cumulative sums.
         /// Gate buffer and intermediate in bytes
         unsigned long int gBxM = 0UL;
@@ -380,12 +382,14 @@ namespace aristos{
         unsigned long int sBfC = 0UL;
         /// tQ length, expert data and token probabilities in bytes
         unsigned long int tQXt = 0UL;
+        /// gRl + gB + eDsA + sBfC + brs
+        unsigned long int bookSize = 0UL;
+        /// length of gTQHeads
+        unsigned int gtQCl = 0U;
         /// Block Ring Softmax flags in bytes, non-cumulative
         unsigned int brs = 0UL;
         /// gate routing and loss vectors in bytes
         unsigned int gRl = 0U;
-        /// gRl + gB + eDsA + sBfC + brs
-        unsigned long int bookSize = 0UL;
 
         /// Task Q length per producer
         unsigned int tPs = 0U;
@@ -415,8 +419,6 @@ namespace aristos{
         unsigned int blocks = 0U;
         /// expert capacity
         unsigned int eCap = 0U;
-        /// Global device barrier
-        cuda::barrier<cuda::thread_scope_device>* deviceBlockade = nullptr;
 
         __device__ __forceinline__
         Bookkeeping() = default;
@@ -436,11 +438,10 @@ namespace aristos{
             const unsigned int& _world,
             cuda::barrier<cuda::thread_scope_device>* _blockade,
             const bool isSingleBlockGate = true) :
-        book(_book), world(_world), sl(_sl), nx(_nx), nLx(_nLx), pd(_pd), px(_px),
+        book(_book), deviceBlockade(_blockade), world(_world), sl(_sl), nx(_nx), nLx(_nLx), pd(_pd), px(_px),
         tM(Config::tiles<BLOCK_M>(_sl)),
         tN(Config::tiles<BLOCK_N>(_embedDim)),
-        tCM(Config::tiles<BLOCK_M>(_eCapacity)), blocks(_blocks), eCap(_eCapacity),
-        deviceBlockade(_blockade) {
+        tCM(Config::tiles<BLOCK_M>(_eCapacity)), blocks(_blocks), eCap(_eCapacity){
             if (_nx > 1)[[likely]] {
                 // maximum gemm tiles/tasks scheduled by processors
                 const auto prT = world * nLx * tCM * Config::tiles<BLOCK_N>(pd);
@@ -458,6 +459,7 @@ namespace aristos{
                 const unsigned int fCl = sizeof(bool) * (world * nLx + nx * tCM * tN);
                 sBfC = eDsA + sizeof(BookType) * 2 * (blocks + world * nLx * tCM) + fCl;
             }
+            gtQCl = world * nLx * tCM;
             gBxM = sBfC + sizeof(Element) * (_world * _nLx * tCM * tN + sl * px);
             bookSize = gBxM;
         }

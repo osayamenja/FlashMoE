@@ -11,7 +11,6 @@
 namespace aristos::moe{
     template<unsigned int Arch,
         unsigned int blocks,
-        unsigned int k,
         GateReductionLevel g = GateReductionLevel::singleBlock,
         typename ActivationOp = cute::identity,
         typename ActivationOpX = cute::identity,
@@ -19,24 +18,32 @@ namespace aristos::moe{
         typename ElementA = cute::half_t,
         typename ElementB = ElementA,
         typename ElementD = ElementA,
-        typename MatrixA,
-        typename MatrixB,
-        typename MatrixBg,
-        typename MatrixC,
-        typename MatrixCg>
-    requires(aristos::Matrix<MatrixA> && aristos::Matrix<MatrixB> &&
-        aristos::Matrix<MatrixBg> && aristos::Matrix<MatrixC>
-        && aristos::Matrix<MatrixCg>)
+        typename Activations,
+        typename Experts,
+        typename Bias,
+        typename Gates,
+        typename MoEOut,
+        typename GateOut>
+    requires(aristos::Matrix<Activations> && aristos::Matrix<Experts> &&
+        aristos::Matrix<Bias> && aristos::Matrix<Gates> && aristos::Matrix<MoEOut>
+        && aristos::Matrix<GateOut>)
     __global__ __maxnreg__(128) void forward(
-        MatrixA const& activations,
-        MatrixB const& expertsWeights,
-        MatrixBg const& gateWeights,
-        MatrixC moeOutput,
-        MatrixCg gateOutput) {
+        Activations const __grid_constant__ activations,
+        Experts const __grid_constant__ expertsWeights,
+        Bias const __grid_constant__ bias,
+        Gates const __grid_constant__ gateWeights,
+        GateOut const __grid_constant__ gateOutput) {
 
         __shared__ __align__(16) cuda::std::byte workspace[SHARED_SIZE];
+        // wipe gTQHeads here and read the sequence bit, before the grid-wide barrier
+        const auto gtQCl = bookkeeping.gtQCl;
+        const auto sb = seqBit;
+        auto* __restrict__ gtQHeads = bookkeeping.tQH();
+        for (uint i = THREADS * blockIdx.x + threadIdx.x; i < gtQCl; i += blocks * THREADS) {
+            gtQHeads[i] = 0U;
+        }
 
-        gate::forward<Arch, blocks, k, g, ElementC>(activations,
+        gate::forward<Arch, blocks, g, ElementC>(activations,
             gateWeights, gateOutput, CAST_TO(ElementC, workspace));
         if (blockIdx.x + 1 < blocks) {
             packet::encode<blocks>(activations, gateOutput, workspace);
@@ -48,14 +55,17 @@ namespace aristos::moe{
                 ElementC,
                 ElementD,
                 ActivationOp,
-                ActivationOpX>(CAST_TO(ElementD, workspace));
+                ActivationOpX>(CAST_TO(ElementD, workspace, rSb));
         }
         else {
-            os::start<blocks>(workspace);
+            os::start<blocks>(workspace, activations, expertsWeights, bias, sb);
         }
     }
 
-    template<Matrix M, Tensor T>
+    template<unsigned int Arch,
+        unsigned int blocks,
+        GateReductionLevel g = GateReductionLevel::singleBlock
+    >
     __global__ __maxnreg__(128) void backward(){
 
     }

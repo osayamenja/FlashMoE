@@ -23,24 +23,21 @@ namespace aristos::os {
     void start(cuda::std::byte* __restrict__ const& workspace,
         Activations const& activations,
         ExpertsTensor const& experts,
-        BiasTensor const& biasT) {
+        BiasTensor const& biasT,
+        const uint16_t& lSeqBit) {
         // each subscriber thread gets 64 bytes of workspace
         constexpr auto wSet = 16U; // working set size
         constexpr auto subscriberCount = THREADS - 32;
         auto* __restrict__ scratch = workspace + THREADS * wSet * sizeof(uint);
-        __shared__ Bookkeeping bk;
-        if (!threadIdx.x) {
-            bk = bookkeeping;
-        }
-        const auto nx = bk.nx;
-        const auto* __restrict__ eC = bk.eC();
-        const auto* __restrict__ gPT = bk.pT();
-        const auto* __restrict__ eD = bk.eD();
-        const auto nRx = *bk.nRx();
-        const auto tNx = Config::tiles<BLOCK_N>(bk.pd);
-        const auto tN = bk.tN;
-        const auto eCap = bk.eCap;
-        const auto world = bk.world;
+        const auto nx = bookkeeping.nx;
+        const auto* __restrict__ eC = bookkeeping.eC();
+        const auto* __restrict__ gPT = bookkeeping.pT();
+        const auto* __restrict__ eD = bookkeeping.eD();
+        const auto nRx = *bookkeeping.nRx();
+        const auto tNx = Config::tiles<BLOCK_N>(bookkeeping.pd);
+        const auto tN = bookkeeping.tN;
+        const auto eCap = bookkeeping.eCap;
+        const auto world = bookkeeping.world;
         // shared memory arrays
         // Upper bound for expectant tasks
         auto*  __restrict__ taskBound = CAST_TO(uint, scratch);
@@ -69,6 +66,7 @@ namespace aristos::os {
         auto* __restrict__ interrupt = rQ + processors;
         #pragma unroll
         for (uint i = threadIdx.x; i < SUBSCRIBERS; i += THREADS) {
+            tQHeads[i] = 0U;
             interrupt[i] = 0U;
         }
         auto* __restrict__ status = interrupt + SUBSCRIBERS;
@@ -86,19 +84,19 @@ namespace aristos::os {
         // build arguments for scheduler and subscriber
         if (threadIdx.x / WARP_SIZE == 0) {
             // scheduler
-            const auto gtQCl = bk.tM;
-            const auto tQRl = cute::ceil_div(gtQCl * Config::tiles<BLOCK_N>(bk.pd),
+            const auto gtQCl = bookkeeping.gtQCl;
+            const auto tQRl = cute::ceil_div(gtQCl * Config::tiles<BLOCK_N>(bookkeeping.pd),
                 subscriberCount);
-            auto* __restrict__ gtQHeads = bk.tQH();
-            auto* __restrict__ sQ = bk.tQS();
-            auto* __restrict__ pDB = bk.pDB();
+            auto* __restrict__ gtQHeads = bookkeeping.tQH();
+            auto* __restrict__ sQ = bookkeeping.tQS();
+            auto* __restrict__ pDB = bookkeeping.pDB();
             scheduler::start<processors>(CAST_TO(cuda::std::byte, xD + nx),
                 tQRl, gtQCl, interrupt, tQHeads, gtQHeads, taskBound, rQ, sQ, pDB);
         }
         else {
             // subscriber
             subscriber::start(workspace, interrupt, pT, xD, xD + nRx, nRx, status,
-                taskBound, bk, activations, experts, biasT);
+                taskBound, activations, experts, biasT, lSeqBit);
         }
     }
 }

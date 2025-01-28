@@ -36,10 +36,10 @@ namespace aristos::subscriber{
         const unsigned int& rEl, // number of remote peers
         unsigned int* __restrict__ const& status, // shared
         unsigned int* __restrict__ const& taskCount,
-        const Bookkeeping& bk,
         Activations const& activations,
         ExpertsTensor const& experts,
-        BiasTensor const& biasT){
+        BiasTensor const& biasT,
+        const uint16_t& lSeqBit){
         // offset due to warp specialization for the scheduler
         const auto tIdx = threadIdx.x - WARP_SIZE;
         static_assert(sizeof(unsigned long long int) == sizeof(flagsType));
@@ -53,38 +53,37 @@ namespace aristos::subscriber{
 
         const auto dA = packet::DecoderArg{
             moeConfig.sHeap,
-            bk.tQ(),
+            bookkeeping.tQ(),
             moeConfig.cellSize,
-            bk.eCap,
+            bookkeeping.eCap,
             moeConfig.embedDim,
-            bk.tPs,
-            bk.tN,
-            Config::tiles<BLOCK_N>(bk.px),
+            bookkeeping.tPs,
+            bookkeeping.tN,
+            Config::tiles<BLOCK_N>(bookkeeping.px),
             moeConfig.expertSlots,
-            bk.nx
+            bookkeeping.nx
         };
 
         // each thread gets 64 bytes of workspace
         cutlass::AlignedArray<unsigned int, wSet> rWSet{};
 
         // token indices
-        auto* __restrict__ tokenIds = bk.tP();
+        auto* __restrict__ tokenIds = bookkeeping.tP();
 
         // tQ things
-        auto* __restrict__ tQHead = bk.tQH() + tIdx;
+        auto* __restrict__ tQHead = bookkeeping.tQH() + tIdx;
         auto lTQHead = 0U; // local tQ Head
 
         // pointers
         auto* __restrict__ sharedSpace = CAST_TO(unsigned int, workspace);
         auto* __restrict__ sFlags = moeConfig.flags;
-        auto* __restrict__ pGB = bk.xM(); // post GEMM buffer
+        auto* __restrict__ pGB = bookkeeping.xM<Element>(); // post GEMM buffer
 
         // Constants
-        const auto lSeqBit = seqBit;
-        const auto nLx = bk.nLx;
+        const auto nLx = bookkeeping.nLx;
 
         // first stage
-        const auto fSfC = bk.world * nLx; // first stage flag count
+        const auto fSfC = bookkeeping.world * nLx; // first stage flag count
         const auto fSl = fSfC / subscriberCount + (tIdx < fSfC % subscriberCount);
         const auto fSt = fSl / wSet;
         auto fSp = fSl; // first stage pending
@@ -103,7 +102,7 @@ namespace aristos::subscriber{
         const auto fS = make_shape(dA.nx - rEl, iPfS);
         const auto fStride = make_stride(size(iPfS), cute::make_stride(dA.tN, 1));
 
-        auto* __restrict__ ffC = bk.fC(); // flags checkpoint
+        auto* __restrict__ ffC = bookkeeping.fC(); // flags checkpoint
         auto* __restrict__ rfC = ffC + fSfC; // second stage: remote flags checkpoint
         auto* __restrict__ pfC = rfC + sRfC; // second stage: p2p flags checkpoint
 
@@ -222,12 +221,12 @@ namespace aristos::subscriber{
                                     nvshmem_ptr(packet, peerTranslation[peerIdx]) != nullptr) {
                                     // Enforce consistency before decoding the packet
                                     __threadfence_system();
-                                    fPd(dA, packet, status, taskCount, sP->routedTokens, sP->totalTilesM,
+                                    fPd(packet, status, taskCount, sP->routedTokens, sP->totalTilesM,
                                         expertIdx, pGB, weights, bias, peerIdx, lTQHead, tQHead);
                                 }
                                 else {
                                     nvshmem_ushort_test(&sP->seqBit, NVSHMEM_CMP_EQ, lSeqBit);
-                                    fRd(bk, packet, status, taskCount, sP->routedTokens, sP->totalTilesM,
+                                    fRd(dA, packet, status, taskCount, sP->routedTokens, sP->totalTilesM,
                                         expertIdx, pGB, weights, bias, peerIdx, lTQHead, tQHead);
                                 }
                             }

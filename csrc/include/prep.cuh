@@ -114,17 +114,21 @@ namespace aristos{
 
     }
 
-    __forceinline__
+    template<typename Element>
+    requires(aristos::TensorValueType<Element>)
+    __host__ __forceinline__
     void forwardHost(){
         assert(isInitialized);
     }
 
-    __forceinline__
+    template<typename Element>
+    requires(aristos::TensorValueType<Element>)
+    __host__ __forceinline__
     void backwardHost(){
         assert(isInitialized);
     }
 
-    __forceinline__
+    __host__ __forceinline__
     void aristosFinalize(){
         assert(isInitialized);
         isInitialized = false;
