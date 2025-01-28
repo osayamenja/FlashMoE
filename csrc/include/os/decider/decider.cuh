@@ -20,7 +20,7 @@
 #include "comps/group.cuh"
 #include "comps/worker.cuh"
 
-using AdjMatrix = std::vector<std::vector<std::pair<double, double>>>;
+using AdjMatrix = std::vector<std::vector<std::pair<float, float>>>;
 namespace aristos::decider{
     /// Necessary to use path halving to ensure amortized "practical constant" time
     using DisjointSet = boost::disjoint_sets_with_storage<boost::identity_property_map,
@@ -31,10 +31,9 @@ namespace aristos::decider{
     __forceinline__ __host__
     std::vector<size_t> decide(const AdjMatrix& adjMatrix,
                                const std::vector<Worker>& workers,
-                               const unsigned long& totalExpertCost,
+                               const unsigned int& totalExpertCost,
                                const unsigned int& totalExpertMem,
-                               const ModelConfig& modelConfig,
-                               bool doParetoSweep = false){
+                               const ModelConfig& modelConfig){
         auto infeasibleGroups = std::unordered_set<unsigned int>{};
         for(const auto& w: workers){
             if(w.memoryCapacity < totalExpertMem)
@@ -46,7 +45,7 @@ namespace aristos::decider{
         auto groupInfo = std::unordered_map<unsigned int, Group>{};
         auto effectiveWorld = workers.size() - infeasibleGroups.size();
         for(int i = 0; i < adjMatrix.size(); ++i) {
-            auto dp = std::vector<std::pair<double, double>>(adjMatrix.size());
+            auto dp = std::vector<std::pair<float, float>>(adjMatrix.size());
             for (int j = 0; j < adjMatrix.size(); ++j) {
                 dp[j] = {0.0, 0.0};
                 if (i != j)[[likely]] {
@@ -170,7 +169,7 @@ namespace aristos::decider{
         auto wellDistributedCapacity = true;
         auto reqCap = totalMem / workerGroup.size();
         if(totalMem % workerGroup.size() != 0){
-            reqCap = static_cast<int>(std::ceil(static_cast<double>(totalMem) / static_cast<double>(workerGroup.size())));
+            reqCap = static_cast<int>(std::ceil(static_cast<float>(totalMem) / static_cast<float>(workerGroup.size())));
         }
         auto totalRate = 0U;
         for(const auto& w: workerGroup){
@@ -181,7 +180,7 @@ namespace aristos::decider{
 
         auto j = 0U;
         while(!t.empty()){
-            auto budget = static_cast<unsigned int>(std::ceil(static_cast<double>(workerGroup[j].processingRate * totalCost) / static_cast<double>(totalRate)));
+            auto budget = static_cast<unsigned int>(std::ceil(static_cast<float>(workerGroup[j].processingRate * totalCost) / static_cast<float>(totalRate)));
             const auto allocated = budget;
             while(budget > 0 && workerGroup[j].memoryCapacity > 0 && !t.empty() > 0){
                 auto expertBudget = Expert(budget);

@@ -10,28 +10,28 @@ namespace aristos{
     struct Group{
         std::unordered_map<unsigned int, std::pair<unsigned int, unsigned int>> visited{};
         /// Dynamic Programming State
-        std::vector<std::pair<double, double>> p2pTimes{};
+        std::vector<std::pair<float, float>> p2pTimes{};
         std::unordered_set<unsigned int> internalNodes{};
         unsigned int id;
         unsigned int memCapacity;
         unsigned long deviceRate;
-        double allReduceTime{};
+        float allReduceTime{};
         ObjArgs objArgs;
-        double currentObjective{};
+        float currentObjective{};
         unsigned int worldSize;
-        double cachedObjective{};
-        double cachedAllReduceTime{};
+        float cachedObjective{};
+        float cachedAllReduceTime{};
 
         Group(const unsigned int& _id, const unsigned int& _mem, const unsigned long& _rate,
               const unsigned int& _world, const ObjArgs& _args,
-              const std::vector<std::pair<double, double>>& dp):
+              const std::vector<std::pair<float, float>>& dp):
               id(_id), memCapacity(_mem), deviceRate(_rate),
               objArgs(_args),worldSize(_world){
             internalNodes.insert(id);
             p2pTimes = dp;
         }
 
-        __forceinline__ void construct(const double& art, const unsigned int& effective){
+        __forceinline__ void construct(const float& art, const unsigned int& effective){
             objArgs.groupMemCapacity = memCapacity;
             objArgs.effectiveWorld = effective;
             objArgs.allReduceTime = allReduceTime = art;
@@ -117,25 +117,25 @@ namespace aristos{
             /// Dynamic Programming magic yielding complexity O(|self| + |neighbor|)
             /// rather than O(|self| * |neighbor|).
             __forceinline__
-            double evalP2PTime(const Group& neighbor, const unsigned int& numNodes) const{
-                auto maxP2PTime = 0.0;
+            float evalP2PTime(const Group& neighbor, const unsigned int& numNodes) const{
+                auto maxP2PTime = 0.0f;
                 for(const auto& node: internalNodes){
                     maxP2PTime = std::max(maxP2PTime,
                                           ObjArgs::p2pTransferTime(p2pTimes[node].first + neighbor.p2pTimes[node].first,
                                                                    p2pTimes[node].second + neighbor.p2pTimes[node].second,
-                                                                   objArgs.p2pBuffer / static_cast<double>(numNodes)));
+                                                                   objArgs.p2pBuffer / static_cast<float>(numNodes)));
                 }
                 for(const auto& node: neighbor.internalNodes){
                     maxP2PTime = std::max(maxP2PTime,
                                           ObjArgs::p2pTransferTime(p2pTimes[node].first + neighbor.p2pTimes[node].first,
                                                                    p2pTimes[node].second + neighbor.p2pTimes[node].second,
-                                                                   objArgs.p2pBuffer / static_cast<double>(numNodes)));
+                                                                   objArgs.p2pBuffer / static_cast<float>(numNodes)));
                 }
                 return maxP2PTime;
             }
 
             __forceinline__
-            double getCurrentObjective() const{
+            float getCurrentObjective() const{
                 return (currentObjective - allReduceTime) + cachedAllReduceTime;
             }
 
@@ -143,7 +143,6 @@ namespace aristos{
             void updateVisited(const unsigned int& neighborID,
                                const unsigned int& myState,
                                const unsigned int& neighborState){
-                // I dislike the unnecessary construction of a 'pair' object per insertion
                 visited.try_emplace(neighborID, std::pair{myState, neighborState});
             }
     };

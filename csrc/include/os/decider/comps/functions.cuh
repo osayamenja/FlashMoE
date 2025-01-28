@@ -7,31 +7,31 @@
 #include "args.cuh"
 #include <limits>
 namespace aristos{
-    __inline__ double clamp;
+    __inline__ float clamp;
     __forceinline__
-    double obj(const ObjArgs& a){
+    float obj(const ObjArgs& a){
         return (a.groupMemCapacity < a.totalExpertMemoryDemand) ?
-        std::numeric_limits<double>::infinity() :
+        std::numeric_limits<float>::infinity() :
                (ObjArgs::getGamma(a.globalMoEStages, a.effectiveWorld)
-               *((static_cast<double>(a.totalExpertCost) / static_cast<double>(a.totalDeviceRate))
+               *((static_cast<float>(a.totalExpertCost) / static_cast<float>(a.totalDeviceRate))
                + (a.commFreq * a.intraCommunicationCost))) + a.allReduceTime;
     }
 
     __forceinline__
-    double allReduceT(const ARArgs& a){
+    float allReduceT(const ARArgs& a){
         ///https://link.springer.com/content/pdf/10.1007/978-3-540-24685-5_1.pdf
         return 2.0 * (a.numGroups - 1) * a.bottleneckTime;
     }
 
     template<aristos::Stability s=STABLE>
     __forceinline__
-    bool optimizingPolicy(const double& obj1, const double& obj2, const double& obj1_2){
+    bool optimizingPolicy(const float& obj1, const float& obj2, const float& obj1_2){
         return (std::isinf(obj1) && std::isinf(obj2))? true :
                (obj1_2 <= std::max(obj1, obj2));
     }
     template<>
     __forceinline__
-    bool optimizingPolicy<EXPERIMENTAL>(const double& obj1, const double& obj2, const double& obj1_2){
+    bool optimizingPolicy<EXPERIMENTAL>(const float& obj1, const float& obj2, const float& obj1_2){
         return (std::isinf(obj1) && std::isinf(obj2))? true :
                (obj1_2 * (1 / obj1 + 1/obj2)) <= (std::min((std::max(obj1, obj2) / std::min(obj1, obj2)) + 1, clamp));
     }

@@ -18,10 +18,10 @@ namespace aristos{
     struct Edge{
         unsigned int node1;
         unsigned int node2;
-        double weight;
+        float weight;
 
         /// Order is important!
-        Edge(const unsigned int& _node1, const unsigned int& _node2, const double& _weight):
+        Edge(const unsigned int& _node1, const unsigned int& _node2, const float& _weight):
         node1(_node1), node2(_node2), weight(_weight){}
 
         __forceinline__
@@ -79,12 +79,12 @@ namespace aristos{
         __forceinline__
         bool isLimboEdge() const{
             /// Define a self-edge with zero weight as limbo or null edge
-            return node1 == node2 && floatEqual(weight, 0.0);
+            return node1 == node2 && floatEqual(weight, 0.0f);
         }
 
         __forceinline__
         static Edge limboEdge() {
-            return {0,0,0.0};
+            return {0,0,0.0f};
         }
     };
 }

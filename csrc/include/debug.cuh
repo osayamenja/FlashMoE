@@ -47,6 +47,15 @@ namespace aristos{
         free(demangledName);
     }
 
+    __host__ __forceinline__
+    void reportError(const bool predicate, const std::string& msg) {
+        if (!predicate) {
+            fprintf(stderr, "<%s:%d>: %s", __FILE__, __LINE__, msg.c_str());
+            fflush(stderr);
+            exit(1);
+        }
+    }
+
     __device__ __forceinline__
     bool isRegisterMemory(const void* p) {
         return !(__isShared(p) &&

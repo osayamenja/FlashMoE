@@ -7,14 +7,14 @@
 namespace aristos{
     struct Expert{
         unsigned int id;
-        unsigned long cost;
-        unsigned int memoryDemand = 1; // experimental feature for heterogeneous experts
+        unsigned int cost;
+        unsigned int memoryDemand = 1U; // experimental feature for heterogeneous experts
 
-        Expert(const unsigned int& _id, const unsigned long& _cost):
+        Expert(const unsigned int& _id, const unsigned int& _cost):
                 id(_id), cost(_cost){};
 
         /// Sentinel
-        explicit Expert(const unsigned long& _cost){
+        explicit Expert(const unsigned int& _cost){
             cost = _cost;
             id = 0;
         }
@@ -56,8 +56,10 @@ namespace aristos{
                    + ", \"MemoryDemand\": " + std::to_string(memoryDemand) + "}";
         }
 
-        __forceinline__ static Expert closest(const Expert& left, const Expert& right, unsigned int val){
-            return (std::abs(int(left.cost) - int(val)) <= std::abs(int(right.cost) - int(val))? left : right);
+        __forceinline__ static Expert closest(const Expert& left, const Expert& right, const unsigned int& val){
+            const auto leftMargin = val > left.cost ? val - left.cost : left.cost - val;
+            const auto rightMargin = val > right.cost ? val - right.cost : right.cost - val;
+            return leftMargin <= rightMargin? left : right;
         }
     };
 }

@@ -9,6 +9,8 @@
 #include <nvshmemx.h>
 #include <nvshmem.h>
 #include <host/nvshmemx_api.h>
+
+#include "debug.cuh"
 #include "types.cuh"
 
 #define SUPPORTED = 1;
@@ -19,22 +21,23 @@ namespace aristos{
     void aristosInit(const unsigned int& seqLen, const unsigned int& embedDim, const unsigned int& hiddenProjDim,
                      const unsigned int& k, const unsigned int& capacityFactor, const unsigned int& numExperts,
                      const bool& shouldDrop) {
-        // TODO assert inputs are correct and check for cudaDevP2PAttrNativeAtomicSupported, cudaDevP2PAttrAccessSupported
-        assert(embedDim % BLOCK_N == 0 && hiddenProjDim % BLOCK_N == 0 && "Must be multiple of BLOCK_N");
-        assert(seqLen % BLOCK_M == 0 && "Must be a multiple of BLOCK_M");
-        int l2CacheSize = 0;
-        assert(!isInitialized);
+        reportError(!isInitialized, "Already Initialized");
         isInitialized = true;
+        reportError(embedDim % BLOCK_N == 0 && hiddenProjDim % BLOCK_N == 0,
+            "Must be multiple of BLOCK_N");
+        reportError(seqLen % BLOCK_M == 0, "Must be a multiple of BLOCK_M");
+        int l2CacheSize = 0;
         int cudaDevAttribute = 0;
         int dev = 0;
         int blocks = 0;
+        int arch = 0;
         CUTE_CHECK_ERROR(cudaGetDevice(&dev));
-        CUTE_CHECK_ERROR(cudaDeviceGetAttribute(&cudaDevAttribute,
-                                                cudaDevAttrMemoryPoolsSupported, dev));
-        assert(cudaDevAttribute);
-        CUTE_CHECK_ERROR(cudaDeviceGetAttribute(&cudaDevAttribute, cudaDevAttrComputeCapabilityMajor, dev));
-        assert(cudaDevAttribute >= 7);
+        CUTE_CHECK_ERROR(cudaDeviceGetAttribute(&cudaDevAttribute, cudaDevAttrMemoryPoolsSupported, dev));
+        reportError(cudaDevAttribute, "Memory Pools support required");
+        CUTE_CHECK_ERROR(cudaDeviceGetAttribute(&arch, cudaDevAttrComputeCapabilityMajor, dev));
+        reportError(arch, "At least Volta required");
         CUTE_CHECK_ERROR(cudaDeviceGetAttribute(&l2CacheSize, cudaDevAttrL2CacheSize, dev));
+        CUTE_CHECK_ERROR(cudaDeviceGetAttribute(&blocks, cudaDevAttrMultiProcessorCount, dev));
 
         // Good to go! Let's do some initialization
         // Run decider
@@ -49,55 +52,7 @@ namespace aristos{
         nvshmem_init();
         CUTE_CHECK_ERROR(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
         const auto globalWorld = nvshmem_n_pes();
-        // TODO: dual allocation to precisely get memory cost, namely max {|W| * |X_l|} across all EP groups
-        // Allocate Symmetric Heap + Flags
-        auto memoryBytes = STAGES * CELLS * seqLen * (embedDim + k + 2) * sizeof(Element) +
-            STAGES * numNeighbors * sizeof(flagsType);
-        memoryBytes = cute::max(memoryBytes, globalWorld * (BETA_BUFFER + (globalWorld + 1) * sizeof(floatPair)));
-        /// Allocates symmetric heap
-        /// assert alignment 16 bytes
-        auto sHeap = static_cast<cuda::std::byte*>(nvshmem_calloc(memoryBytes, sizeof(cuda::std::byte)));
 
-        //Final Initialization
-        void* bookKeeping;
-        const auto taskBound = cute::ceil_div(seqLen, BLOCK_M) *
-            (cute::ceil_div(embedDim, BLOCK_N) + cute::ceil_div(hiddenProjDim, BLOCK_N) + 1);
-        const auto tilesN = embedDim / BLOCK_N;
-        const auto tilesM = seqLen / BLOCK_M;
-        const auto paddedNumExperts = Config::pad<BLOCK_N>(numExperts);
-        const auto flagCount = numNeighbors * numLocalExperts + tilesM * tilesN;
-
-        const auto brsData = (numExperts > BLOCK_N) *
-            (sizeof(unsigned int) * (seqLen * (paddedNumExperts / BLOCK_N)) + // sync flags for gate
-            2 * sizeof(mp_t) * seqLen + // m and d for softmax
-            sizeof(cuda::std::pair<mp_t, unsigned int>) * k * seqLen);  // binary min heap
-
-        // Allocate all memory needed once
-        memoryBytes = sizeof(mp_t) * seqLen * hiddenProjDim + // intermediary results of expert GEMM
-            brsData +
-            // flags for ring aggregation of token indices
-            sizeof(unsigned int) * (tilesM + tilesN) +
-            sizeof(sizeof(TokenIdxTuple)) * seqLen + // token ids and probabilities
-            sizeof(mp_t) * seqLen * paddedNumExperts + // gate routing
-            sizeof(mp_t) * (2 * paddedNumExperts + 1) + // gate loss vectors, loss value
-            sizeof(unsigned int) * paddedNumExperts + // expert counts,
-            sizeof(unsigned int) * (numExperts + numNeighbors + 1) + // GPU -> expert lookup table and sentinel for prefix
-            sizeof(unsigned int) * numExperts + // sync array for packet Construction
-            sizeof(unsigned int) * numNeighbors + // EP rank -> global rank
-            sizeof(unsigned int) * numExperts * 2  + // Expert parallelism specification and EP -> heap
-            sizeof(unsigned int) * blocks + // readyQ
-            sizeof(unsigned int) * blocks + // statusQ
-            sizeof(unsigned int) * numNeighbors * numLocalExperts * cute::ceil_div(seqLen, numExperts * BLOCK_M) + // taskSync
-            sizeof(unsigned int) * flagCount +  // flag checkpoints
-            sizeof(Task) * (taskBound + blocks * tilesN) + // taskQ
-            sizeof(unsigned int) * (blocks + THREADS - 2); // tQHeads
-        // Initialize hostConfig
-        CUTE_CHECK_ERROR(cudaMallocAsync(&bookKeeping, memoryBytes, aristosStream));
-        CUTE_CHECK_ERROR(cudaMemsetAsync(bookKeeping, 0, memoryBytes, aristosStream));
-        CUTE_CHECK_ERROR(cudaMemcpyToSymbolAsync(moeConfig, &hostMoEConfig, sizeof(Config), 0,
-                                            cudaMemcpyHostToDevice, aristosStream));
-        CUTE_CHECK_ERROR(cudaPeekAtLastError());
-        CUTE_CHECK_ERROR(cudaStreamSynchronize(aristosStream));
 
 #if (__CUDACC_VER_MAJOR__ >= 11 && __CUDA_ARCH__ >= 800)
         cudaStreamAttrValue stream_attribute;

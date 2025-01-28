@@ -212,6 +212,7 @@ namespace aristos{
         unsigned int* peerTranslation;
         /// Expert index -> EP rank
         unsigned int* parallelismSpec;
+        unsigned int functionId; // needed for identifying static template parameters
         /// Expert parallel group rank
         unsigned int rank;
         unsigned int seqLen;
@@ -237,6 +238,7 @@ namespace aristos{
         Config(cuda::std::byte* _symmetricHeap,
                flagsType* _flags,
                cuda::std::byte* _bk,
+               const unsigned int& _fId,
                const unsigned int& _rank,
                const unsigned int& _k,
                const unsigned int& _embedDim,
@@ -255,6 +257,7 @@ namespace aristos{
                 bookKeeping(_bk),
                 peerTranslation(CAST_TO(unsigned int, _bk)),
                 parallelismSpec(CAST_TO(unsigned int, _bk) + _world),
+                functionId(_fId),
                 rank(_rank),
                 seqLen(_seqLen),
                 numExperts(_numExperts), numLocalExperts(_numLExperts),
@@ -423,7 +426,6 @@ namespace aristos{
         __device__ __forceinline__
         Bookkeeping() = default;
 
-        template<typename Element>
         __host__ __forceinline__
         explicit Bookkeeping(
             cuda::std::byte* const& _book,
@@ -437,6 +439,7 @@ namespace aristos{
             const unsigned int& _blocks,
             const unsigned int& _world,
             cuda::barrier<cuda::thread_scope_device>* _blockade,
+            const unsigned int& _eNb, // number of bytes for the matrix element type
             const bool isSingleBlockGate = true) :
         book(_book), deviceBlockade(_blockade), world(_world), sl(_sl), nx(_nx), nLx(_nLx), pd(_pd), px(_px),
         tM(Config::tiles<BLOCK_M>(_sl)),
@@ -460,7 +463,7 @@ namespace aristos{
                 sBfC = eDsA + sizeof(BookType) * 2 * (blocks + world * nLx * tCM) + fCl;
             }
             gtQCl = world * nLx * tCM;
-            gBxM = sBfC + sizeof(Element) * (_world * _nLx * tCM * tN + sl * px);
+            gBxM = sBfC + _eNb * (_world * _nLx * tCM * tN + sl * px);
             bookSize = gBxM;
         }
 

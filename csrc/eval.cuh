@@ -9,6 +9,7 @@
 
 #include <cuda/std/memory>
 #include <cuda/std/cstddef>
+#include <cute/tensor.hpp>
 #include <fmt/ranges.h>
 #include <fmt/core.h>
 #include <nvshmemx.h>
@@ -127,20 +128,24 @@ namespace aristos {
     __host__ __forceinline__
     void testDecider() {
         using clk = std::chrono::high_resolution_clock;
-        auto end = std::chrono::duration<double>::zero();
-        auto constexpr dim = 4096U;
+        std::chrono::duration<float> end {};
+        auto constexpr dim = 8U;
         auto constexpr intraWidth = 4.0;
 
         AdjMatrix A(dim);
         std::pair constexpr intraBW = {4.35e-04, 1.29e-02}; // (ms, ms/MB)
         std::pair constexpr interBW = {1.12e-02, 5e-02}; // (ms, ms/MB)
 
+        /*cuda::std::array<cuda::std::pair<float, float>, dim*dim> d{};
+        const auto adj = make_tensor(d.data(),
+            make_layout(cute::make_shape(dim, dim), cute::LayoutRight{}));*/
+
         for(int i = 0; i < dim; ++i){
-            A[i] = std::vector<std::pair<double, double>>(dim);
+            A[i] = std::vector<std::pair<float, float>>(dim);
             for(int j = 0; j < dim; ++j){
-                if(i == j )[[unlikely]]
+                if(i == j)[[unlikely]]
                     continue;
-                if(static_cast<int>(std::floor(j / static_cast<double>(intraWidth))) == static_cast<int>(std::floor(i / static_cast<double>(intraWidth)))){
+                if(static_cast<int>(std::floor(j / static_cast<float>(intraWidth))) == static_cast<int>(std::floor(i / static_cast<float>(intraWidth)))){
                     // intra node partitions
                     A[i][j] = intraBW;
                 }
@@ -150,41 +155,40 @@ namespace aristos {
             }
         }
 
-        auto constexpr deviceMem = 16U;
+        auto constexpr deviceMem = 8U;
         auto constexpr deviceGigaFlopsPerMs = static_cast<unsigned int>(0.43*312U * (1e9 / (1024*1024*1024)));
-        std::vector<aristos::Worker> w;
+        std::vector<Worker> w;
         for(int i = 0; i < dim; ++i){
             w.emplace_back(i, deviceGigaFlopsPerMs, deviceMem);
         }
 
-        auto constexpr nExp = 4096U;
+        auto constexpr nExp = 16U;
         auto constexpr expertGigaFlops = 128U; // Giga == 2^30
-        std::vector<aristos::Expert> e;
+        std::vector<Expert> e;
         for(int i = 0; i < nExp; ++i){
             e.emplace_back(i, expertGigaFlops);
         }
         // GPT-3 350M MoE
-        const auto m = aristos::ModelConfig(24, 1, 256, 4, 24, 16, 512);
+        const auto m = ModelConfig(24, 1, 256, 4, 24, 16, 512);
 
         auto start = clk::now();
-        aristos::decider::decide(A, w, e.size()*expertGigaFlops, e.size(), m);
+        decider::decide(A, w, e.size()*expertGigaFlops, e.size(), m);
         end = clk::now() - start;
-        const auto spec = aristos::decider::decide(A, w, e.size()*expertGigaFlops, e.size(), m);
+        const auto spec = decider::decide(A, w, e.size()*expertGigaFlops, e.size(), m);
         fmt::println("Measured time for the Decider is {}s", end.count());
-        //fmt::println("Device to Groups: {}", spec);
+        fmt::println("Device to Groups: {}", spec);
 
-        const auto g = aristos::subsets(spec, 0);
-
-        //fmt::println("Rank {} Group {}", 0, g);
-        std::vector<aristos::Worker> wG;
+        const auto g = subsets(spec, 0);
+        fmt::println("Rank {} Group {}", 0, g); // peer translation
+        std::vector<Worker> wG;
         for(int i = 0; i < g.size(); ++i){
             wG.emplace_back(g[i], w[i].processingRate, w[i].memoryCapacity);
         }
         start = clk::now();
-        const auto assignment = aristos::decider::assign(e, wG);
+        const auto assignment = decider::assign(e, wG);
         end += clk::now() - start;
         fmt::println("Total time is {}s", end.count());
-        //fmt::println("Experts to Devices {}", assignment);
+        fmt::println("Experts to Devices {}", assignment); // sharding spec
     }
 }
 #endif //EVAL_CUH

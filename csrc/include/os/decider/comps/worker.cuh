@@ -8,10 +8,10 @@
 namespace aristos{
     struct Worker{
         unsigned int id;
-        unsigned long processingRate;
+        unsigned int processingRate;
         unsigned int memoryCapacity;
 
-        Worker(unsigned int _id, unsigned long _processingRate, unsigned int memoryCapacity):
+        Worker(const unsigned int& _id, const unsigned int& _processingRate, const unsigned int& memoryCapacity):
                 id(_id), processingRate(_processingRate), memoryCapacity(memoryCapacity){};
 
         __forceinline__

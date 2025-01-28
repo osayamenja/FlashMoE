@@ -9,14 +9,14 @@ namespace aristos{
     constexpr unsigned int p2pFreq = 4;
     struct ARArgs{
         /// 𝛼* from the paper
-        double ringAlpha;
+        float ringAlpha;
         /// β* from the paper
-        double ringBeta;
-        double bottleneckTime{};
+        float ringBeta;
+        float bottleneckTime{};
         const unsigned int bufferSize;
         unsigned int numGroups;
 
-        ARArgs(const double& _alpha, const double& _beta,
+        ARArgs(const float& _alpha, const float& _beta,
                const unsigned int& _n, const unsigned int& gradBuffer): bufferSize(gradBuffer){
             ringAlpha = _alpha;
             ringBeta = _beta;
@@ -26,21 +26,21 @@ namespace aristos{
 
         __forceinline__
         void setBottleneckTime(){
-            bottleneckTime = (numGroups == 0 )? 0 : ringAlpha + (ringBeta * (static_cast<double>(bufferSize) / numGroups));
+            bottleneckTime = (numGroups == 0 )? 0 : ringAlpha + (ringBeta * (static_cast<float>(bufferSize) / numGroups));
         }
 
         __forceinline__
-        void refresh(const double& alpha, const double& beta){
+        void refresh(const float& alpha, const float& beta){
             ringAlpha = alpha;
             ringBeta = beta;
             setBottleneckTime();
         }
 
-        __forceinline__ static double bottleneck(const double& alpha,
-                                                 const double& beta,
+        __forceinline__ static float bottleneck(const float& alpha,
+                                                 const float& beta,
                                                  const unsigned int& buf,
                                                  const unsigned int& nG){
-            return (nG == 0) ? 0 : (alpha + (beta * (static_cast<double>(buf) / nG)));
+            return (nG == 0) ? 0 : (alpha + (beta * (static_cast<float>(buf) / nG)));
         }
     };
 
@@ -49,10 +49,10 @@ namespace aristos{
         unsigned long totalExpertCost;
         unsigned int globalMoEStages;
         unsigned int totalExpertMemoryDemand;
-        double allReduceTime{};
+        float allReduceTime{};
         unsigned int commFreq;
         unsigned int groupMemCapacity{};
-        double intraCommunicationCost;
+        float intraCommunicationCost;
         unsigned int effectiveWorld;
         unsigned int p2pBuffer;
 
@@ -67,9 +67,9 @@ namespace aristos{
             commFreq = p2pFreq;
         }
 
-        __forceinline__ static double p2pTransferTime(const double& alpha,
-                                                      const double& beta,
-                                                      const double& bufferSize){
+        __forceinline__ static float p2pTransferTime(const float& alpha,
+                                                      const float& beta,
+                                                      const float& bufferSize){
             return alpha + (beta * bufferSize);
         }
 
