@@ -131,7 +131,7 @@ namespace aristos {
     template<
         unsigned int Arch,
         typename ElementA,
-        typename ElementB,
+        typename ElementB = ElementA,
         typename ElementC = float,
         typename ActivationOp = cute::identity>
     struct BlockMM {

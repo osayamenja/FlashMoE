@@ -12,6 +12,7 @@
 #include <ranges>
 #include <set>
 #include <boost/pending/disjoint_sets.hpp>
+#include <cute/tensor.hpp>
 
 #include "../../types.cuh"
 #include "comps/edge.cuh"
@@ -20,11 +21,13 @@
 #include "comps/group.cuh"
 #include "comps/worker.cuh"
 
-using AdjMatrix = std::vector<std::vector<std::pair<float, float>>>;
 namespace aristos::decider{
     /// Necessary to use path halving to ensure amortized "practical constant" time
     using DisjointSet = boost::disjoint_sets_with_storage<boost::identity_property_map,
             boost::identity_property_map, boost::find_with_path_halving>;
+    template<typename AdjMatrix>
+    requires(cute::is_tensor_v<AdjMatrix> && rank(AdjMatrix{}) == 2 &&
+        cuda::std::is_same_v<typename AdjMatrix::value_type, floatPair>)
     /// Generates DP-EP groups [D, G] -> Devices to Groups
     /// Complexity 𝓞(|E|*log(|E|) + |V|(|V|-1)) => 𝓞(|V|^2*log(|V|^2)),
     /// where |V| = |workers| and |E| = number of edges = |V|*(|V| - 1)
@@ -44,20 +47,21 @@ namespace aristos::decider{
         std::priority_queue<Edge> externalEdges;
         auto groupInfo = std::unordered_map<unsigned int, Group>{};
         auto effectiveWorld = workers.size() - infeasibleGroups.size();
-        for(int i = 0; i < adjMatrix.size(); ++i) {
-            auto dp = std::vector<std::pair<float, float>>(adjMatrix.size());
-            for (int j = 0; j < adjMatrix.size(); ++j) {
+        const auto dim = cute::size<0>(adjMatrix);
+        for(int i = 0; i < dim; ++i) {
+            auto dp = std::vector<floatPair>(dim);
+            for (int j = 0; j < dim; ++j) {
                 dp[j] = {0.0, 0.0};
                 if (i != j)[[likely]] {
-                    const auto alpha = adjMatrix[i][j].first;
-                    const auto beta = adjMatrix[i][j].second;
+                    const auto alpha = adjMatrix(i, j).alpha;
+                    const auto beta = adjMatrix(i, j).beta;
                     candidateEdges.emplace(i, j,
                                              ObjArgs::p2pTransferTime(alpha, beta,
                                                                       modelConfig.p2pBuffer));
                     externalEdges.emplace(i, j, ARArgs::bottleneck(alpha, beta,
                                                                      modelConfig.gradBuffer, 2));
                     /// Invert the edge for the dp table
-                    dp[j] = adjMatrix[j][i];
+                    dp[j] = adjMatrix(j, i);
                 }
             }
             groupInfo.insert({i, Group(i,
@@ -68,8 +72,8 @@ namespace aristos::decider{
                                        dp)});
         }
         auto extEdge = externalEdges.top();
-        auto arArgs = ARArgs(adjMatrix[extEdge.node1][extEdge.node2].first,
-                               adjMatrix[extEdge.node1][extEdge.node2].second,
+        auto arArgs = ARArgs(adjMatrix(extEdge.node1, extEdge.node2).alpha,
+                               adjMatrix(extEdge.node1, extEdge.node2).beta,
                                effectiveWorld, modelConfig.gradBuffer);
         const auto art = allReduceT(arArgs);
         /// Second-pass group construction
@@ -110,7 +114,7 @@ namespace aristos::decider{
             else if(!infeasibleGroups.contains(group1) && !infeasibleGroups.contains(group2)){
                 arArgs.numGroups -= 1;
             }
-            arArgs.refresh(adjMatrix[extEdge.node1][extEdge.node2].first, adjMatrix[extEdge.node1][extEdge.node2].second);
+            arArgs.refresh(adjMatrix(extEdge.node1, extEdge.node2).alpha, adjMatrix(extEdge.node1, extEdge.node2).beta);
             if(groupInfo.at(group1).shouldMerge(groupInfo.at(group2), arArgs, effectiveWorld)){
                 limbo = Edge::limboEdge();
                 groups.link(group1, group2);

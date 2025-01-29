@@ -75,6 +75,7 @@ add_executable(csrc main.cu
         eval.cuh
         include/arch.cuh
         include/os/os.cuh
+        include/moe/expert.cuh
 )
 set_target_properties(csrc PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON

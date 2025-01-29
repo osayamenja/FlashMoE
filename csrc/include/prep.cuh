@@ -15,6 +15,46 @@
 
 #define SUPPORTED = 1;
 namespace aristos{
+
+    __host__ __forceinline__
+    void measureThroughput() {
+        // TODO do expert workflow
+    }
+    __host__ __forceinline__
+    void discoverTopology(void* hAp, const uint& n, const uint& globalRank,
+        const uint& eT) {
+        const auto aD = n * n;
+        const size_t heapBytes = n * sizeof(flagsType) + aD * sizeof(floatPair)
+        + sizeof(uint) * (n + 2) + n * BETA_BUFFER;
+        auto* symHeap = nvshmem_calloc(heapBytes, sizeof(cuda::std::byte));
+        // Pointer orchestration
+        // Starting index of flags array
+        auto* flags = CAST_TO(flagsType, symHeap);
+        auto* adj = CAST_TO(floatPair, flags + n);
+        // Navigate to our slice of the adjacency matrix
+        auto* results = adj + globalRank * n;
+        // Repurpose a subset of the symmetric heap for local storage.
+        auto* rates = CAST_TO(uint, adj + aD);
+        auto* syncArray = rates + n;
+        // Starting index of heap
+        auto* sHeap = CAST_TO(cuda::std::byte, syncArray + 2);
+        const auto remotePresent = [&n, &results] {
+            for (int i = 0; i< n; ++i) {
+                if (nvshmem_ptr(results, i) == nullptr) return true;
+            }
+            return false;
+        };
+        const auto isRemotePresent = remotePresent();
+        const auto sharedSize = n * (sizeof(floatPair) + sizeof(unsigned int));
+        topology::discover<<<ARISTOS_SUPER_BLOCK_SIZE, ARISTOS_BLOCK_SIZE, sharedSize, aristosStream>>>(n, globalRank,
+            isRemotePresent, eT, sHeap, flags, results, syncArray, rates);
+        CHECK_ERROR_EXIT(cudaMemcpyAsync(hAp, adj, aD * sizeof(floatPair) + n * sizeof(uint),
+            cudaMemcpyDeviceToHost, aristosStream));
+        CHECK_ERROR_EXIT(cudaPeekAtLastError());
+        CHECK_ERROR_EXIT(cudaStreamSynchronize(aristosStream));
+        nvshmem_free(symHeap);
+    }
+
     template<typename Element>
     requires(aristos::TensorValueType<Element>)
     __host__ __forceinline__
@@ -39,6 +79,20 @@ namespace aristos{
         CUTE_CHECK_ERROR(cudaDeviceGetAttribute(&l2CacheSize, cudaDevAttrL2CacheSize, dev));
         CUTE_CHECK_ERROR(cudaDeviceGetAttribute(&blocks, cudaDevAttrMultiProcessorCount, dev));
 
+        // initialize communication backend
+        nvshmem_init();
+        CUTE_CHECK_ERROR(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
+        const auto globalWorld = nvshmem_n_pes();
+        const auto localRank = nvshmem_my_pe();
+
+        // Pointer to adjacency matrix and throughput of all devices
+        const auto aD = globalWorld * globalWorld;
+        auto* aP = std::calloc(globalWorld * globalWorld * sizeof(floatPair) +
+            globalWorld * sizeof(uint), sizeof(cuda::std::byte));
+        discoverTopology(aP, globalWorld, globalWorld, 0);
+        auto* hA = static_cast<floatPair*>(aP);
+        auto* eTp = CAST_TO(uint, hA + aD);
+
         // Good to go! Let's do some initialization
         // Run decider
         // ...
@@ -47,11 +101,6 @@ namespace aristos{
         std::vector<specType> parallelSpec{};
         std::vector<specType> translation{};
         const unsigned int numNeighbors = translation.size();
-
-        // initialize communication backend
-        nvshmem_init();
-        CUTE_CHECK_ERROR(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
-        const auto globalWorld = nvshmem_n_pes();
 
 
 #if (__CUDACC_VER_MAJOR__ >= 11 && __CUDA_ARCH__ >= 800)
@@ -66,7 +115,7 @@ namespace aristos{
         //Set the attributes to a CUDA stream of type cudaStream_t
         cudaStreamSetAttribute(aristosStream, cudaStreamAttributeAccessPolicyWindow, &stream_attribute);
 #endif
-
+        std::free(aP);
     }
 
     template<typename Element>

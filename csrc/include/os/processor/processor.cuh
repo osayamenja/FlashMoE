@@ -16,11 +16,6 @@
 #include "gemm.cuh"
 
 namespace aristos::processor{
-    enum class CombineMode {
-        single,
-        multithreaded
-    };
-
     template<
         unsigned Arch,
         typename ElementCombine,
@@ -250,7 +245,7 @@ namespace aristos::processor{
     >
     struct FGT<TaskType::postGEMM, BlockGEMM> {
         __forceinline__ __device__
-        void operator()(typename BlockGEMM::MatrixDType* __restrict__ workspace,
+        void operator()(typename BlockGEMM::MatrixDType* __restrict__& workspace,
         const typename BlockGEMM::MatrixAType* __restrict__& inputs,
         const typename BlockGEMM::MatrixBType* __restrict__& weights,
         typename BlockGEMM::MatrixDType* __restrict__& output,
@@ -377,7 +372,6 @@ namespace aristos::processor{
             }
         }
     };
-
 
     struct ProcessorArgs{
         // sensible sentinel values

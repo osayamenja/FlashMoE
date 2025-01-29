@@ -132,25 +132,27 @@ namespace aristos {
         auto constexpr dim = 8U;
         auto constexpr intraWidth = 4.0;
 
-        AdjMatrix A(dim);
-        std::pair constexpr intraBW = {4.35e-04, 1.29e-02}; // (ms, ms/MB)
-        std::pair constexpr interBW = {1.12e-02, 5e-02}; // (ms, ms/MB)
+        //AdjMatrix A(dim);
+        /*std::pair constexpr intraBW = {4.35e-04, 1.29e-02}; // (ms, ms/MB)
+        std::pair constexpr interBW = {1.12e-02, 5e-02}; // (ms, ms/MB)*/
+        auto constexpr intraBW = floatPair{4.35e-04f, 1.29e-02f}; // (ms, ms/MB)
+        auto constexpr interBW = floatPair{1.12e-02f, 5e-02f}; // (ms, ms/MB)
 
-        /*cuda::std::array<cuda::std::pair<float, float>, dim*dim> d{};
+        cuda::std::array<floatPair, dim*dim> d{};
         const auto adj = make_tensor(d.data(),
-            make_layout(cute::make_shape(dim, dim), cute::LayoutRight{}));*/
+            cute::Layout<cute::Shape<cute::Int<dim>, cute::Int<dim>>,
+                        cute::Stride<cute::Int<dim>, cute::_1>>{});
 
         for(int i = 0; i < dim; ++i){
-            A[i] = std::vector<std::pair<float, float>>(dim);
             for(int j = 0; j < dim; ++j){
                 if(i == j)[[unlikely]]
                     continue;
                 if(static_cast<int>(std::floor(j / static_cast<float>(intraWidth))) == static_cast<int>(std::floor(i / static_cast<float>(intraWidth)))){
                     // intra node partitions
-                    A[i][j] = intraBW;
+                    adj(i, j) = intraBW;
                 }
                 else{
-                    A[i][j] = interBW;
+                    adj(i, j) = interBW;
                 }
             }
         }
@@ -172,9 +174,9 @@ namespace aristos {
         const auto m = ModelConfig(24, 1, 256, 4, 24, 16, 512);
 
         auto start = clk::now();
-        decider::decide(A, w, e.size()*expertGigaFlops, e.size(), m);
+        decider::decide(adj, w, e.size()*expertGigaFlops, e.size(), m);
         end = clk::now() - start;
-        const auto spec = decider::decide(A, w, e.size()*expertGigaFlops, e.size(), m);
+        const auto spec = decider::decide(adj, w, e.size()*expertGigaFlops, e.size(), m);
         fmt::println("Measured time for the Decider is {}s", end.count());
         fmt::println("Device to Groups: {}", spec);
 

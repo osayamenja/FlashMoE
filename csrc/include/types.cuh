@@ -136,6 +136,12 @@ namespace aristos{
     };
 
     __device__
+    enum class CombineMode {
+        single,
+        multithreaded
+    };
+
+    __device__
     struct __align__(8) RingSoftmaxPayload {
         mp_t mI;
         cute::half_t dI;
