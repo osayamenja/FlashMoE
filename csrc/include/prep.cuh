@@ -71,13 +71,13 @@ namespace aristos{
         int dev = 0;
         int blocks = 0;
         int arch = 0;
-        CUTE_CHECK_ERROR(cudaGetDevice(&dev));
-        CUTE_CHECK_ERROR(cudaDeviceGetAttribute(&cudaDevAttribute, cudaDevAttrMemoryPoolsSupported, dev));
+        CHECK_ERROR_EXIT(cudaGetDevice(&dev));
+        CHECK_ERROR_EXIT(cudaDeviceGetAttribute(&cudaDevAttribute, cudaDevAttrMemoryPoolsSupported, dev));
         reportError(cudaDevAttribute, "Memory Pools support required");
-        CUTE_CHECK_ERROR(cudaDeviceGetAttribute(&arch, cudaDevAttrComputeCapabilityMajor, dev));
-        reportError(arch, "At least Volta required");
-        CUTE_CHECK_ERROR(cudaDeviceGetAttribute(&l2CacheSize, cudaDevAttrL2CacheSize, dev));
-        CUTE_CHECK_ERROR(cudaDeviceGetAttribute(&blocks, cudaDevAttrMultiProcessorCount, dev));
+        CHECK_ERROR_EXIT(cudaDeviceGetAttribute(&arch, cudaDevAttrComputeCapabilityMajor, dev));
+        reportError(arch, ">= Volta is required");
+        CHECK_ERROR_EXIT(cudaDeviceGetAttribute(&l2CacheSize, cudaDevAttrL2CacheSize, dev));
+        CHECK_ERROR_EXIT(cudaDeviceGetAttribute(&blocks, cudaDevAttrMultiProcessorCount, dev));
 
         // initialize communication backend
         nvshmem_init();
@@ -122,21 +122,23 @@ namespace aristos{
     requires(aristos::TensorValueType<Element>)
     __host__ __forceinline__
     void forwardHost(){
-        assert(isInitialized);
+        // This function would likely be called frequently--per layer per iteration--thus, we elide the error check.
+        // Of course, calling this function without initializing the aristos runtime yields undefined behavior.
+        // reportError(isInitialized, "Not initialized")
     }
 
     template<typename Element>
     requires(aristos::TensorValueType<Element>)
     __host__ __forceinline__
     void backwardHost(){
-        assert(isInitialized);
+        // reportError(isInitialized, "Not initialized")
     }
 
     __host__ __forceinline__
     void aristosFinalize(){
-        assert(isInitialized);
+        reportError(isInitialized, "Not initialized!");
         isInitialized = false;
-        CUTE_CHECK_ERROR(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
+        CHECK_ERROR_EXIT(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
 #if (__CUDACC_VER_MAJOR__ >= 11 && __CUDA_ARCH__ >= 800)
         cudaStreamAttrValue stream_attribute;
         stream_attribute.accessPolicyWindow.num_bytes = 0; // Setting the window size to 0 disable it
@@ -145,11 +147,11 @@ namespace aristos{
         cudaCtxResetPersistingL2Cache();
 #endif
 
-        CUTE_CHECK_ERROR(cudaFreeAsync(hostMoEConfig.bookKeeping, aristosStream));
+        CHECK_ERROR_EXIT(cudaFreeAsync(hostMoEConfig.bookKeeping, aristosStream));
         nvshmem_free(hostMoEConfig.sHeap);
         nvshmem_finalize();
-        CUTE_CHECK_ERROR(cudaPeekAtLastError());
-        CUTE_CHECK_ERROR(cudaStreamSynchronize(aristosStream));
+        CHECK_ERROR_EXIT(cudaPeekAtLastError());
+        CHECK_ERROR_EXIT(cudaStreamSynchronize(aristosStream));
     }
 }
 #endif //PREP_CUH

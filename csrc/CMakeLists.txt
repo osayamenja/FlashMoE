@@ -71,7 +71,6 @@ add_executable(csrc main.cu
         include/moe/gate.cuh
         include/os/processor/gemm.cuh
         include/os/packet.cuh
-        bench.cuh
         eval.cuh
         include/arch.cuh
         include/os/os.cuh

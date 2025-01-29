@@ -483,6 +483,7 @@ namespace aristos::gate {
 
             // Begin loss computation and global token ordering construction
             constexpr auto wS = 32U; // warpSize
+            static_assert(bN % wS == 0);
             ElementC cache[bN / wS];
             using BlockReduce = cub::BlockReduce<ElementC, threads>;
             auto* __restrict__ cS = CAST_TO(typename BlockReduce::TempStorage, gateScratch);
