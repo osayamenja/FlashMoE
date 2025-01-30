@@ -15,52 +15,47 @@
 #include "../os/processor/gemm.cuh"
 #include "../os/processor/processor.cuh"
 namespace aristos {
-    template<typename BlockGEMM>
+    template<
+        typename BlockGEMM,
+        typename Activations,
+        typename Weights,
+        typename Output,
+        typename Bias
+    >
     __forceinline__ __device__
     void fGST(typename BlockGEMM::MatrixDType* __restrict__& workspace,
-    const typename BlockGEMM::MatrixAType* __restrict__& inputs,
-    const typename BlockGEMM::MatrixBType* __restrict__& weights,
-    typename BlockGEMM::MatrixDType* __restrict__& output,
-    const typename BlockGEMM::MatrixDType* __restrict__& bias,
-    const typename BlockGEMM::MatrixDType* __restrict__& scaleWeights,
-    const unsigned int& M,
-    const unsigned int& N,
-    const unsigned int& K,
-    const unsigned int& tileIdx) {
+        const Activations& mA,
+        const Weights& mB,
+        const Bias& mD,
+        const Output& mC,
+        typename BlockGEMM::MatrixDType* __restrict__& scaleWeights,
+        typename BlockGEMM::MatrixDType* __restrict__& combineWeights,
+        const unsigned int& M,
+        const unsigned int& N,
+        const unsigned int& tileIdx) {
         auto accumulator = cute::partition_fragment_C(typename BlockGEMM::MMA{}, typename BlockGEMM::TilerOut{});
         constexpr auto elems = SHARED_SIZE / (THREADS * sizeof(typename BlockGEMM::MatrixDType));
         static_assert(cute::size(accumulator) % elems == 0);
         cutlass::AlignedArray<typename BlockGEMM::MatrixDType, elems> rScratch{};
         constexpr auto bM = cute::get<0>(typename BlockGEMM::BlockTiler{});
+        constexpr auto bN = cute::get<1>(typename BlockGEMM::BlockTiler{});
         static_assert(size(accumulator) % rScratch.size() == 0);
         // Instantiate mainloop
         typename BlockGEMM::CollectiveMainloop mainLoop{};
         cute::clear(accumulator);
-
-        // Row-major
-        const auto mA = make_tensor(cute::make_gmem_ptr(inputs),
-            make_layout(cute::make_shape(M, K), cute::make_stride(K, 1)));
-        // Row-major, transposed
-        const auto mB = make_tensor(cute::make_gmem_ptr(weights),
-            make_layout(cute::make_shape(N, K), cute::make_stride(K, 1)));
-        // Row-major
-        const auto mC = make_tensor(cute::make_gmem_ptr(output,
-            make_layout(cute::make_shape(M, N), cute::make_stride(N, 1))));
-        const auto mD = make_tensor(cute::make_gmem_ptr(bias),
-            make_layout(cute::make_shape(M, N), cute::make_stride(0, 1)));
-        const auto mS = make_tensor(cute::make_gmem_ptr(scaleWeights),
-               make_layout(cute::make_shape(M, N), cute::make_stride(1, 0)));
-
         const auto tilesM = M / cute::get<0>(typename BlockGEMM::BlockTiler{});
         const auto tilesN = N / cute::get<1>(typename BlockGEMM::BlockTiler{});
-
         const auto tileCoord = idx2crd(tileIdx, cute::Shape(tilesM, tilesN), cute::Stride(tilesN ,1));
         const auto ctaCoord = make_coord(cute::get<0>(tileCoord), cute::get<1>(tileCoord), cute::_);
+        using BlockTiler = cute::Shape<cute::Int<bM>, cute::Int<bN>>;
+        constexpr BlockTiler tiler{};
         const auto gA = cute::local_tile(mA, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1, cute::X,cute::_1>{});
         const auto gB = cute::local_tile(mB, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step< cute::X,cute::_1,cute::_1>{});
         const auto gC = cute::local_tile(mC, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1,cute::_1, cute::X>{});
         const auto gD = cute::local_tile(mD, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1,cute::_1, cute::X>{});
-        const auto gS = cute::local_tile(mS, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1,cute::_1, cute::X>{});
+        // get combine and scale weights
+        auto sW = scaleWeights[tileIdx * bM + threadIdx.x];
+        auto cW = combineWeights[tileIdx * bM + threadIdx.x];
 
         auto k_tile_iter = cute::make_coord_iterator(size<2>(gA));
         int k_tile_count = size<2>(gA);
@@ -80,7 +75,6 @@ namespace aristos {
         // Epilogue
         constexpr typename BlockGEMM::MMA tiledMMA{};
         const auto tDgD = tiledMMA.get_slice(threadIdx.x).partition_C(gD);
-        const auto tSgS = tiledMMA.get_slice(threadIdx.x).partition_C(gS);
 
         constexpr auto gCStoreOp = cutlass::NumericConverter<typename decltype(gC)::value_type,
                                                     typename decltype(accumulator)::value_type>{};
@@ -91,6 +85,7 @@ namespace aristos {
         // Assume elementwise operator
         constexpr typename BlockGEMM::FusedEpilogue epilogueOp{};
         constexpr auto trips = size(accumulator) / rScratch.size();
+        const auto nW = gDLoadOp(sW / cW);
 
         // Prefetch bias from global to shared memory
         #pragma unroll
@@ -111,30 +106,7 @@ namespace aristos {
 
             #pragma unroll
             for (int j = 0; j < elems; ++j) {
-                accumulator(j + i * elems) = epilogueOp(accumulator(j + i * elems), gDLoadOp(rScratch[j]));
-            }
-        }
-
-        // Do Scale on register fragment
-        #pragma unroll
-        for (int j = 0; j < elems; ++j) {
-            workspace[threadIdx.x + j * THREADS] = tSgS(j);
-        }
-
-        #pragma unroll
-        for (unsigned int i = 0; i < trips; ++i) {
-            #pragma unroll
-            for (unsigned int j = 0; j < elems; ++j) {
-                rScratch[j] = workspace[threadIdx.x + j * THREADS];
-                if (i + 1 < trips) {
-                    // Eagerly start loads for the next batch, if needed
-                    workspace[threadIdx.x + j * THREADS] = tDgD(j + (i + 1) * elems);
-                }
-            }
-
-            #pragma unroll
-            for (int j = 0; j < elems; ++j) {
-                accumulator(j + i * elems) = scaleOp(accumulator(j + i * elems), gDLoadOp(rScratch[j]));
+                accumulator(j + i * elems) = nW * epilogueOp(accumulator(j + i * elems), gDLoadOp(rScratch[j]));
             }
         }
 
@@ -145,6 +117,7 @@ namespace aristos {
         const auto tCsC = tiledMMA.get_slice(threadIdx.x).partition_C(sC);
         const auto rIdx = threadIdx.x / elems * elems;
         const auto cIdx = threadIdx.x % elems;
+        // Transpose data
         #pragma unroll
         for (unsigned int i = 0; i < trips; ++i) {
             #pragma unroll
@@ -152,9 +125,14 @@ namespace aristos {
                 tCsC(j) = gCStoreOp(accumulator(j + i * elems));
             }
             __syncthreads();
+            // Load striped slice into register fragment
             #pragma unroll
             for (unsigned int j = 0; j < elems; ++j) {
-                gC(rIdx + j, cIdx + i * elems) = sC(rIdx + j, cIdx);
+                rScratch[j] = sC(rIdx + j, cIdx);
+            }
+            #pragma unroll
+            for (unsigned int j = 0; j < elems; ++j) {
+                atomicAdd(&gC(rIdx + j, cIdx + i * elems), rScratch[j]);
             }
         }
         __syncthreads();
@@ -166,7 +144,7 @@ namespace aristos {
         identified,
         completed
     };
-    // single shot expert used for evaluation only
+    // Stylized expert for evaluation only
     // For simplicity, assume single element types for all matrices,
     // This is typical of PyTorch workloads
     template<
@@ -176,16 +154,20 @@ namespace aristos {
         typename Element,
         typename ProblemShape_MNK
     >
-    requires(cute::is_tuple_v<ProblemShape_MNK> && rank(ProblemShape_MNK{}) == 4
-        && aristos::TensorValueType<Element>)
+    requires(cute::is_tuple_v<ProblemShape_MNK> && rank(ProblemShape_MNK{}) == 3
+    && aristos::TensorValueType<Element> && !(cuda::std::is_same_v<Element, cute::float_e4m3_t> ||
+            cuda::std::is_same_v<Element, cute::float_e5m2_t>))
     /// D = A * B1 + C1
     /// A = D * B2 + C2
     __global__ void expert(ProblemShape_MNK const pS,
-        uint* __restrict__ tileSync, Element* __restrict__ pA,
+        uint* __restrict__ deviceThroughput, uint* __restrict__ tileSync,
+        Element* __restrict__ pA,
         const cuda::std::array<Element* __restrict__, batch> pB,
-        const cuda::std::array<Element* __restrict__, batch> pC /*bias*/,
-        const cuda::std::array<Element* __restrict__, batch> pSw /*scale weights*/,
-        Element* __restrict__ pD, uint* __restrict__ deviceThroughput) {
+        Element* __restrict__ pC,
+        const cuda::std::array<Element* __restrict__, batch> pD /*bias*/,
+        const Element* __restrict__ pSw /*scale weights*/,
+        const Element* __restrict__ pCw /*combine weights*/,
+        const __grid_constant__ unsigned int nX /*number of experts*/) {
         uint64_t start = 0, end = 0;
         constexpr auto blocks = Hardware<Arch>::blocks::value - 1U;
         constexpr auto tUpB = 1536U; // max supported number of tiles per block per gemm
@@ -193,28 +175,40 @@ namespace aristos {
         __shared__ __align__(16) uint16_t tQ[tUpB];
         const auto M = cute::get<0>(pS);
         const auto N = cute::get<1>(pS);
-        const auto Nx = cute::get<2>(pS);
         const auto K = cute::get<3>(pS);
         using Operation = BlockMM<Arch, Element, ActivationOp>;
         using OperationX = BlockMM<Arch, Element>;
         constexpr auto preGEMM = processor::FGT<TaskType::preGEMM, Operation>{};
         const auto tilesM = Config::tiles<BLOCK_M>(M);
         const auto tilesN = Config::tiles<BLOCK_N>(N);
-        const auto tilesNx = Config::tiles<BLOCK_N>(Nx);
-        const auto tilesX = tilesM * tilesNx;
+        const auto tilesK = Config::tiles<BLOCK_N>(K);
+        const auto tilesX = tilesM * tilesK;
         const auto tiles = tilesM * tilesN;
 
         asm volatile("mov.u64 %0, %%globaltimer;": "=l"(start)::);
         #pragma unroll 4
         for (uint i = blockIdx.x; i < tiles; i += blocks) {
-            const auto tM = i / tilesNx;
-            preGEMM(CAST_TO(Element, workspace), pA, pB[0], pD, pC[0], M, Nx, K, i);
+            const auto tM = i / tilesN;
+            preGEMM(CAST_TO(Element, workspace), pA, pB[0], pC, pD[0], M, N, K, i);
             // notify this tile's completion
             if (!threadIdx.x) {
                 __threadfence();
                 atomicIncrement(tileSync + tM);
             }
         }
+
+        // Make tensors for below
+        // Row-major
+        const auto mA = make_tensor(cute::make_gmem_ptr(pC),
+            make_layout(cute::make_shape(M, N), cute::LayoutRight{}));
+        // Row-major, transposed
+        const auto mB = make_tensor(cute::make_gmem_ptr(pB[1]),
+            make_layout(cute::make_shape(K, N), cute::LayoutRight{}));
+        // Row-major
+        const auto mC = make_tensor(cute::make_gmem_ptr(pA,
+            make_layout(cute::make_shape(M, K), cute::LayoutRight{})));
+        const auto mD = make_tensor(cute::make_gmem_ptr(pD[1]),
+            make_layout(cute::make_shape(M, K), cute::make_stride(0, 1)));
 
         // Below, is a more sophisticated method for scheduling the next GEMM task.
         using BlockScan = cub::BlockScan<uint16_t, THREADS>;
@@ -238,7 +232,7 @@ namespace aristos {
                 if (i < tNt) {
                     const auto idx = i * THREADS + threadIdx.x;
                     if (tileStates[i] != TileState::completed) {
-                        predicates[i] = atomicLoad(tileSync + idx) == tilesNx;
+                        predicates[i] = atomicLoad(tileSync + idx) == tilesK;
                         tileStates[i] = predicates[i] ? TileState::identified : TileState::unidentified;
                     }
                 }
@@ -264,13 +258,13 @@ namespace aristos {
             for (uint i = 0; i < completedTiles; ++i) {
                 const auto tileIdx = tQ[i];
                 // do gemm
-                fGST<OperationX>(workspace, pD, pB[1], pA, pC[1], pSw, M, N, K,
-                    tileIdx);
+                fGST<OperationX>(workspace, mA, mB, mD, mC, pSw, pCw,
+                    M, N, tileIdx);
             }
             processed += completedTiles;
         }
         asm volatile("mov.u64 %0, %%globaltimer;": "=l"(end)::);
-        auto tDt = static_cast<float>(end - start) / 1e6f;
+        auto tDt = static_cast<float>(end - start) / 1e6f; // convert nano to milliseconds
         // Intra-block reduction to get maximum latency
         using BlockReduce = cub::BlockReduce<float, THREADS>;
         auto* __restrict__ rTs = CAST_TO(BlockReduce::TempStorage, workspace);
@@ -278,7 +272,7 @@ namespace aristos {
         auto bT = BlockReduce(*rTs).Reduce(tDt, cub::Max());
         // Inter-block max reduction
         if (!threadIdx.x) {
-            atomicMax(deviceThroughput, __float2uint_rn(bT));
+            atomicMin(deviceThroughput, __float2uint_rn(__fdividef(1, bT))); // experts per ms
         }
     }
 }

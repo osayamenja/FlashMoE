@@ -5,6 +5,7 @@
 #ifndef PREP_CUH
 #define PREP_CUH
 
+#include <cutlass/epilogue/thread/activation.h>
 #include <cute/layout.hpp>
 #include <nvshmemx.h>
 #include <nvshmem.h>
@@ -12,13 +13,48 @@
 
 #include "debug.cuh"
 #include "types.cuh"
+#include "moe/expert.cuh"
 
 #define SUPPORTED = 1;
 namespace aristos{
-
+    template<
+        unsigned int Arch,
+        typename Element
+    >
     __host__ __forceinline__
-    void measureThroughput() {
-        // TODO do expert workflow
+    void measureThroughput(uint* __restrict__ hDt,
+        const unsigned int& M, const unsigned int& N, const unsigned int& K) {
+        // malloc memory for all matrices
+        constexpr auto batch = 2U;
+        cuda::std::byte* abc;
+        constexpr auto eS = sizeof(Element);
+        const auto stateSize = sizeof(uint) * (1 + M / BLOCK_M); // tileSync + dT
+        const auto aSize = stateSize + eS * M * K;
+        const auto abSize = aSize + eS * K * N;
+        const auto abcSize = abSize + eS * M * N;
+        const auto abcBSize = abcSize + eS * cute::max(N, K); // bias
+        const auto abcBSSize = abcBSize + eS * M; // scale/combine weights
+        CHECK_ERROR_EXIT(cudaMallocAsync(&abc, abcBSSize, aristosStream));
+        CHECK_ERROR_EXIT(cudaMemsetAsync(abc, 0, abcBSSize, aristosStream));
+
+        // memcpy to device memory
+
+        auto* __restrict__ p = CAST_TO(uint, abc);
+        const auto pS = cute::make_tuple(M, N, K);
+        using Activation = cutlass::epilogue::thread::ReLU<Element>;
+        constexpr auto blocks = Hardware<Arch>::blocks::value - 1U;
+        auto* __restrict__ pBp = CAST_TO(Element, abc + aSize);
+        auto* __restrict__ pDp = CAST_TO(Element, abc + abcSize);
+        const auto pB = cuda::std::array<Element*, batch>{pBp, pBp};
+        const auto pD = cuda::std::array<Element*, batch>{pDp, pDp};
+        auto* __restrict__ pC = CAST_TO(Element, abc + abSize);
+        auto* __restrict__ pSC = CAST_TO(Element, abc + abcBSize);
+        expert<Arch, Activation, batch><<<blocks, ARISTOS_BLOCK_SIZE, 0, aristosStream>>>(pS, p,
+            p + 1, CAST_TO(Element, abc + stateSize), pB, pC, pD, pSC, pSC);
+        CHECK_ERROR_EXIT(cudaMemcpyAsync(hDt, p, sizeof(uint), cudaMemcpyDeviceToHost, aristosStream));
+        CHECK_ERROR_EXIT(cudaFreeAsync(abc, aristosStream));
+        CHECK_ERROR_EXIT(cudaPeekAtLastError());
+        CHECK_ERROR_EXIT(cudaStreamSynchronize(aristosStream));
     }
     __host__ __forceinline__
     void discoverTopology(void* hAp, const uint& n, const uint& globalRank,
@@ -83,15 +119,30 @@ namespace aristos{
         nvshmem_init();
         CUTE_CHECK_ERROR(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
         const auto globalWorld = nvshmem_n_pes();
-        const auto localRank = nvshmem_my_pe();
+        const auto rank = nvshmem_my_pe();
 
         // Pointer to adjacency matrix and throughput of all devices
         const auto aD = globalWorld * globalWorld;
         auto* aP = std::calloc(globalWorld * globalWorld * sizeof(floatPair) +
             globalWorld * sizeof(uint), sizeof(cuda::std::byte));
-        discoverTopology(aP, globalWorld, globalWorld, 0);
+        // measure device throughput
         auto* hA = static_cast<floatPair*>(aP);
         auto* eTp = CAST_TO(uint, hA + aD);
+        switch (arch) {
+            case 7:
+                measureThroughput<700, Element>(eTp + rank, seqLen, hiddenProjDim, embedDim);
+            break;
+            case 8:
+                measureThroughput<800, Element>(eTp + rank, seqLen, hiddenProjDim, embedDim);
+            break;
+            default:
+                measureThroughput<900, Element>(eTp + rank, seqLen, hiddenProjDim, embedDim);
+            break;
+        }
+        const auto dT = eTp[rank];
+        discoverTopology(aP, globalWorld, globalWorld, dT);
+
+        // Now the topology adjacency matrix is ready
 
         // Good to go! Let's do some initialization
         // Run decider

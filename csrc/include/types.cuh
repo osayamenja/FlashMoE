@@ -229,7 +229,7 @@ namespace aristos{
         unsigned int embedDim;
         unsigned int upProjection;
         // per GPU
-        unsigned int expertSlots;
+        unsigned int expertSlots; // for sheap only
         unsigned int expertCapacity;
         unsigned int cellSize;
         unsigned int nTiles;
@@ -483,28 +483,31 @@ namespace aristos{
             const unsigned int& _embedDim,
             const unsigned int& _eCap,
             const unsigned int& _blocks,
-            const unsigned int& _world){
+            const unsigned int& _world,
+            const unsigned int& _eNb, // number of bytes for the matrix element type
+            const bool isSingleBlockGate = true){
             const auto tCM = Config::tiles<BLOCK_M>(_eCap);
             const auto tN = Config::tiles<BLOCK_N>(_embedDim);
-            if (_nx == 1) {
-                return sizeof(mp_t) * _world * _nLx * tCM * tN;
+            auto sBfC = 0UL;
+            if (_nx > 1)[[likely]] {
+                // maximum gemm tiles/tasks scheduled by processors
+                const auto prT = _world * _nLx * tCM * Config::tiles<BLOCK_N>(_pd);
+                // maximum gemm tiles/tasks scheduled by subscriber threads
+                auto sT = _world * _nLx * tCM * tN + tCM * tN * _nx;
+                const auto tPs = cute::ceil_div(sT, SUBSCRIBERS);
+                sT = tPs * SUBSCRIBERS;
+                const auto tQl = sizeof(Task) * (sT + prT);
+                const auto tQml = tQl + _blocks * sizeof(Task); // interrupt tasks
+                const auto tQXt = tQml + sizeof(EDT) * _nx + sizeof(TokenIdxTuple) * (_px * _eCap);
+                const auto brs = tQXt + (isSingleBlockGate ? 0U : _sl * Config::tiles<BLOCK_N>(_px) *
+                    (sizeof(RingSoftmaxPayload) + 2 * sizeof(RingTopKPayload)));
+                const auto gRl = brs + 2 * _nx + 1;
+                const auto eDsA = gRl + sizeof(BookType) * (4 * _nx + _world + 1);
+                const unsigned int fCl = sizeof(bool) * (_world * _nLx + _nx * tCM * tN);
+                sBfC = eDsA + sizeof(BookType) * 2 * (_blocks + _world * _nLx * tCM) + fCl;
             }
-            const auto tM = Config::tiles<BLOCK_M>(_sl);
-            const auto gRl = sizeof(mp_t) * (_sl * _px + (2 * _px + 1));
-            const auto gB = gRl + sizeof(TokenIdxTuple) * (_px * _eCap) + sizeof(BookType) * _px * (tM + 3);
-            const auto eDsA = gB + sizeof(BookType) * (4 * _nx + _world + 1);
-            const auto fCl = sizeof(bool) * (_world * _nLx + _nx * tCM * tN);
-            const auto sBfC = eDsA + sizeof(BookType) * (3 * _blocks + THREADS - 2 + _world * _nLx * tCM) + fCl;
-            // maximum gemm tiles/tasks scheduled by subscriber threads
-            auto sT = _world * _nLx * tCM * tN + tCM * tN * _nx;
-            sT = cute::ceil_div(sT, SUBSCRIBERS) * SUBSCRIBERS;
-            // maximum gemm tiles/tasks scheduled by processors
-            const auto pT = _world * _nLx * tCM * Config::tiles<BLOCK_N>(_pd);
-            const auto tQl = sizeof(Task) * (sT + pT);
-            const auto tQml = tQl + _blocks; // interrupt tasks
-            const auto xMtQ = sBfC + tQml + sizeof(mp_t) * _world * _nLx * tCM * tN;
-            const auto brs = _sl * Config::tiles<BLOCK_N>(_px) * (sizeof(RingSoftmaxPayload) + 2 * sizeof(RingTopKPayload));
-            return xMtQ + brs;
+            const auto gBxM = sBfC + _eNb * (_world * _nLx * tCM * tN + _sl * _px);
+            return gBxM;
         }
 
         __device__ __forceinline__
@@ -651,6 +654,7 @@ namespace aristos{
     __constant__ __inline__ Config moeConfig{};
     __constant__ __inline__ Bookkeeping bookkeeping{};
     __inline__ Config hostMoEConfig;
+    __inline__ Bookkeeping hostBookkeeping{};
     __inline__ bool isInitialized = false;
     __inline__ auto aristosStream = cudaStreamPerThread;
 

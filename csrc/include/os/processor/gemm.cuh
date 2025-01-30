@@ -22,6 +22,10 @@ namespace aristos {
             cuda::std::is_same_v<typename Registers::value_type, Element>
         __device__ __forceinline__
         void operator()(Element* __restrict__ const& gS, Registers const& registers) const {
+            static_assert(!(cuda::std::is_same_v<Element, cute::float_e4m3_t> ||
+                cuda::std::is_same_v<Element, cute::float_e5m2_t>),
+                "Currently VAA is not supported for fp8."
+                "It's easy to do but not a priority currently");
             // Float is the "safe accumulator type"
             // We acknowledge this by converting registers to float before accumulating.
             auto regLoadOp = cutlass::NumericConverter<float, typename Registers::value_type>{};
