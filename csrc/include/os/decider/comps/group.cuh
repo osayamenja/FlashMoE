@@ -31,7 +31,8 @@ namespace aristos{
             p2pTimes = dp;
         }
 
-        __forceinline__ void construct(const float& art, const unsigned int& effective){
+        __forceinline__
+        void construct(const float& art, const unsigned int& effective){
             objArgs.groupMemCapacity = memCapacity;
             objArgs.effectiveWorld = effective;
             objArgs.allReduceTime = allReduceTime = art;

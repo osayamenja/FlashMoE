@@ -189,17 +189,66 @@ namespace aristos{
     template <class T>
     constexpr bool isRegisterV = isRegister<T>::value;
 
+    struct __align__(16) InitialConfig {
+        const uint vocabSize;
+        const uint numLayers;
+        const uint globalBatch;
+        const uint miniBatch;
+        const uint moeFrequency;
+        const uint seqLen;
+        const uint embedDim;
+        const uint hiddenProjDim;
+        const uint k;
+        const uint capacityFactor;
+        const uint numExperts;
+        const bool shouldDrop;
+        const uint redAmount;
+        const uint p2pBuffer;
+        const ulong gradBuffer;
+
+        __host__
+        InitialConfig(const uint& _vocabSize,
+            const uint& _numLayers,
+            const uint& _globalBatch,
+            const uint& _miniBatch,
+            const uint& _moeFreq,
+            const uint& _seqLen,
+            const uint& _embedDim,
+            const uint& _hiddenProjDim,
+            const uint& _k,
+            const uint& _capacityFactor,
+            const uint& _numExperts,
+            const bool& _shouldDrop,
+            const uint& _redAmount = 1):
+        vocabSize(_vocabSize),
+        numLayers(_numLayers),
+        globalBatch(_globalBatch),
+        miniBatch(_miniBatch),
+        moeFrequency(_moeFreq),
+        seqLen(_seqLen),
+        embedDim(_embedDim),
+        hiddenProjDim(_hiddenProjDim),
+        k(_k), capacityFactor(_capacityFactor),
+        numExperts(_numExperts),
+        shouldDrop(_shouldDrop), redAmount(_redAmount),
+        p2pBuffer(seqLen * miniBatch * embedDim),
+        // formula for total number of parameters
+        // source: https://arxiv.org/abs/2401.14489
+        gradBuffer(embedDim * (numLayers * (12 * embedDim + 13) + (vocabSize + embedDim)))
+        {}
+    };
     // Needed for decider
-    struct ModelConfig{
-        unsigned int numLayers;
-        unsigned int globalBatch;
-        unsigned int redAmount;
-        unsigned int miniBatch;
-        unsigned int moeFreq;
-        unsigned int p2pBuffer;
-        unsigned int gradBuffer;
-        ModelConfig() = default;
-        ModelConfig(const unsigned int& numLayers, const unsigned int& redAmount, const unsigned int& globalBatch,
+    struct __align__(16) ModelConfig{
+        const unsigned int numLayers;
+        const unsigned int globalBatch;
+        const unsigned int redAmount;
+        const unsigned int miniBatch;
+        const unsigned int moeFreq;
+        const unsigned int p2pBuffer;
+        const unsigned int gradBuffer;
+        __host__
+        ModelConfig(const unsigned int& numLayers, const unsigned int& redAmount,
+                    const unsigned int& globalBatch,
                     const unsigned int& miniBatch, const unsigned int& moeFreq,
                     const unsigned int& p2PBuffer, const unsigned int& gradBuffer) :
                     numLayers(numLayers), globalBatch(globalBatch),
@@ -212,12 +261,6 @@ namespace aristos{
     struct __align__(16) Config{
         cuda::std::byte* sHeap;
         flagsType* flags;
-        /// Needed for free
-        cuda::std::byte* bookKeeping;
-        /// EP rank -> global rank
-        unsigned int* peerTranslation;
-        /// Expert index -> EP rank
-        unsigned int* parallelismSpec;
         unsigned int functionId; // needed for identifying static template parameters
         /// Expert parallel group rank
         unsigned int rank;
@@ -229,7 +272,7 @@ namespace aristos{
         unsigned int embedDim;
         unsigned int upProjection;
         // per GPU
-        unsigned int expertSlots; // for sheap only
+        unsigned int expertSlots; // for the symmetric heap only
         unsigned int expertCapacity;
         unsigned int cellSize;
         unsigned int nTiles;
@@ -243,7 +286,6 @@ namespace aristos{
         __host__ __device__ __forceinline__
         Config(cuda::std::byte* _symmetricHeap,
                flagsType* _flags,
-               cuda::std::byte* _bk,
                const unsigned int& _fId,
                const unsigned int& _rank,
                const unsigned int& _k,
@@ -260,9 +302,6 @@ namespace aristos{
                const unsigned int& _capFactor = 1):
                 sHeap(_symmetricHeap),
                 flags(_flags),
-                bookKeeping(_bk),
-                peerTranslation(CAST_TO(unsigned int, _bk)),
-                parallelismSpec(CAST_TO(unsigned int, _bk) + _world),
                 functionId(_fId),
                 rank(_rank),
                 seqLen(_seqLen),
@@ -272,7 +311,7 @@ namespace aristos{
                 upProjection(_proj),
                 expertSlots(_expertSlots),
                 expertCapacity(cute::ceil_div(_seqLen, _numExperts) * _capFactor),
-                cellSize(expertCapacity * (embedDim + 1)), // max packet frame size
+                cellSize(expertCapacity * embedDim), // max packet frame size
                 nTiles(_tilesM * (_tilesN + _tilesNx)),
                 tilesN(_tilesN), tilesM(_tilesM),
                 tilesNx(_tilesNx){}

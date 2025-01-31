@@ -91,17 +91,32 @@ namespace aristos{
         nvshmem_free(symHeap);
     }
 
+    __host__ __forceinline__
+    std::vector<size_t> runDecider(const InitialConfig& iC, const floatPair* __restrict__ const& aP,
+        const uint* __restrict__ const& rates, const uint& world) {
+        const auto mC = ModelConfig{
+            iC.numLayers,
+            iC.redAmount,
+            iC.globalBatch,
+            iC.miniBatch,
+            iC.moeFrequency,
+            cute::ceil_div(iC.p2pBuffer, 1024U * 1024U), // in MB
+            cute::ceil_div(iC.p2pBuffer, 1024U * 1024U) // in MB
+        };
+        std::vector<Worker> workers(world);
+
+        // TODO estimate available device memory
+        return {};
+    }
     template<typename Element>
     requires(aristos::TensorValueType<Element>)
     __host__ __forceinline__
-    void aristosInit(const unsigned int& seqLen, const unsigned int& embedDim, const unsigned int& hiddenProjDim,
-                     const unsigned int& k, const unsigned int& capacityFactor, const unsigned int& numExperts,
-                     const bool& shouldDrop) {
+    void aristosInit(const InitialConfig& iC) {
         reportError(!isInitialized, "Already Initialized");
         isInitialized = true;
-        reportError(embedDim % BLOCK_N == 0 && hiddenProjDim % BLOCK_N == 0,
+        reportError(iC.embedDim % BLOCK_N == 0 && iC.hiddenProjDim % BLOCK_N == 0,
             "Must be multiple of BLOCK_N");
-        reportError(seqLen % BLOCK_M == 0, "Must be a multiple of BLOCK_M");
+        reportError(iC.seqLen % BLOCK_M == 0, "Must be a multiple of BLOCK_M");
         int l2CacheSize = 0;
         int cudaDevAttribute = 0;
         int dev = 0;
@@ -130,26 +145,26 @@ namespace aristos{
         auto* eTp = CAST_TO(uint, hA + aD);
         switch (arch) {
             case 7:
-                measureThroughput<700, Element>(eTp + rank, seqLen, hiddenProjDim, embedDim);
+                measureThroughput<700, Element>(eTp + rank, iC.seqLen, iC.hiddenProjDim, iC.embedDim);
             break;
             case 8:
-                measureThroughput<800, Element>(eTp + rank, seqLen, hiddenProjDim, embedDim);
+                measureThroughput<800, Element>(eTp + rank, iC.seqLen, iC.hiddenProjDim, iC.embedDim);
             break;
             default:
-                measureThroughput<900, Element>(eTp + rank, seqLen, hiddenProjDim, embedDim);
+                measureThroughput<900, Element>(eTp + rank, iC.seqLen, iC.hiddenProjDim, iC.embedDim);
             break;
         }
         const auto dT = eTp[rank];
         discoverTopology(aP, globalWorld, globalWorld, dT);
 
-        // Now the topology adjacency matrix is ready
+        // The topology adjacency matrix is ready, let's map devices to optimal cooperative process groups
+        const auto dTg = runDecider(iC, hA, eTp, globalWorld);
 
         // Good to go! Let's do some initialization
         // Run decider
         // ...
         // generates the below
         const unsigned int numLocalExperts = 0;
-        std::vector<specType> parallelSpec{};
         std::vector<specType> translation{};
         const unsigned int numNeighbors = translation.size();
 
@@ -198,7 +213,7 @@ namespace aristos{
         cudaCtxResetPersistingL2Cache();
 #endif
 
-        CHECK_ERROR_EXIT(cudaFreeAsync(hostMoEConfig.bookKeeping, aristosStream));
+        CHECK_ERROR_EXIT(cudaFreeAsync(hostBookkeeping.book, aristosStream));
         nvshmem_free(hostMoEConfig.sHeap);
         nvshmem_finalize();
         CHECK_ERROR_EXIT(cudaPeekAtLastError());

@@ -19,12 +19,16 @@ namespace aristos::topology{
         return buffer + slot * BETA_BUFFER;
     }
 
+    // Only a single block executes the below
     __device__ __forceinline__
     void awaitResponses(uint64_t* __restrict__ const& flags,
         uint* __restrict__ const& syncArray, uint* __restrict__ const& rates,
-        const uint& rank, const uint& n, const uint& seqNo) {
+        const uint& rank, const uint& n, const uint& seqNo, const unsigned int& processingRate) {
         using Payload = TopologySignal;
         auto result = Payload{};
+        if (!threadIdx.x) {
+            rates[rank] = processingRate;
+        }
         for (int i = threadIdx.x; i < n; i += ARISTOS_BLOCK_SIZE) {
             if (i != rank) {
                 awaitPayload<cuda::thread_scope_system>(CAST_TO(unsigned long long int, flags + i), &result, seqNo);
@@ -107,7 +111,7 @@ namespace aristos::topology{
         }
 
         // await responses from other GPUs
-        awaitResponses(flags, syncArray, rates, rank, n, seqNo);
+        awaitResponses(flags, syncArray, rates, rank, n, seqNo, processingRate);
     }
 
     __device__ __forceinline__
@@ -158,7 +162,7 @@ namespace aristos::topology{
         // If num of other P2P peers == 0, then we adjourn early after conditional subscription
         if (numPeers <= 1)[[unlikely]] {
             if (blockIdx.x == (gridDim.x - 1)) {
-                awaitResponses(flags, syncArray, rates, rank, n, seqNo);
+                awaitResponses(flags, syncArray, rates, rank, n, seqNo, processingRate);
             }
             return;
         }
@@ -206,7 +210,7 @@ namespace aristos::topology{
         // Most likely this block will not partake in the above thus, they would do the below in parallel
         // Could potentially enlist more blocks if n > THREADS, but that's unlikely
         if (blockIdx.x == gridDim.x - 1) {
-            awaitResponses(flags, syncArray, rates, rank, n, seqNo);
+            awaitResponses(flags, syncArray, rates, rank, n, seqNo, processingRate);
         }
     }
 
