@@ -25,7 +25,7 @@ namespace aristos {
             static_assert(!(cuda::std::is_same_v<Element, cute::float_e4m3_t> ||
                 cuda::std::is_same_v<Element, cute::float_e5m2_t>),
                 "Currently VAA is not supported for fp8."
-                "It's easy to do but not a priority currently");
+                "It's easy to implement but not a priority, currently");
             // Float is the "safe accumulator type"
             // We acknowledge this by converting registers to float before accumulating.
             auto regLoadOp = cutlass::NumericConverter<float, typename Registers::value_type>{};
@@ -179,6 +179,34 @@ namespace aristos {
         >;
 
         using FusedEpilogue = FAA<ElementC, ActivationOp>;
+    };
+
+    template<
+        typename ElementA,
+        typename ElementB = ElementA,
+        typename ElementC = float,
+        typename ActivationOp = cute::identity
+    >
+    struct BlockMM<900, ElementA, ElementB, ElementC, ActivationOp> {
+        static_assert(BLOCK_M == THREADS);
+        static_assert(BLOCK_M == 128);
+        static_assert(BLOCK_N == 64, "64 is a very good value for N, change it back!");
+        using GEMM = decltype(cublasdx::Size<BLOCK_M, BLOCK_N, BLOCK_K_FULL>()
+                              + cublasdx::Precision<toCDX<ElementA>, toCDX<ElementB>, toCDX<ElementC>>()
+                              + cublasdx::Type<cublasdx::type::real>()
+                              + cublasdx::Arrangement<cublasdx::row_major, cublasdx::row_major, cublasdx::row_major>()
+                              + cublasdx::Function<cublasdx::function::MM>()
+                              + cublasdx::SM<900>()
+                              + cublasdx::Block()
+                              + cublasdx::BlockDim<THREADS>());
+        using MatrixAType = ElementA;
+        using MatrixBType = ElementB;
+        using MatrixCType = ElementC;
+        using MatrixDType = ElementA;
+        using BlockTiler = cute::Shape<cute::Int<cublasdx::size_of<GEMM>::m>,
+                                        cute::Int<cublasdx::size_of<GEMM>::n>,
+                                        cute::Int<cublasdx::size_of<GEMM>::k>>;
+        using TilerOut = cute::Shape<cute::Int<cublasdx::size_of<GEMM>::m>, cute::Int<cublasdx::size_of<GEMM>::n>>;
         // TODO CollectiveMMA support for Hopper
     };
 }

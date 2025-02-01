@@ -90,7 +90,7 @@ namespace aristos::subscriber{
 
         // second stage: remote
         const auto tilesMc = Config::tiles<BLOCK_M>(dA.eCap);
-        const auto sRfC = rEl * tilesMc;
+        const auto sRfC = rEl * tilesMc * dA.tN;
         const auto sRl = sRfC / subscriberCount + (tIdx < sRfC % subscriberCount);
         const auto sRt = sRl / wSet;
 

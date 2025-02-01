@@ -9,7 +9,8 @@
 #include "../os/os.cuh"
 
 namespace aristos::moe{
-    template<unsigned int Arch,
+    template<
+        unsigned int Arch,
         unsigned int blocks,
         GateReductionLevel g = GateReductionLevel::singleBlock,
         typename ActivationOp = cute::identity,
@@ -62,7 +63,8 @@ namespace aristos::moe{
         }
     }
 
-    template<unsigned int Arch,
+    template<
+        unsigned int Arch,
         unsigned int blocks,
         GateReductionLevel g = GateReductionLevel::singleBlock
     >

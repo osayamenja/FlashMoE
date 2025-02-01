@@ -216,7 +216,7 @@ namespace aristos {
     };
 
     enum class LayoutOptimization {
-      UseSwizzle,
+        UseSwizzle,
         UseVanilla
     };
 
@@ -224,11 +224,13 @@ namespace aristos {
     requires (sizeof(T) == 2 || sizeof(T) == 4)
     using MiddleSwizzle = cute::Int<sizeof(T) == 2 ? 3 : 2>;
 
-    template<class GEMM,
-    LayoutOptimization lOpt = LayoutOptimization::UseVanilla,
-    typename ElementA = toCT<typename GEMM::a_value_type>,
-    typename ElementB = toCT<typename GEMM::b_value_type>,
-    typename ElementC = toCT<typename GEMM::c_value_type>>
+    template<
+        class GEMM,
+        LayoutOptimization lOpt = LayoutOptimization::UseVanilla,
+        typename ElementA = toCT<typename GEMM::a_value_type>,
+        typename ElementB = toCT<typename GEMM::b_value_type>,
+        typename ElementC = toCT<typename GEMM::c_value_type>
+    >
     requires (cublasdx::is_complete_blas<GEMM>::value
     && cublasdx::is_supported<GEMM, cublasdx::sm_of<GEMM>::value>::value
     && cublasdx::sm_of<GEMM>::value >= MIN_ARCH

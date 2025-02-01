@@ -516,19 +516,20 @@ namespace aristos{
             const unsigned int& _nx,
             const unsigned int& _nLx,
             const unsigned int& _pd,
-            const unsigned int& _px,
             const unsigned int& _embedDim,
             const unsigned int& _eCapacity,
             const unsigned int& _blocks,
             const unsigned int& _world,
             cuda::barrier<cuda::thread_scope_device>* _blockade,
-            const unsigned int& _eNb, // number of bytes for the matrix element type
-            const bool isSingleBlockGate = true) :
-        book(_book), deviceBlockade(_blockade), world(_world), sl(_sl), nx(_nx), nLx(_nLx), pd(_pd), px(_px),
+            const unsigned int& _eNb // number of bytes for the matrix element type
+            ) :
+        book(_book), deviceBlockade(_blockade), world(_world), sl(_sl), nx(_nx), nLx(_nLx), pd(_pd),
+        px(Config::pad<BLOCK_N>(_nx)),
         tM(Config::tiles<BLOCK_M>(_sl)),
         tN(Config::tiles<BLOCK_N>(_embedDim)),
         tCM(Config::tiles<BLOCK_M>(_eCapacity)), blocks(_blocks), eCap(_eCapacity){
             if (_nx > 1)[[likely]] {
+                const bool isSingleBlockGate = _nx <= BLOCK_N;
                 // maximum gemm tiles/tasks scheduled by processors
                 const auto prT = world * nLx * tCM * Config::tiles<BLOCK_N>(pd);
                 // maximum gemm tiles/tasks scheduled by subscriber threads
@@ -538,7 +539,7 @@ namespace aristos{
                 tQl = sizeof(Task) * (sT + prT);
                 tQml = tQl + blocks * sizeof(Task); // interrupt tasks
                 tQXt = tQml + sizeof(EDT) * _nx + sizeof(TokenIdxTuple) * (px * _eCapacity);
-                brs = tQXt + (isSingleBlockGate ? 0U : sl * Config::tiles<BLOCK_N>(_px) *
+                brs = tQXt + (isSingleBlockGate ? 0U : sl * Config::tiles<BLOCK_N>(px) *
                     (sizeof(RingSoftmaxPayload) + 2 * sizeof(RingTopKPayload)));
                 gRl = brs + 2 * nx + 1;
                 eDsA = gRl + sizeof(BookType) * (4 * nx + world + 1);
@@ -551,21 +552,22 @@ namespace aristos{
         }
 
         /// Needed for malloc
-        static unsigned long int BookLength(
+        static unsigned long int bookLength(
             const unsigned int& _sl,
             const unsigned int& _nx,
             const unsigned int& _nLx,
             const unsigned int& _pd,
-            const unsigned int& _px,
             const unsigned int& _embedDim,
             const unsigned int& _eCap,
             const unsigned int& _blocks,
             const unsigned int& _world,
-            const unsigned int& _eNb, // number of bytes for the matrix element type
-            const bool isSingleBlockGate = true){
+            const unsigned int& _eNb // number of bytes for the matrix element type
+            ){
+            const bool isSingleBlockGate = _nx <= BLOCK_N;
             const auto tCM = Config::tiles<BLOCK_M>(_eCap);
             const auto tN = Config::tiles<BLOCK_N>(_embedDim);
             auto sBfC = 0UL;
+            const auto _px = Config::pad<BLOCK_N>(_nx);
             if (_nx > 1)[[likely]] {
                 // maximum gemm tiles/tasks scheduled by processors
                 const auto prT = _world * _nLx * tCM * Config::tiles<BLOCK_N>(_pd);

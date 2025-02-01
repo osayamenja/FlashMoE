@@ -28,7 +28,7 @@ namespace aristos{
         // Deduct cost for the dense case, assuming at least one expert per device
         const auto bP = iC.bytesPerParameter<Element>();
         free -= bP * (iC.numParameters + iC.p2pBuffer);
-        const size_t mX = iC.moeFrequency * bP * 2UL * (iC.hiddenProjDim * iC.embedDim);
+        const size_t mX = cute::ceil_div(iC.numLayers, iC.moeFrequency) * bP * 2UL * (iC.hiddenProjDim * iC.embedDim);
         dWa->memoryCapacity = free / mX;
     }
 
@@ -160,7 +160,7 @@ namespace aristos{
         if (peerTranslation.size() == world) {
             // everyone is in one group; thus, we end early
             // peer translation, sharding spec, expert slots
-            return cuda::std::tuple{peerTranslation, assignment, expertSlots, numLocalExperts};
+            return cuda::std::tuple{peerTranslation, assignment, epRank, expertSlots, numLocalExperts};
         }
         // Get other group ids
         std::unordered_set<uint> groups{};
@@ -185,7 +185,86 @@ namespace aristos{
                 }
             }
         }
-        return cuda::std::tuple{peerTranslation, assignment, expertSlots, numLocalExperts};
+        return cuda::std::tuple{peerTranslation, assignment, epRank, expertSlots, numLocalExperts};
+    }
+
+    template<unsigned int Arch, typename Element>
+    requires(aristos::TensorValueType<Element> && SupportedArch<Arch>)
+    __host__ __forceinline__
+    void archSpecificInit(const InitialConfig& iC) {
+        // initialize communication backend
+        nvshmem_init();
+        CUTE_CHECK_ERROR(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
+        const auto globalWorld = nvshmem_n_pes();
+        const auto rank = nvshmem_my_pe();
+
+        // Pointer to adjacency matrix and throughput of all devices
+        const auto aD = globalWorld * globalWorld;
+        auto* aP = std::calloc(globalWorld * globalWorld * sizeof(floatPair) +
+            globalWorld * sizeof(WorkerAttribute), sizeof(cuda::std::byte));
+        // measure device throughput
+        auto* hA = static_cast<floatPair*>(aP);
+        auto* wAp = CAST_TO(WorkerAttribute, hA + aD);
+        estimateMemory<Element>(&wAp[rank]);
+        measureThroughput<Arch, Element>(wAp + rank, iC.seqLen, iC.hiddenProjDim, iC.embedDim);
+        discoverTopology(aP, globalWorld, globalWorld, wAp[rank]);
+
+        // The topology adjacency matrix is ready, let's map devices to optimal cooperative process groups
+        const auto [peerT, epSpec, epRank,
+            expertSlots, numLocalExperts] = runDecider(iC, hA, wAp, rank, globalWorld);
+
+        // Now allocate memory
+        /// Symmetric memory
+        const auto epWorld = peerT.size();
+        const auto eCap = iC.shouldDrop? iC.expertCapacity(epWorld) : iC.seqLen;
+        const auto heapBytes = STAGES * CELLS * epWorld * expertSlots * eCap * iC.embedDim * sizeof(Element);
+        const auto tMc = Config::tiles<BLOCK_M>(eCap);
+        const auto tN = Config::tiles<BLOCK_N>(iC.embedDim);
+        const auto flagBytes = (epWorld * numLocalExperts + iC.numExperts * tMc * tN) * sizeof(flagsType);
+        auto* sHeap = nvshmem_calloc(flagBytes + heapBytes, sizeof(cuda::std::byte));
+        auto* sHb = static_cast<cuda::std::byte*>(sHeap);
+
+        // local bookkeeping memory
+        constexpr auto blocks = Hardware<Arch>::blocks::value - 1U;
+        const auto bookSize = Bookkeeping::bookLength(iC.seqLen, iC.numExperts, numLocalExperts, iC.hiddenProjDim,
+            iC.embedDim, eCap, blocks, epWorld, sizeof(Element));
+
+        cuda::std::byte* book;
+        cuda::barrier<cuda::thread_scope_device>* b;
+        CHECK_ERROR_EXIT(cudaMallocAsync(&book, bookSize + sizeof(cuda::barrier<cuda::thread_scope_device>), aristosStream));
+        // We allocate below separately due to alignment constraints
+        CHECK_ERROR_EXIT(cudaMallocAsync(&b, sizeof(cuda::barrier<cuda::thread_scope_device>), aristosStream));
+        CHECK_ERROR_EXIT(cudaMemsetAsync(&book, 0, bookSize, aristosStream));
+
+        auto hB = new cuda::barrier<cuda::thread_scope_device>{blocks};
+        CHECK_ERROR_EXIT(cudaMemcpyAsync(b, hB, sizeof(cuda::barrier<cuda::thread_scope_device>),
+            cudaMemcpyHostToDevice, aristosStream));
+
+        // Initialize bookkeeping
+        hostBookkeeping = Bookkeeping{
+            book,
+            iC.seqLen,
+            iC.numExperts,
+            numLocalExperts,
+            iC.hiddenProjDim,
+            iC.embedDim,
+            eCap,
+            blocks,
+            epWorld,
+            b,
+            sizeof(Element)
+        };
+        CHECK_ERROR_EXIT(cudaMemcpyToSymbolAsync(bookkeeping, &hostBookkeeping, sizeof(Bookkeeping), 0,
+            cudaMemcpyHostToDevice, aristosStream));
+        // Initialize config struct
+        hostMoEConfig = Config{
+        };
+        CHECK_ERROR_EXIT(cudaMemcpyToSymbolAsync(moeConfig, &hostMoEConfig, sizeof(Config), 0,
+            cudaMemcpyHostToDevice, aristosStream));
+        CHECK_ERROR_EXIT(cudaPeekAtLastError());
+        CHECK_ERROR_EXIT(cudaStreamSynchronize(aristosStream));
+        delete hB;
+        std::free(aP);
     }
     // Should be called before loading the model
     template<typename Element>
@@ -209,42 +288,18 @@ namespace aristos{
         reportError(arch, ">= Volta is required");
         CHECK_ERROR_EXIT(cudaDeviceGetAttribute(&l2CacheSize, cudaDevAttrL2CacheSize, dev));
         CHECK_ERROR_EXIT(cudaDeviceGetAttribute(&blocks, cudaDevAttrMultiProcessorCount, dev));
-
-        // initialize communication backend
-        nvshmem_init();
-        CUTE_CHECK_ERROR(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
-        const auto globalWorld = nvshmem_n_pes();
-        const auto rank = nvshmem_my_pe();
-
-        // Pointer to adjacency matrix and throughput of all devices
-        const auto aD = globalWorld * globalWorld;
-        auto* aP = std::calloc(globalWorld * globalWorld * sizeof(floatPair) +
-            globalWorld * sizeof(WorkerAttribute), sizeof(cuda::std::byte));
-        // measure device throughput
-        auto* hA = static_cast<floatPair*>(aP);
-        auto* wAp = CAST_TO(WorkerAttribute, hA + aD);
-        estimateMemory<Element>(&wAp[rank]);
+        // TODO use below to compute function id
         switch (arch) {
             case 7:
-                measureThroughput<700, Element>(wAp + rank, iC.seqLen, iC.hiddenProjDim, iC.embedDim);
+                archSpecificInit<700, Element>(iC);
             break;
             case 8:
-                measureThroughput<800, Element>(wAp + rank, iC.seqLen, iC.hiddenProjDim, iC.embedDim);
+                archSpecificInit<800, Element>(iC);
             break;
             default:
-                measureThroughput<900, Element>(wAp + rank, iC.seqLen, iC.hiddenProjDim, iC.embedDim);
-            break;
+                archSpecificInit<900, Element>(iC);
+                break;
         }
-        discoverTopology(aP, globalWorld, globalWorld, wAp[rank]);
-
-        // The topology adjacency matrix is ready, let's map devices to optimal cooperative process groups
-        const auto [peerT, epSpec,
-            expertSlots, numLocalExperts] = runDecider(iC, hA, wAp, rank, globalWorld);
-
-        // Now allocate memory
-        const auto eCap = iC.shouldDrop? iC.expertCapacity(peerT.size()) : iC.seqLen;
-
-
 #if (__CUDACC_VER_MAJOR__ >= 11 && __CUDA_ARCH__ >= 800)
         cudaStreamAttrValue stream_attribute;
         stream_attribute.accessPolicyWindow.base_ptr  = bookKeeping;
@@ -257,7 +312,6 @@ namespace aristos{
         //Set the attributes to a CUDA stream of type cudaStream_t
         cudaStreamSetAttribute(aristosStream, cudaStreamAttributeAccessPolicyWindow, &stream_attribute);
 #endif
-        std::free(aP);
     }
 
     template<typename Element>
