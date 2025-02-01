@@ -215,7 +215,7 @@ namespace aristos{
 
         // Now allocate memory
         /// Symmetric memory
-        const auto epWorld = peerT.size();
+        const uint epWorld = peerT.size();
         const auto eCap = iC.shouldDrop? iC.expertCapacity(epWorld) : iC.seqLen;
         const auto heapBytes = STAGES * CELLS * epWorld * expertSlots * eCap * iC.embedDim * sizeof(Element);
         const auto tMc = Config::tiles<BLOCK_M>(eCap);
@@ -256,8 +256,23 @@ namespace aristos{
         };
         CHECK_ERROR_EXIT(cudaMemcpyToSymbolAsync(bookkeeping, &hostBookkeeping, sizeof(Bookkeeping), 0,
             cudaMemcpyHostToDevice, aristosStream));
+
+        const auto functionId = 2 * ((Arch - MIN_ARCH) / 100) + (iC.numExperts <= BLOCK_N);
         // Initialize config struct
         hostMoEConfig = Config{
+            sHb + flagBytes,
+            static_cast<flagsType *>(sHeap),
+            functionId,
+            epRank,
+            iC.k,
+            iC.embedDim,
+            iC.numExperts,
+            numLocalExperts,
+            iC.seqLen,
+            epWorld,
+            iC.hiddenProjDim,
+            expertSlots,
+            iC.capacityFactor
         };
         CHECK_ERROR_EXIT(cudaMemcpyToSymbolAsync(moeConfig, &hostMoEConfig, sizeof(Config), 0,
             cudaMemcpyHostToDevice, aristosStream));
@@ -288,7 +303,6 @@ namespace aristos{
         reportError(arch, ">= Volta is required");
         CHECK_ERROR_EXIT(cudaDeviceGetAttribute(&l2CacheSize, cudaDevAttrL2CacheSize, dev));
         CHECK_ERROR_EXIT(cudaDeviceGetAttribute(&blocks, cudaDevAttrMultiProcessorCount, dev));
-        // TODO use below to compute function id
         switch (arch) {
             case 7:
                 archSpecificInit<700, Element>(iC);
@@ -321,6 +335,54 @@ namespace aristos{
         // This function would likely be called frequently--per layer per iteration--thus, we elide the error check.
         // Of course, calling this function without initializing the aristos runtime yields undefined behavior.
         // reportError(isInitialized, "Not initialized")
+
+        /// Decode function id
+        switch (hostMoEConfig.functionId) {
+            case 0: {
+                constexpr auto Arch = 700;
+                constexpr auto blocks = Hardware<Arch>::blocks::value;
+                constexpr auto gRl = GateReductionLevel::singleBlock;
+                // Call forward pass
+            }
+            break;
+            case 1: {
+                constexpr auto Arch = 700;
+                constexpr auto blocks = Hardware<Arch>::blocks::value;
+                constexpr auto gRl = GateReductionLevel::multiBlock;
+                // Call forward pass
+            }
+            break;
+            case 2: {
+                constexpr auto Arch = 800;
+                constexpr auto blocks = Hardware<>::blocks::value;
+                constexpr auto gRl = GateReductionLevel::singleBlock;
+                // Call forward pass
+            }
+            break;
+            case 3: {
+                constexpr auto Arch = 800;
+                constexpr auto blocks = Hardware<>::blocks::value;
+                constexpr auto gRl = GateReductionLevel::multiBlock;
+                // Call forward pass
+            }
+            break;
+            case 4: {
+                constexpr auto Arch = 900;
+                constexpr auto blocks = Hardware<Arch>::blocks::value;
+                constexpr auto gRl = GateReductionLevel::singleBlock;
+                // Call forward pass
+            }
+            break;
+            case 5: {
+                constexpr auto Arch = 700;
+                constexpr auto blocks = Hardware<Arch>::blocks::value;
+                constexpr auto gRl = GateReductionLevel::multiBlock;
+                // Call forward pass
+            }
+            break;
+            default:
+                reportError(false, "No such function exists!");
+        }
     }
 
     template<typename Element>
@@ -344,6 +406,7 @@ namespace aristos{
 #endif
 
         CHECK_ERROR_EXIT(cudaFreeAsync(hostBookkeeping.book, aristosStream));
+        CHECK_ERROR_EXIT(cudaFreeAsync(hostBookkeeping.deviceBlockade, aristosStream));
         nvshmem_free(hostMoEConfig.sHeap);
         nvshmem_finalize();
         CHECK_ERROR_EXIT(cudaPeekAtLastError());

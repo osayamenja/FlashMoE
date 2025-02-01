@@ -333,9 +333,6 @@ namespace aristos{
                const unsigned int& _seqLen,
                const unsigned int& _world,
                const unsigned int& _proj,
-               const unsigned int& _tilesN,
-               const unsigned int& _tilesM,
-               const unsigned int& _tilesNx,
                const unsigned int& _expertSlots,
                const unsigned int& _capFactor = 1):
                 sHeap(_symmetricHeap),
@@ -349,10 +346,13 @@ namespace aristos{
                 upProjection(_proj),
                 expertSlots(_expertSlots),
                 expertCapacity(cute::ceil_div(_seqLen, _numExperts) * _capFactor),
-                cellSize(expertCapacity * embedDim), // max packet frame size
-                nTiles(_tilesM * (_tilesN + _tilesNx)),
-                tilesN(_tilesN), tilesM(_tilesM),
-                tilesNx(_tilesNx){}
+                cellSize(expertCapacity * embedDim) // max packet frame size
+        {
+            tilesM = Config::tiles<BLOCK_M>(seqLen);
+            tilesN = Config::tiles<BLOCK_N>(embedDim);
+            tilesNx = Config::tiles<BLOCK_N>(upProjection);
+            nTiles = tilesM * (tilesN + tilesNx);
+        }
 
         template<unsigned int tileDimension>
         __host__ __device__ __forceinline__

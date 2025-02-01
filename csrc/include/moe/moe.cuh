@@ -23,11 +23,9 @@ namespace aristos::moe{
         typename Experts,
         typename Bias,
         typename Gates,
-        typename MoEOut,
         typename GateOut>
     requires(aristos::Matrix<Activations> && aristos::Matrix<Experts> &&
-        aristos::Matrix<Bias> && aristos::Matrix<Gates> && aristos::Matrix<MoEOut>
-        && aristos::Matrix<GateOut>)
+        aristos::Matrix<Bias> && aristos::Matrix<Gates> && aristos::Matrix<GateOut>)
     __global__ __maxnreg__(128) void forward(
         Activations const __grid_constant__ activations,
         Experts const __grid_constant__ expertsWeights,
