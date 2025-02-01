@@ -188,7 +188,8 @@ namespace aristos {
         fmt::println("Rank {} Group {}", 0, g); // peer translation
         std::vector<Worker> wG;
         for(int i = 0; i < g.size(); ++i){
-            wG.emplace_back(g[i], w[i].processingRate, w[i].memoryCapacity);
+            const auto wId = g[i];
+            wG.emplace_back(i, w[wId].processingRate, w[wId].memoryCapacity);
         }
         start = clk::now();
         const auto assignment = decider::assign(e, wG);

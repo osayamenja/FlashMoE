@@ -5,8 +5,10 @@
 #ifndef PREP_CUH
 #define PREP_CUH
 
-#include <cutlass/epilogue/thread/activation.h>
+#include <vector>
+#include <algorithm>
 #include <cute/layout.hpp>
+#include <cutlass/epilogue/thread/activation.h>
 #include <nvshmemx.h>
 #include <nvshmem.h>
 #include <host/nvshmemx_api.h>
@@ -110,8 +112,8 @@ namespace aristos{
     }
 
     __host__ __forceinline__
-    std::vector<size_t> runDecider(const InitialConfig& iC, const floatPair* __restrict__ const& aP,
-        const WorkerAttribute* __restrict__ const& attributes, const uint& world) {
+    decltype(auto) runDecider(const InitialConfig& iC, const floatPair* __restrict__ const& aP,
+        const WorkerAttribute* __restrict__ const& attributes, const uint& rank, const uint& world) {
         const auto mC = ModelConfig{
             iC.numLayers,
             iC.redAmount,
@@ -122,8 +124,68 @@ namespace aristos{
             iC.gradBuffer,
         };
         std::vector<Worker> workers(world);
-
-        return {};
+        for (uint i = 0; i < workers.size(); ++i) {
+            const auto [t, m] = attributes[i];
+            workers.emplace_back(i, t, m);
+        }
+        const auto adj = make_tensor(aP, make_layout(cute::make_shape(world, world), cute::LayoutRight{}));
+        const auto dTg = decider::decide(adj, workers, iC.numExperts,
+            iC.numExperts, mC);
+        const auto peerTranslation = subsets(dTg, rank);
+        std::vector<Expert> experts(iC.numExperts);
+        for (uint i = 0; i < iC.numExperts; ++i) {
+            // assuming homogenous experts, where each has normalized compute cost of 1
+            experts.emplace_back(i, 1);
+        }
+        std::vector<Worker> expertParallelGroup(peerTranslation.size());
+        auto epRank = 0U;
+        for (uint i = 0; i < expertParallelGroup.size(); ++i) {
+            const auto wRank = peerTranslation[i];
+            if (wRank == rank) {
+                epRank = i;
+            }
+            expertParallelGroup.emplace_back(i, workers[wRank].processingRate, workers[wRank].memoryCapacity);
+        }
+        const auto assignment = decider::assign(experts, expertParallelGroup);
+        std::vector<uint> scratch(world);
+        std::ranges::fill(scratch.begin(), scratch.end(), 0U);
+        auto expertSlots = 0U;
+        // compute expert slots for our group
+        for (const auto &i : assignment) {
+            const auto tally = scratch[i] + 1;
+            scratch[i] = tally;
+            expertSlots = cuda::std::max(tally, expertSlots);
+        }
+        auto numLocalExperts = scratch[epRank];
+        if (peerTranslation.size() == world) {
+            // everyone is in one group; thus, we end early
+            // peer translation, sharding spec, expert slots
+            return cuda::std::tuple{peerTranslation, assignment, expertSlots, numLocalExperts};
+        }
+        // Get other group ids
+        std::unordered_set<uint> groups{};
+        for (const auto& i: dTg) {
+            groups.emplace(i);
+        }
+        const auto myGroup = dTg[rank];
+        for (const auto& group : groups) {
+            if (group != myGroup) {
+                std::ranges::fill(scratch.begin(), scratch.end(), 0U);
+                const auto oPt = subsets(dTg, group);
+                std::vector<Worker> ePG(oPt.size());
+                for (uint i = 0; i < ePG.size(); ++i) {
+                    const auto wRank = oPt[i];
+                    ePG.emplace_back(wRank, workers[wRank].processingRate,
+                        workers[wRank].memoryCapacity);
+                }
+                for (const auto &i : decider::assign(experts, expertParallelGroup)) {
+                    const auto tally = scratch[i] + 1;
+                    scratch[i] = tally;
+                    expertSlots = cuda::std::max(tally, expertSlots);
+                }
+            }
+        }
+        return cuda::std::tuple{peerTranslation, assignment, expertSlots, numLocalExperts};
     }
     // Should be called before loading the model
     template<typename Element>
@@ -176,15 +238,11 @@ namespace aristos{
         discoverTopology(aP, globalWorld, globalWorld, wAp[rank]);
 
         // The topology adjacency matrix is ready, let's map devices to optimal cooperative process groups
-        const auto dTg = runDecider(iC, hA, wAp, globalWorld);
+        const auto [peerT, epSpec,
+            expertSlots, numLocalExperts] = runDecider(iC, hA, wAp, rank, globalWorld);
 
-        // Good to go! Let's do some initialization
-        // Run decider
-        // ...
-        // generates the below
-        const unsigned int numLocalExperts = 0;
-        std::vector<specType> translation{};
-        const unsigned int numNeighbors = translation.size();
+        // Now allocate memory
+        const auto eCap = iC.shouldDrop? iC.expertCapacity(peerT.size()) : iC.seqLen;
 
 
 #if (__CUDACC_VER_MAJOR__ >= 11 && __CUDA_ARCH__ >= 800)

@@ -258,14 +258,21 @@ namespace aristos{
 
         // formula for total number of parameters
         // source: https://arxiv.org/abs/2401.14489
+        __forceinline__
         static auto parameterCount(const uint& embedDim, const uint& numLayers, const uint& vocabSize) {
             return embedDim * (numLayers * (12U * embedDim + 13U) + (vocabSize + embedDim));
         }
 
         // source: https://arxiv.org/pdf/2201.11990
         template<typename Element>
+        __forceinline__
         auto bytesPerParameter() const {
             return jobType == JobType::training ? 2 * sizeof(Element) + 12 : sizeof(Element);
+        }
+
+        __forceinline__
+        auto expertCapacity(const uint& epWorld) const {
+            return cute::ceil_div(seqLen * miniBatch * capacityFactor, epWorld);
         }
     };
     // Needed for decider
