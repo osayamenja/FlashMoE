@@ -142,6 +142,21 @@ namespace aristos{
     };
 
     __device__
+    enum class JobType : uint8_t {
+        training,
+        inference
+    };
+
+    struct __align__(4) WorkerAttribute{
+        uint16_t throughput; // experts per ms
+        uint16_t memoryCapacity; // upper bound of experts that we can accommodate
+    };
+    struct __align__(8) TopologySignal{
+        unsigned int signal;
+        WorkerAttribute wA;
+    };
+
+    __device__
     struct __align__(8) RingSoftmaxPayload {
         mp_t mI;
         cute::half_t dI;
@@ -201,10 +216,13 @@ namespace aristos{
         const uint k;
         const uint capacityFactor;
         const uint numExperts;
+        // logical elements
+        const uint p2pBuffer; // in MB
+        const ulong numParameters;
+        const uint gradBuffer; // in MB
         const bool shouldDrop;
-        const uint redAmount;
-        const uint p2pBuffer;
-        const ulong gradBuffer;
+        const JobType jobType;
+        const uint16_t redAmount;
 
         __host__
         InitialConfig(const uint& _vocabSize,
@@ -219,7 +237,8 @@ namespace aristos{
             const uint& _capacityFactor,
             const uint& _numExperts,
             const bool& _shouldDrop,
-            const uint& _redAmount = 1):
+            const bool& _isTraining,
+            const uint16_t& _redAmount = 1):
         vocabSize(_vocabSize),
         numLayers(_numLayers),
         globalBatch(_globalBatch),
@@ -230,12 +249,24 @@ namespace aristos{
         hiddenProjDim(_hiddenProjDim),
         k(_k), capacityFactor(_capacityFactor),
         numExperts(_numExperts),
-        shouldDrop(_shouldDrop), redAmount(_redAmount),
-        p2pBuffer(seqLen * miniBatch * embedDim),
+        p2pBuffer(cute::ceil_div(seqLen * miniBatch * embedDim, 1024U * 1024U)),
+        numParameters(embedDim * (numLayers * (12U * embedDim + 13U) + (vocabSize + embedDim))),
+        gradBuffer(cute::ceil_div(numParameters, 1024U * 1024U)),
+        shouldDrop(_shouldDrop), jobType(_isTraining ? JobType::training : JobType::inference),
+        redAmount(_redAmount)
+        {}
+
         // formula for total number of parameters
         // source: https://arxiv.org/abs/2401.14489
-        gradBuffer(embedDim * (numLayers * (12 * embedDim + 13) + (vocabSize + embedDim)))
-        {}
+        static auto parameterCount(const uint& embedDim, const uint& numLayers, const uint& vocabSize) {
+            return embedDim * (numLayers * (12U * embedDim + 13U) + (vocabSize + embedDim));
+        }
+
+        // source: https://arxiv.org/pdf/2201.11990
+        template<typename Element>
+        auto bytesPerParameter() const {
+            return jobType == JobType::training ? 2 * sizeof(Element) + 12 : sizeof(Element);
+        }
     };
     // Needed for decider
     struct __align__(16) ModelConfig{

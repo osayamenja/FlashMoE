@@ -17,12 +17,25 @@
 
 #define SUPPORTED = 1;
 namespace aristos{
+    template<typename Element>
+    __host__ __forceinline__
+    void estimateMemory(const InitialConfig& iC, WorkerAttribute* __restrict__ const& dWa) {
+        // estimate available device memory
+        size_t free = 0, total = 0;
+        CHECK_ERROR_EXIT(cudaMemGetInfo(&free, &total));
+        // Deduct cost for the dense case, assuming at least one expert per device
+        const auto bP = iC.bytesPerParameter<Element>();
+        free -= bP * (iC.numParameters + iC.p2pBuffer);
+        const size_t mX = iC.moeFrequency * bP * 2UL * (iC.hiddenProjDim * iC.embedDim);
+        dWa->memoryCapacity = free / mX;
+    }
+
     template<
         unsigned int Arch,
         typename Element
     >
     __host__ __forceinline__
-    void measureThroughput(uint* __restrict__ hDt,
+    void measureThroughput(WorkerAttribute* __restrict__ cosnt& dWa,
         const unsigned int& M, const unsigned int& N, const unsigned int& K) {
         // malloc memory for all matrices
         constexpr auto batch = 2U;
@@ -51,14 +64,18 @@ namespace aristos{
         auto* __restrict__ pSC = CAST_TO(Element, abc + abcBSize);
         expert<Arch, Activation, batch><<<blocks, ARISTOS_BLOCK_SIZE, 0, aristosStream>>>(pS, p,
             p + 1, CAST_TO(Element, abc + stateSize), pB, pC, pD, pSC, pSC);
-        CHECK_ERROR_EXIT(cudaMemcpyAsync(hDt, p, sizeof(uint), cudaMemcpyDeviceToHost, aristosStream));
+        uint stage = 0;
+        CHECK_ERROR_EXIT(cudaMemcpyAsync(&stage, p, sizeof(uint), cudaMemcpyDeviceToHost, aristosStream));
         CHECK_ERROR_EXIT(cudaFreeAsync(abc, aristosStream));
         CHECK_ERROR_EXIT(cudaPeekAtLastError());
         CHECK_ERROR_EXIT(cudaStreamSynchronize(aristosStream));
+        // quantize to uint16_t, this should be safe as the value is very small: in the hundreds
+        // we use uint due to the API requirement of CUDA atomicMin
+        dWa->throughput = static_cast<uint16_t>(stage);
     }
+
     __host__ __forceinline__
-    void discoverTopology(void* hAp, const uint& n, const uint& globalRank,
-        const uint& eT) {
+    void discoverTopology(void* hAp, const uint& n, const uint& globalRank, const WorkerAttribute& lWa) {
         const auto aD = n * n;
         const size_t heapBytes = n * sizeof(flagsType) + aD * sizeof(floatPair)
         + sizeof(uint) * (n + 2) + n * BETA_BUFFER;
@@ -70,12 +87,13 @@ namespace aristos{
         // Navigate to our slice of the adjacency matrix
         auto* results = adj + globalRank * n;
         // Repurpose a subset of the symmetric heap for local storage.
-        auto* rates = CAST_TO(uint, adj + aD);
-        auto* syncArray = rates + n;
+        auto* attributes = CAST_TO(WorkerAttribute, adj + aD);
+        static_assert(sizeof(WorkerAttribute) >= sizeof(uint));
+        auto* syncArray = CAST_TO(uint, attributes + n);
         // Starting index of heap
         auto* sHeap = CAST_TO(cuda::std::byte, syncArray + 2);
         const auto remotePresent = [&n, &results] {
-            for (int i = 0; i< n; ++i) {
+            for (int i = 0; i < n; ++i) {
                 if (nvshmem_ptr(results, i) == nullptr) return true;
             }
             return false;
@@ -83,7 +101,7 @@ namespace aristos{
         const auto isRemotePresent = remotePresent();
         const auto sharedSize = n * (sizeof(floatPair) + sizeof(unsigned int));
         topology::discover<<<ARISTOS_SUPER_BLOCK_SIZE, ARISTOS_BLOCK_SIZE, sharedSize, aristosStream>>>(n, globalRank,
-            isRemotePresent, eT, sHeap, flags, results, syncArray, rates);
+            isRemotePresent, lWa, sHeap, flags, results, syncArray, attributes);
         CHECK_ERROR_EXIT(cudaMemcpyAsync(hAp, adj, aD * sizeof(floatPair) + n * sizeof(uint),
             cudaMemcpyDeviceToHost, aristosStream));
         CHECK_ERROR_EXIT(cudaPeekAtLastError());
@@ -93,21 +111,21 @@ namespace aristos{
 
     __host__ __forceinline__
     std::vector<size_t> runDecider(const InitialConfig& iC, const floatPair* __restrict__ const& aP,
-        const uint* __restrict__ const& rates, const uint& world) {
+        const WorkerAttribute* __restrict__ const& attributes, const uint& world) {
         const auto mC = ModelConfig{
             iC.numLayers,
             iC.redAmount,
             iC.globalBatch,
             iC.miniBatch,
             iC.moeFrequency,
-            cute::ceil_div(iC.p2pBuffer, 1024U * 1024U), // in MB
-            cute::ceil_div(iC.p2pBuffer, 1024U * 1024U) // in MB
+            iC.p2pBuffer,
+            iC.gradBuffer,
         };
         std::vector<Worker> workers(world);
 
-        // TODO estimate available device memory
         return {};
     }
+    // Should be called before loading the model
     template<typename Element>
     requires(aristos::TensorValueType<Element>)
     __host__ __forceinline__
@@ -139,26 +157,26 @@ namespace aristos{
         // Pointer to adjacency matrix and throughput of all devices
         const auto aD = globalWorld * globalWorld;
         auto* aP = std::calloc(globalWorld * globalWorld * sizeof(floatPair) +
-            globalWorld * sizeof(uint), sizeof(cuda::std::byte));
+            globalWorld * sizeof(WorkerAttribute), sizeof(cuda::std::byte));
         // measure device throughput
         auto* hA = static_cast<floatPair*>(aP);
-        auto* eTp = CAST_TO(uint, hA + aD);
+        auto* wAp = CAST_TO(WorkerAttribute, hA + aD);
+        estimateMemory<Element>(&wAp[rank]);
         switch (arch) {
             case 7:
-                measureThroughput<700, Element>(eTp + rank, iC.seqLen, iC.hiddenProjDim, iC.embedDim);
+                measureThroughput<700, Element>(wAp + rank, iC.seqLen, iC.hiddenProjDim, iC.embedDim);
             break;
             case 8:
-                measureThroughput<800, Element>(eTp + rank, iC.seqLen, iC.hiddenProjDim, iC.embedDim);
+                measureThroughput<800, Element>(wAp + rank, iC.seqLen, iC.hiddenProjDim, iC.embedDim);
             break;
             default:
-                measureThroughput<900, Element>(eTp + rank, iC.seqLen, iC.hiddenProjDim, iC.embedDim);
+                measureThroughput<900, Element>(wAp + rank, iC.seqLen, iC.hiddenProjDim, iC.embedDim);
             break;
         }
-        const auto dT = eTp[rank];
-        discoverTopology(aP, globalWorld, globalWorld, dT);
+        discoverTopology(aP, globalWorld, globalWorld, wAp[rank]);
 
         // The topology adjacency matrix is ready, let's map devices to optimal cooperative process groups
-        const auto dTg = runDecider(iC, hA, eTp, globalWorld);
+        const auto dTg = runDecider(iC, hA, wAp, globalWorld);
 
         // Good to go! Let's do some initialization
         // Run decider

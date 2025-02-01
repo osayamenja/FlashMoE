@@ -78,7 +78,7 @@ namespace aristos{
     template<cuda::thread_scope scope = cuda::thread_scope_device, typename Payload>
     requires(sizeof(Payload) == sizeof(unsigned long long int) && alignof(Payload) == alignof(unsigned long long int))
     __device__ __forceinline__
-    void awaitPayload(unsigned long long int* const& addr, Payload* const& dest, const uint16_t& baton = 1U) {
+    void awaitPayload(unsigned long long int* const& addr, Payload* __restrict__ const& dest, const uint16_t& baton = 1U) {
         auto mail = atomicLoad<scope>(addr);
         auto* payload = CAST_TO(Payload, &mail);
         while (payload->signal != baton) {

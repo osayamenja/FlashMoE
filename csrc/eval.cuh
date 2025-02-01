@@ -45,8 +45,8 @@ namespace aristos {
             globalRank, localRank, prop.name, prop.pciBusID, dev_count);
 
         CHECK_ERROR_EXIT(cudaSetDevice(localRank));
-        const size_t heapBytes = n * sizeof(flagsType) + ax * sizeof(floatPair) + sizeof(uint) * (n + 2) +
-            n * BETA_BUFFER;
+        const size_t heapBytes = n * sizeof(flagsType) + ax * sizeof(floatPair) + sizeof(WorkerAttribute) * n +
+            sizeof(uint) * 2 + n * BETA_BUFFER;
         auto* symHeap = nvshmem_calloc(heapBytes, sizeof(cuda::std::byte));
         // Pointer orchestration
         // Starting index of flags array
@@ -55,11 +55,12 @@ namespace aristos {
         // Navigate to our slice of the adjacency matrix
         auto* results = adj + globalRank * n;
         // Repurpose a subset of the symmetric heap for local storage.
-        auto* rates = CAST_TO(uint, adj + ax);
-        auto* syncArray = rates + n;
+        auto* workerAttributes = CAST_TO(WorkerAttribute, adj + ax);
+        auto* syncArray = CAST_TO(uint, workerAttributes + n);
         // Starting index of heap
         auto* sHeap = CAST_TO(cuda::std::byte, syncArray + 2);
-        const uint pr = globalRank + 1;
+        const uint16_t pr = globalRank + 1;
+        const auto self = WorkerAttribute{pr, pr};
         const auto remotePresent = [&n, &results] {
             for (int i = 0; i< n; ++i) {
                 if (nvshmem_ptr(results, i) == nullptr) return true;
@@ -75,15 +76,16 @@ namespace aristos {
         cudaEventCreate(&start);
         cudaEventCreate(&stop);
         float duration;
+
         #pragma unroll
         for (uint i = 0; i < skip; ++i) {
             topology::discover<<<blocks, threads, sharedSize, aristosStream>>>(n, globalRank, isRemotePresent,
-            pr, sHeap, flags, results, syncArray, rates);
+            self, sHeap, flags, results, syncArray, workerAttributes);
         }
         CHECK_ERROR_EXIT(cudaMemsetAsync(results, 0, sizeof(floatPair) * n, aristosStream));
         CHECK_ERROR_EXIT(cudaEventRecord(start, aristos::aristosStream));
         topology::discover<<<blocks, threads, sharedSize, aristosStream>>>(n, globalRank, isRemotePresent,
-            pr, sHeap, flags, results, syncArray, rates);
+            self, sHeap, flags, results, syncArray, workerAttributes);
         CHECK_ERROR_EXIT(cudaEventRecord(stop, aristos::aristosStream));
         CHECK_ERROR_EXIT(cudaPeekAtLastError());
         CHECK_ERROR_EXIT(cudaStreamSynchronize(aristosStream));
@@ -91,7 +93,7 @@ namespace aristos {
         auto* aP = calloc(ax * sizeof(floatPair) + n * sizeof(uint),
             sizeof(cuda::std::byte));
         auto* adjMatrix = static_cast<floatPair*>(aP);
-        auto* flagsPtr = CAST_TO(uint, adjMatrix + ax);
+        auto* attributesPtr = CAST_TO(WorkerAttribute, adjMatrix + ax);
 
         /// Epilogue
         CHECK_ERROR_EXIT(cudaMemcpyAsync(aP, adj, ax * sizeof(floatPair) + n * sizeof(uint),
@@ -100,7 +102,8 @@ namespace aristos {
         CHECK_ERROR_EXIT(cudaStreamSynchronize(aristosStream));
 
         std::vector<std::array<float, 2>> temp(n);
-        std::vector<uint> temp_f(n);
+        std::vector<uint16_t> aT(n);
+        std::vector<uint16_t> aM(n);
         auto* file = std::fopen(std::string("adjMatrix_Rank")
             .append(std::to_string(globalRank)).append(".txt").c_str(), "w");
         fmt::print(file, "----> {} processes pair-wise (𝛼 ms, 𝛽 ms/MB) costs <------\n", n);
@@ -112,10 +115,11 @@ namespace aristos {
         }
 
         for (uint i = 0; i < n; ++i){
-            temp_f[i] = flagsPtr[i];
+            const auto [t, m] = attributesPtr[i];
+            aT[i] = t;
+            aM[i] = m;
         }
-        temp_f[globalRank] = pr;
-        fmt::print(file, "Rank {} Flags: {}\n", globalRank, temp_f);
+        fmt::print(file, "Rank {}: \n\t Throughput: {}\n\t MemoryCapacity: {}\n", globalRank, aT, aM);
         fmt::println(file, "Duration is {}ms", duration);
         std::fclose(file);
         nvshmem_free(symHeap);
