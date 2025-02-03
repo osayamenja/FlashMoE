@@ -11,8 +11,8 @@
 namespace aristos::moe{
     template<
         unsigned int Arch,
-        unsigned int blocks,
         GateReductionLevel g = GateReductionLevel::singleBlock,
+        DropTokens d = DropTokens::yes,
         typename ActivationOp = cute::identity,
         typename ActivationOpX = cute::identity,
         typename ElementC = float,
@@ -32,7 +32,8 @@ namespace aristos::moe{
         Bias const __grid_constant__ bias,
         Gates const __grid_constant__ gateWeights,
         GateOut const __grid_constant__ gateOutput) {
-
+        constexpr auto blocks = Hardware<Arch>::blocks;
+        constexpr auto processors = blocks - 1;
         __shared__ __align__(16) cuda::std::byte workspace[SHARED_SIZE];
         // wipe gTQHeads here and read the sequence bit, before the grid-wide barrier
         const auto gtQCl = bookkeeping.gtQCl;
@@ -45,9 +46,9 @@ namespace aristos::moe{
         gate::forward<Arch, blocks, g, ElementC>(activations,
             gateWeights, gateOutput, CAST_TO(ElementC, workspace));
         if (blockIdx.x + 1 < blocks) {
-            packet::encode<blocks>(activations, gateOutput, workspace);
+            packet::encode<processors, d>(activations, gateOutput, workspace);
             processor::start<
-                blocks,
+                processors,
                 Arch,
                 ElementA,
                 ElementB,
@@ -57,7 +58,7 @@ namespace aristos::moe{
                 ActivationOpX>(CAST_TO(ElementD, workspace, rSb));
         }
         else {
-            os::start<blocks>(workspace, activations, expertsWeights, bias, sb);
+            os::start<processors>(workspace, activations, expertsWeights, bias, sb);
         }
     }
 

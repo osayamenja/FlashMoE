@@ -19,6 +19,6 @@
 #include "moe/moe.cuh"
 
 #include "topo.cuh"
-#include "prep.cuh"
+#include "bootstrap.cuh"
 
 #endif //ARISTOS_CUH

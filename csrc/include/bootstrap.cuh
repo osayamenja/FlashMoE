@@ -2,8 +2,8 @@
 // Created by oja7 on 11/12/24.
 //
 
-#ifndef PREP_CUH
-#define PREP_CUH
+#ifndef BOOTSRAP_CUH
+#define BOOTSTRAP_CUH
 
 #include <vector>
 #include <algorithm>
@@ -13,6 +13,7 @@
 #include <nvshmem.h>
 #include <host/nvshmemx_api.h>
 
+#include "topo.cuh"
 #include "debug.cuh"
 #include "types.cuh"
 #include "moe/expert.cuh"
@@ -257,7 +258,7 @@ namespace aristos{
         CHECK_ERROR_EXIT(cudaMemcpyToSymbolAsync(bookkeeping, &hostBookkeeping, sizeof(Bookkeeping), 0,
             cudaMemcpyHostToDevice, aristosStream));
 
-        const auto functionId = 2 * ((Arch - MIN_ARCH) / 100) + (iC.numExperts <= BLOCK_N);
+        const auto functionId = 4 * ((Arch - MIN_ARCH) / 100) + 2 * (iC.numExperts > BLOCK_N) + iC.shouldDrop;
         // Initialize config struct
         hostMoEConfig = Config{
             sHb + flagBytes,
@@ -340,43 +341,85 @@ namespace aristos{
         switch (hostMoEConfig.functionId) {
             case 0: {
                 constexpr auto Arch = 700;
-                constexpr auto blocks = Hardware<Arch>::blocks::value;
                 constexpr auto gRl = GateReductionLevel::singleBlock;
+                constexpr auto drop = DropTokens::no;
                 // Call forward pass
             }
             break;
             case 1: {
                 constexpr auto Arch = 700;
-                constexpr auto blocks = Hardware<Arch>::blocks::value;
-                constexpr auto gRl = GateReductionLevel::multiBlock;
+                constexpr auto gRl = GateReductionLevel::singleBlock;
+                constexpr auto drop = DropTokens::yes;
                 // Call forward pass
             }
             break;
             case 2: {
-                constexpr auto Arch = 800;
-                constexpr auto blocks = Hardware<>::blocks::value;
-                constexpr auto gRl = GateReductionLevel::singleBlock;
+                constexpr auto Arch = 700;
+                constexpr auto gRl = GateReductionLevel::multiBlock;
+                constexpr auto drop = DropTokens::no;
                 // Call forward pass
             }
             break;
             case 3: {
-                constexpr auto Arch = 800;
-                constexpr auto blocks = Hardware<>::blocks::value;
+                constexpr auto Arch = 700;
                 constexpr auto gRl = GateReductionLevel::multiBlock;
+                constexpr auto drop = DropTokens::yes;
                 // Call forward pass
             }
             break;
             case 4: {
-                constexpr auto Arch = 900;
-                constexpr auto blocks = Hardware<Arch>::blocks::value;
+                constexpr auto Arch = 800;
                 constexpr auto gRl = GateReductionLevel::singleBlock;
+                constexpr auto drop = DropTokens::no;
                 // Call forward pass
             }
             break;
             case 5: {
-                constexpr auto Arch = 700;
-                constexpr auto blocks = Hardware<Arch>::blocks::value;
+                constexpr auto Arch = 800;
+                constexpr auto gRl = GateReductionLevel::singleBlock;
+                constexpr auto drop = DropTokens::yes;
+                // Call forward pass
+            }
+            break;
+            case 6: {
+                constexpr auto Arch = 800;
                 constexpr auto gRl = GateReductionLevel::multiBlock;
+                constexpr auto drop = DropTokens::no;
+                // Call forward pass
+            }
+            break;
+            case 7: {
+                constexpr auto Arch = 800;
+                constexpr auto gRl = GateReductionLevel::multiBlock;
+                constexpr auto drop = DropTokens::yes;
+                // Call forward pass
+            }
+            break;
+            case 8: {
+                constexpr auto Arch = 900;
+                constexpr auto gRl = GateReductionLevel::singleBlock;
+                constexpr auto drop = DropTokens::no;
+                // Call forward pass
+            }
+            break;
+            case 9: {
+                constexpr auto Arch = 900;
+                constexpr auto gRl = GateReductionLevel::singleBlock;
+                constexpr auto drop = DropTokens::yes;
+                // Call forward pass
+            }
+            break;
+            case 10: {
+                constexpr auto Arch = 900;
+                constexpr auto gRl = GateReductionLevel::multiBlock;
+                constexpr auto drop = DropTokens::no;
+                // Call forward pass
+            }
+            break;
+            case 11: {
+                constexpr auto Arch = 900;
+                constexpr auto gRl = GateReductionLevel::multiBlock;
+                constexpr auto drop = DropTokens::yes;
                 // Call forward pass
             }
             break;
@@ -413,4 +456,4 @@ namespace aristos{
         CHECK_ERROR_EXIT(cudaStreamSynchronize(aristosStream));
     }
 }
-#endif //PREP_CUH
+#endif //BOOTSTRAP_CUH

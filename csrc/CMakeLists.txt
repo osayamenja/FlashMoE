@@ -66,7 +66,7 @@ add_executable(csrc main.cu
         include/os/decider/comps/niche.cuh
         include/topo.cuh
         include/os/processor/mmaConfig.cuh
-        include/prep.cuh
+        include/bootstrap.cuh
         include/os/scheduler.cuh
         include/moe/gate.cuh
         include/os/processor/gemm.cuh
