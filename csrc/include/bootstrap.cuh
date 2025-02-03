@@ -5,13 +5,16 @@
 #ifndef BOOTSRAP_CUH
 #define BOOTSTRAP_CUH
 
-#include <vector>
 #include <algorithm>
+#include <vector>
+
 #include <cute/layout.hpp>
+#include <cute/tensor.hpp>
 #include <cutlass/epilogue/thread/activation.h>
 #include <nvshmemx.h>
 #include <nvshmem.h>
 #include <host/nvshmemx_api.h>
+#include <torch/torch.h>
 
 #include "topo.cuh"
 #include "debug.cuh"
@@ -258,7 +261,8 @@ namespace aristos{
         CHECK_ERROR_EXIT(cudaMemcpyToSymbolAsync(bookkeeping, &hostBookkeeping, sizeof(Bookkeeping), 0,
             cudaMemcpyHostToDevice, aristosStream));
 
-        const auto functionId = 4 * ((Arch - MIN_ARCH) / 100) + 2 * (iC.numExperts > BLOCK_N) + iC.shouldDrop;
+        const auto functionId = 8 * ((Arch - MIN_ARCH) / 100) + 4 * (iC.numExperts > BLOCK_N) +
+            2 * iC.shouldDrop + (iC.k > 1);
         // Initialize config struct
         hostMoEConfig = Config{
             sHb + flagBytes,
@@ -330,101 +334,257 @@ namespace aristos{
     }
 
     template<typename Element>
-    requires(aristos::TensorValueType<Element>)
     __host__ __forceinline__
-    void forwardHost(){
-        // This function would likely be called frequently--per layer per iteration--thus, we elide the error check.
-        // Of course, calling this function without initializing the aristos runtime yields undefined behavior.
-        // reportError(isInitialized, "Not initialized")
+    void dispatchForwardKernel(const torch::Tensor& activations,
+        const torch::Tensor& experts, const torch::Tensor& bias,
+        const torch::Tensor& gateWeights, const torch::Tensor& gateOutput) {
+        TORCH_CHECK(activations.scalar_type() == experts.scalar_type());
+        TORCH_CHECK(activations.scalar_type() == bias.scalar_type());
+        TORCH_CHECK(activations.scalar_type() == gateWeights.scalar_type());
+        TORCH_CHECK(activations.scalar_type() == gateOutput.scalar_type());
 
-        /// Decode function id
+        TORCH_CHECK(activations.is_contiguous())
+        TORCH_CHECK(experts.is_contiguous())
+        TORCH_CHECK(bias.is_contiguous())
+        TORCH_CHECK(gateWeights.is_contiguous())
+        TORCH_CHECK(gateOutput.is_contiguous())
+
+        TORCH_INTERNAL_ASSERT(activations.device().type() == at::DeviceType::CUDA);
+        TORCH_INTERNAL_ASSERT(experts.device().type() == at::DeviceType::CUDA);
+        TORCH_INTERNAL_ASSERT(bias.device().type() == at::DeviceType::CUDA);
+        TORCH_INTERNAL_ASSERT(gateWeights.device().type() == at::DeviceType::CUDA);
+        TORCH_INTERNAL_ASSERT(gateOutput.device().type() == at::DeviceType::CUDA);
+
+        // Now construct cute tensors
+        using ElementC = float; // accumulate type
+        // Decode function id
         switch (hostMoEConfig.functionId) {
             case 0: {
-                constexpr auto Arch = 700;
-                constexpr auto gRl = GateReductionLevel::singleBlock;
-                constexpr auto drop = DropTokens::no;
+                constexpr auto g = GateReductionLevel::singleBlock;
+                constexpr auto d = DropTokens::no;
+                constexpr auto c = CombineMode::single;
                 // Call forward pass
+                moe::forward<700, g, d, c, ElementC, Element>();
             }
             break;
             case 1: {
-                constexpr auto Arch = 700;
-                constexpr auto gRl = GateReductionLevel::singleBlock;
-                constexpr auto drop = DropTokens::yes;
+                constexpr auto g = GateReductionLevel::singleBlock;
+                constexpr auto d = DropTokens::no;
+                constexpr auto c = CombineMode::multithreaded;
                 // Call forward pass
+                moe::forward<700, g, d, c, ElementC, Element>();
             }
             break;
             case 2: {
-                constexpr auto Arch = 700;
-                constexpr auto gRl = GateReductionLevel::multiBlock;
-                constexpr auto drop = DropTokens::no;
+                constexpr auto g = GateReductionLevel::singleBlock;
+                constexpr auto d = DropTokens::yes;
+                constexpr auto c = CombineMode::single;
                 // Call forward pass
+                moe::forward<700, g, d, c, ElementC, Element>();
             }
             break;
             case 3: {
-                constexpr auto Arch = 700;
-                constexpr auto gRl = GateReductionLevel::multiBlock;
-                constexpr auto drop = DropTokens::yes;
+                constexpr auto g = GateReductionLevel::singleBlock;
+                constexpr auto d = DropTokens::yes;
+                constexpr auto c = CombineMode::multithreaded;
                 // Call forward pass
+                moe::forward<700, g, d, c, ElementC, Element>();
             }
             break;
             case 4: {
-                constexpr auto Arch = 800;
-                constexpr auto gRl = GateReductionLevel::singleBlock;
-                constexpr auto drop = DropTokens::no;
+                constexpr auto g = GateReductionLevel::multiBlock;
+                constexpr auto d = DropTokens::no;
+                constexpr auto c = CombineMode::single;
                 // Call forward pass
+                moe::forward<700, g, d, c, ElementC, Element>();
             }
             break;
             case 5: {
-                constexpr auto Arch = 800;
-                constexpr auto gRl = GateReductionLevel::singleBlock;
-                constexpr auto drop = DropTokens::yes;
+                constexpr auto g = GateReductionLevel::multiBlock;
+                constexpr auto d = DropTokens::no;
+                constexpr auto c = CombineMode::multithreaded;
                 // Call forward pass
+                moe::forward<700, g, d, c, ElementC, Element>();
             }
             break;
             case 6: {
-                constexpr auto Arch = 800;
-                constexpr auto gRl = GateReductionLevel::multiBlock;
-                constexpr auto drop = DropTokens::no;
+                constexpr auto g = GateReductionLevel::multiBlock;
+                constexpr auto d = DropTokens::yes;
+                constexpr auto c = CombineMode::single;
                 // Call forward pass
+                moe::forward<700, g, d, c, ElementC, Element>();
             }
             break;
             case 7: {
-                constexpr auto Arch = 800;
-                constexpr auto gRl = GateReductionLevel::multiBlock;
-                constexpr auto drop = DropTokens::yes;
+                constexpr auto g = GateReductionLevel::multiBlock;
+                constexpr auto d = DropTokens::yes;
+                constexpr auto c = CombineMode::multithreaded;
                 // Call forward pass
+                moe::forward<700, g, d, c, ElementC, Element>();
             }
             break;
             case 8: {
-                constexpr auto Arch = 900;
-                constexpr auto gRl = GateReductionLevel::singleBlock;
-                constexpr auto drop = DropTokens::no;
+                constexpr auto g = GateReductionLevel::singleBlock;
+                constexpr auto d = DropTokens::no;
+                constexpr auto c = CombineMode::single;
                 // Call forward pass
+                moe::forward<800, g, d, c, ElementC, Element>();
             }
             break;
             case 9: {
-                constexpr auto Arch = 900;
-                constexpr auto gRl = GateReductionLevel::singleBlock;
-                constexpr auto drop = DropTokens::yes;
+                constexpr auto g = GateReductionLevel::singleBlock;
+                constexpr auto d = DropTokens::no;
+                constexpr auto c = CombineMode::multithreaded;
                 // Call forward pass
+                moe::forward<800, g, d, c, ElementC, Element>();
             }
             break;
             case 10: {
-                constexpr auto Arch = 900;
-                constexpr auto gRl = GateReductionLevel::multiBlock;
-                constexpr auto drop = DropTokens::no;
+                constexpr auto g = GateReductionLevel::singleBlock;
+                constexpr auto d = DropTokens::yes;
+                constexpr auto c = CombineMode::single;
                 // Call forward pass
+                moe::forward<800, g, d, c, ElementC, Element>();
             }
             break;
             case 11: {
-                constexpr auto Arch = 900;
-                constexpr auto gRl = GateReductionLevel::multiBlock;
-                constexpr auto drop = DropTokens::yes;
+                constexpr auto g = GateReductionLevel::singleBlock;
+                constexpr auto d = DropTokens::yes;
+                constexpr auto c = CombineMode::multithreaded;
                 // Call forward pass
+                moe::forward<800, g, d, c, ElementC, Element>();
+            }
+            case 12: {
+                constexpr auto g = GateReductionLevel::multiBlock;
+                constexpr auto d = DropTokens::no;
+                constexpr auto c = CombineMode::single;
+                // Call forward pass
+                moe::forward<800, g, d, c, ElementC, Element>();
+            }
+            break;
+            case 13: {
+                constexpr auto g = GateReductionLevel::multiBlock;
+                constexpr auto d = DropTokens::no;
+                constexpr auto c = CombineMode::multithreaded;
+                // Call forward pass
+                moe::forward<800, g, d, c, ElementC, Element>();
+            }
+            break;
+            case 14: {
+                constexpr auto g = GateReductionLevel::multiBlock;
+                constexpr auto d = DropTokens::yes;
+                constexpr auto c = CombineMode::single;
+                // Call forward pass
+                moe::forward<800, g, d, c, ElementC, Element>();
+            }
+            break;
+            case 15: {
+                constexpr auto g = GateReductionLevel::multiBlock;
+                constexpr auto d = DropTokens::yes;
+                constexpr auto c = CombineMode::multithreaded;
+                // Call forward pass
+                moe::forward<800, g, d, c, ElementC, Element>();
+            }
+            break;
+            case 16: {
+                constexpr auto g = GateReductionLevel::singleBlock;
+                constexpr auto d = DropTokens::yes;
+                constexpr auto c = CombineMode::single;
+                // Call forward pass
+                moe::forward<900, g, d, c, ElementC, Element>();
+            }
+            break;
+            case 17: {
+                constexpr auto g = GateReductionLevel::singleBlock;
+                constexpr auto d = DropTokens::yes;
+                constexpr auto c = CombineMode::multithreaded;
+                // Call forward pass
+                moe::forward<900, g, d, c, ElementC, Element>();
+            }
+            break;
+            case 18: {
+                constexpr auto g = GateReductionLevel::singleBlock;
+                constexpr auto d = DropTokens::no;
+                constexpr auto c = CombineMode::single;
+                // Call forward pass
+                moe::forward<900, g, d, c, ElementC, Element>();
+            }
+            break;
+            case 19: {
+                constexpr auto g = GateReductionLevel::singleBlock;
+                constexpr auto d = DropTokens::no;
+                constexpr auto c = CombineMode::multithreaded;
+                moe::forward<900, g, d, c, ElementC, Element>();
+            }
+            break;
+            case 20: {
+                constexpr auto g = GateReductionLevel::multiBlock;
+                constexpr auto d = DropTokens::yes;
+                constexpr auto c = CombineMode::single;
+                // Call forward pass
+                moe::forward<900, g, d, c, ElementC, Element>();
+            }
+            break;
+            case 21: {
+                constexpr auto g = GateReductionLevel::multiBlock;
+                constexpr auto d = DropTokens::yes;
+                constexpr auto c = CombineMode::multithreaded;
+                // Call forward pass
+                moe::forward<900, g, d, c, ElementC, Element>();
+            }
+            break;
+            case 22: {
+                constexpr auto g = GateReductionLevel::multiBlock;
+                constexpr auto d = DropTokens::no;
+                constexpr auto c = CombineMode::single;
+                // Call forward pass
+                moe::forward<900, g, d, c, ElementC, Element>();
+            }
+            break;
+            case 23: {
+                constexpr auto g = GateReductionLevel::multiBlock;
+                constexpr auto d = DropTokens::no;
+                constexpr auto c = CombineMode::multithreaded;
+                // Call forward pass
+                moe::forward<900, g, d, c, ElementC, Element>();
             }
             break;
             default:
                 reportError(false, "No such function exists!");
+        }
+    }
+
+    __host__ __forceinline__
+    void forwardHost(const torch::Tensor& activations,
+        const torch::Tensor& experts, const torch::Tensor& bias,
+        const torch::Tensor& gateWeights, const torch::Tensor& gateOutput){
+        // This function would likely be called frequently--per layer per iteration--thus, we elide the error check.
+        // Of course, calling this function without initializing the aristos runtime yields undefined behavior.
+        // reportError(isInitialized, "Not initialized")
+        switch (activations.scalar_type()) {
+            case torch::kFloat: {
+                if (at::globalContext().allowTF32CuBLAS() || at::globalContext().allowTF32CuDNN()) {
+                    dispatchForwardKernel<cute::tfloat32_t>(activations, experts, bias, gateWeights, gateOutput);
+                }
+                else {
+                    dispatchForwardKernel<float>(activations, experts, bias, gateWeights, gateOutput);
+                }
+            }
+            break;
+            case torch::kFloat16:
+                dispatchForwardKernel<cute::half_t>(activations, experts, bias, gateWeights, gateOutput);
+            break;
+            case torch::kBFloat16:
+                dispatchForwardKernel<cute::bfloat16_t>(activations, experts, bias, gateWeights, gateOutput);
+            break;
+            case torch::kFloat8_e4m3fn:
+                dispatchForwardKernel<cute::float_e4m3_t>(activations, experts, bias, gateWeights, gateOutput);
+            break;
+            case torch::kFloat8_e5m2:
+                dispatchForwardKernel<cute::float_e5m2_t>(activations, experts, bias, gateWeights, gateOutput);
+            break;
+            default:
+                reportError(false, "Not supported!");
         }
     }
 

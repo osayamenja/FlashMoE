@@ -66,7 +66,7 @@ namespace aristos{
     concept Matrix = requires(M m){
         requires Tensor<M> && rank(m) == 2;
     };
-    using mp_t = float; // no support for double, unfortunately
+    using mp_t = float; // or tf32
     using specType = unsigned int;
     using flagsType = uint64_t;
 
@@ -547,7 +547,7 @@ namespace aristos{
                 sBfC = eDsA + sizeof(BookType) * 2 * (blocks + world * nLx * tCM) + fCl;
             }
             gtQCl = world * nLx * tCM;
-            gBxM = sBfC + _eNb * (_world * _nLx * tCM * tN + sl * px);
+            gBxM = sBfC + _eNb * (_world * _nLx * tCM * tN);
             bookSize = gBxM;
         }
 
@@ -585,7 +585,7 @@ namespace aristos{
                 const unsigned int fCl = sizeof(bool) * (_world * _nLx + _nx * tCM * tN);
                 sBfC = eDsA + sizeof(BookType) * 2 * (_blocks + _world * _nLx * tCM) + fCl;
             }
-            const auto gBxM = sBfC + _eNb * (_world * _nLx * tCM * tN + _sl * _px);
+            const auto gBxM = sBfC + _eNb * (_world * _nLx * tCM * tN);
             return gBxM;
         }
 
@@ -713,19 +713,12 @@ namespace aristos{
             return CAST_TO(BookType, tQS() + world * nLx * tCM);
         }
 
-        /// Gate routing buffer
+        // Intermediate buffer
         template<typename Element>
         requires(sizeof(BookType) >= sizeof(Element))
         __device__ __forceinline__
-        auto* gRt() const {
-            return CAST_TO(Element, book + sBfC);
-        }
-
-        // Intermediate buffer
-        template<typename Element>
-        __device__ __forceinline__
         auto* xM() const {
-            return gRt<Element>() + sl * px;
+            return CAST_TO(Element, book + sBfC);
         }
     };
 

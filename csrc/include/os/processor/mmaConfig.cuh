@@ -9,7 +9,6 @@
 #include <cute/arch/copy.hpp>
 #include <cute/arch/copy_sm80.hpp>
 #include <cutlass/gemm/dispatch_policy.hpp>
-
 #include "../../types.cuh"
 
 namespace aristos {

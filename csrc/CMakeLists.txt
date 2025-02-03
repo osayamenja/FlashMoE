@@ -138,6 +138,29 @@ CPMFindPackage(
 )
 target_link_libraries(csrc PRIVATE mathdx::cublasdx)
 
+CPMAddPackage(
+        NAME NVTX3
+        GITHUB_REPOSITORY NVIDIA/NVTX
+        GIT_TAG v3.1.0-c-cpp
+        GIT_SHALLOW TRUE
+)
+
+if(NVTX3_ADDED)
+    target_link_libraries(csrc PRIVATE nvtx3-cpp)
+    string(FIND "$ENV{CMAKE_PREFIX_PATH}" "nvtx3" INDEX)
+    if(INDEX EQUAL -1)
+        # append nvtx3 to prefix path to remove libtorch error
+        set(ENV{CMAKE_PREFIX_PATH} "$ENV{CMAKE_PREFIX_PATH}:${NVTX3_SOURCE_DIR}")
+    endif()
+endif ()
+
+# libTorch
+set(USE_SYSTEM_NVTX ON)
+set(CAFFE2_USE_CUDNN ON)
+find_package(Torch REQUIRED HINTS "$ENV{TORCH_ROOT}")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
+target_link_libraries(csrc PRIVATE "${TORCH_LIBRARIES}")
+
 target_link_libraries(csrc PRIVATE CUDA::cudart CUDA::cuda_driver CUDA::nvml CUDA::cublas CUDA::nvtx3)
 target_link_libraries(csrc PRIVATE atomic)
 

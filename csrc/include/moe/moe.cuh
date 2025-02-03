@@ -13,6 +13,7 @@ namespace aristos::moe{
         unsigned int Arch,
         GateReductionLevel g = GateReductionLevel::singleBlock,
         DropTokens d = DropTokens::yes,
+        CombineMode c = CombineMode::single,
         typename ActivationOp = cute::identity,
         typename ActivationOpX = cute::identity,
         typename ElementC = float,
@@ -50,6 +51,7 @@ namespace aristos::moe{
             processor::start<
                 processors,
                 Arch,
+                c,
                 ElementA,
                 ElementB,
                 ElementC,
@@ -58,14 +60,15 @@ namespace aristos::moe{
                 ActivationOpX>(CAST_TO(ElementD, workspace, rSb));
         }
         else {
-            os::start<processors>(workspace, activations, expertsWeights, bias, sb);
+            os::start<processors, d>(workspace, activations, expertsWeights, bias, sb);
         }
     }
 
     template<
         unsigned int Arch,
-        unsigned int blocks,
-        GateReductionLevel g = GateReductionLevel::singleBlock
+        GateReductionLevel g = GateReductionLevel::singleBlock,
+        DropTokens d = DropTokens::yes,
+        CombineMode c = CombineMode::single
     >
     __global__ __maxnreg__(128) void backward(){
 
