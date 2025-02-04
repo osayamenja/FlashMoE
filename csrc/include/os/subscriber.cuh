@@ -52,15 +52,15 @@ namespace aristos::subscriber{
             __isShared(status) && __isShared(taskCount));*/
 
         const auto dA = packet::DecoderArg{
-            moeConfig.sHeap,
+            bookkeeping.sHeap,
             bookkeeping.tQ(),
-            moeConfig.cellSize,
+            bookkeeping.cellSize(),
             bookkeeping.eCap,
-            moeConfig.embedDim,
+            bookkeeping.ed,
             bookkeeping.tPs,
             bookkeeping.tN,
-            Config::tiles<BLOCK_N>(bookkeeping.px),
-            moeConfig.expertSlots,
+            Bookkeeping::tiles<BLOCK_N>(bookkeeping.px),
+            bookkeeping.xs,
             bookkeeping.nx
         };
 
@@ -76,7 +76,7 @@ namespace aristos::subscriber{
 
         // pointers
         auto* __restrict__ sharedSpace = CAST_TO(unsigned int, workspace);
-        auto* __restrict__ sFlags = moeConfig.flags;
+        auto* __restrict__ sFlags = bookkeeping.flags;
         auto* __restrict__ pGB = bookkeeping.xM<Element>(); // post GEMM buffer
 
         // Constants
@@ -89,7 +89,7 @@ namespace aristos::subscriber{
         auto fSp = fSl; // first stage pending
 
         // second stage: remote
-        const auto tilesMc = Config::tiles<BLOCK_M>(dA.eCap);
+        const auto tilesMc = Bookkeeping::tiles<BLOCK_M>(dA.eCap);
         const auto sRfC = rEl * tilesMc * dA.tN;
         const auto sRl = sRfC / subscriberCount + (tIdx < sRfC % subscriberCount);
         const auto sRt = sRl / wSet;

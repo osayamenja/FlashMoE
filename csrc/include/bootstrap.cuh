@@ -223,64 +223,45 @@ namespace aristos{
         const uint epWorld = peerT.size();
         const auto eCap = iC.shouldDrop? iC.expertCapacity(epWorld) : iC.seqLen;
         const auto heapBytes = STAGES * CELLS * epWorld * expertSlots * eCap * iC.embedDim * sizeof(Element);
-        const auto tMc = Config::tiles<BLOCK_M>(eCap);
-        const auto tN = Config::tiles<BLOCK_N>(iC.embedDim);
+        const auto tMc = Bookkeeping::tiles<BLOCK_M>(eCap);
+        const auto tN = Bookkeeping::tiles<BLOCK_N>(iC.embedDim);
         const auto flagBytes = (epWorld * numLocalExperts + iC.numExperts * tMc * tN) * sizeof(flagsType);
         auto* sHeap = nvshmem_calloc(flagBytes + heapBytes, sizeof(cuda::std::byte));
         auto* sHb = static_cast<cuda::std::byte*>(sHeap);
 
         // local bookkeeping memory
         constexpr auto blocks = Hardware<Arch>::blocks::value - 1U;
-        const auto bookSize = Bookkeeping::bookLength(iC.seqLen, iC.numExperts, numLocalExperts, iC.hiddenProjDim,
+        const auto bookSize = Bookkeeping::bookLength(iC.seqLen,
+            iC.numExperts, numLocalExperts, iC.hiddenProjDim,
             iC.embedDim, eCap, blocks, epWorld, sizeof(Element));
 
         cuda::std::byte* book;
-        cuda::barrier<cuda::thread_scope_device>* b;
         CHECK_ERROR_EXIT(cudaMallocAsync(&book, bookSize, aristosStream));
-        // We allocate below separately due to alignment constraints
-        CHECK_ERROR_EXIT(cudaMallocAsync(&b, sizeof(cuda::barrier<cuda::thread_scope_device>), aristosStream));
         CHECK_ERROR_EXIT(cudaMemsetAsync(&book, 0, bookSize, aristosStream));
-
-        auto hB = new cuda::barrier<cuda::thread_scope_device>{blocks};
-        CHECK_ERROR_EXIT(cudaMemcpyAsync(b, hB, sizeof(cuda::barrier<cuda::thread_scope_device>),
-            cudaMemcpyHostToDevice, aristosStream));
-
         const auto functionId = 8 * ((Arch - MIN_ARCH) / 100) + 4 * (iC.numExperts > BLOCK_N) +
             2 * iC.shouldDrop + (iC.k > 1);
         // Initialize bookkeeping
         hostBookkeeping = Bookkeeping{
+            sHb + flagBytes,
+            static_cast<flagsType *>(sHeap),
             book,
             iC.seqLen * iC.miniBatch,
             iC.numExperts,
             numLocalExperts,
+            expertSlots,
+            epRank,
             iC.hiddenProjDim,
             iC.embedDim,
             eCap,
             blocks,
             epWorld,
             functionId,
-            b,
             sizeof(Element)
         };
-        CHECK_ERROR_EXIT(cudaMemcpyToSymbolAsync(bookkeeping, &hostBookkeeping, sizeof(Bookkeeping), 0,
+        auto hB = new cuda::barrier<cuda::thread_scope_device>{blocks};
+        CHECK_ERROR_EXIT(cudaMemcpyAsync(hostBookkeeping.dB(), hB, sizeof(cuda::barrier<cuda::thread_scope_device>),
             cudaMemcpyHostToDevice, aristosStream));
-
-        // Initialize config struct
-        hostMoEConfig = Config{
-            sHb + flagBytes,
-            static_cast<flagsType *>(sHeap),
-            epRank,
-            iC.k,
-            iC.embedDim,
-            iC.numExperts,
-            numLocalExperts,
-            iC.seqLen * iC.miniBatch,
-            epWorld,
-            iC.hiddenProjDim,
-            expertSlots,
-            iC.capacityFactor
-        };
-        CHECK_ERROR_EXIT(cudaMemcpyToSymbolAsync(moeConfig, &hostMoEConfig, sizeof(Config), 0,
+        CHECK_ERROR_EXIT(cudaMemcpyToSymbolAsync(bookkeeping, &hostBookkeeping, sizeof(Bookkeeping), 0,
             cudaMemcpyHostToDevice, aristosStream));
         CHECK_ERROR_EXIT(cudaPeekAtLastError());
         CHECK_ERROR_EXIT(cudaStreamSynchronize(aristosStream));
@@ -729,10 +710,8 @@ namespace aristos{
         cudaStreamSetAttribute(aristosStream, cudaStreamAttributeAccessPolicyWindow, &stream_attribute);
         cudaCtxResetPersistingL2Cache();
 #endif
-
         CHECK_ERROR_EXIT(cudaFreeAsync(hostBookkeeping.book, aristosStream));
-        CHECK_ERROR_EXIT(cudaFreeAsync(hostBookkeeping.deviceBlockade, aristosStream));
-        nvshmem_free(hostMoEConfig.sHeap);
+        nvshmem_free(hostBookkeeping.sHeap);
         nvshmem_finalize();
         CHECK_ERROR_EXIT(cudaPeekAtLastError());
         CHECK_ERROR_EXIT(cudaStreamSynchronize(aristosStream));

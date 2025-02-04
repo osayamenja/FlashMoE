@@ -38,12 +38,12 @@ namespace aristos::packet {
         const auto eCap = bk.eCap;
         auto* __restrict__ pSA = bk.pSA();
         const auto* __restrict__ pDs = bk.pDs();
-        auto* __restrict__ sHeap = moeConfig.sHeap;
-        auto* __restrict__ flags = moeConfig.flags;
-        const auto cellSize = moeConfig.cellSize;
-        const auto expertSlots = moeConfig.expertSlots;
-        const auto tokenDim = moeConfig.embedDim;
-        const auto rank = moeConfig.rank;
+        auto* __restrict__ sHeap = bookkeeping.sHeap;
+        auto* __restrict__ flags = bookkeeping.flags;
+        const auto cellSize = bookkeeping.cellSize();
+        const auto expertSlots = bookkeeping.xs;
+        const auto tokenDim = bookkeeping.ed;
+        const auto rank = bookkeeping.rank;
         const auto rSeqBit = seqBit;
 
         const auto tokenIds = make_tensor(cute::make_gmem_ptr(tP),
@@ -104,7 +104,7 @@ namespace aristos::packet {
                     *CAST_TO(SignalPayload<>, &flagSignal) = SignalPayload{
                         routedTokens,
                         rSeqBit,
-                        Config::tiles<BLOCK_M>(pTT)
+                        Bookkeeping::tiles<BLOCK_M>(pTT)
                     };
                     // transmit signal
                     nvshmemx_signal_op(flags + rank * expertSlots + pLIdx,
@@ -137,7 +137,7 @@ namespace aristos::packet {
                     *CAST_TO(SignalPayload<>, &flagSignal) = SignalPayload{
                         routedTokens,
                         rSeqBit,
-                        Config::tiles<BLOCK_M>(pTT)
+                        Bookkeeping::tiles<BLOCK_M>(pTT)
                     };
                     if (isRemote) {
                         // do RDMA transfer + signal
@@ -145,7 +145,7 @@ namespace aristos::packet {
                             heap::advance<0, 1>(sHeap, cellSize, expertSlots, tokenDim, peer, pLIdx),
                             peerHeap,
                             sizeof(Element) * routedTokens * tokenDim,
-                            moeConfig.flags + moeConfig.rank * expertSlots + pLIdx,
+                            flags + rank * expertSlots + pLIdx,
                             flagSignal,
                             NVSHMEM_SIGNAL_SET,
                             pT[peer]);
@@ -153,7 +153,7 @@ namespace aristos::packet {
                     else {
                         __threadfence_system();
                         // we've done the DMA transfer already, so we set the signal instead
-                        nvshmemx_signal_op(moeConfig.flags + moeConfig.rank * expertSlots + pLIdx,
+                        nvshmemx_signal_op(flags + rank * expertSlots + pLIdx,
                             flagSignal,
                             NVSHMEM_SIGNAL_SET,
                             pT[peer]);
@@ -219,11 +219,11 @@ namespace aristos::packet {
             auto* __restrict__ sHeap = dA.sHeap;
             auto* __restrict__ tQ = dA.tQ + (threadIdx.x * dA.tPs + lTQHead);
             const auto fTilesM = routedTokens / BLOCK_M;
-            const auto padM = Config::pad<BLOCK_M>(routedTokens);
+            const auto padM = Bookkeeping::pad<BLOCK_M>(routedTokens);
 
             if (!atomicTAS<cuda::thread_scope_block>(status + peer)) {
                 // atomically reduce taskCount
-                const auto superfluous = (dA.tN + dA.tNx) * (Config::tiles<BLOCK_M>(dA.eCap) - globalTaskTiles);
+                const auto superfluous = (dA.tN + dA.tNx) * (Bookkeeping::tiles<BLOCK_M>(dA.eCap) - globalTaskTiles);
                 atomicSub_block(taskCount, superfluous);
             }
 
@@ -279,7 +279,7 @@ namespace aristos::packet {
 
             if (routedTokens) {
                 __threadfence();
-                const auto totalTasks = Config::tiles<BLOCK_M>(routedTokens) * dA.tN;
+                const auto totalTasks = Bookkeeping::tiles<BLOCK_M>(routedTokens) * dA.tN;
                 lTQHead += totalTasks;
                 // notifies scheduler of work
                 atomicAdd_block(tQHead, totalTasks);

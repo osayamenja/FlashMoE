@@ -633,11 +633,11 @@ namespace aristos::gate {
             fusedGate(activations, weights, routing, accumulator, i, gArg, nTiles, scratch, k);
         }
 
-        __threadfence();
         __syncthreads();
         // Everyone syncs here prior to packet construction
         if (!threadIdx.x) {
-            bookkeeping.deviceBlockade->arrive_and_wait();
+            __threadfence();
+            bookkeeping.dB()->arrive_and_wait();
         }
         __syncthreads();
 

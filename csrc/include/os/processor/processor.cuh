@@ -427,18 +427,18 @@ namespace aristos::processor{
         const auto rSeqBit = _seqBit;
         if (!threadIdx.x) {
             pA = ProcessorArgs{
-                moeConfig.sHeap,
+                bookkeeping.sHeap,
                 bookkeeping.sQ() + blockIdx.x,
                 bookkeeping.pDB() + blockIdx.x,
                 bookkeeping.tQH(),
-                moeConfig.flags,
+                bookkeeping.flags,
                 bookkeeping.tQ(),
                 bookkeeping.tQ() + bookkeeping.tPs * SUBSCRIBERS, // should be the external Q
                 bookkeeping.tQS(),
                 bookkeeping.px,
-                moeConfig.embedDim,
+                bookkeeping.ed,
                 bookkeeping.tN,
-                Config::tiles<BLOCK_N>(bookkeeping.pd)
+                Bookkeeping::tiles<BLOCK_N>(bookkeeping.pd)
             };
             // Initially indicate this block's readiness
             atomicExch(pA.sQ, ready);
