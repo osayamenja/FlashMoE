@@ -461,7 +461,6 @@ namespace aristos{
         cuda::barrier<cuda::thread_scope_device>* deviceBlockade = nullptr;
         /// Note the below lengths are cumulative sums.
         /// Gate buffer and intermediate in bytes
-        unsigned long int gBxM = 0UL;
         /// EP group description and packet sync array in bytes
         unsigned long int eDsA = 0UL;
         /// Scheduler buffers and flag checkpoints in bytes
@@ -491,6 +490,8 @@ namespace aristos{
         unsigned int nx = 0U;
         /// number of local experts
         unsigned int nLx = 0U;
+        /// embedding dimension
+        unsigned int ed = 0U;
         /// hidden projection dimension
         unsigned int pd = 0U;
         /// padded number of experts
@@ -523,7 +524,8 @@ namespace aristos{
             cuda::barrier<cuda::thread_scope_device>* _blockade,
             const unsigned int& _eNb // number of bytes for the matrix element type
             ) :
-        book(_book), deviceBlockade(_blockade), world(_world), sl(_sl), nx(_nx), nLx(_nLx), pd(_pd),
+        book(_book), deviceBlockade(_blockade), world(_world), sl(_sl), nx(_nx), nLx(_nLx), ed(_embedDim),
+        pd(_pd),
         px(Config::pad<BLOCK_N>(_nx)),
         tM(Config::tiles<BLOCK_M>(_sl)),
         tN(Config::tiles<BLOCK_N>(_embedDim)),
@@ -547,8 +549,7 @@ namespace aristos{
                 sBfC = eDsA + sizeof(BookType) * 2 * (blocks + world * nLx * tCM) + fCl;
             }
             gtQCl = world * nLx * tCM;
-            gBxM = sBfC + _eNb * (_world * _nLx * tCM * tN);
-            bookSize = gBxM;
+            bookSize = sBfC + _eNb * (_world * _nLx * tCM * tN);
         }
 
         /// Needed for malloc

@@ -262,22 +262,11 @@ namespace aristos::scheduler {
             atomicExch_block(sInterrupts + i, 1U);
         }
 
-        // clear global memory tQ heads
-        for (uint i = threadIdx.x; i < gtQCL; i += wS) {
-            gtQHeads[i] = 0U;
-        }
-
         // enqueue interrupts and schedule them
         auto* __restrict__ tQI = bookkeeping.tQI();
         #pragma unroll
         for (uint i = threadIdx.x; i < processors; i += wS) {
             tQI[i] = Task{TaskType::Interrupt};
-        }
-
-        // clear shared memory tQ heads
-        #pragma unroll
-        for (uint i = threadIdx.x; i < SUBSCRIBERS; i += wS) {
-            tQHeads[i] = 0U;
         }
 
         __threadfence();

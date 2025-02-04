@@ -247,7 +247,7 @@ namespace aristos{
         // Initialize bookkeeping
         hostBookkeeping = Bookkeeping{
             book,
-            iC.seqLen,
+            iC.seqLen * iC.miniBatch,
             iC.numExperts,
             numLocalExperts,
             iC.hiddenProjDim,
@@ -273,7 +273,7 @@ namespace aristos{
             iC.embedDim,
             iC.numExperts,
             numLocalExperts,
-            iC.seqLen,
+            iC.seqLen * iC.miniBatch,
             epWorld,
             iC.hiddenProjDim,
             expertSlots,
@@ -335,10 +335,17 @@ namespace aristos{
 
     template<typename Element>
     __host__ __forceinline__
-    void dispatchForwardKernel(const torch::Tensor& activations,
+    void dispatchForwardKernel(const torch::Tensor& activations, const torch::Tensor& moeOutput,
         const torch::Tensor& expertsUp, const torch::Tensor& expertsDown,
         const torch::Tensor& biasUp, const torch::Tensor& biasDown,
         const torch::Tensor& gateWeights, const torch::Tensor& gateOutput) {
+        using ElementC = mp_t; // accumulate type
+        const auto sl = hostBookkeeping.sl;
+        const auto ed = hostBookkeeping.ed;
+        const auto pd = hostBookkeeping.pd;
+        const auto nLx = hostBookkeeping.nLx;
+        const auto nx = hostBookkeeping.nx;
+        const auto px = hostBookkeeping.px;
 #if CHECK_TENSORS
         TORCH_CHECK(activations.scalar_type() == expertsUp.scalar_type());
         TORCH_CHECK(activations.scalar_type() == expertsDown.scalar_type());
@@ -361,41 +368,62 @@ namespace aristos{
         TORCH_CHECK(biasUp.is_cuda());
         TORCH_CHECK(biasDown.is_cuda());
         TORCH_CHECK(gateWeights.is_cuda());
-        TORCH_CHECK(gateOutput.is_coalesced());
+        TORCH_CHECK(gateOutput.is_cuda());
 
-        TORCH_CHECK(activations.sizes()[0] == hostMoEConfig.seqLen
-            && activations.sizes()[1] == hostMoEConfig.embedDim);
-        TORCH_CHECK(gateWeights.size(0) == hostMoEConfig.numExperts
-            && gateWeights.size(1) == hostMoEConfig.embedDim)
-        TORCH_CHECK(gateOutput.size(0) == hostMoEConfig.seqLen
-            && gateWeights.size(1) == hostBookkeeping.px)
+        TORCH_CHECK(activations.sizes()[0] == sl
+            && activations.sizes()[1] == ed);
+        TORCH_CHECK(gateWeights.size(0) == nx
+            && gateWeights.size(1) == ed)
+        TORCH_CHECK(gateOutput.size(0) == sl
+            && gateWeights.size(1) == px)
 
         const auto eSzU = expertsUp.sizes();
         const auto eSzD = expertsDown.sizes();
         TORCH_CHECK(eSzU.size() == 3 && eSzD.size() == 3);
-        TORCH_CHECK(eSzU[0] == hostBookkeeping.nLx &&
-            eSzD[0] == hostBookkeeping.nLx);
+        TORCH_CHECK(eSzU[0] == nLx && eSzD[0] == nLx);
         // Weights are already transposed in memory
-        TORCH_CHECK(eSzU[1] == hostMoEConfig.upProjection &&
-            eSzD[1] == hostMoEConfig.embedDim);
-        TORCH_CHECK(eSzU[2] == hostMoEConfig.embedDim &&
-            eSzD[3] == hostMoEConfig.upProjection);
+        TORCH_CHECK(eSzU[1] == pd && eSzD[1] == ed);
+        TORCH_CHECK(eSzU[2] == ed && eSzD[3] == pd);
         const auto bSzU = biasUp.sizes();
         const auto bSzD = biasDown.sizes();
         TORCH_CHECK(bSzU.size() == 2 && bSzD.size() == 2);
-        TORCH_CHECK(bSzU[0] == hostBookkeeping.nLx
-            && bSzD[0] == hostBookkeeping.nLx);
-        TORCH_CHECK(bSzU[1] == hostMoEConfig.upProjection
-            && bSzD[1] == hostMoEConfig.embedDim);
+        TORCH_CHECK(bSzU[0] == nLx && bSzD[0] == nLx);
+        TORCH_CHECK(bSzU[1] == pd && bSzD[1] == ed);
 #endif
 
         // Now construct cute tensors
-        using ElementC = mp_t; // accumulate type
-
-        // Activations
+        // Activations & Output
         const auto* __restrict__ aP = activations.const_data_ptr<Element>();
         const auto tA = cute::make_tensor(cute::make_gmem_ptr(aP),
-            make_layout(cute::make_shape()));
+            make_layout(cute::make_shape(sl, ed),
+                cute::LayoutRight{}));
+        const auto* __restrict__ oP = moeOutput.mutable_data_ptr<Element>();
+        const auto tO = cute::make_tensor(cute::make_gmem_ptr(oP),
+            make_layout(cute::make_shape(sl, ed),
+                cute::LayoutRight{}));
+
+        // Expert weights
+        const auto* __restrict__ ePu = expertsUp.const_data_ptr<Element>();
+        const auto tXu = cute::make_tensor(cute::make_gmem_ptr(ePu),
+            make_layout(make_shape(nLx, cute::make_shape(pd, ed)), cute::LayoutRight{}));
+        const auto* __restrict__ ePd = expertsDown.const_data_ptr<Element>();
+        const auto tXd = cute::make_tensor(cute::make_gmem_ptr(ePd),
+            make_layout(make_shape(nLx, cute::make_shape(ed, pd)), cute::LayoutRight{}));
+
+        // Bias
+        const auto* __restrict__ bPu = biasUp.const_data_ptr<Element>();
+        const auto tBu = cute::make_tensor(cute::make_gmem_ptr(bPu),
+            make_layout(make_shape(nLx, cute::make_shape(1, pd)), cute::LayoutRight{}));
+        const auto* __restrict__ bPd = biasDown.const_data_ptr<Element>();
+        const auto tBd = cute::make_tensor(cute::make_gmem_ptr(bPd),
+            make_layout(make_shape(nLx, cute::make_shape(1, ed)), cute::LayoutRight{}));
+        // Gate
+        const auto* __restrict__ gP = gateWeights.const_data_ptr<Element>();
+        const auto tG = cute::make_tensor(cute::make_gmem_ptr(gP),
+            make_layout(cute::make_shape(nx, ed), cute::LayoutRight{}));
+        const auto* __restrict__ gOp = gateWeights.const_data_ptr<Element>();
+        const auto tGo = cute::make_tensor(cute::make_gmem_ptr(gOp),
+            make_layout(cute::make_shape(sl, px), cute::LayoutRight{}));
         // Decode function id
         switch (hostMoEConfig.functionId) {
             case 0: {
@@ -594,7 +622,7 @@ namespace aristos{
     }
 
     __host__ __forceinline__
-    void forwardHost(const torch::Tensor& activations,
+    void forwardHost(const torch::Tensor& activations, const torch::Tensor& moeOutput,
         const torch::Tensor& expertsUp, const torch::Tensor& expertsDown,
         const torch::Tensor& biasUp, const torch::Tensor& biasDown,
         const torch::Tensor& gateWeights, const torch::Tensor& gateOutput){
@@ -602,29 +630,29 @@ namespace aristos{
         switch (activations.scalar_type()) {
             case torch::kFloat: {
                 if (at::globalContext().allowTF32CuBLAS() || at::globalContext().allowTF32CuDNN()) {
-                    dispatchForwardKernel<cute::tfloat32_t>(activations, expertsUp, expertsDown,
+                    dispatchForwardKernel<cute::tfloat32_t>(activations, moeOutput, expertsUp, expertsDown,
                         biasUp, biasDown, gateWeights, gateOutput);
                 }
                 else {
-                    dispatchForwardKernel<float>(activations, expertsUp, expertsDown,
+                    dispatchForwardKernel<float>(activations, moeOutput, expertsUp, expertsDown,
                         biasUp, biasDown, gateWeights, gateOutput);
                 }
             }
             break;
             case torch::kFloat16:
-                dispatchForwardKernel<cute::half_t>(activations, expertsUp, expertsDown,
+                dispatchForwardKernel<cute::half_t>(activations, moeOutput, expertsUp, expertsDown,
                     biasUp, biasDown, gateWeights, gateOutput);
             break;
             case torch::kBFloat16:
-                dispatchForwardKernel<cute::bfloat16_t>(activations, expertsUp, expertsDown,
+                dispatchForwardKernel<cute::bfloat16_t>(activations, moeOutput, expertsUp, expertsDown,
                     biasUp, biasDown, gateWeights, gateOutput);
             break;
             case torch::kFloat8_e4m3fn:
-                dispatchForwardKernel<cute::float_e4m3_t>(activations, expertsUp, expertsDown,
+                dispatchForwardKernel<cute::float_e4m3_t>(activations, moeOutput, expertsUp, expertsDown,
                     biasUp, biasDown, gateWeights, gateOutput);
             break;
             case torch::kFloat8_e5m2:
-                dispatchForwardKernel<cute::float_e5m2_t>(activations, expertsUp, expertsDown,
+                dispatchForwardKernel<cute::float_e5m2_t>(activations, moeOutput, expertsUp, expertsDown,
                     biasUp, biasDown, gateWeights, gateOutput);
             break;
             default:
@@ -636,7 +664,7 @@ namespace aristos{
     requires(aristos::TensorValueType<Element>)
     __host__ __forceinline__
     void backwardHost(){
-        // reportError(isInitialized, "Not initialized")
+        reportError(isInitialized, "Not initialized");
     }
 
     __host__ __forceinline__
