@@ -296,10 +296,10 @@ namespace aristos{
 
     // Index and gate combine weight
     using TokenIdxTuple = cuda::std::pair<unsigned int, mp_t>;
+    // TODO consolidate into Bookkeeping
     struct __align__(16) Config{
         cuda::std::byte* sHeap;
         flagsType* flags;
-        unsigned int functionId; // needed for identifying static template parameters
         /// Expert parallel group rank
         unsigned int rank;
         unsigned int seqLen;
@@ -324,7 +324,6 @@ namespace aristos{
         __host__ __device__ __forceinline__
         Config(cuda::std::byte* _symmetricHeap,
                flagsType* _flags,
-               const unsigned int& _fId,
                const unsigned int& _rank,
                const unsigned int& _k,
                const unsigned int& _embedDim,
@@ -337,7 +336,6 @@ namespace aristos{
                const unsigned int& _capFactor = 1):
                 sHeap(_symmetricHeap),
                 flags(_flags),
-                functionId(_fId),
                 rank(_rank),
                 seqLen(_seqLen),
                 numExperts(_numExperts), numLocalExperts(_numLExperts),
@@ -506,6 +504,8 @@ namespace aristos{
         unsigned int blocks = 0U;
         /// expert capacity
         unsigned int eCap = 0U;
+        /// Encoded result of template parameters
+        unsigned int fId = 0U;
 
         __device__ __forceinline__
         Bookkeeping() = default;
@@ -521,6 +521,7 @@ namespace aristos{
             const unsigned int& _eCapacity,
             const unsigned int& _blocks,
             const unsigned int& _world,
+            const unsigned int& _fId,
             cuda::barrier<cuda::thread_scope_device>* _blockade,
             const unsigned int& _eNb // number of bytes for the matrix element type
             ) :
@@ -529,7 +530,7 @@ namespace aristos{
         px(Config::pad<BLOCK_N>(_nx)),
         tM(Config::tiles<BLOCK_M>(_sl)),
         tN(Config::tiles<BLOCK_N>(_embedDim)),
-        tCM(Config::tiles<BLOCK_M>(_eCapacity)), blocks(_blocks), eCap(_eCapacity){
+        tCM(Config::tiles<BLOCK_M>(_eCapacity)), blocks(_blocks), eCap(_eCapacity), fId(_fId){
             if (_nx > 1)[[likely]] {
                 const bool isSingleBlockGate = _nx <= BLOCK_N;
                 // maximum gemm tiles/tasks scheduled by processors

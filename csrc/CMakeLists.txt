@@ -183,14 +183,14 @@ target_compile_options(csrc PRIVATE
         $<$<COMPILE_LANGUAGE:CUDA>:-t0; --generate-line-info>
         $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-gencode=arch=compute_${COMPUTE_CAPABILITY},code=sm_${COMPUTE_CAPABILITY}>
 )
+target_compile_definitions(csrc
+        PRIVATE
+        CHECK_TENSORS=1
+)
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_compile_options(csrc PRIVATE
             $<$<COMPILE_LANGUAGE:CXX>:-Og;-g;>
             $<$<COMPILE_LANGUAGE:CUDA>:-O0; -g; -G>
-    )
-    target_compile_definitions(csrc
-            PRIVATE
-            CHECK_TENSORS=1
     )
 elseif(CMAKE_BUILD_TYPE STREQUAL "Release")
     target_compile_options(csrc PRIVATE

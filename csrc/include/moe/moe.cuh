@@ -21,16 +21,24 @@ namespace aristos::moe{
         typename ElementB = ElementA,
         typename ElementD = ElementA,
         typename Activations,
-        typename Experts,
-        typename Bias,
+        typename MoEOut,
+        typename ExpertsUp,
+        typename ExpertsDown,
+        typename BiasUp,
+        typename BiasDown,
         typename Gates,
         typename GateOut>
-    requires(aristos::Matrix<Activations> && aristos::Matrix<Experts> &&
-        aristos::Matrix<Bias> && aristos::Matrix<Gates> && aristos::Matrix<GateOut>)
+    requires(aristos::SupportedArch<Arch> && aristos::Matrix<Activations> &&
+        aristos::Matrix<MoEOut> &&
+        aristos::Tensor<ExpertsUp> && aristos::Tensor<ExpertsDown> &&
+        aristos::Tensor<BiasUp> && aristos::Tensor<BiasDown> &&
+        aristos::Matrix<Gates> && aristos::Matrix<GateOut>)
     __global__ __maxnreg__(128) void forward(
         Activations const __grid_constant__ activations,
-        Experts const __grid_constant__ expertsWeights,
-        Bias const __grid_constant__ bias,
+        ExpertsUp const __grid_constant__ expertsUp,
+        ExpertsDown const __grid_constant__ expertsDown,
+        BiasUp const __grid_constant__ biasUp,
+        BiasDown const __grid_constant__ biasDown,
         Gates const __grid_constant__ gateWeights,
         GateOut const __grid_constant__ gateOutput) {
         constexpr auto blocks = Hardware<Arch>::blocks;
@@ -60,16 +68,14 @@ namespace aristos::moe{
                 ActivationOpX>(CAST_TO(ElementD, workspace, rSb));
         }
         else {
-            os::start<processors, d>(workspace, activations, expertsWeights, bias, sb);
+            os::start<processors, d>();
         }
     }
 
     template<
-        unsigned int Arch,
-        GateReductionLevel g = GateReductionLevel::singleBlock,
-        DropTokens d = DropTokens::yes,
-        CombineMode c = CombineMode::single
+        unsigned int Arch
     >
+    requires(aristos::SupportedArch<Arch>)
     __global__ __maxnreg__(128) void backward(){
 
     }

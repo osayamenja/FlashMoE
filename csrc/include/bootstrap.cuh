@@ -19,6 +19,7 @@
 #include "topo.cuh"
 #include "debug.cuh"
 #include "types.cuh"
+#include "moe/moe.cuh"
 #include "moe/expert.cuh"
 
 #define SUPPORTED = 1;
@@ -235,7 +236,7 @@ namespace aristos{
 
         cuda::std::byte* book;
         cuda::barrier<cuda::thread_scope_device>* b;
-        CHECK_ERROR_EXIT(cudaMallocAsync(&book, bookSize + sizeof(cuda::barrier<cuda::thread_scope_device>), aristosStream));
+        CHECK_ERROR_EXIT(cudaMallocAsync(&book, bookSize, aristosStream));
         // We allocate below separately due to alignment constraints
         CHECK_ERROR_EXIT(cudaMallocAsync(&b, sizeof(cuda::barrier<cuda::thread_scope_device>), aristosStream));
         CHECK_ERROR_EXIT(cudaMemsetAsync(&book, 0, bookSize, aristosStream));
@@ -244,6 +245,8 @@ namespace aristos{
         CHECK_ERROR_EXIT(cudaMemcpyAsync(b, hB, sizeof(cuda::barrier<cuda::thread_scope_device>),
             cudaMemcpyHostToDevice, aristosStream));
 
+        const auto functionId = 8 * ((Arch - MIN_ARCH) / 100) + 4 * (iC.numExperts > BLOCK_N) +
+            2 * iC.shouldDrop + (iC.k > 1);
         // Initialize bookkeeping
         hostBookkeeping = Bookkeeping{
             book,
@@ -255,19 +258,17 @@ namespace aristos{
             eCap,
             blocks,
             epWorld,
+            functionId,
             b,
             sizeof(Element)
         };
         CHECK_ERROR_EXIT(cudaMemcpyToSymbolAsync(bookkeeping, &hostBookkeeping, sizeof(Bookkeeping), 0,
             cudaMemcpyHostToDevice, aristosStream));
 
-        const auto functionId = 8 * ((Arch - MIN_ARCH) / 100) + 4 * (iC.numExperts > BLOCK_N) +
-            2 * iC.shouldDrop + (iC.k > 1);
         // Initialize config struct
         hostMoEConfig = Config{
             sHb + flagBytes,
             static_cast<flagsType *>(sHeap),
-            functionId,
             epRank,
             iC.k,
             iC.embedDim,
@@ -335,7 +336,7 @@ namespace aristos{
 
     template<typename Element>
     __host__ __forceinline__
-    void dispatchForwardKernel(const torch::Tensor& activations, const torch::Tensor& moeOutput,
+    void dispatchForwardKernel(const torch::Tensor& activations,
         const torch::Tensor& expertsUp, const torch::Tensor& expertsDown,
         const torch::Tensor& biasUp, const torch::Tensor& biasDown,
         const torch::Tensor& gateWeights, const torch::Tensor& gateOutput) {
@@ -397,7 +398,7 @@ namespace aristos{
         const auto tA = cute::make_tensor(cute::make_gmem_ptr(aP),
             make_layout(cute::make_shape(sl, ed),
                 cute::LayoutRight{}));
-        const auto* __restrict__ oP = moeOutput.mutable_data_ptr<Element>();
+        const auto* __restrict__ oP = activations.mutable_data_ptr<Element>();
         const auto tO = cute::make_tensor(cute::make_gmem_ptr(oP),
             make_layout(cute::make_shape(sl, ed),
                 cute::LayoutRight{}));
@@ -421,17 +422,20 @@ namespace aristos{
         const auto* __restrict__ gP = gateWeights.const_data_ptr<Element>();
         const auto tG = cute::make_tensor(cute::make_gmem_ptr(gP),
             make_layout(cute::make_shape(nx, ed), cute::LayoutRight{}));
-        const auto* __restrict__ gOp = gateWeights.const_data_ptr<Element>();
+        const auto* __restrict__ gOp = gateOutput.const_data_ptr<Element>();
         const auto tGo = cute::make_tensor(cute::make_gmem_ptr(gOp),
             make_layout(cute::make_shape(sl, px), cute::LayoutRight{}));
         // Decode function id
-        switch (hostMoEConfig.functionId) {
+        switch (hostBookkeeping.fId) {
             case 0: {
                 constexpr auto g = GateReductionLevel::singleBlock;
                 constexpr auto d = DropTokens::no;
                 constexpr auto c = CombineMode::single;
                 // Call forward pass
-                moe::forward<700, g, d, c, ElementC, Element>();
+                moe::forward<700, g, d, c, ElementC, Element><<<Hardware<700>::blocks::value, THREADS>>>(
+                    activations, expertsUp,
+                    expertsDown, biasUp, biasDown,
+                    gateWeights, gateOutput);
             }
             break;
             case 1: {
@@ -439,7 +443,9 @@ namespace aristos{
                 constexpr auto d = DropTokens::no;
                 constexpr auto c = CombineMode::multithreaded;
                 // Call forward pass
-                moe::forward<700, g, d, c, ElementC, Element>();
+                moe::forward<700, g, d, c, ElementC, Element><<<Hardware<700>::blocks::value, THREADS>>>(
+                    activations, expertsUp, expertsDown, biasUp, biasDown,
+                    gateWeights, gateOutput);
             }
             break;
             case 2: {
@@ -447,7 +453,9 @@ namespace aristos{
                 constexpr auto d = DropTokens::yes;
                 constexpr auto c = CombineMode::single;
                 // Call forward pass
-                moe::forward<700, g, d, c, ElementC, Element>();
+                moe::forward<700, g, d, c, ElementC, Element><<<Hardware<700>::blocks::value, THREADS>>>(
+                    activations, expertsUp, expertsDown, biasUp, biasDown,
+                    gateWeights, gateOutput);
             }
             break;
             case 3: {
@@ -455,7 +463,9 @@ namespace aristos{
                 constexpr auto d = DropTokens::yes;
                 constexpr auto c = CombineMode::multithreaded;
                 // Call forward pass
-                moe::forward<700, g, d, c, ElementC, Element>();
+                moe::forward<700, g, d, c, ElementC, Element><<<Hardware<700>::blocks::value, THREADS>>>(
+                    activations, expertsUp, expertsDown, biasUp, biasDown,
+                    gateWeights, gateOutput);
             }
             break;
             case 4: {
@@ -463,7 +473,9 @@ namespace aristos{
                 constexpr auto d = DropTokens::no;
                 constexpr auto c = CombineMode::single;
                 // Call forward pass
-                moe::forward<700, g, d, c, ElementC, Element>();
+                moe::forward<700, g, d, c, ElementC, Element><<<Hardware<700>::blocks::value, THREADS>>>(
+                    activations, expertsUp, expertsDown, biasUp, biasDown,
+                    gateWeights, gateOutput);
             }
             break;
             case 5: {
@@ -471,7 +483,9 @@ namespace aristos{
                 constexpr auto d = DropTokens::no;
                 constexpr auto c = CombineMode::multithreaded;
                 // Call forward pass
-                moe::forward<700, g, d, c, ElementC, Element>();
+                moe::forward<700, g, d, c, ElementC, Element><<<Hardware<700>::blocks::value, THREADS>>>(
+                    activations, expertsUp, expertsDown, biasUp, biasDown,
+                    gateWeights, gateOutput);
             }
             break;
             case 6: {
@@ -479,7 +493,9 @@ namespace aristos{
                 constexpr auto d = DropTokens::yes;
                 constexpr auto c = CombineMode::single;
                 // Call forward pass
-                moe::forward<700, g, d, c, ElementC, Element>();
+                moe::forward<700, g, d, c, ElementC, Element><<<Hardware<700>::blocks::value, THREADS>>>(
+                    activations, expertsUp, expertsDown, biasUp, biasDown,
+                    gateWeights, gateOutput);
             }
             break;
             case 7: {
@@ -487,7 +503,9 @@ namespace aristos{
                 constexpr auto d = DropTokens::yes;
                 constexpr auto c = CombineMode::multithreaded;
                 // Call forward pass
-                moe::forward<700, g, d, c, ElementC, Element>();
+                moe::forward<700, g, d, c, ElementC, Element><<<Hardware<700>::blocks::value, THREADS>>>(
+                    activations, expertsUp, expertsDown, biasUp, biasDown,
+                    gateWeights, gateOutput);
             }
             break;
             case 8: {
@@ -495,7 +513,9 @@ namespace aristos{
                 constexpr auto d = DropTokens::no;
                 constexpr auto c = CombineMode::single;
                 // Call forward pass
-                moe::forward<800, g, d, c, ElementC, Element>();
+                moe::forward<800, g, d, c, ElementC, Element><<<Hardware<>::blocks::value, THREADS>>>(
+                    activations, expertsUp, expertsDown, biasUp, biasDown,
+                    gateWeights, gateOutput);
             }
             break;
             case 9: {
@@ -503,7 +523,9 @@ namespace aristos{
                 constexpr auto d = DropTokens::no;
                 constexpr auto c = CombineMode::multithreaded;
                 // Call forward pass
-                moe::forward<800, g, d, c, ElementC, Element>();
+                moe::forward<800, g, d, c, ElementC, Element><<<Hardware<>::blocks::value, THREADS>>>(
+                    activations, expertsUp, expertsDown, biasUp, biasDown,
+                    gateWeights, gateOutput);
             }
             break;
             case 10: {
@@ -511,7 +533,9 @@ namespace aristos{
                 constexpr auto d = DropTokens::yes;
                 constexpr auto c = CombineMode::single;
                 // Call forward pass
-                moe::forward<800, g, d, c, ElementC, Element>();
+                moe::forward<800, g, d, c, ElementC, Element><<<Hardware<>::blocks::value, THREADS>>>(
+                    activations, expertsUp, expertsDown, biasUp, biasDown,
+                    gateWeights, gateOutput);
             }
             break;
             case 11: {
@@ -519,14 +543,18 @@ namespace aristos{
                 constexpr auto d = DropTokens::yes;
                 constexpr auto c = CombineMode::multithreaded;
                 // Call forward pass
-                moe::forward<800, g, d, c, ElementC, Element>();
+                moe::forward<800, g, d, c, ElementC, Element><<<Hardware<>::blocks::value, THREADS>>>(
+                    activations, expertsUp, expertsDown, biasUp, biasDown,
+                    gateWeights, gateOutput);
             }
             case 12: {
                 constexpr auto g = GateReductionLevel::multiBlock;
                 constexpr auto d = DropTokens::no;
                 constexpr auto c = CombineMode::single;
                 // Call forward pass
-                moe::forward<800, g, d, c, ElementC, Element>();
+                moe::forward<800, g, d, c, ElementC, Element><<<Hardware<>::blocks::value, THREADS>>>(
+                    activations, expertsUp, expertsDown, biasUp, biasDown,
+                    gateWeights, gateOutput);
             }
             break;
             case 13: {
@@ -534,7 +562,9 @@ namespace aristos{
                 constexpr auto d = DropTokens::no;
                 constexpr auto c = CombineMode::multithreaded;
                 // Call forward pass
-                moe::forward<800, g, d, c, ElementC, Element>();
+                moe::forward<800, g, d, c, ElementC, Element><<<Hardware<>::blocks::value, THREADS>>>(
+                    activations, expertsUp, expertsDown, biasUp, biasDown,
+                    gateWeights, gateOutput);
             }
             break;
             case 14: {
@@ -542,7 +572,9 @@ namespace aristos{
                 constexpr auto d = DropTokens::yes;
                 constexpr auto c = CombineMode::single;
                 // Call forward pass
-                moe::forward<800, g, d, c, ElementC, Element>();
+                moe::forward<800, g, d, c, ElementC, Element><<<Hardware<>::blocks::value, THREADS>>>(
+                    activations, expertsUp, expertsDown, biasUp, biasDown,
+                    gateWeights, gateOutput);
             }
             break;
             case 15: {
@@ -550,7 +582,9 @@ namespace aristos{
                 constexpr auto d = DropTokens::yes;
                 constexpr auto c = CombineMode::multithreaded;
                 // Call forward pass
-                moe::forward<800, g, d, c, ElementC, Element>();
+                moe::forward<800, g, d, c, ElementC, Element><<<Hardware<>::blocks::value, THREADS>>>(
+                    activations, expertsUp, expertsDown, biasUp, biasDown,
+                    gateWeights, gateOutput);
             }
             break;
             case 16: {
@@ -558,7 +592,9 @@ namespace aristos{
                 constexpr auto d = DropTokens::yes;
                 constexpr auto c = CombineMode::single;
                 // Call forward pass
-                moe::forward<900, g, d, c, ElementC, Element>();
+                moe::forward<900, g, d, c, ElementC, Element><<<Hardware<900>::blocks::value, THREADS>>>(
+                    activations, expertsUp, expertsDown, biasUp, biasDown,
+                    gateWeights, gateOutput);
             }
             break;
             case 17: {
@@ -566,7 +602,9 @@ namespace aristos{
                 constexpr auto d = DropTokens::yes;
                 constexpr auto c = CombineMode::multithreaded;
                 // Call forward pass
-                moe::forward<900, g, d, c, ElementC, Element>();
+                moe::forward<900, g, d, c, ElementC, Element><<<Hardware<900>::blocks::value, THREADS>>>(
+                    activations, expertsUp, expertsDown, biasUp, biasDown,
+                    gateWeights, gateOutput);
             }
             break;
             case 18: {
@@ -574,14 +612,18 @@ namespace aristos{
                 constexpr auto d = DropTokens::no;
                 constexpr auto c = CombineMode::single;
                 // Call forward pass
-                moe::forward<900, g, d, c, ElementC, Element>();
+                moe::forward<900, g, d, c, ElementC, Element><<<Hardware<900>::blocks::value, THREADS>>>(
+                    activations, expertsUp, expertsDown, biasUp, biasDown,
+                    gateWeights, gateOutput);
             }
             break;
             case 19: {
                 constexpr auto g = GateReductionLevel::singleBlock;
                 constexpr auto d = DropTokens::no;
                 constexpr auto c = CombineMode::multithreaded;
-                moe::forward<900, g, d, c, ElementC, Element>();
+                moe::forward<900, g, d, c, ElementC, Element><<<Hardware<900>::blocks::value, THREADS>>>(
+                    activations, expertsUp, expertsDown, biasUp, biasDown,
+                    gateWeights, gateOutput);
             }
             break;
             case 20: {
@@ -589,7 +631,9 @@ namespace aristos{
                 constexpr auto d = DropTokens::yes;
                 constexpr auto c = CombineMode::single;
                 // Call forward pass
-                moe::forward<900, g, d, c, ElementC, Element>();
+                moe::forward<900, g, d, c, ElementC, Element><<<Hardware<900>::blocks::value, THREADS>>>(
+                    activations, expertsUp, expertsDown, biasUp, biasDown,
+                    gateWeights, gateOutput);
             }
             break;
             case 21: {
@@ -597,7 +641,9 @@ namespace aristos{
                 constexpr auto d = DropTokens::yes;
                 constexpr auto c = CombineMode::multithreaded;
                 // Call forward pass
-                moe::forward<900, g, d, c, ElementC, Element>();
+                moe::forward<900, g, d, c, ElementC, Element><<<Hardware<900>::blocks::value, THREADS>>>(
+                    activations, expertsUp, expertsDown, biasUp, biasDown,
+                    gateWeights, gateOutput);
             }
             break;
             case 22: {
@@ -605,7 +651,9 @@ namespace aristos{
                 constexpr auto d = DropTokens::no;
                 constexpr auto c = CombineMode::single;
                 // Call forward pass
-                moe::forward<900, g, d, c, ElementC, Element>();
+                moe::forward<900, g, d, c, ElementC, Element><<<Hardware<900>::blocks::value, THREADS>>>(
+                    activations, expertsUp, expertsDown, biasUp, biasDown,
+                    gateWeights, gateOutput);
             }
             break;
             case 23: {
@@ -613,7 +661,9 @@ namespace aristos{
                 constexpr auto d = DropTokens::no;
                 constexpr auto c = CombineMode::multithreaded;
                 // Call forward pass
-                moe::forward<900, g, d, c, ElementC, Element>();
+                moe::forward<900, g, d, c, ElementC, Element><<<Hardware<900>::blocks::value, THREADS>>>(
+                    activations, expertsUp, expertsDown, biasUp, biasDown,
+                    gateWeights, gateOutput);
             }
             break;
             default:
@@ -622,7 +672,7 @@ namespace aristos{
     }
 
     __host__ __forceinline__
-    void forwardHost(const torch::Tensor& activations, const torch::Tensor& moeOutput,
+    void forwardHost(const torch::Tensor& activations,
         const torch::Tensor& expertsUp, const torch::Tensor& expertsDown,
         const torch::Tensor& biasUp, const torch::Tensor& biasDown,
         const torch::Tensor& gateWeights, const torch::Tensor& gateOutput){
@@ -630,29 +680,29 @@ namespace aristos{
         switch (activations.scalar_type()) {
             case torch::kFloat: {
                 if (at::globalContext().allowTF32CuBLAS() || at::globalContext().allowTF32CuDNN()) {
-                    dispatchForwardKernel<cute::tfloat32_t>(activations, moeOutput, expertsUp, expertsDown,
+                    dispatchForwardKernel<cute::tfloat32_t>(activations,expertsUp, expertsDown,
                         biasUp, biasDown, gateWeights, gateOutput);
                 }
                 else {
-                    dispatchForwardKernel<float>(activations, moeOutput, expertsUp, expertsDown,
+                    dispatchForwardKernel<float>(activations, expertsUp, expertsDown,
                         biasUp, biasDown, gateWeights, gateOutput);
                 }
             }
             break;
             case torch::kFloat16:
-                dispatchForwardKernel<cute::half_t>(activations, moeOutput, expertsUp, expertsDown,
+                dispatchForwardKernel<cute::half_t>(activations, expertsUp, expertsDown,
                     biasUp, biasDown, gateWeights, gateOutput);
             break;
             case torch::kBFloat16:
-                dispatchForwardKernel<cute::bfloat16_t>(activations, moeOutput, expertsUp, expertsDown,
+                dispatchForwardKernel<cute::bfloat16_t>(activations, expertsUp, expertsDown,
                     biasUp, biasDown, gateWeights, gateOutput);
             break;
             case torch::kFloat8_e4m3fn:
-                dispatchForwardKernel<cute::float_e4m3_t>(activations, moeOutput, expertsUp, expertsDown,
+                dispatchForwardKernel<cute::float_e4m3_t>(activations,expertsUp, expertsDown,
                     biasUp, biasDown, gateWeights, gateOutput);
             break;
             case torch::kFloat8_e5m2:
-                dispatchForwardKernel<cute::float_e5m2_t>(activations, moeOutput, expertsUp, expertsDown,
+                dispatchForwardKernel<cute::float_e5m2_t>(activations, expertsUp, expertsDown,
                     biasUp, biasDown, gateWeights, gateOutput);
             break;
             default:
