@@ -244,8 +244,8 @@ namespace aristos{
         globalBatch(_globalBatch),
         miniBatch(_miniBatch),
         moeFrequency(_moeFreq),
-        seqLen(_seqLen),
-        embedDim(_embedDim),
+        seqLen(_seqLen * miniBatch), // s * b
+        embedDim(_embedDim), // h
         hiddenProjDim(_hiddenProjDim),
         k(_k), capacityFactor(_capacityFactor),
         numExperts(_numExperts),

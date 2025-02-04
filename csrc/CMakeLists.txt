@@ -188,6 +188,10 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
             $<$<COMPILE_LANGUAGE:CXX>:-Og;-g;>
             $<$<COMPILE_LANGUAGE:CUDA>:-O0; -g; -G>
     )
+    target_compile_definitions(csrc
+            PRIVATE
+            CHECK_TENSORS=1
+    )
 elseif(CMAKE_BUILD_TYPE STREQUAL "Release")
     target_compile_options(csrc PRIVATE
             $<$<COMPILE_LANGUAGE:CXX>:-O3>

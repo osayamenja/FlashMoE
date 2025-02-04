@@ -336,27 +336,66 @@ namespace aristos{
     template<typename Element>
     __host__ __forceinline__
     void dispatchForwardKernel(const torch::Tensor& activations,
-        const torch::Tensor& experts, const torch::Tensor& bias,
+        const torch::Tensor& expertsUp, const torch::Tensor& expertsDown,
+        const torch::Tensor& biasUp, const torch::Tensor& biasDown,
         const torch::Tensor& gateWeights, const torch::Tensor& gateOutput) {
-        TORCH_CHECK(activations.scalar_type() == experts.scalar_type());
-        TORCH_CHECK(activations.scalar_type() == bias.scalar_type());
+#if CHECK_TENSORS
+        TORCH_CHECK(activations.scalar_type() == expertsUp.scalar_type());
+        TORCH_CHECK(activations.scalar_type() == expertsDown.scalar_type());
+        TORCH_CHECK(activations.scalar_type() == biasUp.scalar_type());
+        TORCH_CHECK(activations.scalar_type() == biasDown.scalar_type());
         TORCH_CHECK(activations.scalar_type() == gateWeights.scalar_type());
         TORCH_CHECK(activations.scalar_type() == gateOutput.scalar_type());
 
         TORCH_CHECK(activations.is_contiguous())
-        TORCH_CHECK(experts.is_contiguous())
-        TORCH_CHECK(bias.is_contiguous())
+        TORCH_CHECK(expertsUp.is_contiguous())
+        TORCH_CHECK(expertsDown.is_contiguous())
+        TORCH_CHECK(biasUp.is_contiguous())
+        TORCH_CHECK(biasDown.is_contiguous())
         TORCH_CHECK(gateWeights.is_contiguous())
         TORCH_CHECK(gateOutput.is_contiguous())
 
-        TORCH_INTERNAL_ASSERT(activations.device().type() == at::DeviceType::CUDA);
-        TORCH_INTERNAL_ASSERT(experts.device().type() == at::DeviceType::CUDA);
-        TORCH_INTERNAL_ASSERT(bias.device().type() == at::DeviceType::CUDA);
-        TORCH_INTERNAL_ASSERT(gateWeights.device().type() == at::DeviceType::CUDA);
-        TORCH_INTERNAL_ASSERT(gateOutput.device().type() == at::DeviceType::CUDA);
+        TORCH_CHECK(activations.is_cuda());
+        TORCH_CHECK(expertsUp.is_cuda());
+        TORCH_CHECK(expertsDown.is_cuda());
+        TORCH_CHECK(biasUp.is_cuda());
+        TORCH_CHECK(biasDown.is_cuda());
+        TORCH_CHECK(gateWeights.is_cuda());
+        TORCH_CHECK(gateOutput.is_coalesced());
+
+        TORCH_CHECK(activations.sizes()[0] == hostMoEConfig.seqLen
+            && activations.sizes()[1] == hostMoEConfig.embedDim);
+        TORCH_CHECK(gateWeights.size(0) == hostMoEConfig.numExperts
+            && gateWeights.size(1) == hostMoEConfig.embedDim)
+        TORCH_CHECK(gateOutput.size(0) == hostMoEConfig.seqLen
+            && gateWeights.size(1) == hostBookkeeping.px)
+
+        const auto eSzU = expertsUp.sizes();
+        const auto eSzD = expertsDown.sizes();
+        TORCH_CHECK(eSzU.size() == 3 && eSzD.size() == 3);
+        TORCH_CHECK(eSzU[0] == hostBookkeeping.nLx &&
+            eSzD[0] == hostBookkeeping.nLx);
+        // Weights are already transposed in memory
+        TORCH_CHECK(eSzU[1] == hostMoEConfig.upProjection &&
+            eSzD[1] == hostMoEConfig.embedDim);
+        TORCH_CHECK(eSzU[2] == hostMoEConfig.embedDim &&
+            eSzD[3] == hostMoEConfig.upProjection);
+        const auto bSzU = biasUp.sizes();
+        const auto bSzD = biasDown.sizes();
+        TORCH_CHECK(bSzU.size() == 2 && bSzD.size() == 2);
+        TORCH_CHECK(bSzU[0] == hostBookkeeping.nLx
+            && bSzD[0] == hostBookkeeping.nLx);
+        TORCH_CHECK(bSzU[1] == hostMoEConfig.upProjection
+            && bSzD[1] == hostMoEConfig.embedDim);
+#endif
 
         // Now construct cute tensors
-        using ElementC = float; // accumulate type
+        using ElementC = mp_t; // accumulate type
+
+        // Activations
+        const auto* __restrict__ aP = activations.const_data_ptr<Element>();
+        const auto tA = cute::make_tensor(cute::make_gmem_ptr(aP),
+            make_layout(cute::make_shape()));
         // Decode function id
         switch (hostMoEConfig.functionId) {
             case 0: {
@@ -556,32 +595,37 @@ namespace aristos{
 
     __host__ __forceinline__
     void forwardHost(const torch::Tensor& activations,
-        const torch::Tensor& experts, const torch::Tensor& bias,
+        const torch::Tensor& expertsUp, const torch::Tensor& expertsDown,
+        const torch::Tensor& biasUp, const torch::Tensor& biasDown,
         const torch::Tensor& gateWeights, const torch::Tensor& gateOutput){
-        // This function would likely be called frequently--per layer per iteration--thus, we elide the error check.
-        // Of course, calling this function without initializing the aristos runtime yields undefined behavior.
-        // reportError(isInitialized, "Not initialized")
+        reportError(isInitialized, "Not initialized");
         switch (activations.scalar_type()) {
             case torch::kFloat: {
                 if (at::globalContext().allowTF32CuBLAS() || at::globalContext().allowTF32CuDNN()) {
-                    dispatchForwardKernel<cute::tfloat32_t>(activations, experts, bias, gateWeights, gateOutput);
+                    dispatchForwardKernel<cute::tfloat32_t>(activations, expertsUp, expertsDown,
+                        biasUp, biasDown, gateWeights, gateOutput);
                 }
                 else {
-                    dispatchForwardKernel<float>(activations, experts, bias, gateWeights, gateOutput);
+                    dispatchForwardKernel<float>(activations, expertsUp, expertsDown,
+                        biasUp, biasDown, gateWeights, gateOutput);
                 }
             }
             break;
             case torch::kFloat16:
-                dispatchForwardKernel<cute::half_t>(activations, experts, bias, gateWeights, gateOutput);
+                dispatchForwardKernel<cute::half_t>(activations, expertsUp, expertsDown,
+                    biasUp, biasDown, gateWeights, gateOutput);
             break;
             case torch::kBFloat16:
-                dispatchForwardKernel<cute::bfloat16_t>(activations, experts, bias, gateWeights, gateOutput);
+                dispatchForwardKernel<cute::bfloat16_t>(activations, expertsUp, expertsDown,
+                    biasUp, biasDown, gateWeights, gateOutput);
             break;
             case torch::kFloat8_e4m3fn:
-                dispatchForwardKernel<cute::float_e4m3_t>(activations, experts, bias, gateWeights, gateOutput);
+                dispatchForwardKernel<cute::float_e4m3_t>(activations, expertsUp, expertsDown,
+                    biasUp, biasDown, gateWeights, gateOutput);
             break;
             case torch::kFloat8_e5m2:
-                dispatchForwardKernel<cute::float_e5m2_t>(activations, experts, bias, gateWeights, gateOutput);
+                dispatchForwardKernel<cute::float_e5m2_t>(activations, expertsUp, expertsDown,
+                    biasUp, biasDown, gateWeights, gateOutput);
             break;
             default:
                 reportError(false, "Not supported!");
