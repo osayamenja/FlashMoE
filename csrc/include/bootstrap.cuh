@@ -21,9 +21,27 @@
 #include "types.cuh"
 #include "moe/moe.cuh"
 #include "moe/expert.cuh"
+#include "os/decider/decider.cuh"
+#include "os/decider/comps/expert.cuh"
+#include "os/decider/comps/niche.cuh"
+#include "os/decider/comps/worker.cuh"
 
 #define SUPPORTED = 1;
 namespace aristos{
+    // Expert Parallel Group details
+    struct __align__(8) EPG {
+        uint16_t epRank;
+        uint16_t expertSlots;
+        uint16_t nLx;
+        uint16_t epWorld;
+
+        EPG(const uint16_t& _epR,
+            const uint16_t& _eS,
+            const uint16_t& _nLx,
+            const uint16_t& _epW):
+        epRank(_epR), expertSlots(_eS), nLx(_nLx), epWorld(_epW) {}
+    };
+
     template<typename Element>
     __host__ __forceinline__
     void estimateMemory(const InitialConfig& iC, WorkerAttribute* __restrict__ const& dWa) {
@@ -56,9 +74,6 @@ namespace aristos{
         const auto abcBSSize = abcBSize + eS * M; // scale/combine weights
         CHECK_ERROR_EXIT(cudaMallocAsync(&abc, abcBSSize, aristosStream));
         CHECK_ERROR_EXIT(cudaMemsetAsync(abc, 0, abcBSSize, aristosStream));
-
-        // memcpy to device memory
-
         auto* __restrict__ p = CAST_TO(uint, abc);
         const auto pS = cute::make_tuple(M, N, K);
         using Activation = cutlass::epilogue::thread::ReLU<Element>;
@@ -117,8 +132,19 @@ namespace aristos{
     }
 
     __host__ __forceinline__
-    decltype(auto) runDecider(const InitialConfig& iC, const floatPair* __restrict__ const& aP,
-        const WorkerAttribute* __restrict__ const& attributes, const uint& rank, const uint& world) {
+    void runDecider(const InitialConfig& iC,
+        EPG* __restrict__ const& ePg,
+        Expert* __restrict__ const& experts,
+        Worker* __restrict__ const& wG,
+        Worker* __restrict__ const& ePwG,
+        uint* __restrict__ const& pT,
+        uint* __restrict__ const& pTs,
+        uint* __restrict__ const& ePs,
+        uint* __restrict__ const& ePsX,
+        uint16_t* __restrict__ const& scratch, // assume zeroed out
+        const floatPair* __restrict__ const& aP,
+        const WorkerAttribute* __restrict__ const& attributes,
+        const uint& rank, const uint& world) {
         const auto mC = ModelConfig{
             iC.numLayers,
             iC.redAmount,
@@ -128,44 +154,49 @@ namespace aristos{
             iC.p2pBuffer,
             iC.gradBuffer,
         };
-        std::vector<Worker> workers(world);
-        for (uint i = 0; i < workers.size(); ++i) {
+
+        for (uint i = 0; i < world; ++i) {
             const auto [t, m] = attributes[i];
-            workers.emplace_back(i, t, m);
+            wG[i] = Worker{i, t, m};
         }
         const auto adj = make_tensor(aP, make_layout(cute::make_shape(world, world), cute::LayoutRight{}));
-        const auto dTg = decider::decide(adj, workers, iC.numExperts,
+        const auto dTg = decider::decide(adj, wG, iC.numExperts,
             iC.numExperts, mC);
-        const auto peerTranslation = subsets(dTg, rank);
-        std::vector<Expert> experts(iC.numExperts);
+        const auto epWorld = subsets(dTg, pT, rank);
         for (uint i = 0; i < iC.numExperts; ++i) {
             // assuming homogenous experts, where each has normalized compute cost of 1
-            experts.emplace_back(i, 1);
+            experts[i] = Expert{i, 1};
         }
-        std::vector<Worker> expertParallelGroup(peerTranslation.size());
-        auto epRank = 0U;
-        for (uint i = 0; i < expertParallelGroup.size(); ++i) {
-            const auto wRank = peerTranslation[i];
+        // repurpose memory as the expert parallel group
+        uint16_t epRank = 0U;
+        for (uint i = 0; i < epWorld; ++i) {
+            const auto wRank = pT[i];
             if (wRank == rank) {
                 epRank = i;
             }
-            expertParallelGroup.emplace_back(i, workers[wRank].processingRate, workers[wRank].memoryCapacity);
+            ePwG[i] = Worker{i, wG[wRank].processingRate, wG[wRank].memoryCapacity};
         }
-        const auto assignment = decider::assign(experts, expertParallelGroup);
-        std::vector<uint> scratch(world);
-        std::ranges::fill(scratch.begin(), scratch.end(), 0U);
-        auto expertSlots = 0U;
+        decider::assign(ePwG, epWorld, experts, iC.numExperts, ePs);
+        uint16_t expertSlots = 0U;
         // compute expert slots for our group
-        for (const auto &i : assignment) {
-            const auto tally = scratch[i] + 1;
-            scratch[i] = tally;
+        for (uint16_t i = 0; i < iC.numExperts; ++i) {
+            const auto wIdx = ePs[i];
+            const uint16_t tally = scratch[wIdx] + 1U;
+            scratch[wIdx] = tally;
             expertSlots = cuda::std::max(tally, expertSlots);
         }
         auto numLocalExperts = scratch[epRank];
-        if (peerTranslation.size() == world) {
+        *ePg = EPG{
+            epRank,
+            expertSlots,
+            numLocalExperts,
+            epWorld
+        };
+        if (epWorld == world) {
             // everyone is in one group; thus, we end early
             // peer translation, sharding spec, expert slots
-            return cuda::std::tuple{peerTranslation, assignment, epRank, expertSlots, numLocalExperts};
+            //return cuda::std::tuple{peerTranslation, assignment, epRank, expertSlots, numLocalExperts};
+            return;
         }
         // Get other group ids
         std::unordered_set<uint> groups{};
@@ -175,22 +206,25 @@ namespace aristos{
         const auto myGroup = dTg[rank];
         for (const auto& group : groups) {
             if (group != myGroup) {
-                std::ranges::fill(scratch.begin(), scratch.end(), 0U);
-                const auto oPt = subsets(dTg, group);
-                std::vector<Worker> ePG(oPt.size());
-                for (uint i = 0; i < ePG.size(); ++i) {
-                    const auto wRank = oPt[i];
-                    ePG.emplace_back(wRank, workers[wRank].processingRate,
-                        workers[wRank].memoryCapacity);
+                std::ranges::fill(scratch, scratch + world, 0U);
+                const auto ePw = subsets(dTg, pTs, group);
+                for (uint i = 0; i < ePw; ++i) {
+                    const auto wRank = pTs[i];
+                    ePwG[i] = Worker{
+                        wRank,
+                        wG[wRank].processingRate,
+                        wG[wRank].memoryCapacity
+                    };
                 }
-                for (const auto &i : decider::assign(experts, expertParallelGroup)) {
-                    const auto tally = scratch[i] + 1;
-                    scratch[i] = tally;
+                decider::assign(ePwG, epWorld, experts, iC.numExperts, ePsX);
+                for (uint16_t i = 0; i < iC.numExperts; ++i) {
+                    const auto wIdx = ePsX[i];
+                    const uint16_t tally = scratch[wIdx] + 1U;
+                    scratch[wIdx] = tally;
                     expertSlots = cuda::std::max(tally, expertSlots);
                 }
             }
         }
-        return cuda::std::tuple{peerTranslation, assignment, epRank, expertSlots, numLocalExperts};
     }
 
     template<unsigned int Arch, typename Element>
@@ -205,35 +239,52 @@ namespace aristos{
 
         // Pointer to adjacency matrix and throughput of all devices
         const auto aD = globalWorld * globalWorld;
-        auto* aP = std::calloc(globalWorld * globalWorld * sizeof(floatPair) +
-            globalWorld * sizeof(WorkerAttribute), sizeof(cuda::std::byte));
-        // measure device throughput
-        auto* hA = static_cast<floatPair*>(aP);
-        auto* wAp = CAST_TO(WorkerAttribute, hA + aD);
+        const auto dZ = sizeof(EPG) + 2 * sizeof(Worker) * globalWorld + sizeof(Expert) * iC.numExperts;
+        const auto sZ = sizeof(uint) * (3 * globalWorld + 2 * iC.numExperts);
+        // allocate all memory in one go
+        auto* mP = static_cast<cuda::std::byte*>(std::calloc(dZ + aD * sizeof(floatPair) +
+            globalWorld * sizeof(WorkerAttribute) + sZ, sizeof(cuda::std::byte)));
+        // Pointer salami slicing
+        auto* ePg = CAST_TO(EPG, mP);
+        auto* workers = CAST_TO(Worker, mP + sizeof(EPG));
+        auto* ePWorkers = workers + globalWorld;
+        static_assert(sizeof(Worker) >= sizeof(Expert));
+        auto* experts = CAST_TO(Expert, mP + sizeof(Worker) + globalWorld);
+        static_assert(sizeof(Expert) >= sizeof(floatPair));
+        auto* aP = CAST_TO(floatPair, mP + dZ);
+        static_assert(sizeof(floatPair) >= sizeof(WorkerAttribute));
+        auto* wAp = CAST_TO(WorkerAttribute, aP + aD);
+        static_assert(sizeof(WorkerAttribute) >= sizeof(BookType));
+        auto* scratch = CAST_TO(uint16_t, wAp + globalWorld);
+        auto* pT = CAST_TO(uint, scratch + globalWorld);
+        auto* pTs = pT + globalWorld; // scratch
+        auto* ePs = pTs + globalWorld;
+        auto* ePsX = ePs + iC.numExperts; // scratch
+
         estimateMemory<Element>(&wAp[rank]);
         measureThroughput<Arch, Element>(wAp + rank, iC.seqLen, iC.hiddenProjDim, iC.embedDim);
         discoverTopology(aP, globalWorld, globalWorld, wAp[rank]);
 
         // The topology adjacency matrix is ready, let's map devices to optimal cooperative process groups
-        const auto [peerT, epSpec, epRank,
-            expertSlots, numLocalExperts] = runDecider(iC, hA, wAp, rank, globalWorld);
-
+        runDecider(iC, ePg, experts, workers, ePWorkers, pT, pTs, ePs, ePsX,
+            scratch, aP, wAp, rank, globalWorld);
+        const auto ePgD = *ePg;
         // Now allocate memory
         /// Symmetric memory
-        const uint epWorld = peerT.size();
-        const auto eCap = iC.shouldDrop? iC.expertCapacity(epWorld) : iC.seqLen;
-        const auto heapBytes = STAGES * CELLS * epWorld * expertSlots * eCap * iC.embedDim * sizeof(Element);
+        const auto eCap = iC.shouldDrop? iC.expertCapacity(ePgD.epWorld) : iC.seqLen;
+        const auto heapBytes = STAGES * CELLS * ePgD.epWorld * ePgD.expertSlots * eCap * iC.embedDim * sizeof(Element);
         const auto tMc = Bookkeeping::tiles<BLOCK_M>(eCap);
         const auto tN = Bookkeeping::tiles<BLOCK_N>(iC.embedDim);
-        const auto flagBytes = (epWorld * numLocalExperts + iC.numExperts * tMc * tN) * sizeof(flagsType);
+        const auto flagBytes = (ePgD.epWorld * ePgD.nLx + iC.numExperts * tMc * tN) * sizeof(flagsType);
         auto* sHeap = nvshmem_calloc(flagBytes + heapBytes, sizeof(cuda::std::byte));
+        
         auto* sHb = static_cast<cuda::std::byte*>(sHeap);
 
         // local bookkeeping memory
         constexpr auto blocks = Hardware<Arch>::blocks::value - 1U;
         const auto bookSize = Bookkeeping::bookLength(iC.seqLen,
-            iC.numExperts, numLocalExperts, iC.hiddenProjDim,
-            iC.embedDim, eCap, blocks, epWorld, sizeof(Element));
+            iC.numExperts, ePgD.nLx, iC.hiddenProjDim,
+            iC.embedDim, eCap, blocks, ePgD.epWorld, sizeof(Element));
 
         cuda::std::byte* book;
         CHECK_ERROR_EXIT(cudaMallocAsync(&book, bookSize, aristosStream));
@@ -247,18 +298,26 @@ namespace aristos{
             book,
             iC.seqLen * iC.miniBatch,
             iC.numExperts,
-            numLocalExperts,
-            expertSlots,
-            epRank,
+            ePgD.nLx,
+            ePgD.expertSlots,
+            ePgD.epRank,
             iC.hiddenProjDim,
             iC.embedDim,
             eCap,
             blocks,
-            epWorld,
+            ePgD.epWorld,
             functionId,
             sizeof(Element)
         };
-        auto hB = new cuda::barrier<cuda::thread_scope_device>{blocks};
+        // copy peer translation and parallelism spec to device memory
+        CHECK_ERROR_EXIT(cudaMemcpyAsync(hostBookkeeping.pT(), pT,
+            sizeof(BookType) * ePgD.epWorld, cudaMemcpyHostToDevice, aristosStream));
+        CHECK_ERROR_EXIT(cudaMemcpyAsync(hostBookkeeping.ePs(), ePs,
+            sizeof(BookType) * iC.numExperts, cudaMemcpyHostToDevice, aristosStream));
+        // Construct eD and eLs and compute nRx
+        // eLs
+
+        const auto hB = new cuda::barrier<cuda::thread_scope_device>{blocks};
         CHECK_ERROR_EXIT(cudaMemcpyAsync(hostBookkeeping.dB(), hB, sizeof(cuda::barrier<cuda::thread_scope_device>),
             cudaMemcpyHostToDevice, aristosStream));
         CHECK_ERROR_EXIT(cudaMemcpyToSymbolAsync(bookkeeping, &hostBookkeeping, sizeof(Bookkeeping), 0,

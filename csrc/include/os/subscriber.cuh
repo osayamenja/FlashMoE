@@ -17,15 +17,14 @@ namespace aristos::subscriber{
     template<
         unsigned int wSet = 16U,
         unsigned int subscriberCount = SUBSCRIBERS,
-        typename ExpertsTensor,
-        typename BiasTensor,
         typename Activations,
-        typename Element = typename ExpertsTensor::value_type
+        typename ExpertsUp,
+        typename ExpertsDown,
+        typename BiasUp,
+        typename BiasDown,
+        typename Element = typename Activations::value_type
     >
-    requires(cuda::std::is_same_v<typename ExpertsTensor::value_type, typename BiasTensor::value_type>
-        && aristos::Tensor<ExpertsTensor>
-        && aristos::Matrix<BiasTensor> && aristos::Matrix<Activations> && cutlass::ispow2(wSet)
-        && wSet > 1 && wSet <= 32)
+    requires(cutlass::ispow2(wSet) && wSet > 1 && wSet <= 32)
     __device__ __forceinline__
     void start(cuda::std::byte* __restrict__ const& workspace,
         unsigned int* __restrict__ const& interrupt,
@@ -37,20 +36,17 @@ namespace aristos::subscriber{
         unsigned int* __restrict__ const& status, // shared
         unsigned int* __restrict__ const& taskCount,
         Activations const& activations,
-        ExpertsTensor const& experts,
-        BiasTensor const& biasT,
+        ExpertsUp const& expertsUp,
+        ExpertsDown const& expertsDown,
+        BiasUp const& biasUp,
+        BiasDown const& biasDown,
         const uint16_t& lSeqBit){
         // offset due to warp specialization for the scheduler
         const auto tIdx = threadIdx.x - WARP_SIZE;
         static_assert(sizeof(unsigned long long int) == sizeof(flagsType));
         static_assert(sizeof(SignalPayload<>) == sizeof(uint64_t));
         static_assert(sizeof(SignalPayload<PacketStage::last>) == sizeof(uint64_t));
-        /*assert(__isShared(workspace) &&
-            __isShared(&mC) && // faster to retrieve from shared than constant memory due to strewn accesses
-            __isShared(&sC) &&
-            __isShared(interrupt) &&
-            __isShared(status) && __isShared(taskCount));*/
-
+        // Register allocation
         const auto dA = packet::DecoderArg{
             bookkeeping.sHeap,
             bookkeeping.tQ(),
@@ -75,6 +71,7 @@ namespace aristos::subscriber{
         auto lTQHead = 0U; // local tQ Head
 
         // pointers
+        //each thread gets 64 bytes of workspace
         auto* __restrict__ sharedSpace = CAST_TO(unsigned int, workspace);
         auto* __restrict__ sFlags = bookkeeping.flags;
         auto* __restrict__ pGB = bookkeeping.xM<Element>(); // post GEMM buffer
@@ -89,16 +86,16 @@ namespace aristos::subscriber{
         auto fSp = fSl; // first stage pending
 
         // second stage: remote
-        const auto tilesMc = Bookkeeping::tiles<BLOCK_M>(dA.eCap);
-        const auto sRfC = rEl * tilesMc * dA.tN;
+        const auto tCM = bookkeeping.tCM;
+        const auto sRfC = rEl * tCM;
         const auto sRl = sRfC / subscriberCount + (tIdx < sRfC % subscriberCount);
         const auto sRt = sRl / wSet;
 
         // second stage: p2p
-        const auto sPfC = (dA.nx - rEl) * tilesMc * dA.tN;
+        const auto sPfC = (dA.nx - rEl) * tCM * dA.tN;
         const auto sPl = sPfC / subscriberCount + (tIdx < sPfC % subscriberCount);
         const auto sPt = sPl / wSet;
-        const auto iPfS = cute::make_shape(tilesMc, dA.tN);
+        const auto iPfS = cute::make_shape(tCM, dA.tN);
         const auto fS = make_shape(dA.nx - rEl, iPfS);
         const auto fStride = make_stride(size(iPfS), cute::make_stride(dA.tN, 1));
 
@@ -146,12 +143,12 @@ namespace aristos::subscriber{
                                 auto expertIdx = flagIdx % nLx;
                                 auto peerIdx = flagIdx / nLx;
                                 cuda::std::array weights{
-                                    CAST_TO(cuda::std::byte, &experts(expertIdx, 0)),
-                                    CAST_TO(cuda::std::byte, &experts(expertIdx, 1))
+                                    CAST_TO(cuda::std::byte, &expertsUp(expertIdx)),
+                                    CAST_TO(cuda::std::byte, &expertsDown(expertIdx))
                                 };
                                 cuda::std::array bias{
-                                    CAST_TO(cuda::std::byte, &biasT(expertIdx, 0)),
-                                    CAST_TO(cuda::std::byte, &biasT(expertIdx, 1))
+                                    CAST_TO(cuda::std::byte, &biasUp(expertIdx)),
+                                    CAST_TO(cuda::std::byte, &biasDown(expertIdx))
                                 };
                                 auto* __restrict__ packet = heap::advance<0, 1, sizeof(Element)>(dA.sHeap, dA.cellSize,
                                     dA.expertSlots, dA.tokenSize, peerIdx, expertIdx);
@@ -166,9 +163,9 @@ namespace aristos::subscriber{
                                 else {
                                     // Remote peer
                                     // Below enforces consistency
-                                    // before reading the packet
-                                    // we cannot decouple the API, unfortunately,
-                                    // as the consistency function is internal.
+                                    // before reading the packet.
+                                    // We cannot decouple the API, unfortunately,
+                                    // as the memory ordering mechanism is internal.
                                     nvshmem_ushort_test(&sP->seqBit, NVSHMEM_CMP_EQ, lSeqBit);
                                     fRd(dA, packet, status, taskCount, sP->routedTokens, sP->totalTilesM,
                                         expertIdx, pGB, weights, bias, peerIdx, lTQHead, tQHead);
@@ -208,12 +205,12 @@ namespace aristos::subscriber{
                                 auto expertIdx = flagIdx % nLx;
                                 auto peerIdx = flagIdx / nLx;
                                 cuda::std::array weights{
-                                    CAST_TO(cuda::std::byte, &experts(expertIdx, 0)),
-                                    CAST_TO(cuda::std::byte, &experts(expertIdx, 1))
+                                    CAST_TO(cuda::std::byte, &expertsUp(expertIdx)),
+                                    CAST_TO(cuda::std::byte, &expertsDown(expertIdx))
                                 };
                                 cuda::std::array bias{
-                                    CAST_TO(cuda::std::byte, &biasT(expertIdx, 0)),
-                                    CAST_TO(cuda::std::byte, &biasT(expertIdx, 1))
+                                    CAST_TO(cuda::std::byte, &biasUp(expertIdx)),
+                                    CAST_TO(cuda::std::byte, &biasDown(expertIdx))
                                 };
 
                                 if (auto* packet = heap::advance<0, 1, sizeof(Element)>(dA.sHeap, dA.cellSize,
@@ -275,7 +272,7 @@ namespace aristos::subscriber{
                         if (rWSet[j]) {
                             // enforce remote memory consistency
                             nvshmem_ushort_test(&sP->seqBit, NVSHMEM_CMP_EQ, lSeqBit);
-                            const auto [aEIdx, lEIdx, pIdx] = rE[flagIdx / tilesMc];
+                            const auto [aEIdx, lEIdx, pIdx] = rE[flagIdx / tCM];
                             auto* __restrict__ packet = heap::advance<1, 1, sizeof(Element)>(dA.sHeap, dA.cellSize,
                                 dA.expertSlots, dA.tokenSize, pIdx, lEIdx, sP->batchIdx * BLOCK_M);
                             lRd(dA, packet, CAST_TO(cuda::std::byte, tokenIds + (aEIdx * dA.eCap + sP->batchIdx * BLOCK_M)),
@@ -310,7 +307,7 @@ namespace aristos::subscriber{
                         if (rWSet[j]) {
                             // enforce remote memory consistency
                             nvshmem_ushort_test(&sP->seqBit, NVSHMEM_CMP_EQ, lSeqBit);
-                            const auto [aEIdx, lEIdx, pIdx] = rE[flagIdx / tilesMc];
+                            const auto [aEIdx, lEIdx, pIdx] = rE[flagIdx / tCM];
                             auto* __restrict__ packet = heap::advance<1, 1, sizeof(Element)>(dA.sHeap, dA.cellSize,
                                 dA.expertSlots, dA.tokenSize,
                                 pIdx, lEIdx, sP->batchIdx * BLOCK_M);

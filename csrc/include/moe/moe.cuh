@@ -5,6 +5,8 @@
 #ifndef ARISTOS_MOE_CUH
 #define ARISTOS_MOE_CUH
 
+#include <ATen/core/interned_strings.h>
+
 #include "gate.cuh"
 #include "../os/os.cuh"
 
@@ -68,7 +70,8 @@ namespace aristos::moe{
                 ActivationOpX>(CAST_TO(ElementD, workspace, rSb));
         }
         else {
-            os::start<processors, d>();
+            os::start<processors, d>(workspace, activations,
+                expertsUp, expertsDown, biasUp, biasDown, sb);
         }
     }
 

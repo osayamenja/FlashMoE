@@ -5,18 +5,18 @@
 #ifndef CSRC_EXPERT_CUH
 #define CSRC_EXPERT_CUH
 namespace aristos{
-    struct Expert{
+    struct __align__(8) Expert{
         unsigned int id;
-        unsigned int cost;
-        unsigned int memoryDemand = 1U; // experimental feature for heterogeneous experts
+        uint16_t cost;
+        uint16_t memoryDemand = 1U; // experimental feature for heterogeneous experts
 
-        Expert(const unsigned int& _id, const unsigned int& _cost):
-                id(_id), cost(_cost){};
+        Expert(const uint& _id, const uint16_t& _cost):
+                id(_id), cost(_cost){}
 
         /// Sentinel
-        explicit Expert(const unsigned int& _cost){
+        explicit Expert(const uint16_t& _cost){
             cost = _cost;
-            id = 0;
+            id = 0U;
         }
 
         __forceinline__
@@ -56,9 +56,10 @@ namespace aristos{
                    + ", \"MemoryDemand\": " + std::to_string(memoryDemand) + "}";
         }
 
-        __forceinline__ static Expert closest(const Expert& left, const Expert& right, const unsigned int& val){
-            const auto leftMargin = val > left.cost ? val - left.cost : left.cost - val;
-            const auto rightMargin = val > right.cost ? val - right.cost : right.cost - val;
+        __forceinline__
+        static Expert closest(const Expert& left, const Expert& right, const uint16_t& val){
+            const uint16_t leftMargin = val > left.cost ? val - left.cost : left.cost - val;
+            const uint16_t rightMargin = val > right.cost ? val - right.cost : right.cost - val;
             return leftMargin <= rightMargin? left : right;
         }
     };

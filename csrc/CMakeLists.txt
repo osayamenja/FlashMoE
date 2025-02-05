@@ -185,7 +185,7 @@ target_compile_options(csrc PRIVATE
 )
 target_compile_definitions(csrc
         PRIVATE
-        CHECK_TENSORS=1
+        CHECK_TENSORS=0
 )
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_compile_options(csrc PRIVATE

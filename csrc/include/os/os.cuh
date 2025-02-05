@@ -15,16 +15,20 @@ namespace aristos::os {
     template<
         unsigned int processors,
         DropTokens d = DropTokens::yes,
-        typename ExpertsTensor,
-        typename BiasTensor,
-        typename Activations
+        typename Activations,
+        typename ExpertsUp,
+        typename ExpertsDown,
+        typename BiasUp,
+        typename BiasDown
     >
     __device__ __forceinline__
     void start(cuda::std::byte* __restrict__ const& workspace,
         Activations const& activations,
-        ExpertsTensor const& experts,
-        BiasTensor const& biasT,
-        const uint16_t& lSeqBit) {
+        ExpertsUp const& expertsUp,
+        ExpertsDown const& expertsDown,
+        BiasUp const& biasUp,
+        BiasDown const& biasDown,
+        const uint8_t& lSeqBit) {
         // each subscriber thread gets 64 bytes of workspace
         constexpr auto wSet = 16U; // working set size
         constexpr auto subscriberCount = THREADS - 32;
@@ -33,8 +37,8 @@ namespace aristos::os {
         const auto* __restrict__ eC = bookkeeping.eC();
         const auto* __restrict__ gPT = bookkeeping.pT();
         const auto* __restrict__ eD = bookkeeping.eD();
-        const auto nRx = *bookkeeping.nRx();
-        const auto tNx = Config::tiles<BLOCK_N>(bookkeeping.pd);
+        const auto nRx = __ldg(bookkeeping.nRx());
+        const auto tNx = Bookkeeping::tiles<BLOCK_N>(bookkeeping.pd);
         const auto tN = bookkeeping.tN;
         const auto eCap = bookkeeping.eCap;
         const auto world = bookkeeping.world;
@@ -48,7 +52,7 @@ namespace aristos::os {
         __syncthreads();
         // compute taskBound
         for (uint i = threadIdx.x; i < nx; i += THREADS) {
-            const auto eCt = Config::tiles<BLOCK_M>(d == DropTokens::yes ? cute::min(eCs[i], eCap)
+            const auto eCt = Bookkeeping::tiles<BLOCK_M>(d == DropTokens::yes ? cute::min(eCs[i], eCap)
                 : eCs[i]);
             atomicAdd_block(taskBound, eCt * tN);
             #pragma unroll 4
@@ -85,7 +89,7 @@ namespace aristos::os {
         if (threadIdx.x / WARP_SIZE == 0) {
             // scheduler
             const auto gtQCl = bookkeeping.gtQCl;
-            const auto tQRl = cute::ceil_div(gtQCl * Config::tiles<BLOCK_N>(bookkeeping.pd),
+            const auto tQRl = cute::ceil_div(gtQCl * Bookkeeping::tiles<BLOCK_N>(bookkeeping.pd),
                 subscriberCount);
             auto* __restrict__ gtQHeads = bookkeeping.tQH();
             auto* __restrict__ sQ = bookkeeping.tQS();
@@ -96,7 +100,7 @@ namespace aristos::os {
         else {
             // subscriber
             subscriber::start(workspace, interrupt, pT, xD, xD + nRx, nRx, status,
-                taskBound, activations, experts, biasT, lSeqBit);
+                taskBound, activations, expertsUp, expertsDown, biasUp, biasDown, lSeqBit);
         }
     }
 }

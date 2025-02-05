@@ -6,28 +6,34 @@
 #define CSRC_NICHE_CUH
 
 namespace aristos{
-    __forceinline__
-    std::vector<unsigned int> subsets(const std::vector<size_t>& parents, const unsigned int& myRank){
-        std::vector<unsigned int> platoon{};
+    template<typename  Element>
+    requires(std::is_integral_v<Element>)
+    __host__ __forceinline__
+    auto subsets(const std::vector<size_t>& parents,
+        Element* __restrict__ const& platoon,
+        const unsigned int& myRank){
+        uint16_t gSize = 0U;
         for(unsigned int i = 0; i < parents.size(); ++i){
             if (parents[i] == parents[myRank]) {
-                platoon.emplace_back(i);
+                platoon[i] = i;
+                ++gSize;
             }
         }
-        return platoon;
+        return gSize;
     }
 
     template<typename T> requires std::equality_comparable<T>
-    __forceinline__ bool dualSetCompare(const T& v00,
+    __forceinline__
+    bool dualSetCompare(const T& v00,
                                         const T& v01,
                                         const T& v10,
                                         const T& v11){
         return ((v00 == v10 && v01 == v11) || (v00 == v11 && v01 == v10));
     }
 
-    enum Stability : unsigned short{
+    enum Stability : uint8_t{
             STABLE = 0,
             EXPERIMENTAL = 1
-        };
+    };
 }
 #endif //CSRC_NICHE_CUH

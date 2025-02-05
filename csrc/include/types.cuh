@@ -465,10 +465,11 @@ namespace aristos{
                 sT = tPs * SUBSCRIBERS;
                 tQl = sizeof(Task) * (sT + prT);
                 tQml = tQl + blocks * sizeof(Task); // interrupt tasks
-                tQXt = tQml + sizeof(EDT) * _nx + sizeof(TokenIdxTuple) * (px * _eCapacity);
-                brs = tQXt + (isSingleBlockGate ? 0U : sl * tiles<BLOCK_N>(px) *
+                brs = tQml + (isSingleBlockGate ? 0U : sl * tiles<BLOCK_N>(px) *
                     (sizeof(RingSoftmaxPayload) + 2 * sizeof(RingTopKPayload)));
-                gRl = brs + sizeof(cuda::barrier<cuda::thread_scope_device>) + sizeof(mp_t) * (2 * nx + 1);
+                tQXt = brs + sizeof(EDT) * _nx + sizeof(TokenIdxTuple) * (px * _eCapacity) +
+                    sizeof(cuda::barrier<cuda::thread_scope_device>);
+                gRl = tQXt + sizeof(mp_t) * (2 * nx + 1);
                 eDsA = gRl + sizeof(BookType) * (4 * nx + world + 1);
                 const unsigned int fCl = sizeof(bool) * (world * nLx + nx * tCM * tN);
                 sBfC = eDsA + sizeof(BookType) * 2 * (blocks + world * nLx * tCM) + fCl;
@@ -503,15 +504,16 @@ namespace aristos{
                 sT = tPs * SUBSCRIBERS;
                 const auto tQl = sizeof(Task) * (sT + prT);
                 const auto tQml = tQl + _blocks * sizeof(Task); // interrupt tasks
-                const auto tQXt = tQml + sizeof(EDT) * _nx + sizeof(TokenIdxTuple) * (_px * _eCap);
-                const auto brs = tQXt + (isSingleBlockGate ? 0U : _sl * tiles<BLOCK_N>(_px) *
-                    (sizeof(RingSoftmaxPayload) + 2 * sizeof(RingTopKPayload)));
-                const auto gRl = brs + sizeof(cuda::barrier<cuda::thread_scope_device>) + sizeof(mp_t) * (2 * _nx + 1);
+                const auto brs = tQml + (isSingleBlockGate ? 0U : _sl * tiles<BLOCK_N>(_px) *
+                                    (sizeof(RingSoftmaxPayload) + 2 * sizeof(RingTopKPayload)));
+                const auto tQXt = brs + sizeof(EDT) * _nx + sizeof(TokenIdxTuple) * (_px * _eCap) +
+                    sizeof(cuda::barrier<cuda::thread_scope_device>);
+                const auto gRl = tQXt + sizeof(mp_t) * (2 * _nx + 1);
                 const auto eDsA = gRl + sizeof(BookType) * (4 * _nx + _world + 1);
                 const unsigned int fCl = sizeof(bool) * (_world * _nLx + _nx * tCM * tN);
                 sBfC = eDsA + sizeof(BookType) * 2 * (_blocks + _world * _nLx * tCM) + fCl;
             }
-            return sBfC + _eNb * (_world * _nLx * tCM * tN);;
+            return sBfC + _eNb * (_world * _nLx * tCM * tN);
         }
 
         template<unsigned int tileDimension>
@@ -533,6 +535,8 @@ namespace aristos{
             return eCap * ed;
         }
 
+        /**********Salami slice Pointers!************/
+        /// task queue
         __device__ __forceinline__
         auto* tQ() const {
             return CAST_TO(Task, book);
@@ -544,26 +548,14 @@ namespace aristos{
             return tQ() + tQl;
         }
 
-        static_assert(sizeof(Task) >= sizeof(EDT));
-        /// Expert Data
-        /// remote experts first: {actual & local expert idx, peer idx}
-        __device__ __forceinline__
-        auto* eD() const {
-            return CAST_TO(EDT, book + tQml);
-        }
-
-        static_assert(sizeof(EDT) >= sizeof(TokenIdxTuple));
-        __device__ __forceinline__
-        auto* tP() const {
-            return CAST_TO(TokenIdxTuple, eD() + nx);
-        }
-
-        static_assert(sizeof(TokenIdxTuple) >= sizeof(RingSoftmaxPayload) &&
-            sizeof(TokenIdxTuple) >= sizeof(RingTopKPayload));
+        static_assert(alignof(Task) >= alignof(RingSoftmaxPayload)
+            && alignof(Task) >= alignof(RingTopKPayload)
+            && alignof(RingSoftmaxPayload) >= alignof(RingTopKPayload));
+        /***********CONTIGUOUS**************/
         __device__ __forceinline__
         auto* gateBk() const {
             // Entrypoint for vectorized memory cleaning
-            return CAST_TO(uint2, book + tQXt);
+            return CAST_TO(uint2, book + tQml);
         }
         __device__ __forceinline__
         auto* bRsP() const {
@@ -576,17 +568,32 @@ namespace aristos{
             return CAST_TO(RingTopKPayload, bRsP() + sl * tiles<BLOCK_N>(px));
         }
 
-        static_assert(sizeof(RingTopKPayload) >= sizeof(cuda::barrier<cuda::thread_scope_device>));
+        static_assert(alignof(RingTopKPayload) >= alignof(cuda::barrier<cuda::thread_scope_device>));
         /// Device-wide barrier
         __host__ __device__ __forceinline__
         auto* dB() const {
             return CAST_TO(cuda::barrier<cuda::thread_scope_device>, book + brs);
         }
-        static_assert(sizeof(cuda::barrier<cuda::thread_scope_device>) >= sizeof(mp_t));
+        /***********CONTIGUOUS**************/
+        static_assert(alignof(cuda::barrier<cuda::thread_scope_device>) >= alignof(EDT));
+        /// Expert Data
+        /// remote experts first: {actual & local expert idx, peer idx}
+        __device__ __forceinline__
+        auto* eD() const {
+            return CAST_TO(EDT, dB() + 1);
+        }
+
+        static_assert(alignof(EDT) >= alignof(TokenIdxTuple));
+        __device__ __forceinline__
+        auto* tP() const {
+            return CAST_TO(TokenIdxTuple, eD() + nx);
+        }
+
+        static_assert(alignof(TokenIdxTuple) >= alignof(mp_t));
         /// Gate mean logits
         __device__ __forceinline__
         auto* gML() const {
-            return CAST_TO(mp_t, dB() + 1);
+            return CAST_TO(mp_t, book + tQXt);
         }
         /// Gate mean expert counts
         __device__ __forceinline__
@@ -599,7 +606,8 @@ namespace aristos{
             return gMeC() + nx;
         }
 
-        static_assert(sizeof(mp_t) >= sizeof(BookType));
+        static_assert(alignof(mp_t) >= alignof(BookType));
+        /***********CONTIGUOUS**************/
         /// Packet data structures
         __device__ __forceinline__
         auto* pDs() const {
@@ -609,7 +617,6 @@ namespace aristos{
         auto* eC() const {
             return pDs();
         }
-
         /// Expert parallelism specification
         /// Expert index -> resident GPU EP rank
         __device__ __forceinline__
@@ -621,23 +628,24 @@ namespace aristos{
         auto* eLs() const {
             return ePs() + nx;
         }
-
-        /// Packet Sync array
-        __device__ __forceinline__
-        auto* pSA() const {
-            return eLs() + nx;
-        }
-
         /// Peer Translation
         /// EP rank -> PE rank
         __device__ __forceinline__
         auto* pT() const {
-            return pSA() + nx;
+            return eLs() + nx;
         }
+        /*************CONTIGUOUS************/
+
+        /// Packet Sync array
+        __device__ __forceinline__
+        auto* pSA() const {
+            return pT() + world;
+        }
+
         /// number of remote experts
         __device__ __forceinline__
         auto* nRx() const {
-            return pT() + world;
+            return pSA() + nx;
         }
 
         /// Scheduler buffers and flag checkpoints
@@ -666,7 +674,7 @@ namespace aristos{
 
         // Intermediate buffer
         template<typename Element>
-        requires(sizeof(BookType) >= sizeof(Element))
+        requires(alignof(BookType) >= alignof(Element))
         __device__ __forceinline__
         auto* xM() const {
             return CAST_TO(Element, book + sBfC);

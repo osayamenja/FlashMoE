@@ -6,13 +6,13 @@
 #define CSRC_WORKER_CUH
 
 namespace aristos{
-    struct Worker{
+    struct __align__(8) Worker{
         unsigned int id;
-        unsigned int processingRate;
-        unsigned int memoryCapacity;
+        uint16_t processingRate;
+        uint16_t memoryCapacity;
 
-        Worker(const unsigned int& _id, const unsigned int& _processingRate, const unsigned int& memoryCapacity):
-                id(_id), processingRate(_processingRate), memoryCapacity(memoryCapacity){};
+        Worker(const unsigned int& _id, const uint16_t& _processingRate, const uint16_t& memoryCapacity):
+                id(_id), processingRate(_processingRate), memoryCapacity(memoryCapacity){}
 
         __forceinline__
         bool operator==(const Worker& other) const {

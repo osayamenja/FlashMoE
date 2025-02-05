@@ -33,24 +33,24 @@ namespace aristos::decider{
     /// where |V| = |workers| and |E| = number of edges = |V|*(|V| - 1)
     __forceinline__ __host__
     std::vector<size_t> decide(const AdjMatrix& adjMatrix,
-                               const std::vector<Worker>& workers,
+                               const Worker* __restrict__ const& workers,
                                const unsigned int& totalExpertCost,
                                const unsigned int& totalExpertMem,
                                const ModelConfig& modelConfig){
+        const auto world = cute::size<0>(adjMatrix);
         auto infeasibleGroups = std::unordered_set<unsigned int>{};
-        for(const auto& w: workers){
-            if(w.memoryCapacity < totalExpertMem)
+        for(uint i = 0; i < world; ++i){
+            if(const auto w = workers[i]; w.memoryCapacity < totalExpertMem)
                 infeasibleGroups.insert(w.id);
         }
-        DisjointSet groups(workers.size());
+        DisjointSet groups(world);
         std::priority_queue<Edge, std::vector<Edge>, std::greater<>> candidateEdges;
         std::priority_queue<Edge> externalEdges;
         auto groupInfo = std::unordered_map<unsigned int, Group>{};
-        auto effectiveWorld = workers.size() - infeasibleGroups.size();
-        const auto dim = cute::size<0>(adjMatrix);
-        for(int i = 0; i < dim; ++i) {
-            auto dp = std::vector<floatPair>(dim);
-            for (int j = 0; j < dim; ++j) {
+        auto effectiveWorld = world - infeasibleGroups.size();
+        for(int i = 0; i < world; ++i) {
+            auto dp = std::vector<floatPair>(world);
+            for (int j = 0; j < world; ++j) {
                 dp[j] = {0.0, 0.0};
                 if (i != j)[[likely]] {
                     const auto alpha = adjMatrix(i, j).alpha;
@@ -67,7 +67,7 @@ namespace aristos::decider{
             groupInfo.insert({i, Group(i,
                                        workers[i].memoryCapacity,
                                        workers[i].processingRate,
-                                       workers.size(),
+                                       world,
                                        ObjArgs(totalExpertCost, effectiveWorld, totalExpertMem, modelConfig),
                                        dp)});
         }
@@ -158,35 +158,38 @@ namespace aristos::decider{
     /// Assumes that the group satisfies memory constraints.
     /// Complexity 𝓞(|X|*log(|X|)), where |X| = |experts|
     __forceinline__
-    std::vector<unsigned int> assign(std::vector<Expert>& experts,
-                            std::vector<Worker>& workerGroup){
+    void assign(Worker* __restrict__ const& wG,
+        const uint& world,
+        Expert* __restrict__ const& experts,
+        const uint& numExperts,
+        uint* __restrict__ const& assignment){
         using CostComparator = decltype([](const Expert& lhs, const Expert& rhs){
             return lhs.cost == rhs.cost? lhs.id > rhs.id : lhs.cost < rhs.cost;
         });
-        std::set<Expert, CostComparator> t(experts.cbegin(), experts.cend());
-        std::vector<unsigned int> assignment(experts.size());
+        std::set<Expert, CostComparator> t(experts, experts + numExperts);
         size_t totalCost = 0U, totalMem = 0U;
         for(const auto& e: experts){
             totalCost += e.cost;
             totalMem += e.memoryDemand; // == experts.size()
         }
         auto wellDistributedCapacity = true;
-        auto reqCap = totalMem / workerGroup.size();
-        if(totalMem % workerGroup.size() != 0){
-            reqCap = static_cast<int>(std::ceil(static_cast<float>(totalMem) / static_cast<float>(workerGroup.size())));
+        auto reqCap = totalMem / world;
+        if(totalMem % world != 0){
+            reqCap = static_cast<int>(std::ceil(static_cast<float>(totalMem) / static_cast<float>(world)));
         }
         auto totalRate = 0U;
-        for(const auto& w: workerGroup){
+        for(uint i = 0; i < world; ++i){
+            const auto w = wG[i];
             wellDistributedCapacity = wellDistributedCapacity && w.memoryCapacity >= reqCap;
             totalRate += w.processingRate;
         }
-        std::ranges::sort(workerGroup.begin(), workerGroup.end(), std::greater<>());
+        std::ranges::sort(wG, wG + world, std::greater<>());
 
         auto j = 0U;
         while(!t.empty()){
-            auto budget = static_cast<unsigned int>(std::ceil(static_cast<float>(workerGroup[j].processingRate * totalCost) / static_cast<float>(totalRate)));
+            auto budget = static_cast<unsigned int>(std::ceil(static_cast<float>(wG[j].processingRate * totalCost) / static_cast<float>(totalRate)));
             const auto allocated = budget;
-            while(budget > 0 && workerGroup[j].memoryCapacity > 0 && !t.empty() > 0){
+            while(budget > 0 && wG[j].memoryCapacity > 0 && !t.empty() > 0){
                 auto expertBudget = Expert(budget);
                 auto lower = t.lower_bound(expertBudget);
                 // Below is when lower == t.end() ==> budget is greater than any existing individual demand
@@ -197,18 +200,17 @@ namespace aristos::decider{
                 else if (lower != t.cend()){
                     bestMatch = Expert::closest(*lower, *t.upper_bound(expertBudget), budget);
                 }
-                assignment[bestMatch.id] = workerGroup[j].id;
+                assignment[bestMatch.id] = wG[j].id;
                 t.erase(bestMatch);
-                workerGroup[j].memoryCapacity -= 1;
+                wG[j].memoryCapacity -= 1;
                 budget -= bestMatch.cost;
             }
-            j = (j + 1) % workerGroup.size();
+            j = (j + 1) % world;
             totalCost -= (allocated - budget);
-            if(workerGroup[j].memoryCapacity == 0 || wellDistributedCapacity){
-                totalRate -= workerGroup[j].processingRate;
+            if(wG[j].memoryCapacity == 0 || wellDistributedCapacity){
+                totalRate -= wG[j].processingRate;
             }
         }
-        return assignment;
     }
 }
 #endif //CSRC_DECIDER_CUH
