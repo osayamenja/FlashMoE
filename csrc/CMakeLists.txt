@@ -112,6 +112,7 @@ CPMAddPackage(
 if(CUTLASS_ADDED)
     # header-only
     target_include_directories(csrc SYSTEM PRIVATE "${CUTLASS_SOURCE_DIR}/include")
+    set(cublasdx_CUTLASS_ROOT "${CUTLASS_SOURCE_DIR}")
 endif ()
 
 CPMAddPackage(
@@ -124,16 +125,10 @@ if(FMT_ADDED)
     target_link_libraries(csrc PRIVATE fmt::fmt)
 endif ()
 
-set(NvidiaCutlass_ROOT "${CUTLASS_SOURCE_DIR}")
-set(mathdx_CUTLASS_ROOT "${CUTLASS_SOURCE_DIR}")
-
-set(MATHDX_VER 24.08)
-set(MATHDX_URL_PREFIX "https://developer.download.nvidia.com/compute/cublasdx/redist/cublasdx")
-set(MATHDX_URL "${MATHDX_URL_PREFIX}/nvidia-mathdx-${MATHDX_VER}.0.tar.gz")
+set(MATHDX_VER 25.01)
 CPMFindPackage(
         NAME mathdx
         VERSION "${MATHDX_VER}"
-        URL "${MATHDX_URL}"
         FIND_PACKAGE_ARGUMENTS "REQUIRED COMPONENTS cublasdx CONFIG"
 )
 target_link_libraries(csrc PRIVATE mathdx::cublasdx)

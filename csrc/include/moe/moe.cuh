@@ -23,7 +23,6 @@ namespace aristos::moe{
         typename ElementB = ElementA,
         typename ElementD = ElementA,
         typename Activations,
-        typename MoEOut,
         typename ExpertsUp,
         typename ExpertsDown,
         typename BiasUp,
@@ -31,7 +30,6 @@ namespace aristos::moe{
         typename Gates,
         typename GateOut>
     requires(aristos::SupportedArch<Arch> && aristos::Matrix<Activations> &&
-        aristos::Matrix<MoEOut> &&
         aristos::Tensor<ExpertsUp> && aristos::Tensor<ExpertsDown> &&
         aristos::Tensor<BiasUp> && aristos::Tensor<BiasDown> &&
         aristos::Matrix<Gates> && aristos::Matrix<GateOut>)

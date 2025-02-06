@@ -4,8 +4,6 @@
 
 #ifndef BOOTSRAP_CUH
 #define BOOTSTRAP_CUH
-
-#include <algorithm>
 #include <vector>
 
 #include <cute/layout.hpp>
@@ -138,7 +136,6 @@ namespace aristos{
         Worker* __restrict__ const& wG,
         Worker* __restrict__ const& ePwG,
         uint* __restrict__ const& pT,
-        uint* __restrict__ const& pTs,
         uint* __restrict__ const& ePs,
         uint* __restrict__ const& ePsX,
         uint16_t* __restrict__ const& scratch, // assume zeroed out
@@ -185,7 +182,7 @@ namespace aristos{
             scratch[wIdx] = tally;
             expertSlots = cuda::std::max(tally, expertSlots);
         }
-        auto numLocalExperts = scratch[epRank];
+        const auto numLocalExperts = scratch[epRank];
         *ePg = EPG{
             epRank,
             expertSlots,
@@ -204,6 +201,9 @@ namespace aristos{
             groups.emplace(i);
         }
         const auto myGroup = dTg[rank];
+
+        auto* __restrict__ pTs = pT + epWorld;
+
         for (const auto& group : groups) {
             if (group != myGroup) {
                 std::ranges::fill(scratch, scratch + world, 0U);
@@ -240,33 +240,39 @@ namespace aristos{
         // Pointer to adjacency matrix and throughput of all devices
         const auto aD = globalWorld * globalWorld;
         const auto dZ = sizeof(EPG) + 2 * sizeof(Worker) * globalWorld + sizeof(Expert) * iC.numExperts;
-        const auto sZ = sizeof(uint) * (3 * globalWorld + 2 * iC.numExperts);
+        const auto sZ = sizeof(EDT) * iC.numExperts + sizeof(uint) * (globalWorld + 2 * iC.numExperts) +
+            sizeof(uint16_t) * globalWorld + sizeof(bool) * iC.numExperts;
+        const auto cZ = dZ + aD * sizeof(floatPair) + globalWorld * sizeof(WorkerAttribute) + sZ;
+
         // allocate all memory in one go
-        auto* mP = static_cast<cuda::std::byte*>(std::calloc(dZ + aD * sizeof(floatPair) +
-            globalWorld * sizeof(WorkerAttribute) + sZ, sizeof(cuda::std::byte)));
+        auto* mP = static_cast<cuda::std::byte*>(std::calloc(cZ, sizeof(cuda::std::byte)));
+
         // Pointer salami slicing
         auto* ePg = CAST_TO(EPG, mP);
+        static_assert(alignof(EPG) % alignof(Expert) == 0);
         auto* workers = CAST_TO(Worker, mP + sizeof(EPG));
         auto* ePWorkers = workers + globalWorld;
-        static_assert(sizeof(Worker) >= sizeof(Expert));
+        static_assert(alignof(Worker) % alignof(Expert) == 0);
         auto* experts = CAST_TO(Expert, mP + sizeof(Worker) + globalWorld);
-        static_assert(sizeof(Expert) >= sizeof(floatPair));
+        static_assert(alignof(Expert) % alignof(floatPair) == 0);
         auto* aP = CAST_TO(floatPair, mP + dZ);
-        static_assert(sizeof(floatPair) >= sizeof(WorkerAttribute));
+        static_assert(alignof(floatPair) % alignof(WorkerAttribute) == 0);
         auto* wAp = CAST_TO(WorkerAttribute, aP + aD);
-        static_assert(sizeof(WorkerAttribute) >= sizeof(BookType));
-        auto* scratch = CAST_TO(uint16_t, wAp + globalWorld);
-        auto* pT = CAST_TO(uint, scratch + globalWorld);
-        auto* pTs = pT + globalWorld; // scratch
-        auto* ePs = pTs + globalWorld;
+        static_assert(alignof(WorkerAttribute) % alignof(EDT) == 0);
+        auto* __restrict__ eDr = CAST_TO(EDT, wAp + globalWorld);
+        static_assert(alignof(EDT) == 0 % alignof(BookType) == 0);
+        auto* pT = CAST_TO(uint, eDr + iC.numExperts);
+        auto* ePs = pT + globalWorld;
         auto* ePsX = ePs + iC.numExperts; // scratch
+        auto* scratch = CAST_TO(uint16_t, ePsX + iC.numExperts);
+        auto* __restrict__ eRs = CAST_TO(bool, scratch + globalWorld);
 
         estimateMemory<Element>(&wAp[rank]);
         measureThroughput<Arch, Element>(wAp + rank, iC.seqLen, iC.hiddenProjDim, iC.embedDim);
         discoverTopology(aP, globalWorld, globalWorld, wAp[rank]);
 
         // The topology adjacency matrix is ready, let's map devices to optimal cooperative process groups
-        runDecider(iC, ePg, experts, workers, ePWorkers, pT, pTs, ePs, ePsX,
+        runDecider(iC, ePg, experts, workers, ePWorkers, pT, ePs, ePsX,
             scratch, aP, wAp, rank, globalWorld);
         const auto ePgD = *ePg;
         // Now allocate memory
@@ -314,14 +320,48 @@ namespace aristos{
             sizeof(BookType) * ePgD.epWorld, cudaMemcpyHostToDevice, aristosStream));
         CHECK_ERROR_EXIT(cudaMemcpyAsync(hostBookkeeping.ePs(), ePs,
             sizeof(BookType) * iC.numExperts, cudaMemcpyHostToDevice, aristosStream));
-        // Construct eD and eLs and compute nRx
-        // eLs
-
+        // copy device-wide barrier
         const auto hB = new cuda::barrier<cuda::thread_scope_device>{blocks};
         CHECK_ERROR_EXIT(cudaMemcpyAsync(hostBookkeeping.dB(), hB, sizeof(cuda::barrier<cuda::thread_scope_device>),
             cudaMemcpyHostToDevice, aristosStream));
         CHECK_ERROR_EXIT(cudaMemcpyToSymbolAsync(bookkeeping, &hostBookkeeping, sizeof(Bookkeeping), 0,
             cudaMemcpyHostToDevice, aristosStream));
+        // Construct eD and eLs and compute nRx
+        // eLs, reusing ePsX
+        auto* __restrict__ eLs = ePsX;
+        auto nRx = 0U;
+        std::ranges::fill(scratch, scratch + ePgD.epWorld, 0U);
+        for (uint i = 0; i < iC.numExperts; ++i) {
+            const auto ePrank = ePs[i];
+            const auto gRank = pT[ePrank];
+            eLs[i] = scratch[ePrank]++;
+            if (nvshmem_ptr(sHeap, gRank) == nullptr) {
+                ++nRx;
+                // This expert is hosted on a remote device
+                eRs[i] = true;
+            }
+        }
+        CHECK_ERROR_EXIT(cudaMemcpyAsync(hostBookkeeping.eLs(), eLs,
+            sizeof(BookType) * iC.numExperts, cudaMemcpyHostToDevice, aristosStream));
+        CHECK_ERROR_EXIT(cudaMemcpyAsync(hostBookkeeping.nRx(), &nRx,
+            sizeof(BookType), cudaMemcpyHostToDevice, aristosStream));
+
+        // eD
+        auto* __restrict__ eDp = eDr + nRx;
+        auto rI = 0U;
+        auto pI = 0U;
+        for (uint i = 0; i < iC.numExperts; ++i) {
+            if (eRs[i]) {
+                // remote expert
+                eDr[rI++] = {i, eLs[i], ePs[i]};
+            }
+            else {
+                // p2p expert
+                eDp[pI++] = {i, eLs[i], ePs[i]};
+            }
+        }
+        CHECK_ERROR_EXIT(cudaMemcpyAsync(hostBookkeeping.eD(), eDr,
+            sizeof(EDT) * iC.numExperts, cudaMemcpyHostToDevice, aristosStream));
         CHECK_ERROR_EXIT(cudaPeekAtLastError());
         CHECK_ERROR_EXIT(cudaStreamSynchronize(aristosStream));
         delete hB;
@@ -438,10 +478,6 @@ namespace aristos{
         const auto tA = cute::make_tensor(cute::make_gmem_ptr(aP),
             make_layout(cute::make_shape(sl, ed),
                 cute::LayoutRight{}));
-        const auto* __restrict__ oP = activations.mutable_data_ptr<Element>();
-        const auto tO = cute::make_tensor(cute::make_gmem_ptr(oP),
-            make_layout(cute::make_shape(sl, ed),
-                cute::LayoutRight{}));
 
         // Expert weights
         const auto* __restrict__ ePu = expertsUp.const_data_ptr<Element>();
@@ -473,9 +509,7 @@ namespace aristos{
                 constexpr auto c = CombineMode::single;
                 // Call forward pass
                 moe::forward<700, g, d, c, ElementC, Element><<<Hardware<700>::blocks::value, THREADS>>>(
-                    activations, expertsUp,
-                    expertsDown, biasUp, biasDown,
-                    gateWeights, gateOutput);
+                    tA, tXu, tXd, tBu, tBd, tG, tGo);
             }
             break;
             case 1: {
@@ -484,8 +518,7 @@ namespace aristos{
                 constexpr auto c = CombineMode::multithreaded;
                 // Call forward pass
                 moe::forward<700, g, d, c, ElementC, Element><<<Hardware<700>::blocks::value, THREADS>>>(
-                    activations, expertsUp, expertsDown, biasUp, biasDown,
-                    gateWeights, gateOutput);
+                    tA, tXu, tXd, tBu, tBd, tG, tGo);
             }
             break;
             case 2: {
@@ -494,8 +527,7 @@ namespace aristos{
                 constexpr auto c = CombineMode::single;
                 // Call forward pass
                 moe::forward<700, g, d, c, ElementC, Element><<<Hardware<700>::blocks::value, THREADS>>>(
-                    activations, expertsUp, expertsDown, biasUp, biasDown,
-                    gateWeights, gateOutput);
+                    tA, tXu, tXd, tBu, tBd, tG, tGo);
             }
             break;
             case 3: {
@@ -504,8 +536,7 @@ namespace aristos{
                 constexpr auto c = CombineMode::multithreaded;
                 // Call forward pass
                 moe::forward<700, g, d, c, ElementC, Element><<<Hardware<700>::blocks::value, THREADS>>>(
-                    activations, expertsUp, expertsDown, biasUp, biasDown,
-                    gateWeights, gateOutput);
+                    tA, tXu, tXd, tBu, tBd, tG, tGo);
             }
             break;
             case 4: {
@@ -514,8 +545,7 @@ namespace aristos{
                 constexpr auto c = CombineMode::single;
                 // Call forward pass
                 moe::forward<700, g, d, c, ElementC, Element><<<Hardware<700>::blocks::value, THREADS>>>(
-                    activations, expertsUp, expertsDown, biasUp, biasDown,
-                    gateWeights, gateOutput);
+                    tA, tXu, tXd, tBu, tBd, tG, tGo);
             }
             break;
             case 5: {
@@ -524,8 +554,7 @@ namespace aristos{
                 constexpr auto c = CombineMode::multithreaded;
                 // Call forward pass
                 moe::forward<700, g, d, c, ElementC, Element><<<Hardware<700>::blocks::value, THREADS>>>(
-                    activations, expertsUp, expertsDown, biasUp, biasDown,
-                    gateWeights, gateOutput);
+                    tA, tXu, tXd, tBu, tBd, tG, tGo);
             }
             break;
             case 6: {
@@ -534,8 +563,7 @@ namespace aristos{
                 constexpr auto c = CombineMode::single;
                 // Call forward pass
                 moe::forward<700, g, d, c, ElementC, Element><<<Hardware<700>::blocks::value, THREADS>>>(
-                    activations, expertsUp, expertsDown, biasUp, biasDown,
-                    gateWeights, gateOutput);
+                    tA, tXu, tXd, tBu, tBd, tG, tGo);
             }
             break;
             case 7: {
@@ -544,8 +572,7 @@ namespace aristos{
                 constexpr auto c = CombineMode::multithreaded;
                 // Call forward pass
                 moe::forward<700, g, d, c, ElementC, Element><<<Hardware<700>::blocks::value, THREADS>>>(
-                    activations, expertsUp, expertsDown, biasUp, biasDown,
-                    gateWeights, gateOutput);
+                    tA, tXu, tXd, tBu, tBd, tG, tGo);
             }
             break;
             case 8: {
@@ -554,8 +581,7 @@ namespace aristos{
                 constexpr auto c = CombineMode::single;
                 // Call forward pass
                 moe::forward<800, g, d, c, ElementC, Element><<<Hardware<>::blocks::value, THREADS>>>(
-                    activations, expertsUp, expertsDown, biasUp, biasDown,
-                    gateWeights, gateOutput);
+                    tA, tXu, tXd, tBu, tBd, tG, tGo);
             }
             break;
             case 9: {
@@ -564,8 +590,7 @@ namespace aristos{
                 constexpr auto c = CombineMode::multithreaded;
                 // Call forward pass
                 moe::forward<800, g, d, c, ElementC, Element><<<Hardware<>::blocks::value, THREADS>>>(
-                    activations, expertsUp, expertsDown, biasUp, biasDown,
-                    gateWeights, gateOutput);
+                    tA, tXu, tXd, tBu, tBd, tG, tGo);
             }
             break;
             case 10: {
@@ -574,8 +599,7 @@ namespace aristos{
                 constexpr auto c = CombineMode::single;
                 // Call forward pass
                 moe::forward<800, g, d, c, ElementC, Element><<<Hardware<>::blocks::value, THREADS>>>(
-                    activations, expertsUp, expertsDown, biasUp, biasDown,
-                    gateWeights, gateOutput);
+                    tA, tXu, tXd, tBu, tBd, tG, tGo);
             }
             break;
             case 11: {
@@ -584,8 +608,7 @@ namespace aristos{
                 constexpr auto c = CombineMode::multithreaded;
                 // Call forward pass
                 moe::forward<800, g, d, c, ElementC, Element><<<Hardware<>::blocks::value, THREADS>>>(
-                    activations, expertsUp, expertsDown, biasUp, biasDown,
-                    gateWeights, gateOutput);
+                    tA, tXu, tXd, tBu, tBd, tG, tGo);
             }
             case 12: {
                 constexpr auto g = GateReductionLevel::multiBlock;
@@ -593,8 +616,7 @@ namespace aristos{
                 constexpr auto c = CombineMode::single;
                 // Call forward pass
                 moe::forward<800, g, d, c, ElementC, Element><<<Hardware<>::blocks::value, THREADS>>>(
-                    activations, expertsUp, expertsDown, biasUp, biasDown,
-                    gateWeights, gateOutput);
+                    tA, tXu, tXd, tBu, tBd, tG, tGo);
             }
             break;
             case 13: {
@@ -603,8 +625,7 @@ namespace aristos{
                 constexpr auto c = CombineMode::multithreaded;
                 // Call forward pass
                 moe::forward<800, g, d, c, ElementC, Element><<<Hardware<>::blocks::value, THREADS>>>(
-                    activations, expertsUp, expertsDown, biasUp, biasDown,
-                    gateWeights, gateOutput);
+                    tA, tXu, tXd, tBu, tBd, tG, tGo);
             }
             break;
             case 14: {
@@ -613,8 +634,7 @@ namespace aristos{
                 constexpr auto c = CombineMode::single;
                 // Call forward pass
                 moe::forward<800, g, d, c, ElementC, Element><<<Hardware<>::blocks::value, THREADS>>>(
-                    activations, expertsUp, expertsDown, biasUp, biasDown,
-                    gateWeights, gateOutput);
+                    tA, tXu, tXd, tBu, tBd, tG, tGo);
             }
             break;
             case 15: {
@@ -623,8 +643,7 @@ namespace aristos{
                 constexpr auto c = CombineMode::multithreaded;
                 // Call forward pass
                 moe::forward<800, g, d, c, ElementC, Element><<<Hardware<>::blocks::value, THREADS>>>(
-                    activations, expertsUp, expertsDown, biasUp, biasDown,
-                    gateWeights, gateOutput);
+                    tA, tXu, tXd, tBu, tBd, tG, tGo);
             }
             break;
             case 16: {
@@ -633,8 +652,7 @@ namespace aristos{
                 constexpr auto c = CombineMode::single;
                 // Call forward pass
                 moe::forward<900, g, d, c, ElementC, Element><<<Hardware<900>::blocks::value, THREADS>>>(
-                    activations, expertsUp, expertsDown, biasUp, biasDown,
-                    gateWeights, gateOutput);
+                    tA, tXu, tXd, tBu, tBd, tG, tGo);
             }
             break;
             case 17: {
@@ -643,8 +661,7 @@ namespace aristos{
                 constexpr auto c = CombineMode::multithreaded;
                 // Call forward pass
                 moe::forward<900, g, d, c, ElementC, Element><<<Hardware<900>::blocks::value, THREADS>>>(
-                    activations, expertsUp, expertsDown, biasUp, biasDown,
-                    gateWeights, gateOutput);
+                    tA, tXu, tXd, tBu, tBd, tG, tGo);
             }
             break;
             case 18: {
@@ -653,8 +670,7 @@ namespace aristos{
                 constexpr auto c = CombineMode::single;
                 // Call forward pass
                 moe::forward<900, g, d, c, ElementC, Element><<<Hardware<900>::blocks::value, THREADS>>>(
-                    activations, expertsUp, expertsDown, biasUp, biasDown,
-                    gateWeights, gateOutput);
+                    tA, tXu, tXd, tBu, tBd, tG, tGo);
             }
             break;
             case 19: {
@@ -662,8 +678,7 @@ namespace aristos{
                 constexpr auto d = DropTokens::no;
                 constexpr auto c = CombineMode::multithreaded;
                 moe::forward<900, g, d, c, ElementC, Element><<<Hardware<900>::blocks::value, THREADS>>>(
-                    activations, expertsUp, expertsDown, biasUp, biasDown,
-                    gateWeights, gateOutput);
+                    tA, tXu, tXd, tBu, tBd, tG, tGo);
             }
             break;
             case 20: {
@@ -672,8 +687,7 @@ namespace aristos{
                 constexpr auto c = CombineMode::single;
                 // Call forward pass
                 moe::forward<900, g, d, c, ElementC, Element><<<Hardware<900>::blocks::value, THREADS>>>(
-                    activations, expertsUp, expertsDown, biasUp, biasDown,
-                    gateWeights, gateOutput);
+                    tA, tXu, tXd, tBu, tBd, tG, tGo);
             }
             break;
             case 21: {
@@ -682,8 +696,7 @@ namespace aristos{
                 constexpr auto c = CombineMode::multithreaded;
                 // Call forward pass
                 moe::forward<900, g, d, c, ElementC, Element><<<Hardware<900>::blocks::value, THREADS>>>(
-                    activations, expertsUp, expertsDown, biasUp, biasDown,
-                    gateWeights, gateOutput);
+                    tA, tXu, tXd, tBu, tBd, tG, tGo);
             }
             break;
             case 22: {
@@ -692,8 +705,7 @@ namespace aristos{
                 constexpr auto c = CombineMode::single;
                 // Call forward pass
                 moe::forward<900, g, d, c, ElementC, Element><<<Hardware<900>::blocks::value, THREADS>>>(
-                    activations, expertsUp, expertsDown, biasUp, biasDown,
-                    gateWeights, gateOutput);
+                   tA, tXu, tXd, tBu, tBd, tG, tGo);
             }
             break;
             case 23: {
@@ -702,8 +714,7 @@ namespace aristos{
                 constexpr auto c = CombineMode::multithreaded;
                 // Call forward pass
                 moe::forward<900, g, d, c, ElementC, Element><<<Hardware<900>::blocks::value, THREADS>>>(
-                    activations, expertsUp, expertsDown, biasUp, biasDown,
-                    gateWeights, gateOutput);
+                    tA, tXu, tXd, tBu, tBd, tG, tGo);
             }
             break;
             default:

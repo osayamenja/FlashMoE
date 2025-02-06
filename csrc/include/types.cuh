@@ -548,9 +548,9 @@ namespace aristos{
             return tQ() + tQl;
         }
 
-        static_assert(alignof(Task) >= alignof(RingSoftmaxPayload)
-            && alignof(Task) >= alignof(RingTopKPayload)
-            && alignof(RingSoftmaxPayload) >= alignof(RingTopKPayload));
+        static_assert(alignof(Task) % alignof(RingSoftmaxPayload) == 0
+            && alignof(Task) % alignof(RingTopKPayload) == 0
+            && alignof(RingSoftmaxPayload) % alignof(RingTopKPayload) == 0);
         /***********CONTIGUOUS**************/
         __device__ __forceinline__
         auto* gateBk() const {
@@ -568,14 +568,14 @@ namespace aristos{
             return CAST_TO(RingTopKPayload, bRsP() + sl * tiles<BLOCK_N>(px));
         }
 
-        static_assert(alignof(RingTopKPayload) >= alignof(cuda::barrier<cuda::thread_scope_device>));
+        static_assert(alignof(RingTopKPayload) % alignof(cuda::barrier<cuda::thread_scope_device>) == 0);
         /// Device-wide barrier
         __host__ __device__ __forceinline__
         auto* dB() const {
             return CAST_TO(cuda::barrier<cuda::thread_scope_device>, book + brs);
         }
         /***********CONTIGUOUS**************/
-        static_assert(alignof(cuda::barrier<cuda::thread_scope_device>) >= alignof(EDT));
+        static_assert(alignof(cuda::barrier<cuda::thread_scope_device>) % alignof(EDT) == 0);
         /// Expert Data
         /// remote experts first: {actual & local expert idx, peer idx}
         __device__ __forceinline__
@@ -583,13 +583,13 @@ namespace aristos{
             return CAST_TO(EDT, dB() + 1);
         }
 
-        static_assert(alignof(EDT) >= alignof(TokenIdxTuple));
+        static_assert(alignof(EDT) % alignof(TokenIdxTuple) == 0);
         __device__ __forceinline__
         auto* tP() const {
             return CAST_TO(TokenIdxTuple, eD() + nx);
         }
 
-        static_assert(alignof(TokenIdxTuple) >= alignof(mp_t));
+        static_assert(alignof(TokenIdxTuple) % alignof(mp_t) == 0);
         /// Gate mean logits
         __device__ __forceinline__
         auto* gML() const {
@@ -606,7 +606,7 @@ namespace aristos{
             return gMeC() + nx;
         }
 
-        static_assert(alignof(mp_t) >= alignof(BookType));
+        static_assert(alignof(mp_t) % alignof(BookType) == 0);
         /***********CONTIGUOUS**************/
         /// Packet data structures
         __device__ __forceinline__
@@ -674,7 +674,7 @@ namespace aristos{
 
         // Intermediate buffer
         template<typename Element>
-        requires(alignof(BookType) >= alignof(Element))
+        requires(alignof(BookType) % alignof(Element) == 0)
         __device__ __forceinline__
         auto* xM() const {
             return CAST_TO(Element, book + sBfC);
