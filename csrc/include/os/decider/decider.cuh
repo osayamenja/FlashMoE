@@ -168,7 +168,8 @@ namespace aristos::decider{
         });
         std::set<Expert, CostComparator> t(experts, experts + numExperts);
         size_t totalCost = 0U, totalMem = 0U;
-        for(const auto& e: experts){
+        for(uint i = 0; i < numExperts; ++i){
+            const auto e = experts[i];
             totalCost += e.cost;
             totalMem += e.memoryDemand; // == experts.size()
         }

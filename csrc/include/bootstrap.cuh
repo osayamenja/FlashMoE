@@ -501,6 +501,7 @@ namespace aristos{
         const auto* __restrict__ gOp = gateOutput.const_data_ptr<Element>();
         const auto tGo = cute::make_tensor(cute::make_gmem_ptr(gOp),
             make_layout(cute::make_shape(sl, px), cute::LayoutRight{}));
+#if DECODE_MOE
         // Decode function id
         switch (hostBookkeeping.fId) {
             case 0: {
@@ -720,6 +721,7 @@ namespace aristos{
             default:
                 reportError(false, "No such function exists!");
         }
+#endif
     }
 
     __host__ __forceinline__

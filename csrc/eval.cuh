@@ -7,8 +7,9 @@
 
 #include <vector>
 
-#include <cuda/std/memory>
+#include <cuda/std/cmath>
 #include <cuda/std/cstddef>
+#include <cuda/std/memory>
 #include <cute/tensor.hpp>
 #include <fmt/ranges.h>
 #include <fmt/core.h>
@@ -134,6 +135,7 @@ namespace aristos {
         using clk = std::chrono::high_resolution_clock;
         std::chrono::duration<float> end {};
         auto constexpr dim = 8U;
+        auto constexpr nExp = 16U;
         auto constexpr intraWidth = 4.0;
 
         //AdjMatrix A(dim);
@@ -142,8 +144,22 @@ namespace aristos {
         auto constexpr intraBW = floatPair{4.35e-04f, 1.29e-02f}; // (ms, ms/MB)
         auto constexpr interBW = floatPair{1.12e-02f, 5e-02f}; // (ms, ms/MB)
 
-        cuda::std::array<floatPair, dim*dim> d{};
-        const auto adj = make_tensor(d.data(),
+        constexpr auto hPz = 2 * sizeof(Worker) * dim +
+            sizeof (Expert) * nExp + sizeof(floatPair) * dim * dim +
+                sizeof(uint) * (dim + nExp);
+        auto* hP = std::calloc(hPz, sizeof(cuda::std::byte));
+        constexpr auto z = std::max(dim, nExp);
+        std::array<uint, z> pS{};
+        // Pointer salami slicing
+        auto* __restrict__ ePwG = CAST_TO(Worker, hP);
+        auto* __restrict__ wG = ePwG + dim;
+        static_assert(alignof(Worker) % alignof(Expert) == 0);
+        auto* __restrict experts = CAST_TO(Expert, wG + dim);
+        static_assert(alignof(Expert) % alignof(floatPair) == 0);
+        auto* __restrict__ aP = CAST_TO(floatPair, experts + nExp);
+        auto* __restrict__ pT = CAST_TO(uint, aP + dim * dim);
+        auto* __restrict__ ePs = pT + dim;
+        const auto adj = make_tensor(aP,
             cute::Layout<cute::Shape<cute::Int<dim>, cute::Int<dim>>,
                         cute::Stride<cute::Int<dim>, cute::_1>>{});
 
@@ -161,41 +177,40 @@ namespace aristos {
             }
         }
 
-        auto constexpr deviceMem = 8U;
         auto constexpr deviceGigaFlopsPerMs = static_cast<unsigned int>(0.43*312U * (1e9 / (1024*1024*1024)));
-        std::vector<Worker> w;
-        for(int i = 0; i < dim; ++i){
-            w.emplace_back(i, deviceGigaFlopsPerMs, deviceMem);
+        for(uint i = 0; i < dim; ++i){
+            auto constexpr deviceMem = 8U;
+            wG[i] = Worker{i, deviceGigaFlopsPerMs, deviceMem};
         }
 
-        auto constexpr nExp = 16U;
         auto constexpr expertGigaFlops = 128U; // Giga == 2^30
-        std::vector<Expert> e;
-        for(int i = 0; i < nExp; ++i){
-            e.emplace_back(i, expertGigaFlops);
+        for(uint i = 0; i < nExp; ++i){
+            experts[i] = Expert{i, expertGigaFlops};
         }
         // GPT-3 350M MoE
         const auto m = ModelConfig(24, 1, 256, 4, 24, 16, 512);
 
         auto start = clk::now();
-        decider::decide(adj, w, e.size()*expertGigaFlops, e.size(), m);
+        decider::decide(adj, wG, nExp*expertGigaFlops, nExp, m);
         end = clk::now() - start;
-        const auto spec = decider::decide(adj, w, e.size()*expertGigaFlops, e.size(), m);
+        const auto spec = decider::decide(adj, wG,
+            nExp*expertGigaFlops, nExp, m);
         fmt::println("Measured time for the Decider is {}s", end.count());
         fmt::println("Device to Groups: {}", spec);
 
-        const auto g = subsets(spec, 0);
-        fmt::println("Rank {} Group {}", 0, g); // peer translation
-        std::vector<Worker> wG;
-        for(int i = 0; i < g.size(); ++i){
-            const auto wId = g[i];
-            wG.emplace_back(i, w[wId].processingRate, w[wId].memoryCapacity);
+        const auto epWorld = subsets(spec, pT, 0);
+        std::memcpy(pS.data(), pT, sizeof(uint) * epWorld);
+        fmt::println("Rank {} Group {}", 0, pS); // peer translation
+        for(uint i = 0; i < epWorld; ++i){
+            const auto wId = pT[i];
+            ePwG[i] = Worker{i, wG[wId].processingRate, wG[wId].memoryCapacity};
         }
         start = clk::now();
-        const auto assignment = decider::assign(e, wG);
+        decider::assign(ePwG, epWorld, experts, nExp, ePs);
         end += clk::now() - start;
         fmt::println("Total time is {}s", end.count());
-        fmt::println("Experts to Devices {}", assignment); // sharding spec
+        std::memcpy(pS.data(), ePs, sizeof(uint) * nExp);
+        fmt::println("Experts to Devices {}", pS); // sharding spec
     }
 }
 #endif //EVAL_CUH

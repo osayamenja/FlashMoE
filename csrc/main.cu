@@ -5,6 +5,6 @@
 #include "eval.cuh"
 
 int main() {
-    aristos::testDecider();
+    aristos::testTopologyDiscovery();
     return 0;
 }
