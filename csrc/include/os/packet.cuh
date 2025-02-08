@@ -56,10 +56,10 @@ namespace aristos::packet {
         const auto dSl = 3 * nx + world;
         const auto* __restrict__ expertCounts = workspace;
         const auto* __restrict__ pS = expertCounts + nx;
-        const auto* __restrict__ xLs = pS + nx;
-        const auto* __restrict__ pT = xLs + nx;
+        const auto* __restrict__ pT = pS + nx;
+        const auto* __restrict__ xLs = pT + world;
 
-        const auto* __restrict__ peerTotalTokens = pT + world;
+        const auto* __restrict__ peerTotalTokens = xLs + nx;
         auto* __restrict__ pTTx = workspace + dSl;
 
         // Populate above data structures
@@ -204,7 +204,7 @@ namespace aristos::packet {
         static_assert(s == PacketStage::initial);
         __device__ __forceinline__
         void operator()(const DecoderArg& dA,
-            cuda::std::byte* __restrict__ const& packet,
+            cuda::std::byte* const& packet,
             unsigned int* __restrict__ const& status,
             unsigned int* __restrict__ const& taskCount,
             uint const& routedTokens, uint const& globalTaskTiles,
@@ -214,7 +214,7 @@ namespace aristos::packet {
             const cuda::std::array<cuda::std::byte*, GEMMs>& bias,
             unsigned int const& peer, // relative to the EP group
             unsigned int& lTQHead,
-            unsigned int* __restrict__ const& tQHead) const {
+            unsigned int* const& tQHead) const {
             //assert(!__isShared(&dA) && !__isGlobal(&dA) && !__isLocal(&dA))
             auto* __restrict__ sHeap = dA.sHeap;
             auto* __restrict__ tQ = dA.tQ + (threadIdx.x * dA.tPs + lTQHead);
@@ -293,11 +293,11 @@ namespace aristos::packet {
         __device__ __forceinline__
         void operator()(Task* __restrict__ tQ,
             cuda::std::byte* __restrict__ const& packet,
-            cuda::std::byte* __restrict__ const& tokenIndices,
+            cuda::std::byte* const& tokenIndices,
             cuda::std::byte* __restrict__ const& activations,
             const unsigned int& nTokens,
             const unsigned int& tileIdx,
-            unsigned int* __restrict__ const& tQHead,
+            unsigned int* const& tQHead,
             const unsigned int& expertIdx) const {
             // now let's decode this single tile
             *tQ = Task{
@@ -321,11 +321,11 @@ namespace aristos::packet {
         __device__ __forceinline__
         void operator()(const DecoderArg& dA,
             cuda::std::byte* __restrict__ const& packet,
-            cuda::std::byte* __restrict__ const& tokenIndices,
+            cuda::std::byte* const& tokenIndices,
             cuda::std::byte* __restrict__ const& activations,
             const unsigned int& nTokens,
             unsigned int& lTQHead,
-            unsigned int* __restrict__ const& tQHead,
+            unsigned int* const& tQHead,
             const unsigned int& expertIdx) const {
             auto* __restrict__ tQ = dA.tQ + (threadIdx.x * dA.tPs + lTQHead);
             constexpr auto tB = 8;

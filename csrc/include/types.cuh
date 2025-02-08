@@ -36,6 +36,7 @@
 #define PIPELINE_STAGES 2U
 #define SHARED_SIZE 16 * 1024U
 #define GEMMs 2U // per expert
+#define REGINALD 128 // max registers per thread
 
 #define TOPO_LOOP_TRIP 4U // this may be too much
 #define BETA_BUFFER (1024UL * 1024UL) // 1MB
@@ -215,7 +216,7 @@ namespace aristos{
         const uint hiddenProjDim;
         const uint k;
         const uint capacityFactor;
-        const uint numExperts;
+        const uint16_t numExperts;
         // logical elements
         const uint p2pBuffer; // in MB
         const ulong numParameters;
@@ -235,7 +236,7 @@ namespace aristos{
             const uint& _hiddenProjDim,
             const uint& _k,
             const uint& _capacityFactor,
-            const uint& _numExperts,
+            const uint16_t& _numExperts,
             const bool& _shouldDrop,
             const bool& _isTraining,
             const uint16_t& _redAmount = 1):
@@ -329,7 +330,7 @@ namespace aristos{
         // Stage 1
         __device__ __forceinline__
         Task(const TaskType& _taskType,
-            cuda::std::byte*  const& _aData,
+            cuda::std::byte* const& _aData,
             const cuda::std::array<cuda::std::byte*, GEMMs>& _bData,
             const cuda::std::array<cuda::std::byte*, GEMMs>& _cData,
             const cuda::std::array<cuda::std::byte*, GEMMs>& _dData,
@@ -479,6 +480,7 @@ namespace aristos{
         }
 
         /// Needed for malloc
+        __host__ __forceinline__
         static unsigned long int bookLength(
             const unsigned int& _sl,
             const unsigned int& _nx,
@@ -578,7 +580,7 @@ namespace aristos{
         static_assert(alignof(cuda::barrier<cuda::thread_scope_device>) % alignof(EDT) == 0);
         /// Expert Data
         /// remote experts first: {actual & local expert idx, peer idx}
-        __device__ __forceinline__
+        __host__ __device__ __forceinline__
         auto* eD() const {
             return CAST_TO(EDT, dB() + 1);
         }
@@ -609,7 +611,7 @@ namespace aristos{
         static_assert(alignof(mp_t) % alignof(BookType) == 0);
         /***********CONTIGUOUS**************/
         /// Packet data structures
-        __device__ __forceinline__
+        __host__ __device__ __forceinline__
         auto* pDs() const {
             return CAST_TO(BookType, book + gRl);
         }
@@ -619,33 +621,34 @@ namespace aristos{
         }
         /// Expert parallelism specification
         /// Expert index -> resident GPU EP rank
-        __device__ __forceinline__
+        __host__ __device__ __forceinline__
         auto* ePs() const {
-            return pDs() + nx;
-        }
-        /// Expert index to local expert index
-        __device__ __forceinline__
-        auto* eLs() const {
-            return ePs() + nx;
+            return CAST_TO(BookType, book + gRl) + nx;
         }
         /// Peer Translation
         /// EP rank -> PE rank
-        __device__ __forceinline__
+        __host__ __device__ __forceinline__
         auto* pT() const {
+            return ePs() + nx;
+        }
+        /// Expert index to local expert index
+        __host__ __device__ __forceinline__
+        auto* eLs() const {
+            return pT() + world;
+        }
+
+        /*************CONTIGUOUS************/
+
+        /// number of remote experts
+        __host__ __device__ __forceinline__
+        auto* nRx() const {
             return eLs() + nx;
         }
-        /*************CONTIGUOUS************/
 
         /// Packet Sync array
         __device__ __forceinline__
         auto* pSA() const {
-            return pT() + world;
-        }
-
-        /// number of remote experts
-        __device__ __forceinline__
-        auto* nRx() const {
-            return pSA() + nx;
+            return nRx() + 1;
         }
 
         /// Scheduler buffers and flag checkpoints

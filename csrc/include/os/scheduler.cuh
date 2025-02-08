@@ -164,7 +164,7 @@ namespace aristos::scheduler {
         unsigned int* __restrict__ const& sInterrupts,
         unsigned int* __restrict__ const& tQHeads, // shared
         unsigned int* __restrict__ const& gtQHeads, // global
-        unsigned int* __restrict__ const& taskBound, // shared
+        unsigned int* const& taskBound, // shared
         unsigned int* __restrict__ const& rQ, // shared
         unsigned int* __restrict__ const& sQ, // global
         unsigned int* __restrict__ const& pDB) { //  global

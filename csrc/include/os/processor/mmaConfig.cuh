@@ -12,25 +12,49 @@
 #include "../../types.cuh"
 
 namespace aristos {
-    template<typename T>
-    using toCDX = cuda::std::conditional_t< cuda::std::is_same_v<T, cute::half_t>,
-            __half,
-    cuda::std::conditional_t<cuda::std::is_same_v<T, cute::bfloat16_t>,
-        __nv_bfloat16,
-    cuda::std::conditional_t<cuda::std::is_same_v<T, cute::float_e4m3_t>,
-        __nv_fp8_e4m3,
-    cuda::std::conditional_t<cuda::std::is_same_v<T, cute::float_e5m2_t>,
-        __nv_fp8_e5m2, T>>>>;
+    template<typename S>
+    struct ToCute {
+        using T = S;
+        static_assert(aristos::TensorValueType<T>);
+    };
+    template<>
+    struct ToCute<__half> {
+        using T = cute::half_t;
+    };
+    template<>
+    struct ToCute<__nv_bfloat16> {
+        using T = cute::bfloat16_t;
+    };
+    template<>
+    struct ToCute<__nv_fp8_e4m3> {
+        using T = cute::float_e4m3_t;
+    };
+    template<>
+    struct ToCute<__nv_fp8_e5m2> {
+        using T = cute::float_e5m2_t;
+    };
 
-    template<typename T>
-    using toCT = cuda::std::conditional_t<cuda::std::is_same_v<T, __half>,
-            cute::half_t,
-        cuda::std::conditional_t<cuda::std::is_same_v<T, __nv_bfloat16>,
-            cute::bfloat16_t,
-        cuda::std::conditional_t<cuda::std::is_same_v<T, __nv_fp8_e4m3>,
-            cute::float_e4m3_t,
-        cuda::std::conditional_t<cuda::std::is_same_v<T, __nv_fp8_e5m2>,
-            cute::float_e5m2_t, T>>>>;
+    template<typename S>
+    requires(aristos::TensorValueType<S>)
+    struct ToCDx {
+        using T = S;
+    };
+    template<>
+    struct ToCDx<cute::half_t> {
+        using T = __half;
+    };
+    template<>
+    struct ToCDx<cute::bfloat16_t> {
+        using T = __nv_bfloat16;
+    };
+    template<>
+    struct ToCDx<cute::float_e4m3_t> {
+        using T = __nv_fp8_e4m3;
+    };
+    template<>
+    struct ToCDx<cute::float_e5m2_t> {
+        using T = __nv_fp8_e5m2;
+    };
 
     template<unsigned int Arch, typename TC, typename TA=TC, typename TB=TA>
     requires (Arch >= 700)
@@ -226,12 +250,11 @@ namespace aristos {
     template<
         class GEMM,
         LayoutOptimization lOpt = LayoutOptimization::UseVanilla,
-        typename ElementA = toCT<typename GEMM::a_value_type>,
-        typename ElementB = toCT<typename GEMM::b_value_type>,
-        typename ElementC = toCT<typename GEMM::c_value_type>
+        typename ElementA = typename ToCute<typename GEMM::a_value_type>::T,
+        typename ElementB = typename ToCute<typename GEMM::b_value_type>::T,
+        typename ElementC = typename ToCute<typename GEMM::c_value_type>::T
     >
     requires (cublasdx::is_complete_blas<GEMM>::value
-    && cublasdx::is_supported<GEMM, cublasdx::sm_of<GEMM>::value>::value
     && cublasdx::sm_of<GEMM>::value >= MIN_ARCH
     && cublasdx::sm_of<GEMM>::value < 900)
     struct CollectiveMMAConfig{

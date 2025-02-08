@@ -30,7 +30,7 @@ namespace aristos::gate {
     /// Fused GEMM, softmax, topKMask, and loss, assuming blocks >= tiles.N and no bias.
     /// Supporting the latter is trivial; the former requires a completely new algorithm
     template<
-        GateReductionLevel g = GateReductionLevel::multiBlock,
+        GateReductionLevel g,
         typename BlockGEMM
     >
     struct FusedGate {
@@ -78,22 +78,22 @@ namespace aristos::gate {
 
             // cache
             const auto nx = gArg.nx;
-            auto* __restrict__ tP = gArg.tP();
-            auto* __restrict__ eC = gArg.eC();
-            auto* __restrict__ gMeC = gArg.gMeC();
-            auto* __restrict__ gML = gArg.gML();
+            auto* __restrict__ tP = gArg.tP;
+            auto* __restrict__ eC = gArg.eC;
+            auto* __restrict__ gMeC = gArg.gMeC;
+            auto* __restrict__ gML = gArg.gML;
 
             // Block Ring SoftMax pointers
-            auto* __restrict__ brsMailbox = gArg.bRsP() + myTileOffset;
-            auto* __restrict__ brsXMailbox = gArg.bRsP() + nextTileOffset;
+            auto* __restrict__ brsMailbox = gArg.bRsP + myTileOffset;
+            auto* __restrict__ brsXMailbox = gArg.bRsP + nextTileOffset;
 
             cutlass::NumericConverter<cute::half_t, ElementC> quantize{};
             cutlass::NumericConverter<ElementC, cute::half_t> deQuantize{};
             RingSoftmaxPayload rSp{};
 
             // Block Ring top k pointers
-            auto* __restrict__ tkMailbox = gArg.rTp() + myTileOffset;
-            auto* __restrict__ tkXMailbox = gArg.rTp() + nextTileOffset;
+            auto* __restrict__ tkMailbox = gArg.rTp + myTileOffset;
+            auto* __restrict__ tkXMailbox = gArg.rTp + nextTileOffset;
             RingTopKPayload rTp{};
 
             auto k_tile_iter = cute::make_coord_iterator(size<2>(gA));
@@ -249,7 +249,7 @@ namespace aristos::gate {
             auto mCw = ElementC(0);
             auto lSV = sV;
             auto lSIdx = sIdx;
-            auto bool shouldSweep = true;
+            bool shouldSweep = true;
 
             #pragma unroll
             for (uint i = 0; i < k; ++i) {
@@ -328,7 +328,7 @@ namespace aristos::gate {
             // needed for reusing shared memory
             __syncthreads();
             using BlockScan = cub::BlockScan<uint8_t, threads>;
-            static_assert(sizeof(typename BlockScan::TempStorage + sizeof(uint)) * bN <= SHARED_SIZE);
+            static_assert(sizeof(typename BlockScan::TempStorage) * bN <= SHARED_SIZE);
             auto* __restrict__ scanTempStorage = CAST_TO(typename BlockScan::TempStorage, gateScratch);
             auto* __restrict__ startIndices = CAST_TO(uint, scanTempStorage + bN);
             // Ensures we can safely use uint8_t without any concern for overflow
@@ -429,10 +429,10 @@ namespace aristos::gate {
             const auto tCsC = tiledMMA.get_slice(threadIdx.x).partition_C(sC);
             // cache
             const auto nx = gArg.nx;
-            auto* __restrict__ tP = gArg.tP();
-            auto* __restrict__ eC = gArg.eC();
-            auto* __restrict__ gMeC = gArg.gMeC();
-            auto* __restrict__ gML = gArg.gML();
+            auto* __restrict__ tP = gArg.tP;
+            auto* __restrict__ eC = gArg.eC;
+            auto* __restrict__ gMeC = gArg.gMeC;
+            auto* __restrict__ gML = gArg.gML;
 
             // Begin softmax
             // using notation from https://courses.cs.washington.edu/courses/cse599m/23sp/notes/flashattn.pdf
@@ -556,7 +556,7 @@ namespace aristos::gate {
             // needed for reusing shared memory
             __syncthreads();
             using BlockScan = cub::BlockScan<uint8_t, threads>;
-            static_assert(sizeof(typename BlockScan::TempStorage + sizeof(uint)) * bN <= SHARED_SIZE);
+            static_assert(sizeof(typename BlockScan::TempStorage) * bN <= SHARED_SIZE);
             auto* __restrict__ scanTempStorage = CAST_TO(typename BlockScan::TempStorage, gateScratch);
             auto* __restrict__ startIndices = CAST_TO(uint, scanTempStorage + bN);
             // Ensures we can safely use uint8_t without any concern for overflow
@@ -574,14 +574,14 @@ namespace aristos::gate {
 
             if (threadIdx.x < bN) {
                 startIndices[threadIdx.x] = atomicAdd(eC + threadIdx.x, cachedSelected);
-                atomicAdd(gMeC() + threadIdx.x, __fdividef(static_cast<ElementC>(cachedSelected),
+                atomicAdd(gMeC + threadIdx.x, __fdividef(static_cast<ElementC>(cachedSelected),
                     static_cast<ElementC>(sl)));
             }
             __syncthreads();
             #pragma unroll
             for (uint i = 0; i < bN; ++i) {
                 if (rTopK[i]) {
-                    tP()[startIndices[i] + myIndices[i] - 1] =
+                    tP[startIndices[i] + myIndices[i] - 1] =
                         TokenIdxTuple{bM * cute::get<0>(tileCoord) + threadIdx.x, mCw};
                 }
             }
@@ -649,7 +649,7 @@ namespace aristos::gate {
         for (unsigned int i = threads * blockIdx.x + threadIdx.x; i < gArg.nx; i+= threads * blocks) {
             const auto me = gArg.gML[i];
             const auto ce = gArg.gMeC[i];
-            atomicAdd(gL(), __fdividef(me * ce, static_cast<mp_t>(gArg.nx)));
+            atomicAdd(gL, __fdividef(me * ce, static_cast<mp_t>(gArg.nx)));
         }
 
         // wipe flags clean for next iteration

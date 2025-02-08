@@ -6,11 +6,11 @@
 #define GEMM_CUH
 
 #include <cublasdx.hpp>
-#include <cute/tensor.hpp>
-#include <cutlass/array.h>
 #include <cutlass/epilogue/thread/activation.h>
 #include <cutlass/gemm/collective/collective_mma.hpp>
+
 #include "mmaConfig.cuh"
+#include "../../arch.cuh"
 
 namespace aristos {
     /// Vector atomic add
@@ -99,7 +99,6 @@ namespace aristos {
     template <typename Element, typename ActivationFunction>
     requires(aristos::TensorValueType<Element> && cuda::std::is_invocable_r_v<Element, ActivationFunction, Element>)
     struct FAA {
-        static_assert(sizeof(Element) == 1 || sizeof(Element) >= 4);
         __forceinline__ __device__
         Element operator()(const Element& accumulator, const Element& term) const {
             constexpr ActivationFunction op{};
@@ -143,7 +142,7 @@ namespace aristos {
         static_assert(BLOCK_M == 128);
         static_assert(BLOCK_N == 64, "64 is a very good value for N, change it back!");
         using GEMM = decltype(cublasdx::Size<BLOCK_M, BLOCK_N, BLOCK_K_FULL>()
-                              + cublasdx::Precision<toCDX<ElementA>, toCDX<ElementB>, toCDX<ElementC>>()
+                              + cublasdx::Precision<typename ToCDx<ElementA>::T, typename ToCDx<ElementB>::T, typename ToCDx<ElementC>::T>()
                               + cublasdx::Type<cublasdx::type::real>()
                               + cublasdx::Arrangement<cublasdx::row_major, cublasdx::row_major, cublasdx::row_major>()
                               + cublasdx::Function<cublasdx::function::MM>()
@@ -183,16 +182,16 @@ namespace aristos {
 
     template<
         typename ElementA,
-        typename ElementB = ElementA,
-        typename ElementC = float,
-        typename ActivationOp = cute::identity
+        typename ElementB,
+        typename ElementC,
+        typename ActivationOp
     >
     struct BlockMM<900, ElementA, ElementB, ElementC, ActivationOp> {
         static_assert(BLOCK_M == THREADS);
         static_assert(BLOCK_M == 128);
         static_assert(BLOCK_N == 64, "64 is a very good value for N, change it back!");
         using GEMM = decltype(cublasdx::Size<BLOCK_M, BLOCK_N, BLOCK_K_FULL>()
-                              + cublasdx::Precision<toCDX<ElementA>, toCDX<ElementB>, toCDX<ElementC>>()
+                              + cublasdx::Precision<typename ToCDx<ElementA>::T, typename ToCDx<ElementB>::T, typename ToCDx<ElementC>::T>()
                               + cublasdx::Type<cublasdx::type::real>()
                               + cublasdx::Arrangement<cublasdx::row_major, cublasdx::row_major, cublasdx::row_major>()
                               + cublasdx::Function<cublasdx::function::MM>()

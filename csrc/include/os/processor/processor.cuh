@@ -116,7 +116,7 @@ namespace aristos::processor{
 
     // Fused GEMM, Epilogue and data Transfer
     template<
-        TaskType t = TaskType::preGEMM,
+        TaskType t,
         typename BlockGEMM
     >
     struct FGT {
@@ -136,6 +136,7 @@ namespace aristos::processor{
             static_assert(cute::size(accumulator) % elems == 0);
             cutlass::AlignedArray<typename BlockGEMM::MatrixDType, elems> rScratch{};
             constexpr auto bM = cute::get<0>(typename BlockGEMM::BlockTiler{});
+            constexpr auto bN = cute::get<1>(typename BlockGEMM::BlockTiler{});
             // Instantiate mainloop
             typename BlockGEMM::CollectiveMainloop mainLoop{};
             cute::clear(accumulator);
@@ -147,8 +148,8 @@ namespace aristos::processor{
             const auto mB = make_tensor(cute::make_gmem_ptr(weights),
                 make_layout(cute::make_shape(N, K), cute::make_stride(K, 1)));
             // Row-major
-            const auto mC = make_tensor(cute::make_gmem_ptr(output,
-                make_layout(cute::make_shape(M, N), cute::make_stride(N, 1))));
+            const auto mC = make_tensor(cute::make_gmem_ptr(output),
+                make_layout(cute::make_shape(M, N), cute::make_stride(N, 1)));
             const auto mD = make_tensor(cute::make_gmem_ptr(bias),
                 make_layout(cute::make_shape(M, N), cute::make_stride(0, 1)));
 
@@ -183,8 +184,6 @@ namespace aristos::processor{
             typename BlockGEMM::MMA tiledMMA{};
             const auto tDgD = tiledMMA.get_slice(threadIdx.x).partition_C(gD);
 
-            // Accounts for GEMMs that accumulate in types differing from input types,
-            // given that the result may moonlight as the input for the succeeding GEMM.
             const auto gCStoreOp = cutlass::NumericConverter<typename decltype(gC)::value_type,
                                                         typename decltype(accumulator)::value_type>{};
             const auto gDLoadOp = cutlass::NumericConverter<typename decltype(accumulator)::value_type,
@@ -272,8 +271,8 @@ namespace aristos::processor{
             const auto mB = make_tensor(cute::make_gmem_ptr(weights),
                 make_layout(cute::make_shape(N, K), cute::make_stride(K, 1)));
             // Row-major
-            const auto mC = make_tensor(cute::make_gmem_ptr(output,
-                make_layout(cute::make_shape(M, N), cute::make_stride(N, 1))));
+            const auto mC = make_tensor(cute::make_gmem_ptr(output),
+                make_layout(cute::make_shape(M, N), cute::make_stride(N, 1)));
             const auto mD = make_tensor(cute::make_gmem_ptr(bias),
                 make_layout(cute::make_shape(M, N), cute::make_stride(0, 1)));
 
@@ -418,7 +417,8 @@ namespace aristos::processor{
     __device__ __forceinline__
     void start(cuda::std::byte* __restrict__ const& workspace, const uint16_t& _seqBit){
         assert(__isShared(workspace));
-        static_assert(sizeof(SignalPayload<PacketStage::last>) == sizeof(uint64_t));
+        static_assert(sizeof(SignalPayload<PacketStage::last>) == sizeof(unsigned long long int)
+            && alignof(SignalPayload<PacketStage::last>) == alignof(unsigned long long int));
         __shared__ Task currentTask;
         __shared__ ProcessorArgs pA;
         __shared__ uint enqueue;
@@ -453,7 +453,7 @@ namespace aristos::processor{
 
         while (!interrupt) {
             if (!threadIdx.x) {
-                auto* __restrict__ tQSignal = pA.pDB;
+                auto* tQSignal = pA.pDB;
                 const auto* __restrict__ gtQ = pA.gtQ;
                 // Grabs next task
                 auto nextTask = atomicLoad(tQSignal);

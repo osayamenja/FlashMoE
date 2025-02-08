@@ -6,6 +6,7 @@
 #define EXPERT_CUH
 
 #include <cub/cub.cuh>
+#include <cuda/std/array>
 #include <cuda/std/cstddef>
 #include <cute/tensor.hpp>
 
@@ -14,6 +15,7 @@
 #include "../types.cuh"
 #include "../os/processor/gemm.cuh"
 #include "../os/processor/processor.cuh"
+
 namespace aristos {
     template<
         typename BlockGEMM,
@@ -23,20 +25,20 @@ namespace aristos {
         typename Bias
     >
     __forceinline__ __device__
-    void fGST(typename BlockGEMM::MatrixDType* __restrict__& workspace,
+    void fGST(typename BlockGEMM::MatrixDType* const& workspace,
         const Activations& mA,
         const Weights& mB,
         const Bias& mD,
         const Output& mC,
-        typename BlockGEMM::MatrixDType* __restrict__& scaleWeights,
-        typename BlockGEMM::MatrixDType* __restrict__& combineWeights,
+        const typename BlockGEMM::MatrixDType* __restrict__ const& scaleWeights,
+        const typename BlockGEMM::MatrixDType* __restrict__ const& combineWeights,
         const unsigned int& M,
         const unsigned int& N,
         const unsigned int& tileIdx) {
         auto accumulator = cute::partition_fragment_C(typename BlockGEMM::MMA{}, typename BlockGEMM::TilerOut{});
         constexpr auto elems = SHARED_SIZE / (THREADS * sizeof(typename BlockGEMM::MatrixDType));
         static_assert(cute::size(accumulator) % elems == 0);
-        cutlass::AlignedArray<typename BlockGEMM::MatrixDType, elems> rScratch{};
+        cuda::std::array<typename BlockGEMM::MatrixDType, elems> rScratch{};
         constexpr auto bM = cute::get<0>(typename BlockGEMM::BlockTiler{});
         constexpr auto bN = cute::get<1>(typename BlockGEMM::BlockTiler{});
         static_assert(size(accumulator) % rScratch.size() == 0);
@@ -117,6 +119,7 @@ namespace aristos {
         const auto tCsC = tiledMMA.get_slice(threadIdx.x).partition_C(sC);
         const auto rIdx = threadIdx.x / elems * elems;
         const auto cIdx = threadIdx.x % elems;
+        using CDxT =  typename ToCDx<ElementD>::T;
         // Transpose data
         #pragma unroll
         for (unsigned int i = 0; i < trips; ++i) {
@@ -132,7 +135,7 @@ namespace aristos {
             }
             #pragma unroll
             for (unsigned int j = 0; j < elems; ++j) {
-                atomicAdd(&gC(rIdx + j, cIdx + i * elems), rScratch[j]);
+                atomicAdd(CAST_TO(CDxT, &gC(rIdx + j, cIdx + i * elems)), static_cast<CDxT>(rScratch[j]));
             }
         }
         __syncthreads();
@@ -151,23 +154,25 @@ namespace aristos {
         unsigned int Arch,
         typename ActivationOp,
         unsigned int batch = GEMMs,
-        typename Element,
+        typename ElementC,
+        typename ElementA,
+        typename ElementB,
+        typename ElementD,
         typename ProblemShape_MNK
     >
     requires(cute::is_tuple_v<ProblemShape_MNK> && rank(ProblemShape_MNK{}) == 3
-    && aristos::TensorValueType<Element> && !(cuda::std::is_same_v<Element, cute::float_e4m3_t> ||
-            cuda::std::is_same_v<Element, cute::float_e5m2_t>))
+    && aristos::TensorValueType<ElementA> && !(cuda::std::is_same_v<ElementA, cute::float_e4m3_t> ||
+            cuda::std::is_same_v<ElementA, cute::float_e5m2_t>))
     /// D = A * B1 + C1
     /// A = D * B2 + C2
-    __global__ void expert(ProblemShape_MNK const pS,
+    __global__ __maxnreg__(REGINALD) void expert(ProblemShape_MNK const pS,
         uint* __restrict__ deviceThroughput, uint* __restrict__ tileSync,
-        Element* __restrict__ pA,
-        const cuda::std::array<Element* __restrict__, batch> pB,
-        Element* __restrict__ pC,
-        const cuda::std::array<Element* __restrict__, batch> pD /*bias*/,
-        const Element* __restrict__ pSw /*scale weights*/,
-        const Element* __restrict__ pCw /*combine weights*/,
-        const __grid_constant__ unsigned int nX /*number of experts*/) {
+        ElementA* __restrict__ pA,
+        const cuda::std::array<ElementB*, batch> pB,
+        ElementD* __restrict__ pC,
+        const cuda::std::array<ElementD*, batch> pD /*bias*/,
+        const ElementD* __restrict__ pSw /*scale weights*/,
+        const ElementD* __restrict__ pCw /*combine weights*/) {
         uint64_t start = 0, end = 0;
         constexpr auto blocks = Hardware<Arch>::blocks::value - 1U;
         constexpr auto tUpB = 1536U; // max supported number of tiles per block per gemm
@@ -175,13 +180,13 @@ namespace aristos {
         __shared__ __align__(16) uint16_t tQ[tUpB];
         const auto M = cute::get<0>(pS);
         const auto N = cute::get<1>(pS);
-        const auto K = cute::get<3>(pS);
-        using Operation = BlockMM<Arch, Element, ActivationOp>;
-        using OperationX = BlockMM<Arch, Element>;
+        const auto K = cute::get<2>(pS);
+        using Operation = BlockMM<Arch, ElementA, ElementB, ElementC, ActivationOp>;
+        using OperationX = BlockMM<Arch, ElementA, ElementB, ElementC>;
         constexpr auto preGEMM = processor::FGT<TaskType::preGEMM, Operation>{};
-        const auto tilesM = Config::tiles<BLOCK_M>(M);
-        const auto tilesN = Config::tiles<BLOCK_N>(N);
-        const auto tilesK = Config::tiles<BLOCK_N>(K);
+        const auto tilesM = Bookkeeping::tiles<BLOCK_M>(M);
+        const auto tilesN = Bookkeeping::tiles<BLOCK_N>(N);
+        const auto tilesK = Bookkeeping::tiles<BLOCK_N>(K);
         const auto tilesX = tilesM * tilesK;
         const auto tiles = tilesM * tilesN;
 
@@ -189,7 +194,7 @@ namespace aristos {
         #pragma unroll 4
         for (uint i = blockIdx.x; i < tiles; i += blocks) {
             const auto tM = i / tilesN;
-            preGEMM(CAST_TO(Element, workspace), pA, pB[0], pC, pD[0], M, N, K, i);
+            preGEMM(CAST_TO(ElementD, workspace), pA, pB[0], pC, pD[0], M, N, K, i);
             // notify this tile's completion
             if (!threadIdx.x) {
                 __threadfence();
@@ -205,8 +210,8 @@ namespace aristos {
         const auto mB = make_tensor(cute::make_gmem_ptr(pB[1]),
             make_layout(cute::make_shape(K, N), cute::LayoutRight{}));
         // Row-major
-        const auto mC = make_tensor(cute::make_gmem_ptr(pA,
-            make_layout(cute::make_shape(M, K), cute::LayoutRight{})));
+        const auto mC = make_tensor(cute::make_gmem_ptr(pA),
+            make_layout(cute::make_shape(M, K), cute::LayoutRight{}));
         const auto mD = make_tensor(cute::make_gmem_ptr(pD[1]),
             make_layout(cute::make_shape(M, K), cute::make_stride(0, 1)));
 
@@ -258,7 +263,8 @@ namespace aristos {
             for (uint i = 0; i < completedTiles; ++i) {
                 const auto tileIdx = tQ[i];
                 // do gemm
-                fGST<OperationX>(workspace, mA, mB, mD, mC, pSw, pCw,
+                fGST<OperationX>(CAST_TO(ElementD, workspace), mA, mB, mD, mC,
+                    pSw, pCw,
                     M, N, tileIdx);
             }
             processed += completedTiles;

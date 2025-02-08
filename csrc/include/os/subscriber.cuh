@@ -27,7 +27,7 @@ namespace aristos::subscriber{
     requires(cutlass::ispow2(wSet) && wSet > 1 && wSet <= 32)
     __device__ __forceinline__
     void start(cuda::std::byte* __restrict__ const& workspace,
-        unsigned int* __restrict__ const& interrupt,
+        unsigned int* const& interrupt,
         const unsigned int* __restrict__& peerTranslation, // shared
         // remote experts: {actual & local expert idx, peer idx}
         const cuda::std::tuple<uint, uint, uint>* __restrict__& rE, // shared
@@ -364,7 +364,7 @@ namespace aristos::subscriber{
                                 pIdx, lEIdx, sP->batchIdx * BLOCK_M);
                             lPd(dA.tQ + (tIdx * dA.tPs + lTQHead++), packet, CAST_TO(cuda::std::byte, tokenIds + (aEIdx * dA.eCap + sP->batchIdx * BLOCK_M)),
                                 CAST_TO(cuda::std::byte, activations.data()), sP->tokensM,
-                                cute::get<2>(coord), tQHead, aEIdx);
+                                cute::get<1>(cute::get<1>(coord)), tQHead, aEIdx);
                         }
                     }
                 }
@@ -394,14 +394,14 @@ namespace aristos::subscriber{
                         if (rWSet[j]) {
                             // enforce memory consistency
                             __threadfence_system();
-                            // [index to nRe, batchIdx, tileIdx]
+                            // [index to nRe, [batchIdx, tileIdx]]
                             const auto coord = idx2crd(flagIdx, fS, fStride);
                             const auto [aEIdx, lEIdx, pIdx] = nRe[cute::get<0>(coord)];
                             auto* __restrict__ packet = heap::advance<1, 1, sizeof(Element)>(pIdx, lEIdx,
                                 sP->batchIdx * BLOCK_M);
                             lPd(dA.tQ + (tIdx * dA.tPs + lTQHead++), packet, CAST_TO(cuda::std::byte, tokenIds + (aEIdx * dA.eCap + sP->batchIdx * BLOCK_M)),
                                 CAST_TO(cuda::std::byte, activations.data()), sP->tokensM,
-                                cute::get<2>(coord), tQHead, aEIdx);
+                                cute::get<1>(cute::get<1>(coord)), tQHead, aEIdx);
                         }
                     }
                 }
