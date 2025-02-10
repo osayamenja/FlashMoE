@@ -387,7 +387,7 @@ namespace aristos{
         CHECK_ERROR_EXIT(cudaDeviceGetAttribute(&cudaDevAttribute, cudaDevAttrMemoryPoolsSupported, dev));
         reportError(cudaDevAttribute, "Memory Pools support required");
         CHECK_ERROR_EXIT(cudaDeviceGetAttribute(&arch, cudaDevAttrComputeCapabilityMajor, dev));
-        reportError(arch, ">= Volta is required");
+        reportError(arch >= 7, ">= Volta is required");
         CHECK_ERROR_EXIT(cudaDeviceGetAttribute(&l2CacheSize, cudaDevAttrL2CacheSize, dev));
         CHECK_ERROR_EXIT(cudaDeviceGetAttribute(&blocks, cudaDevAttrMultiProcessorCount, dev));
         switch (arch) {
@@ -398,7 +398,7 @@ namespace aristos{
                 archSpecificInit<800, Element>(iC);
             break;
             default:
-                // TODO hopper
+                archSpecificInit<900, Element>(iC);
                 break;
         }
 #if (__CUDACC_VER_MAJOR__ >= 11 && __CUDA_ARCH__ >= 800)

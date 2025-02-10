@@ -174,7 +174,7 @@ endif ()
 
 target_compile_options(csrc PRIVATE
         $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-Xfatbin -compress-all>
-        $<$<COMPILE_LANGUAGE:CUDA>:-Xptxas -v;--expt-relaxed-constexpr>
+        $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
         $<$<COMPILE_LANGUAGE:CUDA>:-t0; --generate-line-info>
         $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-gencode=arch=compute_${COMPUTE_CAPABILITY},code=sm_${COMPUTE_CAPABILITY}>
 )
@@ -192,5 +192,6 @@ elseif(CMAKE_BUILD_TYPE STREQUAL "Release")
     target_compile_options(csrc PRIVATE
             $<$<COMPILE_LANGUAGE:CXX>:-O3>
             $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-gencode=arch=compute_${COMPUTE_CAPABILITY},code=lto_${COMPUTE_CAPABILITY}>
+            $<$<COMPILE_LANGUAGE:CUDA>:-Xptxas -v;--expt-relaxed-constexpr>
     )
 endif ()

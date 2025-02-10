@@ -138,6 +138,8 @@ namespace aristos {
         typename ElementC = float,
         typename ActivationOp = cute::identity>
     struct BlockMM {
+        // will clamp at Ampere for now, until we implement Hopper specific GEMM
+        using GEMMArch = cute::Int<cute::min(Arch, 800U)>;
         static_assert(BLOCK_M == THREADS);
         static_assert(BLOCK_M == 128);
         static_assert(BLOCK_N == 64, "64 is a very good value for N, change it back!");
@@ -146,7 +148,7 @@ namespace aristos {
                               + cublasdx::Type<cublasdx::type::real>()
                               + cublasdx::Arrangement<cublasdx::row_major, cublasdx::row_major, cublasdx::row_major>()
                               + cublasdx::Function<cublasdx::function::MM>()
-                              + cublasdx::SM<Arch>()
+                              + cublasdx::SM<GEMMArch::value>()
                               + cublasdx::Block()
                               + cublasdx::BlockDim<THREADS>());
         using MatrixAType = ElementA;
@@ -178,35 +180,6 @@ namespace aristos {
         >;
 
         using FusedEpilogue = FAA<ElementC, ActivationOp>;
-    };
-
-    template<
-        typename ElementA,
-        typename ElementB,
-        typename ElementC,
-        typename ActivationOp
-    >
-    struct BlockMM<900, ElementA, ElementB, ElementC, ActivationOp> {
-        static_assert(BLOCK_M == THREADS);
-        static_assert(BLOCK_M == 128);
-        static_assert(BLOCK_N == 64, "64 is a very good value for N, change it back!");
-        using GEMM = decltype(cublasdx::Size<BLOCK_M, BLOCK_N, BLOCK_K_FULL>()
-                              + cublasdx::Precision<typename ToCDx<ElementA>::T, typename ToCDx<ElementB>::T, typename ToCDx<ElementC>::T>()
-                              + cublasdx::Type<cublasdx::type::real>()
-                              + cublasdx::Arrangement<cublasdx::row_major, cublasdx::row_major, cublasdx::row_major>()
-                              + cublasdx::Function<cublasdx::function::MM>()
-                              + cublasdx::SM<900>()
-                              + cublasdx::Block()
-                              + cublasdx::BlockDim<THREADS>());
-        using MatrixAType = ElementA;
-        using MatrixBType = ElementB;
-        using MatrixCType = ElementC;
-        using MatrixDType = ElementA;
-        using BlockTiler = cute::Shape<cute::Int<cublasdx::size_of<GEMM>::m>,
-                                        cute::Int<cublasdx::size_of<GEMM>::n>,
-                                        cute::Int<cublasdx::size_of<GEMM>::k>>;
-        using TilerOut = cute::Shape<cute::Int<cublasdx::size_of<GEMM>::m>, cute::Int<cublasdx::size_of<GEMM>::n>>;
-        // TODO CollectiveMMA support for Hopper
     };
 }
 #endif //GEMM_CUH

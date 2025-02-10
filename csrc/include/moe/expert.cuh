@@ -119,7 +119,7 @@ namespace aristos {
         const auto tCsC = tiledMMA.get_slice(threadIdx.x).partition_C(sC);
         const auto rIdx = threadIdx.x / elems * elems;
         const auto cIdx = threadIdx.x % elems;
-        using CDxT =  typename ToCDx<ElementD>::T;
+        using CDxT = typename ToCDx<ElementD>::T;
         // Transpose data
         #pragma unroll
         for (unsigned int i = 0; i < trips; ++i) {
@@ -175,7 +175,7 @@ namespace aristos {
         const ElementD* __restrict__ pCw /*combine weights*/) {
         uint64_t start = 0, end = 0;
         constexpr auto blocks = Hardware<Arch>::blocks::value - 1U;
-        constexpr auto tUpB = 1536U; // max supported number of tiles per block per gemm
+        constexpr auto tUpB = 1024; // max supported number of tiles per block per gemm is 1536
         __shared__ __align__(16) cuda::std::byte workspace[SHARED_SIZE];
         __shared__ __align__(16) uint16_t tQ[tUpB];
         const auto M = cute::get<0>(pS);

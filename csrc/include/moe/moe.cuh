@@ -34,7 +34,7 @@ namespace aristos::moe{
         aristos::Tensor<ExpertsUp> && aristos::Tensor<ExpertsDown> &&
         aristos::Tensor<BiasUp> && aristos::Tensor<BiasDown> &&
         aristos::Matrix<Gates> && aristos::Matrix<GateOut>)
-    __global__ __maxnreg__(128) void forward(
+    __global__ __maxnreg__(REGINALD) void forward(
         Activations const __grid_constant__ activations,
         ExpertsUp const __grid_constant__ expertsUp,
         ExpertsDown const __grid_constant__ expertsDown,
@@ -78,7 +78,7 @@ namespace aristos::moe{
         unsigned int Arch
     >
     requires(aristos::SupportedArch<Arch>)
-    __global__ __maxnreg__(128) void backward(){
+    __global__ __maxnreg__(REGINALD) void backward(){
 
     }
 

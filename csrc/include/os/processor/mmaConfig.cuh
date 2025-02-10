@@ -195,7 +195,7 @@ namespace aristos {
 
     template<typename Element>
     using sCopyLay = cuda::std::conditional_t<sizeof(Element) >= 4,
-    cute::SM75_U32x4_LDSM_N, cute::SM75_U32x2_LDSM_N>;
+    cute::AutoVectorizingCopyWithAssumedAlignment<8 * alignof(Element)>, cute::SM75_U32x2_LDSM_N>;
 
     template<
         typename ElementA,
