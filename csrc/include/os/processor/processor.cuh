@@ -23,17 +23,17 @@ namespace aristos::processor{
     > requires SupportedArch<Arch> && TensorValueType<ElementCombine>
     struct Combine {
         template<
-            class Activations,
+            class Output,
             class ScaleWeights,
-            typename Element = typename Activations::value_type
+            typename Element = typename Output::value_type
         >
         requires(TensorValueType<Element> &&
-            aristos::Tensor<Activations> && aristos::Tensor<ScaleWeights>)
+            aristos::Tensor<Output> && aristos::Tensor<ScaleWeights>)
         __device__ __forceinline__
-        void operator()(Element* __restrict__ workspace,
-            const TokenIdxTuple* __restrict__ tokenIndices,
-            const Element* __restrict__& inputs,
-            Activations const& activations,
+        void operator()(Element* __restrict__ const& workspace,
+            const TokenIdxTuple* __restrict__ const& tokenIndices,
+            const Element* __restrict__ const& inputs,
+            Element* __restrict__ const& moeOutput,
             ScaleWeights const& scale,
             const unsigned int& M,
             const unsigned int& N,
@@ -98,12 +98,12 @@ namespace aristos::processor{
                     for (uint i = 0; i < bN; ++i) {
                         registers[i] *= scaleWeight;
                     }
-                    vaa(&activations(tokenIdx, 0), registers);
+                    vaa(moeOutput + tokenIdx * N, registers);
                 }
                 else {
                     // vector copy from registers to global directly
                     constexpr auto vL = bN * sizeof(Element) / sizeof(uint4);
-                    auto* __restrict__ aP = CAST_TO(uint4, &activations(tokenIdx, 0));
+                    auto* __restrict__ aP = CAST_TO(uint4, moeOutput + tokenIdx * N);
                     const auto* __restrict__ rD = CAST_TO(uint4, registers.data());
                     #pragma unroll
                     for (uint i = 0; i < vL; ++i) {
@@ -408,14 +408,16 @@ namespace aristos::processor{
         unsigned int processorCount,
         unsigned int Arch,
         CombineMode c,
-        typename ElementA,
-        typename ElementB,
-        typename ElementC = float,
         typename ActivationOp = cute::identity,
-        typename ActivationOpX = cute::identity
+        typename ActivationOpX = cute::identity,
+        typename ElementC = float,
+        typename ElementA,
+        typename ElementB = ElementA,
+        typename ScaleWeights
     > requires(processorCount > 0 && Arch >= MIN_ARCH)
     __device__ __forceinline__
-    void start(cuda::std::byte* __restrict__ const& workspace, const uint16_t& _seqBit){
+    void start(cuda::std::byte* __restrict__ const& workspace,
+        ScaleWeights const& sW, const uint16_t& _seqBit){
         assert(__isShared(workspace));
         static_assert(sizeof(SignalPayload<PacketStage::last>) == sizeof(unsigned long long int)
             && alignof(SignalPayload<PacketStage::last>) == alignof(unsigned long long int));
@@ -559,7 +561,7 @@ namespace aristos::processor{
                     // Eagerly indicate readiness for the next task
                     atomicExch(pA.sQ, ready);
                     combineOp(CAST_TO(ElementA, workspace), currentTask.aData, currentTask.bData[0],
-                        currentTask.cData[0], currentTask.M, pA.tokenSize, currentTask.tileIdx,
+                        currentTask.cData[0], sW, currentTask.M, pA.tokenSize, currentTask.tileIdx,
                         currentTask.tileSize, currentTask.expertIdx);
                 }
                 break;

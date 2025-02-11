@@ -77,12 +77,12 @@ namespace aristos{
         auto* output = hP + iZ;
         #pragma unroll
         for (uint i = 0; i < skip; ++i) {
-            FFN<Arch, Activation, c, ElementAccum><<<blocks, ARISTOS_BLOCK_SIZE, 0, aristosStream>>>(pS, p,
+            expert<Arch, Activation, c, ElementAccum><<<blocks, ARISTOS_BLOCK_SIZE, 0, aristosStream>>>(pS, p,
             p + 1, hP, output);
             // Needed to clear accumulator buffer
             CHECK_ERROR_EXIT(cudaMemsetAsync(output + M * N, 0, sizeof(Element) * (M * K), aristosStream));
         }
-        FFN<Arch, Activation, c, ElementAccum><<<blocks, ARISTOS_BLOCK_SIZE, 0, aristosStream>>>(pS, p,
+        expert<Arch, Activation, c, ElementAccum><<<blocks, ARISTOS_BLOCK_SIZE, 0, aristosStream>>>(pS, p,
             p + 1, hP, hP + iZ, false);
         uint stage = 0;
         CHECK_ERROR_EXIT(cudaMemcpyAsync(&stage, p, sizeof(uint), cudaMemcpyDeviceToHost, aristosStream));
@@ -358,6 +358,7 @@ namespace aristos{
         const auto tN = Bookkeeping::tiles<BLOCK_N>(iC.embedDim);
         const auto flagBytes = (ePgD.epWorld * ePgD.expertSlots + iC.numExperts * tMc * tN) *
             sizeof(flagsType);
+        // Note this allocation's size has to be identical across all PEs
         auto* sHeap = nvshmem_calloc(flagBytes + heapBytes, sizeof(cuda::std::byte));
         
         auto* sHb = static_cast<cuda::std::byte*>(sHeap);

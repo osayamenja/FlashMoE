@@ -17,12 +17,12 @@ namespace aristos::subscriber{
     template<
         unsigned int wSet = 16U,
         unsigned int subscriberCount = SUBSCRIBERS,
-        typename Activations,
+        typename Output,
         typename ExpertsUp,
         typename ExpertsDown,
         typename BiasUp,
         typename BiasDown,
-        typename Element = typename Activations::value_type
+        typename Element = typename Output::value_type
     >
     requires(cutlass::ispow2(wSet) && wSet > 1 && wSet <= 32)
     __device__ __forceinline__
@@ -35,7 +35,7 @@ namespace aristos::subscriber{
         const unsigned int& rEl, // number of remote peers
         unsigned int* __restrict__ const& status, // shared
         unsigned int* __restrict__ const& taskCount,
-        Activations const& activations,
+        Output const& moeOutput,
         ExpertsUp const& expertsUp,
         ExpertsDown const& expertsDown,
         BiasUp const& biasUp,
@@ -276,7 +276,7 @@ namespace aristos::subscriber{
                             auto* __restrict__ packet = heap::advance<1, 1, sizeof(Element)>(dA.sHeap, dA.cellSize,
                                 dA.expertSlots, dA.tokenSize, pIdx, lEIdx, sP->batchIdx * BLOCK_M);
                             lRd(dA, packet, CAST_TO(cuda::std::byte, tokenIds + (aEIdx * dA.eCap + sP->batchIdx * BLOCK_M)),
-                                CAST_TO(cuda::std::byte, activations.data()), sP->tokensM, lTQHead, tQHead, aEIdx);
+                                CAST_TO(cuda::std::byte, moeOutput.data()), sP->tokensM, lTQHead, tQHead, aEIdx);
                         }
                     }
                 }
@@ -312,7 +312,7 @@ namespace aristos::subscriber{
                                 dA.expertSlots, dA.tokenSize,
                                 pIdx, lEIdx, sP->batchIdx * BLOCK_M);
                             lRd(dA, packet, CAST_TO(cuda::std::byte, tokenIds + (aEIdx * dA.eCap + sP->batchIdx * BLOCK_M)),
-                                CAST_TO(cuda::std::byte, activations.data()),
+                                CAST_TO(cuda::std::byte, moeOutput.data()),
                                 sP->tokensM, lTQHead, tQHead, aEIdx);
                         }
                     }
@@ -363,7 +363,7 @@ namespace aristos::subscriber{
                                 dA.expertSlots, dA.tokenSize,
                                 pIdx, lEIdx, sP->batchIdx * BLOCK_M);
                             lPd(dA.tQ + (tIdx * dA.tPs + lTQHead++), packet, CAST_TO(cuda::std::byte, tokenIds + (aEIdx * dA.eCap + sP->batchIdx * BLOCK_M)),
-                                CAST_TO(cuda::std::byte, activations.data()), sP->tokensM,
+                                CAST_TO(cuda::std::byte, moeOutput.data()), sP->tokensM,
                                 cute::get<1>(cute::get<1>(coord)), tQHead, aEIdx);
                         }
                     }
@@ -400,7 +400,7 @@ namespace aristos::subscriber{
                             auto* __restrict__ packet = heap::advance<1, 1, sizeof(Element)>(pIdx, lEIdx,
                                 sP->batchIdx * BLOCK_M);
                             lPd(dA.tQ + (tIdx * dA.tPs + lTQHead++), packet, CAST_TO(cuda::std::byte, tokenIds + (aEIdx * dA.eCap + sP->batchIdx * BLOCK_M)),
-                                CAST_TO(cuda::std::byte, activations.data()), sP->tokensM,
+                                CAST_TO(cuda::std::byte, moeOutput.data()), sP->tokensM,
                                 cute::get<1>(cute::get<1>(coord)), tQHead, aEIdx);
                         }
                     }

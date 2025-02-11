@@ -13,6 +13,24 @@
 
 namespace aristos::moe{
     template<
+        CombineMode c,
+        typename T
+    >
+    requires(aristos::TensorValueType<T>)
+    struct VCT {
+        static_assert(c == CombineMode::single);
+        using Element = T;
+    };
+    template<
+        typename T
+    >
+    requires(aristos::TensorValueType<T>)
+    struct VCT<CombineMode::multithreaded, T> {
+        // tf32 does not have device intrinsics for atomic operations, so we use float instead
+        using Element = cuda::std::conditional_t<cuda::std::is_same_v<T, cute::tfloat32_t>,
+            float, T>;
+    };
+    template<
         unsigned int Arch,
         GateReductionLevel g = GateReductionLevel::singleBlock,
         DropTokens d = DropTokens::yes,
@@ -20,38 +38,71 @@ namespace aristos::moe{
         typename ActivationOp = cute::identity,
         typename ActivationOpX = cute::identity,
         typename ElementC = float,
-        typename ElementA = cute::half_t,
-        typename ElementB = ElementA,
-        typename ElementD = ElementA,
-        typename Activations,
-        typename ExpertsUp,
-        typename ExpertsDown,
-        typename BiasUp,
-        typename BiasDown,
-        typename Gates,
-        typename GateOut>
-    requires(aristos::SupportedArch<Arch> && aristos::Matrix<Activations> &&
-        aristos::Tensor<ExpertsUp> && aristos::Tensor<ExpertsDown> &&
-        aristos::Tensor<BiasUp> && aristos::Tensor<BiasDown> &&
-        aristos::Matrix<Gates> && aristos::Matrix<GateOut>)
+        typename Element
+    >
+    requires(aristos::TensorValueType<ElementC> && aristos::TensorValueType<Element>)
     __global__ __maxnreg__(REGINALD) void forward(
-        Activations const __grid_constant__ activations,
-        ExpertsUp const __grid_constant__ expertsUp,
-        ExpertsDown const __grid_constant__ expertsDown,
-        BiasUp const __grid_constant__ biasUp,
-        BiasDown const __grid_constant__ biasDown,
-        Gates const __grid_constant__ gateWeights,
-        GateOut const __grid_constant__ gateOutput) {
+        const Element* __restrict__ iP, /* A, G, B, D*/ Element* __restrict__ oP /*G, O*/) {
+        // Salami slice pointers
+        const auto S = bookkeeping.sl;
+        const auto P = bookkeeping.pd;
+        const auto H = bookkeeping.ed;
+        const auto E = bookkeeping.nx;
+        const auto lE = bookkeeping.nLx;
+        const auto* __restrict__ gP = iP + S * H;
+        const auto* __restrict__ ePu = gP + H * E;
+        const auto* __restrict__ ePd = ePu + lE * P * H;
+        const auto* __restrict__ bU = ePd + lE * H * P;
+        const auto* __restrict__ bd = bU + lE * P;
+        auto* __restrict__ gOp = oP;
+        auto* __restrict__ mOp = gOp + S * E;
+
         constexpr auto blocks = Hardware<Arch>::blocks;
         constexpr auto processors = blocks - 1;
         __shared__ __align__(16) cuda::std::byte workspace[SHARED_SIZE];
-        // wipe gTQHeads here and read the sequence bit, before the grid-wide barrier
+        // wipe buffers here and read the sequence bit, before the grid-wide barrier
         const auto gtQCl = bookkeeping.gtQCl;
         const auto sb = seqBit;
         auto* __restrict__ gtQHeads = bookkeeping.tQH();
         for (uint i = THREADS * blockIdx.x + threadIdx.x; i < gtQCl; i += blocks * THREADS) {
             gtQHeads[i] = 0U;
         }
+        if constexpr (c == CombineMode::multithreaded) {
+            // clear output buffer
+            const auto sz = S * H;
+            const auto vL = sz / sizeof(uint4);
+            for (uint i = THREADS * blockIdx.x + threadIdx.x; i < vL; i += blocks * THREADS) {
+                CAST_TO(uint4, mOp)[i] = uint4{0U, 0U, 0U, 0U};
+            }
+            // residue
+            for (uint i = THREADS * blockIdx.x + threadIdx.x + vL * sizeof(uint); i < sz; i += blocks * THREADS) {
+                mOp[i] = Element(0);
+            }
+        }
+
+        const auto activations = cute::make_tensor(cute::make_gmem_ptr(iP),
+            make_layout(cute::make_shape(S, H), cute::LayoutRight{}));
+        const auto gateWeights = cute::make_tensor(cute::make_gmem_ptr(gP),
+            make_layout(cute::make_shape(E, H), cute::LayoutRight{}));
+        // Experts Weights
+        const auto expertsUp = cute::make_tensor(cute::make_gmem_ptr(ePu),
+            make_layout(make_shape(lE, cute::make_shape(P, H)), cute::LayoutRight{}));
+        const auto expertsDown = cute::make_tensor(cute::make_gmem_ptr(ePd),
+            make_layout(make_shape(lE, cute::make_shape(H, P)), cute::LayoutRight{}));
+        // Bias
+        // Broadcast from vector to matrix
+        const auto biasUp = cute::make_tensor(cute::make_gmem_ptr(bU),
+            make_layout(make_shape(lE, cute::make_shape(S, P)),
+                make_stride(P, cute::Stride<cute::_0, cute::_1>{})));
+        const auto biasDown = cute::make_tensor(cute::make_gmem_ptr(bd),
+            make_layout(make_shape(lE, cute::make_shape(S, H)),
+                make_stride(H, cute::Stride<cute::_0, cute::_1>{})));
+
+        // Output
+        const auto gateOutput = cute::make_tensor(cute::make_gmem_ptr(gOp),
+            make_layout(cute::make_shape(S, E), cute::LayoutRight{}));
+        const auto moeOutput = cute::make_tensor(cute::make_gmem_ptr(mOp),
+            make_layout(make_layout(cute::make_shape(S, H), cute::LayoutRight{})));
 
         gate::forward<Arch, blocks, g, ElementC>(activations,
             gateWeights, gateOutput, CAST_TO(ElementC, workspace));
@@ -61,16 +112,14 @@ namespace aristos::moe{
                 processors,
                 Arch,
                 c,
-                ElementA,
-                ElementB,
-                ElementC,
-                ElementD,
                 ActivationOp,
-                ActivationOpX>(CAST_TO(ElementD, workspace), sb);
+                ActivationOpX,
+                ElementC,
+                Element,
+                ActivationOpX>(CAST_TO(Element, workspace), gateOutput, sb);
         }
         else {
-            os::start<processors, d>(workspace, activations,
-                expertsUp, expertsDown, biasUp, biasDown, sb);
+            os::start<processors, d>(workspace, moeOutput, expertsUp, expertsDown, biasUp, biasDown, sb);
         }
     }
 
@@ -82,351 +131,310 @@ namespace aristos::moe{
 
     }
 
-    template<typename Element>
+    template<
+        typename T,
+        typename ActivationOp = cutlass::epilogue::thread::ReLU<T>,
+        typename ActivationOpX = cute::identity
+    >
     __host__ __forceinline__
-    void dispatchKernel(const torch::Tensor& activations,
-        const torch::Tensor& expertsUp, const torch::Tensor& expertsDown,
-        const torch::Tensor& biasUp, const torch::Tensor& biasDown,
-        const torch::Tensor& gateWeights, const torch::Tensor& gateOutput) {
-        using ElementC = mp_t; // accumulate type
-        const auto sl = hostBookkeeping.sl;
-        const auto ed = hostBookkeeping.ed;
-        const auto pd = hostBookkeeping.pd;
-        const auto nLx = hostBookkeeping.nLx;
-        const auto nx = hostBookkeeping.nx;
-        const auto px = hostBookkeeping.px;
-#if CHECK_TENSORS
-        TORCH_CHECK(activations.scalar_type() == expertsUp.scalar_type());
-        TORCH_CHECK(activations.scalar_type() == expertsDown.scalar_type());
-        TORCH_CHECK(activations.scalar_type() == biasUp.scalar_type());
-        TORCH_CHECK(activations.scalar_type() == biasDown.scalar_type());
-        TORCH_CHECK(activations.scalar_type() == gateWeights.scalar_type());
-        TORCH_CHECK(activations.scalar_type() == gateOutput.scalar_type());
-
-        TORCH_CHECK(activations.is_contiguous())
-        TORCH_CHECK(expertsUp.is_contiguous())
-        TORCH_CHECK(expertsDown.is_contiguous())
-        TORCH_CHECK(biasUp.is_contiguous())
-        TORCH_CHECK(biasDown.is_contiguous())
-        TORCH_CHECK(gateWeights.is_contiguous())
-        TORCH_CHECK(gateOutput.is_contiguous())
-
-        TORCH_CHECK(activations.is_cuda());
-        TORCH_CHECK(expertsUp.is_cuda());
-        TORCH_CHECK(expertsDown.is_cuda());
-        TORCH_CHECK(biasUp.is_cuda());
-        TORCH_CHECK(biasDown.is_cuda());
-        TORCH_CHECK(gateWeights.is_cuda());
-        TORCH_CHECK(gateOutput.is_cuda());
-
-        TORCH_CHECK(activations.sizes()[0] == sl
-            && activations.sizes()[1] == ed);
-        TORCH_CHECK(gateWeights.size(0) == nx
-            && gateWeights.size(1) == ed)
-        TORCH_CHECK(gateOutput.size(0) == sl
-            && gateWeights.size(1) == px)
-
-        const auto eSzU = expertsUp.sizes();
-        const auto eSzD = expertsDown.sizes();
-        TORCH_CHECK(eSzU.size() == 3 && eSzD.size() == 3);
-        TORCH_CHECK(eSzU[0] == nLx && eSzD[0] == nLx);
-        // Weights are already transposed in memory
-        TORCH_CHECK(eSzU[1] == pd && eSzD[1] == ed);
-        TORCH_CHECK(eSzU[2] == ed && eSzD[3] == pd);
-        const auto bSzU = biasUp.sizes();
-        const auto bSzD = biasDown.sizes();
-        TORCH_CHECK(bSzU.size() == 2 && bSzD.size() == 2);
-        TORCH_CHECK(bSzU[0] == nLx && bSzD[0] == nLx);
-        TORCH_CHECK(bSzU[1] == pd && bSzD[1] == ed);
-#endif
-
-        // Now construct cute tensors
-        // Activations & Output
-        const auto* __restrict__ aP = activations.const_data_ptr<Element>();
-        const auto tA = cute::make_tensor(cute::make_gmem_ptr(aP),
-            make_layout(cute::make_shape(sl, ed),
-                cute::LayoutRight{}));
-
-        // Expert weights
-        const auto* __restrict__ ePu = expertsUp.const_data_ptr<Element>();
-        const auto tXu = cute::make_tensor(cute::make_gmem_ptr(ePu),
-            make_layout(make_shape(nLx, cute::make_shape(pd, ed)), cute::LayoutRight{}));
-        const auto* __restrict__ ePd = expertsDown.const_data_ptr<Element>();
-        const auto tXd = cute::make_tensor(cute::make_gmem_ptr(ePd),
-            make_layout(make_shape(nLx, cute::make_shape(ed, pd)), cute::LayoutRight{}));
-
-        // Bias
-        const auto* __restrict__ bPu = biasUp.const_data_ptr<Element>();
-        const auto tBu = cute::make_tensor(cute::make_gmem_ptr(bPu),
-            make_layout(make_shape(nLx, cute::make_shape(1, pd)), cute::LayoutRight{}));
-        const auto* __restrict__ bPd = biasDown.const_data_ptr<Element>();
-        const auto tBd = cute::make_tensor(cute::make_gmem_ptr(bPd),
-            make_layout(make_shape(nLx, cute::make_shape(1, ed)), cute::LayoutRight{}));
-        // Gate
-        const auto* __restrict__ gP = gateWeights.const_data_ptr<Element>();
-        const auto tG = cute::make_tensor(cute::make_gmem_ptr(gP),
-            make_layout(cute::make_shape(nx, ed), cute::LayoutRight{}));
-        const auto* __restrict__ gOp = gateOutput.const_data_ptr<Element>();
-        const auto tGo = cute::make_tensor(cute::make_gmem_ptr(gOp),
-            make_layout(cute::make_shape(sl, px), cute::LayoutRight{}));
-        // TODO map type to supported types using VAA combine state
-
-#if DECODE_MOE
+    void dispatchKernel(const void* __restrict__ iP, /* A, G, B, D*/ void* __restrict__ oP /*G, O*/) {
+        using ElementC = float;
         // Decode function id
+
         switch (hostBookkeeping.fId) {
+#if (ARISTOS_ARCH < 800)
             case 0: {
                 constexpr auto g = GateReductionLevel::singleBlock;
                 constexpr auto d = DropTokens::no;
                 constexpr auto c = CombineMode::single;
+                using V = typename VCT<c, T>::Element;
                 // Call forward pass
-                moe::forward<700, g, d, c, ElementC, Element><<<Hardware<700>::blocks::value, THREADS>>>(
-                    tA, tXu, tXd, tBu, tBd, tG, tGo);
+                moe::forward<700, g, d, c, ActivationOp, ActivationOpX, ElementC>
+                <<<Hardware<700>::blocks::value, THREADS>>>(
+                    static_cast<const V*>(iP), static_cast<V*>(oP));
             }
             break;
             case 1: {
                 constexpr auto g = GateReductionLevel::singleBlock;
                 constexpr auto d = DropTokens::no;
                 constexpr auto c = CombineMode::multithreaded;
+                using V = typename VCT<c, T>::Element;
                 // Call forward pass
-                moe::forward<700, g, d, c, ElementC, Element><<<Hardware<700>::blocks::value, THREADS>>>(
-                    tA, tXu, tXd, tBu, tBd, tG, tGo);
+                moe::forward<700, g, d, c, ActivationOp, ActivationOpX, ElementC>
+                <<<Hardware<700>::blocks::value, THREADS>>>(
+                    static_cast<const V*>(iP), static_cast<V*>(oP));
             }
             break;
             case 2: {
                 constexpr auto g = GateReductionLevel::singleBlock;
                 constexpr auto d = DropTokens::yes;
                 constexpr auto c = CombineMode::single;
+                using V = typename VCT<c, T>::Element;
                 // Call forward pass
-                moe::forward<700, g, d, c, ElementC, Element><<<Hardware<700>::blocks::value, THREADS>>>(
-                    tA, tXu, tXd, tBu, tBd, tG, tGo);
+                moe::forward<700, g, d, c, ActivationOp, ActivationOpX, ElementC>
+                <<<Hardware<700>::blocks::value, THREADS>>>(
+                    static_cast<const V*>(iP), static_cast<V*>(oP));
             }
             break;
             case 3: {
                 constexpr auto g = GateReductionLevel::singleBlock;
                 constexpr auto d = DropTokens::yes;
                 constexpr auto c = CombineMode::multithreaded;
+                using V = typename VCT<c, T>::Element;
                 // Call forward pass
-                moe::forward<700, g, d, c, ElementC, Element><<<Hardware<700>::blocks::value, THREADS>>>(
-                    tA, tXu, tXd, tBu, tBd, tG, tGo);
+                moe::forward<700, g, d, c, ActivationOp, ActivationOpX, ElementC>
+                <<<Hardware<700>::blocks::value, THREADS>>>(
+                    static_cast<const V*>(iP), static_cast<V*>(oP));
             }
             break;
             case 4: {
                 constexpr auto g = GateReductionLevel::multiBlock;
                 constexpr auto d = DropTokens::no;
                 constexpr auto c = CombineMode::single;
+                using V = typename VCT<c, T>::Element;
                 // Call forward pass
-                moe::forward<700, g, d, c, ElementC, Element><<<Hardware<700>::blocks::value, THREADS>>>(
-                    tA, tXu, tXd, tBu, tBd, tG, tGo);
+                moe::forward<700, g, d, c, ActivationOp, ActivationOpX, ElementC>
+                <<<Hardware<700>::blocks::value, THREADS>>>(
+                    static_cast<const V*>(iP), static_cast<V*>(oP));
             }
             break;
             case 5: {
                 constexpr auto g = GateReductionLevel::multiBlock;
                 constexpr auto d = DropTokens::no;
                 constexpr auto c = CombineMode::multithreaded;
+                using V = typename VCT<c, T>::Element;
                 // Call forward pass
-                moe::forward<700, g, d, c, ElementC, Element><<<Hardware<700>::blocks::value, THREADS>>>(
-                    tA, tXu, tXd, tBu, tBd, tG, tGo);
+                moe::forward<700, g, d, c, ActivationOp, ActivationOpX, ElementC>
+                <<<Hardware<700>::blocks::value, THREADS>>>(
+                    static_cast<const V*>(iP), static_cast<V*>(oP));
             }
             break;
             case 6: {
                 constexpr auto g = GateReductionLevel::multiBlock;
                 constexpr auto d = DropTokens::yes;
                 constexpr auto c = CombineMode::single;
+                using V = typename VCT<c, T>::Element;
                 // Call forward pass
-                moe::forward<700, g, d, c, ElementC, Element><<<Hardware<700>::blocks::value, THREADS>>>(
-                    tA, tXu, tXd, tBu, tBd, tG, tGo);
+                moe::forward<700, g, d, c, ActivationOp, ActivationOpX, ElementC>
+                <<<Hardware<700>::blocks::value, THREADS>>>(
+                    static_cast<const V*>(iP), static_cast<V*>(oP));
             }
             break;
             case 7: {
                 constexpr auto g = GateReductionLevel::multiBlock;
                 constexpr auto d = DropTokens::yes;
                 constexpr auto c = CombineMode::multithreaded;
+                using V = typename VCT<c, T>::Element;
                 // Call forward pass
-                moe::forward<700, g, d, c, ElementC, Element><<<Hardware<700>::blocks::value, THREADS>>>(
-                    tA, tXu, tXd, tBu, tBd, tG, tGo);
+                moe::forward<700, g, d, c, ActivationOp, ActivationOpX, ElementC>
+                <<<Hardware<700>::blocks::value, THREADS>>>(
+                    static_cast<const V*>(iP), static_cast<V*>(oP));
             }
             break;
+#endif
+#if (ARISTOS_ARCH >= 800) && (ARISTOS_ARCH < 900)
             case 8: {
                 constexpr auto g = GateReductionLevel::singleBlock;
                 constexpr auto d = DropTokens::no;
                 constexpr auto c = CombineMode::single;
+                using V = typename VCT<c, T>::Element;
                 // Call forward pass
-                moe::forward<800, g, d, c, ElementC, Element><<<Hardware<>::blocks::value, THREADS>>>(
-                    tA, tXu, tXd, tBu, tBd, tG, tGo);
+                moe::forward<800, g, d, c, ActivationOp, ActivationOpX, ElementC>
+                 <<<Hardware<>::blocks::value, THREADS>>>(
+                     static_cast<const V*>(iP), static_cast<V*>(oP));
             }
             break;
             case 9: {
                 constexpr auto g = GateReductionLevel::singleBlock;
                 constexpr auto d = DropTokens::no;
                 constexpr auto c = CombineMode::multithreaded;
+                using V = typename VCT<c, T>::Element;
                 // Call forward pass
-                moe::forward<800, g, d, c, ElementC, Element><<<Hardware<>::blocks::value, THREADS>>>(
-                    tA, tXu, tXd, tBu, tBd, tG, tGo);
+                moe::forward<800, g, d, c, ActivationOp, ActivationOpX, ElementC>
+                 <<<Hardware<>::blocks::value, THREADS>>>(
+                     static_cast<const V*>(iP), static_cast<V*>(oP));
             }
             break;
             case 10: {
                 constexpr auto g = GateReductionLevel::singleBlock;
                 constexpr auto d = DropTokens::yes;
                 constexpr auto c = CombineMode::single;
+                using V = typename VCT<c, T>::Element;
                 // Call forward pass
-                moe::forward<800, g, d, c, ElementC, Element><<<Hardware<>::blocks::value, THREADS>>>(
-                    tA, tXu, tXd, tBu, tBd, tG, tGo);
+                moe::forward<800, g, d, c, ActivationOp, ActivationOpX, ElementC>
+                 <<<Hardware<>::blocks::value, THREADS>>>(
+                     static_cast<const V*>(iP), static_cast<V*>(oP));
             }
             break;
             case 11: {
                 constexpr auto g = GateReductionLevel::singleBlock;
                 constexpr auto d = DropTokens::yes;
                 constexpr auto c = CombineMode::multithreaded;
+                using V = typename VCT<c, T>::Element;
                 // Call forward pass
-                moe::forward<800, g, d, c, ElementC, Element><<<Hardware<>::blocks::value, THREADS>>>(
-                    tA, tXu, tXd, tBu, tBd, tG, tGo);
+                moe::forward<800, g, d, c, ActivationOp, ActivationOpX, ElementC>
+                 <<<Hardware<>::blocks::value, THREADS>>>(
+                     static_cast<const V*>(iP), static_cast<V*>(oP));
             }
             case 12: {
                 constexpr auto g = GateReductionLevel::multiBlock;
                 constexpr auto d = DropTokens::no;
                 constexpr auto c = CombineMode::single;
+                using V = typename VCT<c, T>::Element;
                 // Call forward pass
-                moe::forward<800, g, d, c, ElementC, Element><<<Hardware<>::blocks::value, THREADS>>>(
-                    tA, tXu, tXd, tBu, tBd, tG, tGo);
+                moe::forward<800, g, d, c, ActivationOp, ActivationOpX, ElementC>
+                 <<<Hardware<>::blocks::value, THREADS>>>(
+                     static_cast<const V*>(iP), static_cast<V*>(oP));
             }
             break;
             case 13: {
                 constexpr auto g = GateReductionLevel::multiBlock;
                 constexpr auto d = DropTokens::no;
                 constexpr auto c = CombineMode::multithreaded;
+                using V = typename VCT<c, T>::Element;
                 // Call forward pass
-                moe::forward<800, g, d, c, ElementC, Element><<<Hardware<>::blocks::value, THREADS>>>(
-                    tA, tXu, tXd, tBu, tBd, tG, tGo);
+                moe::forward<800, g, d, c, ActivationOp, ActivationOpX, ElementC>
+                 <<<Hardware<>::blocks::value, THREADS>>>(
+                     static_cast<const V*>(iP), static_cast<V*>(oP));
             }
             break;
             case 14: {
                 constexpr auto g = GateReductionLevel::multiBlock;
                 constexpr auto d = DropTokens::yes;
                 constexpr auto c = CombineMode::single;
+                using V = typename VCT<c, T>::Element;
                 // Call forward pass
-                moe::forward<800, g, d, c, ElementC, Element><<<Hardware<>::blocks::value, THREADS>>>(
-                    tA, tXu, tXd, tBu, tBd, tG, tGo);
+                moe::forward<800, g, d, c, ActivationOp, ActivationOpX, ElementC>
+                 <<<Hardware<>::blocks::value, THREADS>>>(
+                     static_cast<const V*>(iP), static_cast<V*>(oP));
             }
             break;
             case 15: {
                 constexpr auto g = GateReductionLevel::multiBlock;
                 constexpr auto d = DropTokens::yes;
                 constexpr auto c = CombineMode::multithreaded;
+                using V = typename VCT<c, T>::Element;
                 // Call forward pass
-                moe::forward<800, g, d, c, ElementC, Element><<<Hardware<>::blocks::value, THREADS>>>(
-                    tA, tXu, tXd, tBu, tBd, tG, tGo);
+                moe::forward<800, g, d, c, ActivationOp, ActivationOpX, ElementC>
+                 <<<Hardware<>::blocks::value, THREADS>>>(
+                     static_cast<const V*>(iP), static_cast<V*>(oP));
             }
             break;
+#endif
+#if (ARISTOS_ARCH >= 900)
             case 16: {
                 constexpr auto g = GateReductionLevel::singleBlock;
                 constexpr auto d = DropTokens::yes;
                 constexpr auto c = CombineMode::single;
+                using V = typename VCT<c, T>::Element;
                 // Call forward pass
-                moe::forward<900, g, d, c, ElementC, Element><<<Hardware<900>::blocks::value, THREADS>>>(
-                    tA, tXu, tXd, tBu, tBd, tG, tGo);
+                moe::forward<900, g, d, c, ActivationOp, ActivationOpX, ElementC>
+                 <<<Hardware<900>::blocks::value, THREADS>>>(
+                     static_cast<const V*>(iP), static_cast<V*>(oP));
             }
             break;
             case 17: {
                 constexpr auto g = GateReductionLevel::singleBlock;
                 constexpr auto d = DropTokens::yes;
                 constexpr auto c = CombineMode::multithreaded;
+                using V = typename VCT<c, T>::Element;
                 // Call forward pass
-                moe::forward<900, g, d, c, ElementC, Element><<<Hardware<900>::blocks::value, THREADS>>>(
-                    tA, tXu, tXd, tBu, tBd, tG, tGo);
+                moe::forward<900, g, d, c, ActivationOp, ActivationOpX, ElementC>
+                 <<<Hardware<900>::blocks::value, THREADS>>>(
+                     static_cast<const V*>(iP), static_cast<V*>(oP));
             }
             break;
             case 18: {
                 constexpr auto g = GateReductionLevel::singleBlock;
                 constexpr auto d = DropTokens::no;
                 constexpr auto c = CombineMode::single;
+                using V = typename VCT<c, T>::Element;
                 // Call forward pass
-                moe::forward<900, g, d, c, ElementC, Element><<<Hardware<900>::blocks::value, THREADS>>>(
-                    tA, tXu, tXd, tBu, tBd, tG, tGo);
+                moe::forward<900, g, d, c, ActivationOp, ActivationOpX, ElementC>
+                 <<<Hardware<900>::blocks::value, THREADS>>>(
+                     static_cast<const V*>(iP), static_cast<V*>(oP));
             }
             break;
             case 19: {
                 constexpr auto g = GateReductionLevel::singleBlock;
                 constexpr auto d = DropTokens::no;
                 constexpr auto c = CombineMode::multithreaded;
-                moe::forward<900, g, d, c, ElementC, Element><<<Hardware<900>::blocks::value, THREADS>>>(
-                    tA, tXu, tXd, tBu, tBd, tG, tGo);
+                using V = typename VCT<c, T>::Element;
+                moe::forward<900, g, d, c, ActivationOp, ActivationOpX, ElementC>
+                 <<<Hardware<900>::blocks::value, THREADS>>>(
+                     static_cast<const V*>(iP), static_cast<V*>(oP));
             }
             break;
             case 20: {
                 constexpr auto g = GateReductionLevel::multiBlock;
                 constexpr auto d = DropTokens::yes;
                 constexpr auto c = CombineMode::single;
+                using V = typename VCT<c, T>::Element;
                 // Call forward pass
-                moe::forward<900, g, d, c, ElementC, Element><<<Hardware<900>::blocks::value, THREADS>>>(
-                    tA, tXu, tXd, tBu, tBd, tG, tGo);
+                moe::forward<900, g, d, c, ActivationOp, ActivationOpX, ElementC>
+                 <<<Hardware<900>::blocks::value, THREADS>>>(
+                     static_cast<const V*>(iP), static_cast<V*>(oP));
             }
             break;
             case 21: {
                 constexpr auto g = GateReductionLevel::multiBlock;
                 constexpr auto d = DropTokens::yes;
                 constexpr auto c = CombineMode::multithreaded;
+                using V = typename VCT<c, T>::Element;
                 // Call forward pass
-                moe::forward<900, g, d, c, ElementC, Element><<<Hardware<900>::blocks::value, THREADS>>>(
-                    tA, tXu, tXd, tBu, tBd, tG, tGo);
+                moe::forward<900, g, d, c, ActivationOp, ActivationOpX, ElementC>
+                 <<<Hardware<900>::blocks::value, THREADS>>>(
+                     static_cast<const V*>(iP), static_cast<V*>(oP));
             }
             break;
             case 22: {
                 constexpr auto g = GateReductionLevel::multiBlock;
                 constexpr auto d = DropTokens::no;
                 constexpr auto c = CombineMode::single;
+                using V = typename VCT<c, T>::Element;
                 // Call forward pass
-                moe::forward<900, g, d, c, ElementC, Element><<<Hardware<900>::blocks::value, THREADS>>>(
-                   tA, tXu, tXd, tBu, tBd, tG, tGo);
+                moe::forward<900, g, d, c, ActivationOp, ActivationOpX, ElementC>
+                 <<<Hardware<900>::blocks::value, THREADS>>>(
+                     static_cast<const V*>(iP), static_cast<V*>(oP));
             }
             break;
             case 23: {
                 constexpr auto g = GateReductionLevel::multiBlock;
                 constexpr auto d = DropTokens::no;
                 constexpr auto c = CombineMode::multithreaded;
+                using V = typename VCT<c, T>::Element;
                 // Call forward pass
-                moe::forward<900, g, d, c, ElementC, Element><<<Hardware<900>::blocks::value, THREADS>>>(
-                    tA, tXu, tXd, tBu, tBd, tG, tGo);
+                moe::forward<900, g, d, c, ActivationOp, ActivationOpX, ElementC>
+                 <<<Hardware<900>::blocks::value, THREADS>>>(
+                     static_cast<const V*>(iP), static_cast<V*>(oP));
             }
             break;
+#endif
             default:
                 reportError(false, "No such function exists!");
         }
-#endif
     }
 
+    template<typename TorchType>
     __host__ __forceinline__
-    void forwardHost(const torch::Tensor& activations,
-        const torch::Tensor& expertsUp, const torch::Tensor& expertsDown,
-        const torch::Tensor& biasUp, const torch::Tensor& biasDown,
-        const torch::Tensor& gateWeights, const torch::Tensor& gateOutput){
+    void forwardHost(const void* __restrict__ iP, void* __restrict__ oP,
+        const TorchType& sT){
         reportError(isInitialized, "Not initialized");
-        switch (activations.scalar_type()) {
-            case torch::kFloat: {
+        switch (sT) {
+            case torch::kFloat32: {
                 if (at::globalContext().allowTF32CuBLAS() || at::globalContext().allowTF32CuDNN()) {
-                    dispatchKernel<cute::tfloat32_t>(activations,expertsUp, expertsDown,
-                        biasUp, biasDown, gateWeights, gateOutput);
+                    dispatchKernel<cute::tfloat32_t>(iP, oP);
                 }
                 else {
-                    dispatchKernel<float>(activations, expertsUp, expertsDown,
-                        biasUp, biasDown, gateWeights, gateOutput);
+                    dispatchKernel<float>(iP, oP);
                 }
             }
             break;
             case torch::kFloat16:
-                dispatchKernel<cute::half_t>(activations, expertsUp, expertsDown,
-                    biasUp, biasDown, gateWeights, gateOutput);
+                dispatchKernel<cute::half_t>(iP, oP);
             break;
             case torch::kBFloat16:
-                dispatchKernel<cute::bfloat16_t>(activations, expertsUp, expertsDown,
-                    biasUp, biasDown, gateWeights, gateOutput);
-            break;
-            case torch::kFloat8_e4m3fn:
-                dispatchKernel<cute::float_e4m3_t>(activations,expertsUp, expertsDown,
-                    biasUp, biasDown, gateWeights, gateOutput);
-            break;
-            case torch::kFloat8_e5m2:
-                dispatchKernel<cute::float_e5m2_t>(activations, expertsUp, expertsDown,
-                    biasUp, biasDown, gateWeights, gateOutput);
+                dispatchKernel<cute::bfloat16_t>(iP, oP);
             break;
             default:
                 reportError(false, "Not supported!");

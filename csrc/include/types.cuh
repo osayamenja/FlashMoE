@@ -56,9 +56,9 @@ namespace aristos{
         concept TensorValueType = cuda::std::is_same_v<V, cute::half_t> ||
             cuda::std::is_same_v<V, cute::bfloat16_t> ||
             cuda::std::is_same_v<V, cute::tfloat32_t> ||
-            cuda::std::is_same_v<V, float> ||
+            cuda::std::is_same_v<V, float> /*||
             cuda::std::is_same_v<V, cute::float_e4m3_t> ||
-            cuda::std::is_same_v<V, cute::float_e5m2_t>;
+            cuda::std::is_same_v<V, cute::float_e5m2_t>*/;
 
     template<typename T>
     concept Tensor = cute::is_tensor<T>::value && TensorValueType<typename T::value_type>;

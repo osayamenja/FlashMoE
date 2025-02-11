@@ -51,14 +51,6 @@ namespace aristos {
     struct ToCDx<cute::bfloat16_t> {
         using T = __nv_bfloat16;
     };
-    template<>
-    struct ToCDx<cute::float_e4m3_t> {
-        using T = __nv_fp8_e4m3;
-    };
-    template<>
-    struct ToCDx<cute::float_e5m2_t> {
-        using T = __nv_fp8_e5m2;
-    };
 
     template<unsigned int Arch, typename TC, typename TA=TC, typename TB=TA>
     requires (Arch >= 700)

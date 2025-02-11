@@ -155,8 +155,6 @@ namespace aristos {
         completed
     };
     // Stylized expert for evaluation only
-    // For simplicity, assume single element types for all matrices,
-    // This is typical of PyTorch workloads
     template<
         unsigned int Arch,
         typename ActivationOp,
@@ -172,7 +170,7 @@ namespace aristos {
                 cuda::std::is_same_v<Element, cute::tfloat32_t>))
     /// D = A * B1 + C1
     /// A = D * B2 + C2
-    __global__ __maxnreg__(REGINALD) void FFN(ProblemShape_MNK pShape,
+    __global__ __maxnreg__(REGINALD) void expert(ProblemShape_MNK pShape,
         uint* deviceThroughput, uint* tileSync,
         const Element* __restrict__ iP /* A, B, D, S, W*/,
         Element* __restrict__ oP /*C*/, const bool skip = true) {
@@ -281,13 +279,12 @@ namespace aristos {
                 }
             }
         }
-        // no bueno
         asm volatile("mov.u64 %0, %%globaltimer;": "=l"(end)::);
         if (!skip) {
             auto tDt = static_cast<float>(end - start) / 1e6f; // convert nano to milliseconds
             // Intra-block reduction to get maximum latency
-            using BlockReduce = cub::BlockReduce<float, THREADS>;
-            auto* __restrict__ rTs = CAST_TO(BlockReduce::TempStorage, workspace);
+            using BlockReduce = cub::BlockReduce<float, threads>;
+            auto* __restrict__ rTs = CAST_TO(typename BlockReduce::TempStorage, workspace);
             // Compute the block-wide max for thread0
             auto bT = BlockReduce(*rTs).Reduce(tDt, cub::Max());
             // Inter-block max reduction

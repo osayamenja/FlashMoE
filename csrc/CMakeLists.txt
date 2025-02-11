@@ -82,6 +82,7 @@ set_target_properties(csrc PROPERTIES
 )
 
 string(SUBSTRING "${CMAKE_CUDA_ARCHITECTURES_NATIVE}" 0 2 COMPUTE_CAPABILITY) # xx-real -> xx
+math(EXPR GPU_ARCH "${COMPUTE_CAPABILITY} * 10" OUTPUT_FORMAT DECIMAL)
 message(STATUS "GPU 0 Compute Capability: ${COMPUTE_CAPABILITY}")
 set(ENV{CUTLASS_NVCC_ARCHS} "${COMPUTE_CAPABILITY}")
 
@@ -181,7 +182,8 @@ target_compile_options(csrc PRIVATE
 target_compile_definitions(csrc
         PRIVATE
         CHECK_TENSORS=0
-        DECODE_MOE=0
+        DECODE_MOE=1
+        ARISTOS_ARCH=${GPU_ARCH}
 )
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_compile_options(csrc PRIVATE
