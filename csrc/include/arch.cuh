@@ -19,50 +19,50 @@ namespace aristos {
     template<unsigned int Arch = 800, unsigned int maxRegisters = 128, Board b = Board::pcie>
     struct Hardware {
         static_assert(Arch == 800 && maxRegisters == 128 && b == Board::pcie);
-        using blocks = cute::Int<4 * 108>;
+        using blocks = cute::Int<4U * 108>;
     };
 
     template<>
     struct Hardware<800, 96> {
-        using blocks = cute::Int<5 * 108>;
+        using blocks = cute::Int<5U * 108>;
     };
 
     template<>
     struct Hardware<700> {
-        using blocks = cute::Int<4 * 80>;
+        using blocks = cute::Int<4U * 80>;
     };
 
     template<>
     struct Hardware<700, 96> {
-        using blocks = cute::Int<5 * 80>;
+        using blocks = cute::Int<5U * 80>;
     };
 
     // Hopper
     template<>
     struct Hardware<900, 128, Board::sxm> {
-        using blocks = cute::Int<4 * 132>;
+        using blocks = cute::Int<4U * 132>;
     };
 
     template<>
     struct Hardware<900, 128, Board::pcie> {
-        using blocks = cute::Int<4 * 114>;
+        using blocks = cute::Int<4U * 114>;
     };
 
     // Odd ones
     template<>
     struct Hardware<890> {
-        using blocks = cute::Int<5 * 84>;
+        using blocks = cute::Int<5U * 84>;
     };
 
     template<>
     struct Hardware<860> {
-        using blocks = cute::Int<5 * 84>;
+        using blocks = cute::Int<5U * 84>;
     };
 
     template<>
     struct Hardware<750> {
         // this may be less than the actual
-        using blocks = cute::Int<3 * 40>;
+        using blocks = cute::Int<3U * 40>;
     };
 }
 #endif //ARCH_CUH

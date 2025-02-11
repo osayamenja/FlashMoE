@@ -19,6 +19,7 @@
 namespace aristos {
     template<
         typename BlockGEMM,
+        CombineMode c,
         typename Activations,
         typename Weights,
         typename Output,
@@ -136,14 +137,19 @@ namespace aristos {
             }
             #pragma unroll
             for (unsigned int j = 0; j < elems; ++j) {
-                atomicAdd(CAST_TO(CDxT, &gC(rIdx + j, cIdx + i * elems)), cTCx(rScratch[j]));
+                if constexpr (c == CombineMode::single) {
+                    gC(rIdx + j, cIdx + i * elems) = rScratch[j];
+                }
+                else {
+                    atomicAdd(CAST_TO(CDxT, &gC(rIdx + j, cIdx + i * elems)), cTCx(rScratch[j]));
+                }
             }
         }
         __syncthreads();
     }
 
     __device__
-    enum class TileState : uint8_t {
+    enum class FlagState : uint8_t {
         unidentified,
         identified,
         completed
@@ -154,6 +160,7 @@ namespace aristos {
     template<
         unsigned int Arch,
         typename ActivationOp,
+        CombineMode c,
         typename ElementC,
         typename Element,
         typename ProblemShape_MNK
@@ -166,23 +173,23 @@ namespace aristos {
     /// D = A * B1 + C1
     /// A = D * B2 + C2
     __global__ __maxnreg__(REGINALD) void FFN(ProblemShape_MNK pShape,
-        uint* deviceThroughput,
-        uint* tileSync,
+        uint* deviceThroughput, uint* tileSync,
         const Element* __restrict__ iP /* A, B, D, S, W*/,
         Element* __restrict__ oP /*C*/, const bool skip = true) {
         uint64_t start = 0, end = 0;
         constexpr auto blocks = Hardware<Arch>::blocks::value - 1U;
-        constexpr auto tUpB = 1024; // max supported number of tiles per block per gemm is 1536
+        constexpr auto tMu = 1024; // upper bound of tM for this exercise
         __shared__ __align__(16) Element workspace[SHARED_SIZE / sizeof(Element)];
-        __shared__ __align__(16) uint16_t tQ[tUpB];
+        __shared__ __align__(16) uint16_t tQ[tMu];
         const auto [M, N, K] = pShape;
         using Operation = BlockMM<Arch, Element, Element, ElementC, ActivationOp>;
         using OperationX = BlockMM<Arch, Element, Element, ElementC>;
         constexpr auto preGEMM = processor::FGT<TaskType::preGEMM, Operation>{};
-        const auto tilesM = Bookkeeping::tiles<BLOCK_M>(M);
-        const auto tilesN = Bookkeeping::tiles<BLOCK_N>(N);
-        const auto tilesK = Bookkeeping::tiles<BLOCK_N>(K);
-        const auto tilesX = tilesM * tilesK;
+        constexpr auto threads = Operation::GEMM::block_dim.x;
+        // we require M, N, K to be evenly divisible by corresponding block tiling dimensions
+        const auto tilesM = M / cute::get<0>(typename Operation::BlockTiler{});
+        const auto tilesN = N / cute::get<1>(typename Operation::BlockTiler{});
+        const auto tilesK = K / cute::get<2>(typename Operation::BlockTiler{});
         const auto tiles = tilesM * tilesN;
 
         const auto* __restrict__ pA = iP;
@@ -198,11 +205,11 @@ namespace aristos {
         asm volatile("mov.u64 %0, %%globaltimer;": "=l"(start)::);
         #pragma unroll 4
         for (uint i = blockIdx.x; i < tiles; i += blocks) {
-            const auto tM = i / tilesN;
             preGEMM(workspace, pA, pB1, pC1, pD1, M, N, K, i);
             // notify this tile's completion
             if (!threadIdx.x) {
                 __threadfence();
+                const auto tM = i / tilesN;
                 atomicIncrement(tileSync + tM);
             }
         }
@@ -221,58 +228,60 @@ namespace aristos {
             make_layout(cute::make_shape(M, K), cute::make_stride(0, 1)));
 
         // Below, is a more sophisticated method for scheduling the next GEMM task.
-        using BlockScan = cub::BlockScan<uint16_t, THREADS>;
-        constexpr auto tSlice = tUpB / THREADS;
+        using BlockScan = cub::BlockScan<uint16_t, threads>;
+        constexpr auto tSlice = tMu / threads;
         // Register allocations
         uint16_t predicates[tSlice];
-        TileState tileStates[tSlice];
+        FlagState flagState[tSlice];
         #pragma unroll
         for (uint i = 0; i < tSlice; ++i) {
             predicates[i] = 0U;
-            tileStates[i] = TileState::unidentified;
+            flagState[i] = FlagState::unidentified;
         }
-        const auto nT = tiles / blocks + (blockIdx.x < blocks - tiles / blocks * blocks);
-        const auto tNt = nT / THREADS + (threadIdx.x < THREADS - nT / THREADS * THREADS);
         auto processed = 0U;
+        // Below presumes a row-major layout of blocks over tiles
+        const auto nT = tiles / blocks + (blockIdx.x < (tiles % blocks));
         static_assert(sizeof(BlockScan::TempStorage) <= SHARED_SIZE);
-        auto* __restrict__ bTs = CAST_TO(BlockScan::TempStorage, workspace);
+        auto* __restrict__ bTs = CAST_TO(typename BlockScan::TempStorage, workspace);
+        const auto fStride = umin(blocks, tilesK);
         while (processed < nT) {
-            // concurrently sweep pending tiles
+            // concurrently sweep pending flags
             #pragma unroll
             for (uint i = 0; i < tSlice; ++i) {
-                if (i < tNt) {
-                    const auto idx = i * THREADS + threadIdx.x;
-                    if (tileStates[i] != TileState::completed) {
-                        predicates[i] = atomicLoad(tileSync + idx) == tilesK;
-                        tileStates[i] = predicates[i] ? TileState::identified : TileState::unidentified;
-                    }
+                const auto flagIdx = blockIdx.x + fStride * (i * threads + threadIdx.x);
+                if (flagIdx < tiles && flagState[i] != FlagState::completed) {
+                    predicates[i] = atomicLoad(tileSync + flagIdx / tilesK) == tilesN;
+                    flagState[i] = predicates[i] ? FlagState::identified : FlagState::unidentified;
                 }
             }
-            uint16_t completedTiles = 0U;
+            uint16_t identifiedFlags = 0U;
             // Perform block-wide Aggregation
-            BlockScan(*bTs).InclusiveSum(predicates, predicates, completedTiles);
-            // Populate task queue with tiles
+            BlockScan(*bTs).InclusiveSum(predicates, predicates, identifiedFlags);
+            // Populate task queue with identified flag indices
             #pragma unroll
             for (uint i = 0; i < tSlice; ++i) {
-                if (i < tNt) {
-                    const uint16_t idx = i * THREADS + threadIdx.x;
-                    const uint16_t lIdx = i + threadIdx.x * tSlice;
-                    if (tileStates[i] == TileState::identified) {
-                        tileStates[i] = TileState::completed;
-                        tQ[predicates[i] - lIdx] = idx * blocks + blockIdx.x;
-                    }
+                const auto flagIdx = blockIdx.x + fStride * (i * threads + threadIdx.x);
+                if (flagIdx < tiles && flagState[i] == FlagState::identified) {
+                    flagState[i] = FlagState::completed;
+                    tQ[predicates[i] - 1] = flagIdx / tilesK;
                 }
             }
             // needed for global visibility of tQ updates
             __syncthreads();
-            #pragma unroll 4
-            for (uint i = 0; i < completedTiles; ++i) {
-                const auto tileIdx = tQ[i];
+            #pragma unroll 2
+            for (uint i = 0; i < identifiedFlags; ++i) {
+                const auto rowIdx = tQ[i];
+                // Compute prefix index for my first tile in this row
+                const auto startIdx = rowIdx * tilesK / blocks + (blockIdx.x < rowIdx * tilesK % blocks);
+                const auto endTile = (rowIdx + 1) * tilesK;
                 // do gemm
-                fGST<OperationX>(workspace, mA, mB, mD, mC, pS, pCw, M, N, tileIdx);
+                for (uint j = blockIdx.x + startIdx * blocks; j < endTile; j += blocks) {
+                    fGST<OperationX, c>(workspace, mA, mB, mD, mC, pS, pCw, M, N, j);
+                    processed++;
+                }
             }
-            processed += completedTiles;
         }
+        // no bueno
         asm volatile("mov.u64 %0, %%globaltimer;": "=l"(end)::);
         if (!skip) {
             auto tDt = static_cast<float>(end - start) / 1e6f; // convert nano to milliseconds

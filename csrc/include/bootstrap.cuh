@@ -57,13 +57,13 @@ namespace aristos{
     template<
         unsigned int Arch,
         unsigned int skip = 128U,
+        CombineMode c,
         typename Element
     >
     __host__ __forceinline__
     void mFT(WorkerAttribute* __restrict__ const& dWa,
         const unsigned int& M, const unsigned int& N, const unsigned int& K,
         Element* hP) {
-        // malloc memory for all matrices using torch
         const size_t iZ = M * K + 2 * (N + K) + N + K + 2 * M;
         uint* p;
         const auto stateSize = sizeof(uint) * (1 + M / BLOCK_M); // tileSync + dT
@@ -77,12 +77,12 @@ namespace aristos{
         auto* output = hP + iZ;
         #pragma unroll
         for (uint i = 0; i < skip; ++i) {
-            FFN<Arch, Activation, ElementAccum><<<blocks, ARISTOS_BLOCK_SIZE, 0, aristosStream>>>(pS, p,
+            FFN<Arch, Activation, c, ElementAccum><<<blocks, ARISTOS_BLOCK_SIZE, 0, aristosStream>>>(pS, p,
             p + 1, hP, output);
             // Needed to clear accumulator buffer
             CHECK_ERROR_EXIT(cudaMemsetAsync(output + M * N, 0, sizeof(Element) * (M * K), aristosStream));
         }
-        FFN<Arch, Activation, ElementAccum><<<blocks, ARISTOS_BLOCK_SIZE, 0, aristosStream>>>(pS, p,
+        FFN<Arch, Activation, c, ElementAccum><<<blocks, ARISTOS_BLOCK_SIZE, 0, aristosStream>>>(pS, p,
             p + 1, hP, hP + iZ, false);
         uint stage = 0;
         CHECK_ERROR_EXIT(cudaMemcpyAsync(&stage, p, sizeof(uint), cudaMemcpyDeviceToHost, aristosStream));
@@ -94,7 +94,12 @@ namespace aristos{
         dWa->throughput = static_cast<uint16_t>(stage);
     }
 
-    template<unsigned int Arch, typename Element, unsigned int trials = 128U>
+    template<
+        unsigned int Arch,
+        typename Element,
+        CombineMode c,
+        unsigned int trials = 128U
+    >
     __host__ __forceinline__
     void mT(WorkerAttribute* __restrict__ const& dWa,
         const unsigned int& M, const unsigned int& N, const unsigned int& K, uint const& devId) {
@@ -147,7 +152,7 @@ namespace aristos{
         // Set C2 to 0
         hT.index({0, torch::indexing::Slice(cZ, hZ)}) *= 0.0f;
         CHECK_ERROR_EXIT(cudaDeviceSynchronize());
-        mFT<Arch, trials>(dWa, M, N, K, hT.mutable_data_ptr<Element>());
+        mFT<Arch, trials, c>(dWa, M, N, K, hT.mutable_data_ptr<Element>());
     }
 
     __host__ __forceinline__
@@ -215,7 +220,7 @@ namespace aristos{
         const auto adj = make_tensor(aP, make_layout(cute::make_shape(world, world), cute::LayoutRight{}));
         const auto dTg = decider::decide(adj, wG, iC.numExperts,
             iC.numExperts, mC);
-        const auto epWorld = subsets(dTg, pT, rank);
+        auto epWorld = subsets(dTg, pT, rank);
         for (uint i = 0; i < iC.numExperts; ++i) {
             // assuming homogenous experts, where each has normalized compute cost of 1
             experts[i] = Expert{i, 1};
@@ -247,8 +252,6 @@ namespace aristos{
         };
         if (epWorld == world) {
             // everyone is in one group; thus, we end early
-            // peer translation, sharding spec, expert slots
-            //return cuda::std::tuple{peerTranslation, assignment, epRank, expertSlots, numLocalExperts};
             return;
         }
         // Get other group ids
@@ -264,6 +267,7 @@ namespace aristos{
             if (group != myGroup) {
                 std::ranges::fill(scratch, scratch + world, 0U);
                 const auto ePw = subsets(dTg, pTs, group);
+                epWorld = cute::max(epWorld, ePw);
                 for (uint i = 0; i < ePw; ++i) {
                     const auto wRank = pTs[i];
                     ePwG[i] = Worker{
@@ -281,6 +285,10 @@ namespace aristos{
                 }
             }
         }
+        // The global maximum of the below values is necessary for allocating a uniformly sized symmetric heap
+        // across all PGAS PEs.
+        ePg->expertSlots = expertSlots;
+        ePg->epWorld = epWorld;
     }
 
     template<unsigned int Arch, typename Element>
@@ -326,7 +334,15 @@ namespace aristos{
         auto* __restrict__ eRs = CAST_TO(bool, scratch + globalWorld);
 
         estimateMemory<Element>(iC, &wAp[rank]);
-        mT<Arch, Element>(wAp + rank, iC.seqLen, iC.hiddenProjDim, iC.embedDim, devId);
+        if (iC.k > 1) {
+            mT<Arch, Element, CombineMode::multithreaded>(wAp + rank, iC.seqLen, iC.hiddenProjDim,
+                iC.embedDim, devId);
+        }
+        else {
+            mT<Arch, Element, CombineMode::single>(wAp + rank, iC.seqLen, iC.hiddenProjDim,
+                iC.embedDim, devId);
+        }
+
         discoverTopology(aP, globalWorld, globalWorld, wAp[rank]);
 
         // The topology adjacency matrix is ready, let's map devices to optimal cooperative process groups
@@ -335,12 +351,13 @@ namespace aristos{
         const auto ePgD = *ePg;
         // Now allocate memory
         /// Symmetric memory
-        const auto eCap = iC.shouldDrop? iC.expertCapacity(ePgD.epWorld) : iC.seqLen;
+        const auto eCap = iC.shouldDrop ? iC.expertCapacity(ePgD.epWorld) : iC.seqLen;
         const auto heapBytes = STAGES * CELLS * ePgD.epWorld * ePgD.expertSlots * eCap *
             iC.embedDim * sizeof(Element);
         const auto tMc = Bookkeeping::tiles<BLOCK_M>(eCap);
         const auto tN = Bookkeeping::tiles<BLOCK_N>(iC.embedDim);
-        const auto flagBytes = (ePgD.epWorld * ePgD.nLx + iC.numExperts * tMc * tN) * sizeof(flagsType);
+        const auto flagBytes = (ePgD.epWorld * ePgD.expertSlots + iC.numExperts * tMc * tN) *
+            sizeof(flagsType);
         auto* sHeap = nvshmem_calloc(flagBytes + heapBytes, sizeof(cuda::std::byte));
         
         auto* sHb = static_cast<cuda::std::byte*>(sHeap);

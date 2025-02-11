@@ -154,9 +154,9 @@ namespace aristos::processor{
                 make_layout(cute::make_shape(M, N), cute::make_stride(0, 1)));
 
             // M is padded, such that the below is correct
-            const auto tilesM = M / cute::get<0>(typename BlockGEMM::BlockTiler{});
+            const auto tilesM = M / bM;
             // We assert the below prior to this point
-            const auto tilesN = N / cute::get<1>(typename BlockGEMM::BlockTiler{});
+            const auto tilesN = N / bN;
 
             const auto tileCoord = idx2crd(tileIdx, cute::Shape(tilesM, tilesN), cute::Stride(tilesN ,1));
             const auto ctaCoord = make_coord(cute::get<0>(tileCoord), cute::get<1>(tileCoord), cute::_);

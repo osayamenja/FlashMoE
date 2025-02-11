@@ -12,6 +12,7 @@ void evalExpert() {
     constexpr auto M = 8192U;
     constexpr auto N = 4096U;
     constexpr auto K = 1024U;
+    static_assert(M % BLOCK_M == 0 && N % BLOCK_N == 0 && K % BLOCK_K_HALF == 0);
     using clk = std::chrono::high_resolution_clock;
     std::chrono::duration<float> end {};
     // create torch tensors
