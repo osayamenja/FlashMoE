@@ -40,6 +40,10 @@ namespace aristos {
         using T = S;
     };
     template<>
+    struct ToCDx<cute::tfloat32_t> {
+        using T = float;
+    };
+    template<>
     struct ToCDx<cute::half_t> {
         using T = __half;
     };

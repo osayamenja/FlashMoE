@@ -12,6 +12,7 @@
 #include <nvshmemx.h>
 #include <nvshmem.h>
 #include <host/nvshmemx_api.h>
+#include <torch/torch.h>
 
 #include "topo.cuh"
 #include "debug.cuh"
@@ -48,49 +49,105 @@ namespace aristos{
         // Deduct cost for the dense case, assuming at least one expert per device
         const auto bP = iC.bytesPerParameter<Element>();
         free -= bP * (iC.numParameters + iC.p2pBuffer);
-        const size_t mX = cute::ceil_div(iC.numLayers, iC.moeFrequency) * bP * 2UL * (iC.hiddenProjDim * iC.embedDim);
+        const size_t mX = cute::ceil_div(iC.numLayers, iC.moeFrequency) * bP * 2UL *
+            (iC.hiddenProjDim * iC.embedDim);
         dWa->memoryCapacity = free / mX;
     }
 
     template<
         unsigned int Arch,
+        unsigned int skip = 128U,
         typename Element
     >
     __host__ __forceinline__
-    void measureThroughput(WorkerAttribute* __restrict__ const& dWa,
-        const unsigned int& M, const unsigned int& N, const unsigned int& K) {
-        // malloc memory for all matrices
-        constexpr auto batch = 2U;
-        cuda::std::byte* abc;
+    void mFT(WorkerAttribute* __restrict__ const& dWa,
+        const unsigned int& M, const unsigned int& N, const unsigned int& K,
+        Element* hP) {
+        // malloc memory for all matrices using torch
+        const size_t iZ = M * K + 2 * (N + K) + N + K + 2 * M;
+        uint* p;
         const auto stateSize = sizeof(uint) * (1 + M / BLOCK_M); // tileSync + dT
-        const auto aSize = stateSize + sizeof(Element) * M * K;
-        const auto abSize = aSize + sizeof(Element) * K * N;
-        const auto abcSize = abSize + sizeof(Element) * M * N;
-        const auto abcBSize = abcSize + sizeof(Element) * cute::max(N, K); // bias
-        const auto abcBSSize = abcBSize + sizeof(Element) * M; // scale/combine weights
-        CHECK_ERROR_EXIT(cudaMallocAsync(&abc, abcBSSize, aristosStream));
-        CHECK_ERROR_EXIT(cudaMemsetAsync(abc, 0, abcBSSize, aristosStream));
-        auto* __restrict__ p = CAST_TO(uint, abc);
-        const auto pS = cute::make_tuple(M, N, K);
+        CHECK_ERROR_EXIT(cudaMallocAsync(&p, stateSize, aristosStream));
+        CHECK_ERROR_EXIT(cudaMemsetAsync(p, 0, stateSize, aristosStream));
+        auto pS = cute::make_tuple(M, N, K);
         using ElementAccum = float;
         using Activation = cutlass::epilogue::thread::ReLU<ElementAccum>;
         constexpr auto blocks = Hardware<Arch>::blocks::value - 1U;
-        auto* __restrict__ pBp = CAST_TO(Element, abc + aSize);
-        auto* __restrict__ pDp = CAST_TO(Element, abc + abcSize);
-        const auto pB = cuda::std::array<Element*, batch>{pBp, pBp};
-        const auto pD = cuda::std::array<Element*, batch>{pDp, pDp};
-        auto* __restrict__ pC = CAST_TO(Element, abc + abSize);
-        auto* __restrict__ pSC = CAST_TO(Element, abc + abcBSize);
-        expert<Arch, Activation, batch, ElementAccum><<<blocks, ARISTOS_BLOCK_SIZE, 0, aristosStream>>>(pS, p,
-            p + 1, CAST_TO(Element, abc + stateSize), pB, pC, pD, pSC, pSC);
+
+        auto* output = hP + iZ;
+        #pragma unroll
+        for (uint i = 0; i < skip; ++i) {
+            FFN<Arch, Activation, ElementAccum><<<blocks, ARISTOS_BLOCK_SIZE, 0, aristosStream>>>(pS, p,
+            p + 1, hP, output);
+            // Needed to clear accumulator buffer
+            CHECK_ERROR_EXIT(cudaMemsetAsync(output + M * N, 0, sizeof(Element) * (M * K), aristosStream));
+        }
+        FFN<Arch, Activation, ElementAccum><<<blocks, ARISTOS_BLOCK_SIZE, 0, aristosStream>>>(pS, p,
+            p + 1, hP, hP + iZ, false);
         uint stage = 0;
         CHECK_ERROR_EXIT(cudaMemcpyAsync(&stage, p, sizeof(uint), cudaMemcpyDeviceToHost, aristosStream));
-        CHECK_ERROR_EXIT(cudaFreeAsync(abc, aristosStream));
+        CHECK_ERROR_EXIT(cudaFreeAsync(p, aristosStream));
         CHECK_ERROR_EXIT(cudaPeekAtLastError());
         CHECK_ERROR_EXIT(cudaStreamSynchronize(aristosStream));
         // quantize to uint16_t, this should be safe as the value is very small: in the hundreds
         // we use uint due to the API requirement of CUDA atomicMin
         dWa->throughput = static_cast<uint16_t>(stage);
+    }
+
+    template<unsigned int Arch, typename Element, unsigned int trials = 128U>
+    __host__ __forceinline__
+    void mT(WorkerAttribute* __restrict__ const& dWa,
+        const unsigned int& M, const unsigned int& N, const unsigned int& K, uint const& devId) {
+        // create torch tensors
+        const auto options = torch::TensorOptions().dtype(torch::kFloat32).layout(torch::kStrided)
+            .device(torch::kCUDA, devId);
+        at::globalContext().setAllowTF32CuBLAS(true);
+        at::globalContext().setAllowTF32CuDNN(true);
+        const torch::Device device(torch::kCUDA, devId);
+
+        // Clean way to initialize the memory needed
+        torch::nn::Sequential expert(
+            torch::nn::Linear(torch::nn::LinearOptions(K, N).bias(true)),
+            torch::nn::ReLU(),
+            torch::nn::Linear(torch::nn::LinearOptions(N, K).bias(true))
+            );
+        expert->to(device);
+
+        const auto aZ =  M * K;
+        const auto bZ =  aZ + N * K;
+        const auto b2Z =  bZ + N * K;
+        const auto dZ =  b2Z + N;
+        const auto d2Z =  dZ + K;
+        const auto sZ =  d2Z + M;
+        const auto cWz =  sZ + M;
+        const auto cZ =  cWz + M * N;
+        const auto hZ =  cZ + M * K;
+
+        // Pack A, B, D, S into a single, linear tensor
+        const auto hT = torch::ones({1, hZ}, options).contiguous();
+        const auto activations = torch::rand({M, K}, options);
+        const auto scaleWeights = 0.5f * torch::ones({M, 1}, options);
+        // Pack A
+        hT.index({0, torch::indexing::Slice(torch::indexing::None, aZ)}) =
+            activations.view({aZ}).contiguous();
+        // Pack expert weights
+        hT.index({0, torch::indexing::Slice(aZ, bZ)}) =
+            expert->named_parameters()[0].value().view({N * K}).contiguous();
+        hT.index({0, torch::indexing::Slice(bZ, b2Z)}) =
+            expert->named_parameters()[2].value().view({N * K}).contiguous();
+        // Pack expert bias
+        hT.index({0, torch::indexing::Slice(b2Z, dZ)}) =
+            expert->named_parameters()[1].value().view({N}).contiguous();
+        hT.index({0, torch::indexing::Slice(dZ, d2Z)}) =
+            expert->named_parameters()[3].value().view({K}).contiguous();
+        // Pack Scale
+        hT.index({0, torch::indexing::Slice(d2Z, sZ)}) =
+            scaleWeights.view({M}).contiguous();
+        // implicitly set combine to 1
+        // Set C2 to 0
+        hT.index({0, torch::indexing::Slice(cZ, hZ)}) *= 0.0f;
+        CHECK_ERROR_EXIT(cudaDeviceSynchronize());
+        mFT<Arch, trials>(dWa, M, N, K, hT.mutable_data_ptr<Element>());
     }
 
     __host__ __forceinline__
@@ -232,7 +289,8 @@ namespace aristos{
     void archSpecificInit(const InitialConfig& iC) {
         // initialize communication backend
         nvshmem_init();
-        CUTE_CHECK_ERROR(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
+        const uint devId = nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE);
+        CUTE_CHECK_ERROR(cudaSetDevice(devId));
         const auto globalWorld = nvshmem_n_pes();
         const auto rank = nvshmem_my_pe();
 
@@ -268,7 +326,7 @@ namespace aristos{
         auto* __restrict__ eRs = CAST_TO(bool, scratch + globalWorld);
 
         estimateMemory<Element>(iC, &wAp[rank]);
-        measureThroughput<Arch, Element>(wAp + rank, iC.seqLen, iC.hiddenProjDim, iC.embedDim);
+        mT<Arch, Element>(wAp + rank, iC.seqLen, iC.hiddenProjDim, iC.embedDim, devId);
         discoverTopology(aP, globalWorld, globalWorld, wAp[rank]);
 
         // The topology adjacency matrix is ready, let's map devices to optimal cooperative process groups
@@ -278,7 +336,8 @@ namespace aristos{
         // Now allocate memory
         /// Symmetric memory
         const auto eCap = iC.shouldDrop? iC.expertCapacity(ePgD.epWorld) : iC.seqLen;
-        const auto heapBytes = STAGES * CELLS * ePgD.epWorld * ePgD.expertSlots * eCap * iC.embedDim * sizeof(Element);
+        const auto heapBytes = STAGES * CELLS * ePgD.epWorld * ePgD.expertSlots * eCap *
+            iC.embedDim * sizeof(Element);
         const auto tMc = Bookkeeping::tiles<BLOCK_M>(eCap);
         const auto tN = Bookkeeping::tiles<BLOCK_N>(iC.embedDim);
         const auto flagBytes = (ePgD.epWorld * ePgD.nLx + iC.numExperts * tMc * tN) * sizeof(flagsType);
@@ -322,7 +381,8 @@ namespace aristos{
             sizeof(BookType) * iC.numExperts, cudaMemcpyHostToDevice, aristosStream));
         // copy device-wide barrier
         const auto hB = new cuda::barrier<cuda::thread_scope_device>{blocks};
-        CHECK_ERROR_EXIT(cudaMemcpyAsync(hostBookkeeping.dB(), hB, sizeof(cuda::barrier<cuda::thread_scope_device>),
+        CHECK_ERROR_EXIT(cudaMemcpyAsync(hostBookkeeping.dB(), hB,
+            sizeof(cuda::barrier<cuda::thread_scope_device>),
             cudaMemcpyHostToDevice, aristosStream));
         CHECK_ERROR_EXIT(cudaMemcpyToSymbolAsync(bookkeeping, &hostBookkeeping, sizeof(Bookkeeping), 0,
             cudaMemcpyHostToDevice, aristosStream));

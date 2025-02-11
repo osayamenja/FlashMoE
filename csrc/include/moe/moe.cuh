@@ -169,6 +169,8 @@ namespace aristos::moe{
         const auto* __restrict__ gOp = gateOutput.const_data_ptr<Element>();
         const auto tGo = cute::make_tensor(cute::make_gmem_ptr(gOp),
             make_layout(cute::make_shape(sl, px), cute::LayoutRight{}));
+        // TODO map type to supported types using VAA combine state
+
 #if DECODE_MOE
         // Decode function id
         switch (hostBookkeeping.fId) {
