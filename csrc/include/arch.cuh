@@ -8,7 +8,7 @@
 
 namespace aristos {
     template<unsigned int arch>
-    concept SupportedArch = arch >= 700 && arch <= 900;
+    concept SupportedArch = arch >= 700;
 
     __host__ __device__
     enum class Board {
@@ -16,9 +16,15 @@ namespace aristos {
         sxm,
     };
     // Data center GPUs only
-    template<unsigned int Arch = 800, unsigned int maxRegisters = 128, Board b = Board::pcie>
+    template<
+        unsigned int Arch,
+        unsigned int maxRegisters = 128,
+        Board b = Board::pcie
+    >
+    requires (SupportedArch<Arch>)
     struct Hardware {
-        static_assert(Arch == 800 && maxRegisters == 128 && b == Board::pcie);
+        static_assert(Arch == 800 && maxRegisters == 128 && b == Board::pcie,
+            "Unregistered Arch");
         using blocks = cute::Int<4U * 108>;
     };
 

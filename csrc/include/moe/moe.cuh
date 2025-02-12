@@ -142,16 +142,15 @@ namespace aristos::moe{
         // Decode function id
 
         switch (hostBookkeeping.fId) {
-#if (ARISTOS_ARCH < 800)
             case 0: {
                 constexpr auto g = GateReductionLevel::singleBlock;
                 constexpr auto d = DropTokens::no;
                 constexpr auto c = CombineMode::single;
                 using V = typename VCT<c, T>::Element;
                 // Call forward pass
-                moe::forward<700, g, d, c, ActivationOp, ActivationOpX, ElementC>
-                <<<Hardware<700>::blocks::value, THREADS>>>(
-                    static_cast<const V*>(iP), static_cast<V*>(oP));
+                moe::forward<ARISTOS_ARCH, g, d, c, ActivationOp, ActivationOpX, ElementC>
+                 <<<Hardware<ARISTOS_ARCH>::blocks::value, THREADS>>>(
+                     static_cast<const V*>(iP), static_cast<V*>(oP));
             }
             break;
             case 1: {
@@ -160,9 +159,9 @@ namespace aristos::moe{
                 constexpr auto c = CombineMode::multithreaded;
                 using V = typename VCT<c, T>::Element;
                 // Call forward pass
-                moe::forward<700, g, d, c, ActivationOp, ActivationOpX, ElementC>
-                <<<Hardware<700>::blocks::value, THREADS>>>(
-                    static_cast<const V*>(iP), static_cast<V*>(oP));
+                moe::forward<ARISTOS_ARCH, g, d, c, ActivationOp, ActivationOpX, ElementC>
+                 <<<Hardware<ARISTOS_ARCH>::blocks::value, THREADS>>>(
+                     static_cast<const V*>(iP), static_cast<V*>(oP));
             }
             break;
             case 2: {
@@ -171,9 +170,9 @@ namespace aristos::moe{
                 constexpr auto c = CombineMode::single;
                 using V = typename VCT<c, T>::Element;
                 // Call forward pass
-                moe::forward<700, g, d, c, ActivationOp, ActivationOpX, ElementC>
-                <<<Hardware<700>::blocks::value, THREADS>>>(
-                    static_cast<const V*>(iP), static_cast<V*>(oP));
+                moe::forward<ARISTOS_ARCH, g, d, c, ActivationOp, ActivationOpX, ElementC>
+                 <<<Hardware<ARISTOS_ARCH>::blocks::value, THREADS>>>(
+                     static_cast<const V*>(iP), static_cast<V*>(oP));
             }
             break;
             case 3: {
@@ -182,20 +181,19 @@ namespace aristos::moe{
                 constexpr auto c = CombineMode::multithreaded;
                 using V = typename VCT<c, T>::Element;
                 // Call forward pass
-                moe::forward<700, g, d, c, ActivationOp, ActivationOpX, ElementC>
-                <<<Hardware<700>::blocks::value, THREADS>>>(
-                    static_cast<const V*>(iP), static_cast<V*>(oP));
+                moe::forward<ARISTOS_ARCH, g, d, c, ActivationOp, ActivationOpX, ElementC>
+                 <<<Hardware<ARISTOS_ARCH>::blocks::value, THREADS>>>(
+                     static_cast<const V*>(iP), static_cast<V*>(oP));
             }
-            break;
             case 4: {
                 constexpr auto g = GateReductionLevel::multiBlock;
                 constexpr auto d = DropTokens::no;
                 constexpr auto c = CombineMode::single;
                 using V = typename VCT<c, T>::Element;
                 // Call forward pass
-                moe::forward<700, g, d, c, ActivationOp, ActivationOpX, ElementC>
-                <<<Hardware<700>::blocks::value, THREADS>>>(
-                    static_cast<const V*>(iP), static_cast<V*>(oP));
+                moe::forward<ARISTOS_ARCH, g, d, c, ActivationOp, ActivationOpX, ElementC>
+                 <<<Hardware<ARISTOS_ARCH>::blocks::value, THREADS>>>(
+                     static_cast<const V*>(iP), static_cast<V*>(oP));
             }
             break;
             case 5: {
@@ -204,9 +202,9 @@ namespace aristos::moe{
                 constexpr auto c = CombineMode::multithreaded;
                 using V = typename VCT<c, T>::Element;
                 // Call forward pass
-                moe::forward<700, g, d, c, ActivationOp, ActivationOpX, ElementC>
-                <<<Hardware<700>::blocks::value, THREADS>>>(
-                    static_cast<const V*>(iP), static_cast<V*>(oP));
+                moe::forward<ARISTOS_ARCH, g, d, c, ActivationOp, ActivationOpX, ElementC>
+                 <<<Hardware<ARISTOS_ARCH>::blocks::value, THREADS>>>(
+                     static_cast<const V*>(iP), static_cast<V*>(oP));
             }
             break;
             case 6: {
@@ -215,9 +213,9 @@ namespace aristos::moe{
                 constexpr auto c = CombineMode::single;
                 using V = typename VCT<c, T>::Element;
                 // Call forward pass
-                moe::forward<700, g, d, c, ActivationOp, ActivationOpX, ElementC>
-                <<<Hardware<700>::blocks::value, THREADS>>>(
-                    static_cast<const V*>(iP), static_cast<V*>(oP));
+                moe::forward<ARISTOS_ARCH, g, d, c, ActivationOp, ActivationOpX, ElementC>
+                 <<<Hardware<ARISTOS_ARCH>::blocks::value, THREADS>>>(
+                     static_cast<const V*>(iP), static_cast<V*>(oP));
             }
             break;
             case 7: {
@@ -226,199 +224,19 @@ namespace aristos::moe{
                 constexpr auto c = CombineMode::multithreaded;
                 using V = typename VCT<c, T>::Element;
                 // Call forward pass
-                moe::forward<700, g, d, c, ActivationOp, ActivationOpX, ElementC>
-                <<<Hardware<700>::blocks::value, THREADS>>>(
-                    static_cast<const V*>(iP), static_cast<V*>(oP));
-            }
-            break;
-#endif
-#if (ARISTOS_ARCH >= 800) && (ARISTOS_ARCH < 900)
-            case 8: {
-                constexpr auto g = GateReductionLevel::singleBlock;
-                constexpr auto d = DropTokens::no;
-                constexpr auto c = CombineMode::single;
-                using V = typename VCT<c, T>::Element;
-                // Call forward pass
-                moe::forward<800, g, d, c, ActivationOp, ActivationOpX, ElementC>
-                 <<<Hardware<>::blocks::value, THREADS>>>(
+                moe::forward<ARISTOS_ARCH, g, d, c, ActivationOp, ActivationOpX, ElementC>
+                 <<<Hardware<ARISTOS_ARCH>::blocks::value, THREADS>>>(
                      static_cast<const V*>(iP), static_cast<V*>(oP));
             }
             break;
-            case 9: {
-                constexpr auto g = GateReductionLevel::singleBlock;
-                constexpr auto d = DropTokens::no;
-                constexpr auto c = CombineMode::multithreaded;
-                using V = typename VCT<c, T>::Element;
-                // Call forward pass
-                moe::forward<800, g, d, c, ActivationOp, ActivationOpX, ElementC>
-                 <<<Hardware<>::blocks::value, THREADS>>>(
-                     static_cast<const V*>(iP), static_cast<V*>(oP));
-            }
-            break;
-            case 10: {
-                constexpr auto g = GateReductionLevel::singleBlock;
-                constexpr auto d = DropTokens::yes;
-                constexpr auto c = CombineMode::single;
-                using V = typename VCT<c, T>::Element;
-                // Call forward pass
-                moe::forward<800, g, d, c, ActivationOp, ActivationOpX, ElementC>
-                 <<<Hardware<>::blocks::value, THREADS>>>(
-                     static_cast<const V*>(iP), static_cast<V*>(oP));
-            }
-            break;
-            case 11: {
-                constexpr auto g = GateReductionLevel::singleBlock;
-                constexpr auto d = DropTokens::yes;
-                constexpr auto c = CombineMode::multithreaded;
-                using V = typename VCT<c, T>::Element;
-                // Call forward pass
-                moe::forward<800, g, d, c, ActivationOp, ActivationOpX, ElementC>
-                 <<<Hardware<>::blocks::value, THREADS>>>(
-                     static_cast<const V*>(iP), static_cast<V*>(oP));
-            }
-            case 12: {
-                constexpr auto g = GateReductionLevel::multiBlock;
-                constexpr auto d = DropTokens::no;
-                constexpr auto c = CombineMode::single;
-                using V = typename VCT<c, T>::Element;
-                // Call forward pass
-                moe::forward<800, g, d, c, ActivationOp, ActivationOpX, ElementC>
-                 <<<Hardware<>::blocks::value, THREADS>>>(
-                     static_cast<const V*>(iP), static_cast<V*>(oP));
-            }
-            break;
-            case 13: {
-                constexpr auto g = GateReductionLevel::multiBlock;
-                constexpr auto d = DropTokens::no;
-                constexpr auto c = CombineMode::multithreaded;
-                using V = typename VCT<c, T>::Element;
-                // Call forward pass
-                moe::forward<800, g, d, c, ActivationOp, ActivationOpX, ElementC>
-                 <<<Hardware<>::blocks::value, THREADS>>>(
-                     static_cast<const V*>(iP), static_cast<V*>(oP));
-            }
-            break;
-            case 14: {
-                constexpr auto g = GateReductionLevel::multiBlock;
-                constexpr auto d = DropTokens::yes;
-                constexpr auto c = CombineMode::single;
-                using V = typename VCT<c, T>::Element;
-                // Call forward pass
-                moe::forward<800, g, d, c, ActivationOp, ActivationOpX, ElementC>
-                 <<<Hardware<>::blocks::value, THREADS>>>(
-                     static_cast<const V*>(iP), static_cast<V*>(oP));
-            }
-            break;
-            case 15: {
-                constexpr auto g = GateReductionLevel::multiBlock;
-                constexpr auto d = DropTokens::yes;
-                constexpr auto c = CombineMode::multithreaded;
-                using V = typename VCT<c, T>::Element;
-                // Call forward pass
-                moe::forward<800, g, d, c, ActivationOp, ActivationOpX, ElementC>
-                 <<<Hardware<>::blocks::value, THREADS>>>(
-                     static_cast<const V*>(iP), static_cast<V*>(oP));
-            }
-            break;
-#endif
-#if (ARISTOS_ARCH >= 900)
-            case 16: {
-                constexpr auto g = GateReductionLevel::singleBlock;
-                constexpr auto d = DropTokens::yes;
-                constexpr auto c = CombineMode::single;
-                using V = typename VCT<c, T>::Element;
-                // Call forward pass
-                moe::forward<900, g, d, c, ActivationOp, ActivationOpX, ElementC>
-                 <<<Hardware<900>::blocks::value, THREADS>>>(
-                     static_cast<const V*>(iP), static_cast<V*>(oP));
-            }
-            break;
-            case 17: {
-                constexpr auto g = GateReductionLevel::singleBlock;
-                constexpr auto d = DropTokens::yes;
-                constexpr auto c = CombineMode::multithreaded;
-                using V = typename VCT<c, T>::Element;
-                // Call forward pass
-                moe::forward<900, g, d, c, ActivationOp, ActivationOpX, ElementC>
-                 <<<Hardware<900>::blocks::value, THREADS>>>(
-                     static_cast<const V*>(iP), static_cast<V*>(oP));
-            }
-            break;
-            case 18: {
-                constexpr auto g = GateReductionLevel::singleBlock;
-                constexpr auto d = DropTokens::no;
-                constexpr auto c = CombineMode::single;
-                using V = typename VCT<c, T>::Element;
-                // Call forward pass
-                moe::forward<900, g, d, c, ActivationOp, ActivationOpX, ElementC>
-                 <<<Hardware<900>::blocks::value, THREADS>>>(
-                     static_cast<const V*>(iP), static_cast<V*>(oP));
-            }
-            break;
-            case 19: {
-                constexpr auto g = GateReductionLevel::singleBlock;
-                constexpr auto d = DropTokens::no;
-                constexpr auto c = CombineMode::multithreaded;
-                using V = typename VCT<c, T>::Element;
-                moe::forward<900, g, d, c, ActivationOp, ActivationOpX, ElementC>
-                 <<<Hardware<900>::blocks::value, THREADS>>>(
-                     static_cast<const V*>(iP), static_cast<V*>(oP));
-            }
-            break;
-            case 20: {
-                constexpr auto g = GateReductionLevel::multiBlock;
-                constexpr auto d = DropTokens::yes;
-                constexpr auto c = CombineMode::single;
-                using V = typename VCT<c, T>::Element;
-                // Call forward pass
-                moe::forward<900, g, d, c, ActivationOp, ActivationOpX, ElementC>
-                 <<<Hardware<900>::blocks::value, THREADS>>>(
-                     static_cast<const V*>(iP), static_cast<V*>(oP));
-            }
-            break;
-            case 21: {
-                constexpr auto g = GateReductionLevel::multiBlock;
-                constexpr auto d = DropTokens::yes;
-                constexpr auto c = CombineMode::multithreaded;
-                using V = typename VCT<c, T>::Element;
-                // Call forward pass
-                moe::forward<900, g, d, c, ActivationOp, ActivationOpX, ElementC>
-                 <<<Hardware<900>::blocks::value, THREADS>>>(
-                     static_cast<const V*>(iP), static_cast<V*>(oP));
-            }
-            break;
-            case 22: {
-                constexpr auto g = GateReductionLevel::multiBlock;
-                constexpr auto d = DropTokens::no;
-                constexpr auto c = CombineMode::single;
-                using V = typename VCT<c, T>::Element;
-                // Call forward pass
-                moe::forward<900, g, d, c, ActivationOp, ActivationOpX, ElementC>
-                 <<<Hardware<900>::blocks::value, THREADS>>>(
-                     static_cast<const V*>(iP), static_cast<V*>(oP));
-            }
-            break;
-            case 23: {
-                constexpr auto g = GateReductionLevel::multiBlock;
-                constexpr auto d = DropTokens::no;
-                constexpr auto c = CombineMode::multithreaded;
-                using V = typename VCT<c, T>::Element;
-                // Call forward pass
-                moe::forward<900, g, d, c, ActivationOp, ActivationOpX, ElementC>
-                 <<<Hardware<900>::blocks::value, THREADS>>>(
-                     static_cast<const V*>(iP), static_cast<V*>(oP));
-            }
-            break;
-#endif
             default:
                 reportError(false, "No such function exists!");
         }
     }
 
-    template<typename TorchType>
     __host__ __forceinline__
     void forwardHost(const void* __restrict__ iP, void* __restrict__ oP,
-        const TorchType& sT){
+        const torch::ScalarType& sT){
         reportError(isInitialized, "Not initialized");
         switch (sT) {
             case torch::kFloat32: {

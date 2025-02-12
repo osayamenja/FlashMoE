@@ -106,6 +106,13 @@ namespace aristos{
         uint16_t tasks;
     };
 
+    // These could be much more, as supported by CUTLASS
+    __host__ __device__
+    enum class ActivationFunction {
+        ReLu,
+        GeLU
+    };
+
     __device__
     enum class PacketStage {
         initial,
