@@ -6,6 +6,7 @@
 #define GATE_CUH
 
 #include <cub/cub.cuh>
+#include <cuda/std/array>
 
 #include "../os/processor/gemm.cuh"
 #include "../types.cuh"
@@ -36,7 +37,6 @@ namespace aristos::gate {
     struct FusedGate {
         static_assert(g == GateReductionLevel::multiBlock);
         template<
-            class FrgTensorD,
             typename MatrixA,
             typename MatrixB,
             typename MatrixC,
@@ -46,7 +46,6 @@ namespace aristos::gate {
         void operator()(
             const MatrixA& activations,
             const MatrixB& weights, MatrixC& routing,
-            FrgTensorD& accumulator,
             const unsigned int& tileIdx,
             GateArgs const& gArg,
             ElementC* __restrict__ gateScratch,
@@ -54,6 +53,7 @@ namespace aristos::gate {
             static_assert(cuda::std::is_same_v<ElementC, mp_t> &&
                 cuda::std::is_same_v<typename MatrixC::value_type, ElementC>);
             typename BlockGEMM::CollectiveMainloop mainLoop{};
+            auto accumulator = cute::partition_fragment_C(typename BlockGEMM::MMA{}, typename BlockGEMM::TilerOut{});
             cute::clear(accumulator);
             constexpr auto bM = cute::get<0>(typename BlockGEMM::BlockTiler{});
             constexpr auto bN = cute::get<0>(typename BlockGEMM::BlockTiler{});
@@ -111,7 +111,7 @@ namespace aristos::gate {
             __syncthreads();
 
             /// Epilogue
-            static_assert(SHARED_SIZE % (threads * sizeof(ElementC) == 0));
+            static_assert(SHARED_SIZE % (threads * sizeof(ElementC)) == 0);
             constexpr auto elems = SHARED_SIZE / (threads * sizeof(ElementC));
             static_assert(size(accumulator) % elems == 0);
             static_assert(elems % 32 == 0);
@@ -194,9 +194,11 @@ namespace aristos::gate {
 
             // Online softmax is complete
             // Eagerly write gate logits to global memory
+            constexpr auto gCStoreOp = cutlass::NumericConverter<typename decltype(gC)::value_type,
+                                                        typename decltype(accumulator)::value_type>{};
             #pragma unroll
             for (unsigned int j = 0; j < bN; ++j) {
-                gC(threadIdx.x, j) = accumulator(j);
+                gC(threadIdx.x, j) = gCStoreOp(accumulator(j));
             }
 
             // Begin loss computation and global token ordering construction
@@ -237,7 +239,7 @@ namespace aristos::gate {
             // Get thread-owned slices: first for topK
             const auto topK = cute::local_tile(tK, tkTiler,
                 cute::crd2idx(cute::make_coord(threadIdx.x, 0), tK.layout()));
-            cutlass::AlignedArray<uint8_t, bN> rTopK{};
+            cuda::std::array<uint8_t, bN> rTopK{};
             __syncthreads();
             #pragma unroll
             for (uint i = 0; i < bN; ++i) {
@@ -335,7 +337,7 @@ namespace aristos::gate {
             static_assert(bM <= cuda::std::numeric_limits<uint8_t>::max());
 
             uint8_t cachedSelected = 0U;
-            cutlass::AlignedArray<uint8_t, bN> myIndices{};
+            cuda::std::array<uint8_t, bN> myIndices{};
             // scan down the column
             #pragma unroll
             for (uint i = 0; i < bN; ++i) {
@@ -366,7 +368,6 @@ namespace aristos::gate {
     >
     struct FusedGate<GateReductionLevel::singleBlock, BlockGEMM> {
         template<
-            class FrgTensorD,
             typename MatrixA,
             typename MatrixB,
             typename MatrixC,
@@ -375,17 +376,16 @@ namespace aristos::gate {
         __device__ __forceinline__
         void operator()(const MatrixA& activations,
             const MatrixB& weights, MatrixC& routing,
-            FrgTensorD& accumulator,
             const unsigned int& tileIdx,
             GateArgs const& gArg,
             ElementC* __restrict__ const& gateScratch,
             const unsigned int& k) {
             static_assert(cuda::std::is_same_v<ElementC, float> && cuda::std::is_same_v<ElementC, mp_t>);
             typename BlockGEMM::CollectiveMainloop mainLoop{};
+            auto accumulator = cute::partition_fragment_C(typename BlockGEMM::MMA{}, typename BlockGEMM::TilerOut{});
             cute::clear(accumulator);
             constexpr auto bM = cute::get<0>(typename BlockGEMM::BlockTiler{});
             constexpr auto bN = cute::get<1>(typename BlockGEMM::BlockTiler{});
-            static_assert(k <= bN);
             static_assert(cute::size(accumulator) == bN);
             constexpr auto threads = BlockGEMM::GEMM::block_dim.x;
 
@@ -417,7 +417,7 @@ namespace aristos::gate {
             __syncthreads();
 
             /// Epilogue
-            static_assert(SHARED_SIZE % (threads * sizeof(ElementC) == 0));
+            static_assert(SHARED_SIZE % (threads * sizeof(ElementC)) == 0);
             constexpr auto elems = SHARED_SIZE / (threads * sizeof(ElementC));
             static_assert(bN % elems == 0);
             constexpr auto trips = bN / elems;
@@ -476,9 +476,11 @@ namespace aristos::gate {
 
             // Online softmax is complete
             // Eagerly write gate logits to global memory
+            constexpr auto gCStoreOp = cutlass::NumericConverter<typename decltype(gC)::value_type,
+                                                        typename decltype(accumulator)::value_type>{};
             #pragma unroll
             for (unsigned int j = 0; j < bN; ++j) {
-                gC(threadIdx.x, j) = accumulator(j);
+                gC(threadIdx.x, j) = gCStoreOp(accumulator(j));
             }
 
             // Begin loss computation and global token ordering construction
@@ -523,7 +525,7 @@ namespace aristos::gate {
             // Get thread-owned slices: first for topK
             const auto topK = cute::local_tile(tK, tkTiler,
                 cute::crd2idx(cute::make_coord(threadIdx.x, 0), tK.layout()));
-            cutlass::AlignedArray<uint8_t, bN> rTopK{};
+            cuda::std::array<uint8_t, bN> rTopK{};
             // Prior to reusing shared memory
             __syncthreads();
             #pragma unroll
@@ -563,7 +565,7 @@ namespace aristos::gate {
             static_assert(bM <= cuda::std::numeric_limits<uint8_t>::max());
 
             uint8_t cachedSelected = 0U;
-            cutlass::AlignedArray<uint8_t, bN> myIndices{};
+            cuda::std::array<uint8_t, bN> myIndices{};
             // scan down the column
             #pragma unroll
             for (uint i = 0; i < bN; ++i) {
@@ -619,7 +621,6 @@ namespace aristos::gate {
         using ElementB = typename MatrixB::value_type;
         using Operation = BlockMM<Arch, ElementA, ElementB, ElementC>;
         using ctaTiler = typename Operation::BlockTiler; // (BLK_M, BLK_N, BLK_K)
-        auto accumulator = cute::partition_fragment_C(typename Operation::MMA{}, typename Operation::TilerOut{});
         constexpr auto threads = Operation::GEMM::block_dim.x;
         constexpr auto bM = cute::get<0>(ctaTiler{});
         constexpr auto bN = cute::get<1>(ctaTiler{});
@@ -630,7 +631,7 @@ namespace aristos::gate {
             cute::ceil_div(cute::get<1>(routing.shape()), bN);
 
         for (unsigned int i = blockIdx.x; i < nTiles; i += blocks) {
-            fusedGate(activations, weights, routing, accumulator, i, gArg, nTiles, scratch, k);
+            fusedGate(activations, weights, routing, i, gArg, scratch, k);
         }
 
         __syncthreads();

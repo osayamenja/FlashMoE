@@ -19,14 +19,13 @@ namespace aristos::packet {
         unsigned int superBlockSize = ARISTOS_SUPER_BLOCK_SIZE,
         typename Activations
     >
-    requires aristos::Matrix<Activations>
+    requires aristos::isMatrix<Activations>
     __forceinline__ __device__
-    void encode(Bookkeeping const& bk, const Activations& activations, unsigned int* const& __restrict__ workspace) {
+    void encode(const Activations& activations, unsigned int* const& __restrict__ workspace) {
         using Element = typename Activations::value_type;
         using NativeElement = typename ToCDx<Element>::T;
-        // Below is always true, but better safe than sorry
+        // Below is always true, but we assert to ensure
         static_assert(sizeof(NativeElement) == sizeof(Element) && alignof(NativeElement) == alignof(Element));
-        // assert(blocks <= gridDim.x - 1)
         static_assert(blocks % superBlockSize == 0);
         // Map a static set of blocks to an expert and stride as thus
         constexpr auto numSuperBlocks = blocks / superBlockSize;
@@ -35,12 +34,12 @@ namespace aristos::packet {
         const bool isLeader = !lBid && !threadIdx.x;
 
         // cache
-        const auto* __restrict__ tP = bk.tP();
-        const auto nx = bk.nx;
-        const auto world = bk.world;
-        const auto eCap = bk.eCap;
-        auto* __restrict__ pSA = bk.pSA();
-        const auto* __restrict__ pDs = bk.pDs();
+        const auto* __restrict__ tP = bookkeeping.tP();
+        const auto nx = bookkeeping.nx;
+        const auto world = bookkeeping.world;
+        const auto eCap = bookkeeping.eCap;
+        auto* __restrict__ pSA = bookkeeping.pSA();
+        const auto* __restrict__ pDs = bookkeeping.pDs();
         auto* __restrict__ sHeap = bookkeeping.sHeap;
         auto* __restrict__ flags = bookkeeping.flags;
         const auto cellSize = bookkeeping.cellSize();
@@ -107,7 +106,7 @@ namespace aristos::packet {
                     *CAST_TO(SignalPayload<>, &flagSignal) = SignalPayload{
                         routedTokens,
                         rSeqBit,
-                        Bookkeeping::tiles<BLOCK_M>(pTT)
+                        static_cast<uint16_t>(Bookkeeping::tiles<BLOCK_M>(pTT)) // this should be safe
                     };
                     // transmit signal
                     nvshmemx_signal_op(flags + rank * expertSlots + pLIdx,
@@ -120,7 +119,7 @@ namespace aristos::packet {
             for (uint j = lBid; j < routedTokens; j += superBlockSize) {
                 const auto [tokenIdx, _] = tokenIds(expertIdx, j);
                 auto* __restrict__ localPH = peerHeap + j * tokenDim * sizeof(Element);
-                const auto* __restrict__ aP = CAST_TO(NativeElement, &activations(tokenIdx, 0));
+                const auto* __restrict__ aP = CONST_CAST_TO(NativeElement, &activations(tokenIdx, 0));
                 const auto* __restrict__ vAP = static_cast<const uint4*>(static_cast<const void*>(aP));
                 const auto vTokenSize = tokenDim / (sizeof(uint4) / sizeof(Element));
                 // Use high-throughput vector copy
@@ -141,7 +140,7 @@ namespace aristos::packet {
                     *CAST_TO(SignalPayload<>, &flagSignal) = SignalPayload{
                         routedTokens,
                         rSeqBit,
-                        Bookkeeping::tiles<BLOCK_M>(pTT)
+                        static_cast<uint16_t>(Bookkeeping::tiles<BLOCK_M>(pTT))
                     };
                     if (isRemote) {
                         // do RDMA transfer + signal

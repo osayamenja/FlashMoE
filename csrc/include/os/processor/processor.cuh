@@ -28,7 +28,7 @@ namespace aristos::processor{
             typename Element = typename Output::value_type
         >
         requires(TensorValueType<Element> &&
-            aristos::Tensor<Output> && aristos::Tensor<ScaleWeights>)
+            aristos::isTensor<Output> && aristos::isTensor<ScaleWeights>)
         __device__ __forceinline__
         void operator()(Element* __restrict__ const& workspace,
             const TokenIdxTuple* __restrict__ const& tokenIndices,
@@ -184,9 +184,9 @@ namespace aristos::processor{
             typename BlockGEMM::MMA tiledMMA{};
             const auto tDgD = tiledMMA.get_slice(threadIdx.x).partition_C(gD);
 
-            const auto gCStoreOp = cutlass::NumericConverter<typename decltype(gC)::value_type,
+            constexpr auto gCStoreOp = cutlass::NumericConverter<typename decltype(gC)::value_type,
                                                         typename decltype(accumulator)::value_type>{};
-            const auto gDLoadOp = cutlass::NumericConverter<typename decltype(accumulator)::value_type,
+            constexpr auto gDLoadOp = cutlass::NumericConverter<typename decltype(accumulator)::value_type,
                                                         ElementD>{};
 
             // Assume elementwise operator
@@ -436,13 +436,11 @@ namespace aristos::processor{
                 bookkeeping.tQ(),
                 bookkeeping.tQ() + bookkeeping.tPs * SUBSCRIBERS, // should be the external Q
                 bookkeeping.tQS(),
-                bookkeeping.px,
+                bookkeeping.pd,
                 bookkeeping.ed,
                 bookkeeping.tN,
                 Bookkeeping::tiles<BLOCK_N>(bookkeeping.pd)
             };
-            // Initially indicate this block's readiness
-            atomicExch(pA.sQ, ready);
         }
         atomicExch(&enqueue, 0U);
         using Operation = BlockMM<Arch, ElementA, ElementB, ElementC, ActivationOp>;
@@ -472,7 +470,7 @@ namespace aristos::processor{
                     // Eagerly indicate readiness for the next task
                     atomicExch(pA.sQ, ready);
                     constexpr unsigned int preIndex = 0;
-                    preGEMM(workspace,
+                    preGEMM(CAST_TO(typename Operation::MatrixDType, workspace),
                         CAST_TO(typename Operation::MatrixAType, currentTask.aData),
                         CAST_TO(typename Operation::MatrixBType, currentTask.bData[preIndex]),
                         CAST_TO(typename Operation::MatrixDType, currentTask.cData[preIndex]),
@@ -520,11 +518,12 @@ namespace aristos::processor{
                     // Eagerly indicate readiness for the next task
                     atomicExch(pA.sQ, ready);
                     constexpr unsigned int postIndex = 0;
-                    postGEMM(workspace,
+                    postGEMM(CAST_TO(typename Operation::MatrixDType, workspace),
                         CAST_TO(typename Operation::MatrixAType, currentTask.aData),
                         CAST_TO(typename Operation::MatrixBType, currentTask.bData[postIndex]),
                         CAST_TO(typename Operation::MatrixDType, currentTask.cData[postIndex]),
                         CAST_TO(typename Operation::MatrixDType, currentTask.dData[postIndex]),
+                        currentTask.M,
                         pA.tokenSize,
                         pA.pd,
                         currentTask.tileIdx,

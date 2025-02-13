@@ -11,6 +11,7 @@
 #define ARISTOS_SUPER_BLOCK_SIZE 32U
 
 #define CAST_TO(T, p) static_cast<T*>(static_cast<void*>(p))
+#define CONST_CAST_TO(T, p) static_cast<const T*>(static_cast<const void*>(p))
 /// Number of communication stages S
 #define STAGES 2U
 
@@ -61,13 +62,11 @@ namespace aristos{
             cuda::std::is_same_v<V, cute::float_e5m2_t>*/;
 
     template<typename T>
-    concept Tensor = cute::is_tensor<T>::value && TensorValueType<typename T::value_type>;
-
-    template<typename M>
-    concept Matrix = requires(M m){
-        requires Tensor<M> && rank(m) == 2;
-    };
+    concept isTensor = cute::is_tensor<T>::value && TensorValueType<typename T::value_type>;
+    template<typename T>
+    concept isMatrix = isTensor<T> && rank(T{}) == 2;
     using mp_t = float; // or tf32
+    using GEA = float;
     using specType = unsigned int;
     using flagsType = uint64_t;
 
@@ -323,13 +322,13 @@ namespace aristos{
         // crd2Idx(peer, expertIdx, offset)
         unsigned int syncIdx = 0UL;
         unsigned int tileIdx = 0U;
-        uint16_t tileSize = 0U; // <= BLOCK_M
         unsigned int peerIdx = 0U;
         //padded
         unsigned int M = 0U;
         unsigned int flagIdx = 0U;
         unsigned int batchIdx = 0U;
         unsigned int expertIdx = 0U;
+        uint16_t tileSize = 0U; // <= BLOCK_M
         TaskType taskType = TaskType::Interrupt;
 
         __forceinline__ __device__
@@ -421,6 +420,8 @@ namespace aristos{
         uint16_t world = 0U;
         /// number of experts
         uint16_t nx = 0U;
+        /// top k
+        uint16_t k = 0U;
         /// padded number of experts
         uint16_t px = 0U;
         /// number of local experts
@@ -444,6 +445,7 @@ namespace aristos{
             cuda::std::byte* const& _book,
             const unsigned int& _sl,
             const uint16_t& _nx,
+            const uint16_t& _k,
             const uint16_t& _nLx,
             const uint16_t& _xS,
             const uint16_t& _rank,
@@ -462,7 +464,7 @@ namespace aristos{
         tM(tiles<BLOCK_M>(_sl)),
         tN(tiles<BLOCK_N>(_embedDim)),
         tCM(tiles<BLOCK_M>(_eCapacity)),
-        eCap(_eCapacity), rank(_rank), world(_world), nx(_nx),
+        eCap(_eCapacity), rank(_rank), world(_world), nx(_nx), k(_k),
         px(pad<BLOCK_N>(_nx)), nLx(_nLx), xs(_xS), blocks(_blocks), fId(_fId), pfId(_pfId){
             if (_nx > 1)[[likely]] {
                 const bool isSingleBlockGate = _nx <= BLOCK_N;

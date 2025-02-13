@@ -40,7 +40,10 @@ namespace aristos::moe{
         typename ElementC = float,
         typename Element
     >
-    requires(aristos::TensorValueType<ElementC> && aristos::TensorValueType<Element>)
+    requires(aristos::TensorValueType<ElementC> &&
+        aristos::TensorValueType<Element> &&
+        cuda::std::is_invocable_r_v<ElementC, ActivationOp, ElementC> &&
+        cuda::std::is_invocable_r_v<ElementC, ActivationOpX, ElementC>)
     __global__ __maxnreg__(REGINALD) void forward(
         const Element* __restrict__ iP, /* A, G, B, D*/ Element* __restrict__ oP /*G, O*/) {
         // Salami slice pointers
@@ -57,7 +60,7 @@ namespace aristos::moe{
         auto* __restrict__ gOp = oP;
         auto* __restrict__ mOp = gOp + S * E;
 
-        constexpr auto blocks = Hardware<Arch>::blocks;
+        constexpr auto blocks = Hardware<Arch>::blocks::value;
         constexpr auto processors = blocks - 1;
         __shared__ __align__(16) cuda::std::byte workspace[SHARED_SIZE];
         // wipe buffers here and read the sequence bit, before the grid-wide barrier
@@ -105,9 +108,12 @@ namespace aristos::moe{
             make_layout(make_layout(cute::make_shape(S, H), cute::LayoutRight{})));
 
         gate::forward<Arch, blocks, g, ElementC>(activations,
-            gateWeights, gateOutput, CAST_TO(ElementC, workspace));
+            gateWeights, gateOutput, bookkeeping.k, CAST_TO(ElementC, workspace));
         if (blockIdx.x + 1 < blocks) {
-            packet::encode<processors, d>(activations, gateOutput, workspace);
+            constexpr auto cutoff = processors / ARISTOS_SUPER_BLOCK_SIZE * ARISTOS_SUPER_BLOCK_SIZE;
+            if (blockIdx.x < cutoff) {
+                packet::encode<cutoff, d, ARISTOS_SUPER_BLOCK_SIZE>(activations, CAST_TO(uint, workspace));
+            }
             processor::start<
                 processors,
                 Arch,
@@ -115,8 +121,7 @@ namespace aristos::moe{
                 ActivationOp,
                 ActivationOpX,
                 ElementC,
-                Element,
-                ActivationOpX>(CAST_TO(Element, workspace), gateOutput, sb);
+                Element>(workspace, gateOutput, sb);
         }
         else {
             os::start<processors, d>(workspace, moeOutput, expertsUp, expertsDown, biasUp, biasDown, sb);
@@ -137,7 +142,7 @@ namespace aristos::moe{
     >
     __host__ __forceinline__
     void dispatchKernel(const void* __restrict__ iP, /* A, G, B, D*/ void* __restrict__ oP /*G, O*/) {
-        using ElementC = float;
+        using ElementC = GEA;
         // Decode function id
         switch (hostBookkeeping.fId) {
             case 0: {
@@ -235,39 +240,41 @@ namespace aristos::moe{
     __host__ __forceinline__
     void forwardHost(const void* __restrict__ iP, void* __restrict__ oP){
         reportError(isInitialized, "Not initialized");
+        using relu = cutlass::epilogue::thread::ReLU<GEA>;
+        using gelu = cutlass::epilogue::thread::GELU<GEA>;
         switch (hostBookkeeping.pfId) {
             case 0: {
                 if (at::globalContext().allowTF32CuBLAS() || at::globalContext().allowTF32CuDNN()) {
-                    dispatchKernel<cute::tfloat32_t, cutlass::epilogue::thread::ReLU<cute::tfloat32_t>>(iP, oP);
+                    dispatchKernel<cute::tfloat32_t, relu>(iP, oP);
                 }
                 else {
-                    dispatchKernel<float, cutlass::epilogue::thread::ReLU<float>>(iP, oP);
+                    dispatchKernel<float, relu>(iP, oP);
                 }
             }
             break;
             case 1: {
                 if (at::globalContext().allowTF32CuBLAS() || at::globalContext().allowTF32CuDNN()) {
-                    dispatchKernel<cute::tfloat32_t, cutlass::epilogue::thread::GELU<cute::tfloat32_t>>(iP, oP);
+                    dispatchKernel<cute::tfloat32_t, gelu>(iP, oP);
                 }
                 else {
-                    dispatchKernel<float, cutlass::epilogue::thread::GELU<float>>(iP, oP);
+                    dispatchKernel<float, gelu>(iP, oP);
                 }
             }
             break;
             case 2:
-                dispatchKernel<cute::half_t, cutlass::epilogue::thread::ReLU<cute::half_t>>(iP, oP);
+                dispatchKernel<cute::half_t, relu>(iP, oP);
             break;
             case 3:
-                dispatchKernel<cute::half_t, cutlass::epilogue::thread::GELU<cute::half_t>>(iP, oP);
+                dispatchKernel<cute::half_t, gelu>(iP, oP);
             break;
             case 4:
-                dispatchKernel<cute::bfloat16_t, cutlass::epilogue::thread::ReLU<cute::bfloat16_t>>(iP, oP);
+                dispatchKernel<cute::bfloat16_t, relu>(iP, oP);
             break;
             case 5:
-                dispatchKernel<cute::bfloat16_t, cutlass::epilogue::thread::GELU<cute::bfloat16_t>>(iP, oP);
+                dispatchKernel<cute::bfloat16_t, gelu>(iP, oP);
             break;
             default:
-                dispatchKernel<cute::half_t, cutlass::epilogue::thread::ReLU<cute::half_t>>(iP, oP);
+                dispatchKernel<cute::half_t, relu>(iP, oP);
         }
     }
 

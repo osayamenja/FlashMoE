@@ -300,7 +300,7 @@ namespace aristos{
         typename Activation
     >
     requires(aristos::TensorValueType<Element> && SupportedArch<Arch> &&
-        cuda::std::is_invocable_r_v<Element, Activation, Element>)
+        cuda::std::is_invocable_r_v<GEA, Activation, GEA>)
     __host__ __forceinline__
     void specificInit(const InitialConfig& iC) {
         // initialize communication backend
@@ -388,6 +388,7 @@ namespace aristos{
             book,
             iC.seqLen * iC.miniBatch,
             iC.numExperts,
+            iC.k,
             ePgD.nLx,
             ePgD.expertSlots,
             ePgD.epRank,
@@ -470,39 +471,42 @@ namespace aristos{
         CHECK_ERROR_EXIT(cudaDeviceGetAttribute(&cudaDevAttribute, cudaDevAttrMemoryPoolsSupported, dev));
         reportError(cudaDevAttribute, "Memory Pools support required");
         CHECK_ERROR_EXIT(cudaDeviceGetAttribute(&blocks, cudaDevAttrMultiProcessorCount, dev));
+        using ElementAccum = float;
+        using relu = cutlass::epilogue::thread::ReLU<ElementAccum>;
+        using gelu = cutlass::epilogue::thread::GELU<ElementAccum>;
         switch (eTA(sT, iC.actF)) {
             case 0: {
                 if (at::globalContext().allowTF32CuBLAS() || at::globalContext().allowTF32CuDNN()) {
-                    specificInit<ARISTOS_ARCH, 0, cute::tfloat32_t, cutlass::epilogue::thread::ReLU<cute::tfloat32_t>>(iC);
+                    specificInit<ARISTOS_ARCH, 0, cute::tfloat32_t, relu>(iC);
                 }
                 else {
-                    specificInit<ARISTOS_ARCH, 0, float, cutlass::epilogue::thread::ReLU<float>>(iC);
+                    specificInit<ARISTOS_ARCH, 0, float, relu>(iC);
                 }
             }
             break;
             case 1: {
                 if (at::globalContext().allowTF32CuBLAS() || at::globalContext().allowTF32CuDNN()) {
-                    specificInit<ARISTOS_ARCH, 1, cute::tfloat32_t, cutlass::epilogue::thread::GELU<cute::tfloat32_t>>(iC);
+                    specificInit<ARISTOS_ARCH, 1, cute::tfloat32_t, gelu>(iC);
                 }
                 else {
-                    specificInit<ARISTOS_ARCH, 1, float, cutlass::epilogue::thread::GELU<float>>(iC);
+                    specificInit<ARISTOS_ARCH, 1, float, gelu>(iC);
                 }
             }
             break;
             case 2:
-                specificInit<ARISTOS_ARCH, 2, cute::half_t, cutlass::epilogue::thread::ReLU<cute::half_t>>(iC);
+                specificInit<ARISTOS_ARCH, 2, cute::half_t, relu>(iC);
             break;
             case 3:
-                specificInit<ARISTOS_ARCH, 3, cute::half_t, cutlass::epilogue::thread::GELU<cute::half_t>>(iC);
+                specificInit<ARISTOS_ARCH, 3, cute::half_t, gelu>(iC);
             break;
             case 4:
-                specificInit<ARISTOS_ARCH, 4, cute::bfloat16_t, cutlass::epilogue::thread::ReLU<cute::bfloat16_t>>(iC);
+                specificInit<ARISTOS_ARCH, 4, cute::bfloat16_t, relu>(iC);
             break;
             case 5:
-                specificInit<ARISTOS_ARCH, 5, cute::bfloat16_t, cutlass::epilogue::thread::GELU<cute::bfloat16_t>>(iC);
+                specificInit<ARISTOS_ARCH, 5, cute::bfloat16_t, gelu>(iC);
             break;
             default:
-                specificInit<ARISTOS_ARCH, 6, cute::half_t, cutlass::epilogue::thread::ReLU<cute::half_t>>(iC);
+                specificInit<ARISTOS_ARCH, 6, cute::half_t, relu>(iC);
         }
     }
 

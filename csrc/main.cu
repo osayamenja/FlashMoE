@@ -103,9 +103,10 @@ void startAristos() {
         1,
         16,
         true,
+        aristos::ActivationFunction::ReLu,
         true,
     };
-    aristos::initialize<Element>(iC);
+    aristos::initialize(iC, torch::kFloat32);
     //aristos::moe::forwardHost();
     aristos::finalize();
 }*/
