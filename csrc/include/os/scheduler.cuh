@@ -123,16 +123,18 @@ namespace aristos::scheduler {
                 auto tasksToSchedule = cute::min(tasks - lRQIdx, lTt);
                 lTt -= tasksToSchedule;
                 if (isMedley) {
-                    #pragma unroll
-                    for (uint j = 0; j < sL; ++j) {
-                        if (tqState[j].tasks && tasksToSchedule) {
-                            const auto canSchedule = cute::min(tasksToSchedule, tqState[j].tasks);
-                            const auto taskIdx = j * wS + threadIdx.x + tqState[j].tQTail;
-                            tasksToSchedule -= canSchedule;
-                            tqState[j].tasks -= canSchedule;
-                            tqState[j].tQTail += canSchedule;
-                            const auto cSetB = canSchedule / WSet::kElements;
-                            schedule<processors>(wSet, cSetB, canSchedule, taskIdx, lRQIdx, gRQIdx, rQ, pDB);
+                    if constexpr (sL > 0) {
+                        #pragma unroll
+                        for (uint j = 0; j < sL; ++j) {
+                            if (tqState[j].tasks && tasksToSchedule) {
+                                const auto canSchedule = cute::min(tasksToSchedule, tqState[j].tasks);
+                                const auto taskIdx = j * wS + threadIdx.x + tqState[j].tQTail;
+                                tasksToSchedule -= canSchedule;
+                                tqState[j].tasks -= canSchedule;
+                                tqState[j].tQTail += canSchedule;
+                                const auto cSetB = canSchedule / WSet::kElements;
+                                schedule<processors>(wSet, cSetB, canSchedule, taskIdx, lRQIdx, gRQIdx, rQ, pDB);
+                            }
                         }
                     }
                 }
@@ -273,18 +275,19 @@ namespace aristos::scheduler {
         __syncwarp();
 
         uint lTt = 0U; // local task tally
-        constexpr auto trips = processors / (dQL * WARP_SIZE);
-        #pragma unroll
-        for (uint i = 0; i < trips; ++i) {
+        if constexpr (constexpr auto trips = processors / (dQL * WARP_SIZE); trips > 0) {
             #pragma unroll
-            for (uint j = 0; j < decltype(tqState)::kElements; ++j) {
-                tqState[j].tasks = 1U;
-                tqState[j].tQTail = 0U;
-                lTt += 1U;
+            for (uint i = 0; i < trips; ++i) {
+                #pragma unroll
+                for (uint j = 0; j < decltype(tqState)::kElements; ++j) {
+                    tqState[j].tasks = 1U;
+                    tqState[j].tQTail = 0U;
+                    lTt += 1U;
+                }
+                schedulerLoop<processors, 0U>(sQState, tqState, wSet, 0U, lTt,
+                    processorTally, gRQIdx, pTEpilog, scheduled,
+                    wSt, sQ, rQ, pDB);
             }
-            schedulerLoop<processors, 0U>(sQState, tqState, wSet, 0U, lTt,
-                processorTally, gRQIdx, pTEpilog, scheduled,
-                wSt, sQ, rQ, pDB);
         }
         lTt = 0U;
         constexpr auto pT = processors / WARP_SIZE;

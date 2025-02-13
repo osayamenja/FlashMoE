@@ -315,10 +315,10 @@ namespace aristos{
     struct __align__(16) Task {
         // D = A * B + C
         // sensible sentinel values
-        cuda::std::byte* aData = nullptr;
-        cuda::std::array<cuda::std::byte*, GEMMs> bData = {};
+        const cuda::std::byte* aData = nullptr;
+        cuda::std::array<const cuda::std::byte*, GEMMs> bData = {};
         cuda::std::array<cuda::std::byte*, GEMMs> cData = {};
-        cuda::std::array<cuda::std::byte*, GEMMs> dData = {};
+        cuda::std::array<const cuda::std::byte*, GEMMs> dData = {};
         // crd2Idx(peer, expertIdx, offset)
         unsigned int syncIdx = 0UL;
         unsigned int tileIdx = 0U;
@@ -337,34 +337,34 @@ namespace aristos{
         // Stage 1
         __device__ __forceinline__
         Task(const TaskType& _taskType,
-            cuda::std::byte* const& _aData,
-            const cuda::std::array<cuda::std::byte*, GEMMs>& _bData,
+            const cuda::std::byte* const& _aData,
+            const cuda::std::array<const cuda::std::byte*, GEMMs>& _bData,
             const cuda::std::array<cuda::std::byte*, GEMMs>& _cData,
-            const cuda::std::array<cuda::std::byte*, GEMMs>& _dData,
+            const cuda::std::array<const cuda::std::byte*, GEMMs>& _dData,
             const unsigned int& _syncIdx,
             const unsigned int& _tile,
             const unsigned int& _M,
             const unsigned int& _flagIdx,
-            const unsigned int& _size,
+            const uint16_t& _size,
             const unsigned int& _peerIdx,
             const unsigned int& _batchIdx):
         aData(_aData), bData(_bData),
         cData(_cData), dData(_dData),
-        syncIdx(_syncIdx), tileIdx(_tile), tileSize(_size), peerIdx(_peerIdx), M(_M), flagIdx(_flagIdx),
-        batchIdx(_batchIdx), taskType(_taskType){}
+        syncIdx(_syncIdx), tileIdx(_tile), peerIdx(_peerIdx), M(_M), flagIdx(_flagIdx),
+        batchIdx(_batchIdx), tileSize(_size), taskType(_taskType){}
 
         // Stage 2
         __device__ __forceinline__
         Task(const TaskType& _taskType,
-        cuda::std::byte*  const& _aData,
-        const cuda::std::array<cuda::std::byte*, GEMMs>& _bData,
+        const cuda::std::byte*  const& _aData,
+        const cuda::std::array<const cuda::std::byte*, GEMMs>& _bData,
         const cuda::std::array<cuda::std::byte*, GEMMs>& _cData,
         const unsigned int& _size,
         const unsigned int& _tile,
         const unsigned int& _M,
         const unsigned int& _expertIdx):
-        aData(_aData), bData(_bData), cData(_cData), tileIdx(_tile), tileSize(_size), M(_M), expertIdx(_expertIdx),
-        taskType(_taskType){}
+        aData(_aData), bData(_bData), cData(_cData), tileIdx(_tile), M(_M), expertIdx(_expertIdx),
+        tileSize(_size), taskType(_taskType){}
 
 
         __device__ __forceinline__
@@ -686,11 +686,10 @@ namespace aristos{
         }
 
         // Intermediate buffer
-        template<typename Element>
-        requires(alignof(BookType) % alignof(Element) == 0)
+        static_assert(alignof(BookType) % alignof(cuda::std::byte) == 0);
         __device__ __forceinline__
         auto* xM() const {
-            return CAST_TO(Element, book + sBfC);
+            return book + sBfC;
         }
     };
 

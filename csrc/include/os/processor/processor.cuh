@@ -18,17 +18,16 @@
 namespace aristos::processor{
     template<
         unsigned Arch,
-        typename ElementCombine,
         CombineMode c = CombineMode::single
-    > requires SupportedArch<Arch> && TensorValueType<ElementCombine>
+    > requires SupportedArch<Arch>
     struct Combine {
         template<
-            class Output,
             class ScaleWeights,
-            typename Element = typename Output::value_type
+            typename Element
         >
         requires(TensorValueType<Element> &&
-            aristos::isTensor<Output> && aristos::isTensor<ScaleWeights>)
+            aristos::isMatrix<ScaleWeights> &&
+            cuda::std::is_same_v<typename ScaleWeights::value_type, Element>)
         __device__ __forceinline__
         void operator()(Element* __restrict__ const& workspace,
             const TokenIdxTuple* __restrict__ const& tokenIndices,
@@ -38,7 +37,7 @@ namespace aristos::processor{
             const unsigned int& M,
             const unsigned int& N,
             const unsigned int& tileIdx,
-            const unsigned int& tileSize,
+            const uint16_t& tileSize,
             const unsigned int& expertIdx) const {
             using BlockTiler = cute::Shape<cute::Int<BLOCK_M>, cute::Int<BLOCK_N>>;
             constexpr BlockTiler tiler{};
@@ -49,11 +48,12 @@ namespace aristos::processor{
             // Eagerly issue gmem read.
             auto [tokenIdx, combineWeight] = TokenIdxTuple{};
             auto scaleWeight = Element(0);
+            constexpr auto mTe = cutlass::NumericConverter<Element, TokenIdxTuple::second_type>{};
             if (threadIdx.x < tileSize) {
                 const auto t = tokenIndices[threadIdx.x];
                 tokenIdx = t.first;
                 combineWeight = t.second;
-                scaleWeight = scale(tokenIdx, expertIdx) / combineWeight;
+                scaleWeight = scale(tokenIdx, expertIdx) / mTe(combineWeight);
             }
             // Row-major
             const auto mA = make_tensor(cute::make_gmem_ptr(inputs),
@@ -90,7 +90,7 @@ namespace aristos::processor{
                 }
             }
 
-            constexpr VAA<Arch, ElementCombine> vaa{};
+            constexpr VAA<Arch, Element> vaa{};
             if (threadIdx.x < tileSize) {
                 // do scale
                 if constexpr (c == CombineMode::multithreaded) {
@@ -122,11 +122,11 @@ namespace aristos::processor{
     struct FGT {
         static_assert(t == TaskType::preGEMM);
         __forceinline__ __device__
-        void operator()(typename BlockGEMM::MatrixDType* __restrict__ workspace,
-        const typename BlockGEMM::MatrixAType* __restrict__ inputs,
-        const typename BlockGEMM::MatrixBType* __restrict__ weights,
-        typename BlockGEMM::MatrixDType* __restrict__ output,
-        const typename BlockGEMM::MatrixDType* __restrict__ bias,
+        void operator()(typename BlockGEMM::MatrixDType* __restrict__ const& workspace,
+        const typename BlockGEMM::MatrixAType* __restrict__ const& inputs,
+        const typename BlockGEMM::MatrixBType* __restrict__ const& weights,
+        typename BlockGEMM::MatrixDType* __restrict__ const&output,
+        const typename BlockGEMM::MatrixDType* __restrict__ const& bias,
         const unsigned int& M,
         const unsigned int& N,
         const unsigned int& K,
@@ -244,16 +244,16 @@ namespace aristos::processor{
     >
     struct FGT<TaskType::postGEMM, BlockGEMM> {
         __forceinline__ __device__
-        void operator()(typename BlockGEMM::MatrixDType* __restrict__& workspace,
-        const typename BlockGEMM::MatrixAType* __restrict__& inputs,
-        const typename BlockGEMM::MatrixBType* __restrict__& weights,
-        typename BlockGEMM::MatrixDType* __restrict__& output,
-        const typename BlockGEMM::MatrixDType* __restrict__& bias,
+        void operator()(typename BlockGEMM::MatrixDType* __restrict__ const& workspace,
+        const typename BlockGEMM::MatrixAType* __restrict__ const& inputs,
+        const typename BlockGEMM::MatrixBType* __restrict__ const& weights,
+        typename BlockGEMM::MatrixDType* __restrict__ const& output,
+        const typename BlockGEMM::MatrixDType* __restrict__ const& bias,
         const unsigned int& M,
         const unsigned int& N,
         const unsigned int& K,
         const unsigned int& tileIdx,
-        const unsigned int& isRemote) const {
+        const bool& isRemote) const {
             auto accumulator = cute::partition_fragment_C(typename BlockGEMM::MMA{}, typename BlockGEMM::TilerOut{});
             constexpr auto elems = SHARED_SIZE / (THREADS * sizeof(typename BlockGEMM::MatrixDType));
             static_assert(cute::size(accumulator) % elems == 0);
@@ -374,7 +374,6 @@ namespace aristos::processor{
 
     struct ProcessorArgs{
         // sensible sentinel values
-        cuda::std::byte* __restrict__ sHeap = nullptr;
         unsigned int* __restrict__ sQ = nullptr;
         unsigned int* __restrict__ pDB = nullptr;
         unsigned int* __restrict__ tQH = nullptr;
@@ -388,8 +387,7 @@ namespace aristos::processor{
         unsigned int tNx = 0U;
 
         ProcessorArgs() = default;
-        ProcessorArgs(cuda::std::byte* const& _sHeap,
-            unsigned int* const& _sQ,
+        ProcessorArgs(unsigned int* const& _sQ,
             unsigned int* const& _pDB,
             unsigned int* const& _tQH,
             flagsType* const& _flags,
@@ -400,7 +398,7 @@ namespace aristos::processor{
             unsigned int const& _tokenSize,
             unsigned int const& _tN,
             unsigned int const& _tNx) :
-        sHeap(_sHeap), sQ(_sQ), pDB(_pDB), tQH(_tQH), flags(_flags), gtQ(_gtQ), tQ(_tQ), tQS(_tQS), pd(_pd),
+        sQ(_sQ), pDB(_pDB), tQH(_tQH), flags(_flags), gtQ(_gtQ), tQ(_tQ), tQS(_tQS), pd(_pd),
         tokenSize(_tokenSize), tN(_tN), tNx(_tNx) {}
     };
 
@@ -416,7 +414,7 @@ namespace aristos::processor{
         typename ScaleWeights
     > requires(processorCount > 0 && Arch >= MIN_ARCH)
     __device__ __forceinline__
-    void start(cuda::std::byte* __restrict__ const& workspace,
+    void start(cuda::std::byte* const& workspace,
         ScaleWeights const& sW, const uint16_t& _seqBit){
         static_assert(sizeof(SignalPayload<PacketStage::last>) == sizeof(unsigned long long int)
             && alignof(SignalPayload<PacketStage::last>) == alignof(unsigned long long int));
@@ -428,7 +426,6 @@ namespace aristos::processor{
         const auto rSeqBit = _seqBit;
         if (!threadIdx.x) {
             pA = ProcessorArgs{
-                bookkeeping.sHeap,
                 bookkeeping.sQ() + blockIdx.x,
                 bookkeeping.pDB() + blockIdx.x,
                 bookkeeping.tQH(),
@@ -447,7 +444,7 @@ namespace aristos::processor{
         using OperationX = BlockMM<Arch, ElementA, ElementB, ElementC, ActivationOpX>;
         constexpr auto preGEMM = FGT<TaskType::preGEMM, Operation>{};
         constexpr auto postGEMM = FGT<TaskType::postGEMM, OperationX>{};
-        constexpr auto combineOp = Combine<Arch, ElementA, c>{};
+        constexpr auto combineOp = Combine<Arch, c>{};
         __syncthreads();
 
         while (!interrupt) {
@@ -471,10 +468,10 @@ namespace aristos::processor{
                     atomicExch(pA.sQ, ready);
                     constexpr unsigned int preIndex = 0;
                     preGEMM(CAST_TO(typename Operation::MatrixDType, workspace),
-                        CAST_TO(typename Operation::MatrixAType, currentTask.aData),
-                        CAST_TO(typename Operation::MatrixBType, currentTask.bData[preIndex]),
+                        CONST_CAST_TO(typename Operation::MatrixAType, currentTask.aData),
+                        CONST_CAST_TO(typename Operation::MatrixBType, currentTask.bData[preIndex]),
                         CAST_TO(typename Operation::MatrixDType, currentTask.cData[preIndex]),
-                        CAST_TO(typename Operation::MatrixDType, currentTask.dData[preIndex]),
+                        CONST_CAST_TO(typename Operation::MatrixDType, currentTask.dData[preIndex]),
                         currentTask.M,
                         pA.pd,
                         pA.tokenSize,
@@ -519,15 +516,15 @@ namespace aristos::processor{
                     atomicExch(pA.sQ, ready);
                     constexpr unsigned int postIndex = 0;
                     postGEMM(CAST_TO(typename Operation::MatrixDType, workspace),
-                        CAST_TO(typename Operation::MatrixAType, currentTask.aData),
-                        CAST_TO(typename Operation::MatrixBType, currentTask.bData[postIndex]),
+                        CONST_CAST_TO(typename Operation::MatrixAType, currentTask.aData),
+                        CONST_CAST_TO(typename Operation::MatrixBType, currentTask.bData[postIndex]),
                         CAST_TO(typename Operation::MatrixDType, currentTask.cData[postIndex]),
-                        CAST_TO(typename Operation::MatrixDType, currentTask.dData[postIndex]),
+                        CONST_CAST_TO(typename Operation::MatrixDType, currentTask.dData[postIndex]),
                         currentTask.M,
                         pA.tokenSize,
                         pA.pd,
                         currentTask.tileIdx,
-                        nvshmem_ptr(pA.sHeap, currentTask.peerIdx) == nullptr);
+                        nvshmem_ptr(pA.flags, currentTask.peerIdx) == nullptr);
                     if (!threadIdx.x) {
                         // Pack payload into single signal word
                         auto flagSignal = SignalPayload<PacketStage::last>{
@@ -558,8 +555,14 @@ namespace aristos::processor{
                 case TaskType::combine: {
                     // Eagerly indicate readiness for the next task
                     atomicExch(pA.sQ, ready);
-                    combineOp(CAST_TO(ElementA, workspace), currentTask.aData, currentTask.bData[0],
-                        currentTask.cData[0], sW, currentTask.M, pA.tokenSize, currentTask.tileIdx,
+                    combineOp(CAST_TO(typename Operation::MatrixDType, workspace),
+                        CONST_CAST_TO(TokenIdxTuple, currentTask.aData),
+                        CONST_CAST_TO(typename Operation::MatrixAType, currentTask.bData[0]),
+                        CAST_TO(typename Operation::MatrixDType, currentTask.cData[0]),
+                        sW,
+                        currentTask.M,
+                        pA.tokenSize,
+                        currentTask.tileIdx,
                         currentTask.tileSize, currentTask.expertIdx);
                 }
                 break;

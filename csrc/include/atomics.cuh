@@ -95,14 +95,14 @@ namespace aristos{
     requires(AtomicScope<scope>
         && sizeof(unsigned long long int) == sizeof(Payload) && alignof(Payload) == alignof(unsigned long long int))
     __device__ __forceinline__
-    void signal(Payload* const& addr, Payload const& payload) {
+    void signalPayload(Payload* const& addr, const Payload* const& payload) {
         if constexpr (scope == cuda::thread_scope_block || scope == cuda::thread_scope_thread) {
-            atomicExch_block(CAST_TO(unsigned long long int, addr), *CAST_TO(unsigned long long int, payload));
+            atomicExch_block(CAST_TO(unsigned long long int, addr), *CONST_CAST_TO(unsigned long long int, payload));
         }
         if constexpr (scope == cuda::thread_scope_system) {
-            atomicExch_system(CAST_TO(unsigned long long int, addr), *CAST_TO(unsigned long long int, payload));
+            atomicExch_system(CAST_TO(unsigned long long int, addr), *CONST_CAST_TO(unsigned long long int, payload));
         }
-        atomicExch(CAST_TO(unsigned long long int, addr), *CAST_TO(unsigned long long int, payload));
+        atomicExch(CAST_TO(unsigned long long int, addr), *CONST_CAST_TO(unsigned long long int, payload));
     }
 }
 #endif //CSRC_ATOMICS_CUH

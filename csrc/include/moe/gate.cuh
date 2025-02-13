@@ -50,13 +50,12 @@ namespace aristos::gate {
             GateArgs const& gArg,
             ElementC* __restrict__ gateScratch,
             const unsigned int& k) {
-            static_assert(cuda::std::is_same_v<ElementC, mp_t> &&
-                cuda::std::is_same_v<typename MatrixC::value_type, ElementC>);
+            static_assert(cuda::std::is_same_v<ElementC, mp_t>);
             typename BlockGEMM::CollectiveMainloop mainLoop{};
             auto accumulator = cute::partition_fragment_C(typename BlockGEMM::MMA{}, typename BlockGEMM::TilerOut{});
             cute::clear(accumulator);
             constexpr auto bM = cute::get<0>(typename BlockGEMM::BlockTiler{});
-            constexpr auto bN = cute::get<0>(typename BlockGEMM::BlockTiler{});
+            constexpr auto bN = cute::get<1>(typename BlockGEMM::BlockTiler{});
             constexpr auto threads = BlockGEMM::GEMM::block_dim.x;
 
             // padded to fill bM
@@ -84,11 +83,11 @@ namespace aristos::gate {
             auto* __restrict__ gML = gArg.gML;
 
             // Block Ring SoftMax pointers
-            auto* __restrict__ brsMailbox = gArg.bRsP + myTileOffset;
-            auto* __restrict__ brsXMailbox = gArg.bRsP + nextTileOffset;
+            auto* brsMailbox = gArg.bRsP + myTileOffset;
+            auto* brsXMailbox = gArg.bRsP + nextTileOffset;
 
-            cutlass::NumericConverter<cute::half_t, ElementC> quantize{};
-            cutlass::NumericConverter<ElementC, cute::half_t> deQuantize{};
+            constexpr cutlass::NumericConverter<cute::half_t, ElementC> quantize{};
+            constexpr cutlass::NumericConverter<ElementC, cute::half_t> deQuantize{};
             RingSoftmaxPayload rSp{};
 
             // Block Ring top k pointers
@@ -157,7 +156,7 @@ namespace aristos::gate {
             auto mI = -cuda::std::numeric_limits<ElementC>::infinity();
             // Begin Block-Ring softmax
             if (cute::get<1>(tileCoord) > 0) {
-                awaitPayload(brsMailbox, rSp, 1U);
+                awaitPayload(CAST_TO(ull_t, brsMailbox), &rSp, 1U);
                 // We quantize dI from mp_t to half, and this yields no loss in precision.
                 // We leave as an exercise to the reader to determine why this conversion is lossless.
                 dI = deQuantize(rSp.dI);
@@ -174,16 +173,16 @@ namespace aristos::gate {
 
             if (cute::get<1>(tileCoord) + 1 < tilesN) {
                 const auto sP = RingSoftmaxPayload{mI, quantize(dI), 1U};
-                signal(brsXMailbox, sP);
-                awaitPayload(brsMailbox, rSp, 2U);
+                signalPayload(brsXMailbox, &sP);
+                awaitPayload(CAST_TO(ull_t, brsMailbox), &rSp, 2U);
                 dI = deQuantize(rSp.dI);
                 mI = rSp.mI;
             }
             else {
                 // Ring ends with me, let's unblock everyone else
-                auto sP = RingSoftmaxPayload{mI, quantize(dI), 2U};
+                const auto sP = RingSoftmaxPayload{mI, quantize(dI), 2U};
                 for (uint j = 0; j < tilesM; ++j) {
-                    signal(brsXMailbox + bM * j * tilesM, sP);
+                    signalPayload(brsXMailbox + bM * j * tilesM, &sP);
                 }
             }
 
@@ -281,7 +280,7 @@ namespace aristos::gate {
                     shouldSweep = false;
                 }
                 if (cute::get<1>(tileCoord) > 0) {
-                    awaitPayload(tkMailbox + flagPrefix, rTp, batonPrefix + 1);
+                    awaitPayload(CAST_TO(ull_t, tkMailbox + flagPrefix), &rTp, batonPrefix + 1);
                     sV = rTp.sV;
                     sIdx = rTp.sIdx;
                     if (lSV > sV) {
@@ -296,9 +295,9 @@ namespace aristos::gate {
                     // propagate our proposal
                     // Now we pass our proposal through the ring
                     const auto sP = RingTopKPayload{sV, sIdx, batonPrefix + 1};
-                    signal(tkXMailbox + flagPrefix, sP);
+                    signalPayload(tkXMailbox + flagPrefix, &sP);
                     // Now we await the results to return
-                    awaitPayload(tkMailbox + flagPrefix, rTp, batonPrefix + 2);
+                    awaitPayload(CAST_TO(ull_t, tkMailbox + flagPrefix), &rTp, batonPrefix + 2);
                     sV = rTp.sV;
                     sIdx = rTp.sIdx;
                 }
@@ -308,7 +307,7 @@ namespace aristos::gate {
                     auto* __restrict__ mailboxes = tkXMailbox;
                     for (uint j = 0; j < tilesM; ++j) {
                         mailboxes += phases * j * bM * tilesM;
-                        signal(mailboxes + flagPrefix, sP);
+                        signalPayload(mailboxes + flagPrefix, &sP);
                     }
                 }
 

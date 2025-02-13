@@ -87,17 +87,17 @@ namespace aristos::packet {
             atomicAdd_block(pTTx + peer, expertCounts[i]);
         }
         __syncthreads();
-
         for (uint expertIdx = superBlockIdx; expertIdx < nx; expertIdx += numSuperBlocks) {
             const auto pLIdx = xLs[expertIdx]; // local index for current expert on peer
             const auto routedTokens = d == DropTokens::yes ?
                 cute::min(expertCounts[expertIdx], eCap) : expertCounts[expertIdx];
             const auto peer = pS[expertIdx];
+            const auto pe = pT[peer];
             const auto pTT = cute::min(peerTotalTokens[peer], eCap);
-            const auto isRemote = nvshmem_ptr(sHeap, peer) == nullptr;
+            const auto isRemote = nvshmem_ptr(sHeap, pe) == nullptr;
             auto* __restrict__ peerHeap = static_cast<cuda::std::byte*>(isRemote ?
                 heap::advance<0, 0, sizeof(Element)>(sHeap, cellSize, expertSlots, tokenDim, peer, pLIdx):
-                nvshmem_ptr(heap::advance<0, 1, sizeof(Element)>(sHeap, cellSize, expertSlots, tokenDim, peer, pLIdx), peer));
+                nvshmem_ptr(heap::advance<0, 1, sizeof(Element)>(sHeap, cellSize, expertSlots, tokenDim, peer, pLIdx), pe));
             if (!routedTokens) {
                 if (isLeader && !pTT) {
                     // single thread sends a noop packet to unblock the remote peer
@@ -110,7 +110,7 @@ namespace aristos::packet {
                     };
                     // transmit signal
                     nvshmemx_signal_op(flags + rank * expertSlots + pLIdx,
-                        flagSignal, NVSHMEM_SIGNAL_SET, pT[peer]);
+                        flagSignal, NVSHMEM_SIGNAL_SET, pe);
                 }
                 continue;
             }
@@ -134,6 +134,12 @@ namespace aristos::packet {
             }
             __syncthreads();
             if (!threadIdx.x) {
+                if (isRemote) {
+                    __threadfence();
+                }
+                else {
+                    __threadfence_system();
+                }
                 if (atomicIncrement(pSA + expertIdx) + 1 == superBlockSize) {
                     // I am the last block, let's finalize this transfer.
                     uint64_t flagSignal = 0;
@@ -151,15 +157,12 @@ namespace aristos::packet {
                             flags + rank * expertSlots + pLIdx,
                             flagSignal,
                             NVSHMEM_SIGNAL_SET,
-                            pT[peer]);
+                            pe);
                     }
                     else {
-                        __threadfence_system();
                         // we've done the DMA transfer already, so we set the signal instead
                         nvshmemx_signal_op(flags + rank * expertSlots + pLIdx,
-                            flagSignal,
-                            NVSHMEM_SIGNAL_SET,
-                            pT[peer]);
+                            flagSignal, NVSHMEM_SIGNAL_SET, pe);
                     }
                 }
             }
@@ -199,27 +202,25 @@ namespace aristos::packet {
     template<
         PacketStage s,
         PeerConnectivity p,
-        typename Element = void,
-        typename ElementScale = Element
+        typename Element = void
     >
     struct Decoder {
-        static_assert(aristos::TensorValueType<Element> && aristos::TensorValueType<ElementScale>);
+        static_assert(aristos::TensorValueType<Element>);
         static_assert(s == PacketStage::initial);
         __device__ __forceinline__
         void operator()(const DecoderArg& dA,
-            cuda::std::byte* const& packet,
+            const cuda::std::byte* const& packet,
             unsigned int* __restrict__ const& status,
             unsigned int* __restrict__ const& taskCount,
-            uint const& routedTokens, uint const& globalTaskTiles,
+            uint const& routedTokens, uint16_t const& globalTaskTiles,
             unsigned int const& localExpertIdx,
             cuda::std::byte* __restrict__ const& pGB, //postGEMM buffer
-            const cuda::std::array<cuda::std::byte*, GEMMs>& weights,
-            const cuda::std::array<cuda::std::byte*, GEMMs>& bias,
+            const cuda::std::array<const cuda::std::byte*, GEMMs>& weights,
+            const cuda::std::array<const cuda::std::byte*, GEMMs>& bias,
             unsigned int const& peer, // relative to the EP group
             unsigned int const& gPeer, // relative to the global group, needed for network operations
             unsigned int& lTQHead,
             unsigned int* const& tQHead) const {
-            //assert(!__isShared(&dA) && !__isGlobal(&dA) && !__isLocal(&dA))
             auto* __restrict__ sHeap = dA.sHeap;
             auto* __restrict__ tQ = dA.tQ + (threadIdx.x * dA.tPs + lTQHead);
             const auto fTilesM = routedTokens / BLOCK_M;
@@ -253,7 +254,7 @@ namespace aristos::packet {
                         tileIdx,
                         padM,
                         pXo + (p == PeerConnectivity::remote ? i : tileIdx),
-                        BLOCK_M,
+                        static_cast<uint16_t>(BLOCK_M),
                         gPeer,
                         i
                     };
@@ -274,7 +275,7 @@ namespace aristos::packet {
                         tileIdx,
                         padM,
                         pXo + (p == PeerConnectivity::remote ? fTilesM : tileIdx),
-                        residue,
+                        static_cast<uint16_t>(residue),
                         gPeer,
                         fTilesM
                     };
@@ -296,8 +297,8 @@ namespace aristos::packet {
     struct Decoder<PacketStage::last, PeerConnectivity::p2p> {
         __device__ __forceinline__
         void operator()(Task* __restrict__ tQ,
-            cuda::std::byte* __restrict__ const& packet,
-            cuda::std::byte* const& tokenIndices,
+            const cuda::std::byte* const& packet,
+            const cuda::std::byte* const& tokenIndices,
             cuda::std::byte* __restrict__ const& moeOutput,
             const unsigned int& nTokens,
             const unsigned int& tileIdx,
@@ -307,7 +308,7 @@ namespace aristos::packet {
             *tQ = Task{
                 TaskType::combine,
                 tokenIndices,
-                cuda::std::array<cuda::std::byte*, GEMMs>{packet},
+                cuda::std::array<const cuda::std::byte*, GEMMs>{packet},
                 cuda::std::array<cuda::std::byte*, GEMMs>{moeOutput},
                 nTokens,
                 tileIdx,
@@ -324,8 +325,8 @@ namespace aristos::packet {
     struct Decoder<PacketStage::last, PeerConnectivity::remote> {
         __device__ __forceinline__
         void operator()(const DecoderArg& dA,
-            cuda::std::byte* __restrict__ const& packet,
-            cuda::std::byte* const& tokenIndices,
+            const cuda::std::byte* const& packet,
+            const cuda::std::byte* const& tokenIndices,
             cuda::std::byte* __restrict__ const& moeOutput,
             const unsigned int& nTokens,
             unsigned int& lTQHead,
@@ -340,7 +341,7 @@ namespace aristos::packet {
                     tQ[j + i * tB] = Task{
                         TaskType::combine,
                         tokenIndices,
-                        cuda::std::array<cuda::std::byte*, GEMMs>{packet},
+                        cuda::std::array<const cuda::std::byte*, GEMMs>{packet},
                         cuda::std::array<cuda::std::byte*, GEMMs>{moeOutput},
                         nTokens,
                         j + i * tB,
@@ -354,7 +355,7 @@ namespace aristos::packet {
                 tQ[j] = Task{
                     TaskType::combine,
                     tokenIndices,
-                    cuda::std::array<cuda::std::byte*, GEMMs>{packet},
+                    cuda::std::array<const cuda::std::byte*, GEMMs>{packet},
                     cuda::std::array<cuda::std::byte*, GEMMs>{moeOutput},
                     nTokens,
                     j,
@@ -362,7 +363,6 @@ namespace aristos::packet {
                     expertIdx
                 };
             }
-
             __threadfence();
             lTQHead += dA.tN;
             // notifies scheduler
