@@ -128,7 +128,6 @@ namespace aristos::moe{
     >
     requires(aristos::SupportedArch<Arch>)
     __global__ __maxnreg__(REGINALD) void backward(){
-
     }
 
     template<
@@ -140,7 +139,6 @@ namespace aristos::moe{
     void dispatchKernel(const void* __restrict__ iP, /* A, G, B, D*/ void* __restrict__ oP /*G, O*/) {
         using ElementC = float;
         // Decode function id
-
         switch (hostBookkeeping.fId) {
             case 0: {
                 constexpr auto g = GateReductionLevel::singleBlock;
@@ -235,27 +233,41 @@ namespace aristos::moe{
     }
 
     __host__ __forceinline__
-    void forwardHost(const void* __restrict__ iP, void* __restrict__ oP,
-        const torch::ScalarType& sT){
+    void forwardHost(const void* __restrict__ iP, void* __restrict__ oP){
         reportError(isInitialized, "Not initialized");
-        switch (sT) {
-            case torch::kFloat32: {
+        switch (hostBookkeeping.pfId) {
+            case 0: {
                 if (at::globalContext().allowTF32CuBLAS() || at::globalContext().allowTF32CuDNN()) {
-                    dispatchKernel<cute::tfloat32_t>(iP, oP);
+                    dispatchKernel<cute::tfloat32_t, cutlass::epilogue::thread::ReLU<cute::tfloat32_t>>(iP, oP);
                 }
                 else {
-                    dispatchKernel<float>(iP, oP);
+                    dispatchKernel<float, cutlass::epilogue::thread::ReLU<float>>(iP, oP);
                 }
             }
             break;
-            case torch::kFloat16:
-                dispatchKernel<cute::half_t>(iP, oP);
+            case 1: {
+                if (at::globalContext().allowTF32CuBLAS() || at::globalContext().allowTF32CuDNN()) {
+                    dispatchKernel<cute::tfloat32_t, cutlass::epilogue::thread::GELU<cute::tfloat32_t>>(iP, oP);
+                }
+                else {
+                    dispatchKernel<float, cutlass::epilogue::thread::GELU<float>>(iP, oP);
+                }
+            }
             break;
-            case torch::kBFloat16:
-                dispatchKernel<cute::bfloat16_t>(iP, oP);
+            case 2:
+                dispatchKernel<cute::half_t, cutlass::epilogue::thread::ReLU<cute::half_t>>(iP, oP);
+            break;
+            case 3:
+                dispatchKernel<cute::half_t, cutlass::epilogue::thread::GELU<cute::half_t>>(iP, oP);
+            break;
+            case 4:
+                dispatchKernel<cute::bfloat16_t, cutlass::epilogue::thread::ReLU<cute::bfloat16_t>>(iP, oP);
+            break;
+            case 5:
+                dispatchKernel<cute::bfloat16_t, cutlass::epilogue::thread::GELU<cute::bfloat16_t>>(iP, oP);
             break;
             default:
-                reportError(false, "Not supported!");
+                dispatchKernel<cute::half_t, cutlass::epilogue::thread::ReLU<cute::half_t>>(iP, oP);
         }
     }
 

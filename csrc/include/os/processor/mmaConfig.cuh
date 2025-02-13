@@ -25,14 +25,6 @@ namespace aristos {
     struct ToCute<__nv_bfloat16> {
         using T = cute::bfloat16_t;
     };
-    template<>
-    struct ToCute<__nv_fp8_e4m3> {
-        using T = cute::float_e4m3_t;
-    };
-    template<>
-    struct ToCute<__nv_fp8_e5m2> {
-        using T = cute::float_e5m2_t;
-    };
 
     template<typename S>
     requires(aristos::TensorValueType<S>)

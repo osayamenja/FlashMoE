@@ -22,9 +22,12 @@ namespace aristos::packet {
     requires aristos::Matrix<Activations>
     __forceinline__ __device__
     void encode(Bookkeeping const& bk, const Activations& activations, unsigned int* const& __restrict__ workspace) {
+        using Element = typename Activations::value_type;
+        using NativeElement = typename ToCDx<Element>::T;
+        // Below is always true, but better safe than sorry
+        static_assert(sizeof(NativeElement) == sizeof(Element) && alignof(NativeElement) == alignof(Element));
         // assert(blocks <= gridDim.x - 1)
         static_assert(blocks % superBlockSize == 0);
-        using Element = typename Activations::value_type;
         // Map a static set of blocks to an expert and stride as thus
         constexpr auto numSuperBlocks = blocks / superBlockSize;
         const auto superBlockIdx = blockIdx.x / superBlockSize;
@@ -113,20 +116,21 @@ namespace aristos::packet {
                 continue;
             }
             // copy tokens: not padded
+            #pragma unroll 4
             for (uint j = lBid; j < routedTokens; j += superBlockSize) {
                 const auto [tokenIdx, _] = tokenIds(expertIdx, j);
                 auto* __restrict__ localPH = peerHeap + j * tokenDim * sizeof(Element);
-                const auto* __restrict__ aP = &activations(tokenIdx, 0);
+                const auto* __restrict__ aP = CAST_TO(NativeElement, &activations(tokenIdx, 0));
                 const auto* __restrict__ vAP = static_cast<const uint4*>(static_cast<const void*>(aP));
                 const auto vTokenSize = tokenDim / (sizeof(uint4) / sizeof(Element));
                 // Use high-throughput vector copy
                 for (uint k = threadIdx.x; k < vTokenSize; k += THREADS) {
-                    CAST_TO(uint4, localPH)[k] = vAP[k];
+                    CAST_TO(uint4, localPH)[k] = __ldg(vAP + k);
                 }
                 const auto rIdx = vTokenSize * (sizeof(uint4) / sizeof(Element));
                 localPH += sizeof(uint4) * vTokenSize;
                 for (uint k = threadIdx.x + rIdx; k < tokenDim; k += THREADS) {
-                    CAST_TO(Element, localPH)[k] = aP[k];
+                    CAST_TO(NativeElement, localPH)[k] = __ldg(aP + k);
                 }
             }
             __syncthreads();
@@ -213,6 +217,7 @@ namespace aristos::packet {
             const cuda::std::array<cuda::std::byte*, GEMMs>& weights,
             const cuda::std::array<cuda::std::byte*, GEMMs>& bias,
             unsigned int const& peer, // relative to the EP group
+            unsigned int const& gPeer, // relative to the global group, needed for network operations
             unsigned int& lTQHead,
             unsigned int* const& tQHead) const {
             //assert(!__isShared(&dA) && !__isGlobal(&dA) && !__isLocal(&dA))
@@ -250,7 +255,7 @@ namespace aristos::packet {
                         padM,
                         pXo + (p == PeerConnectivity::remote ? i : tileIdx),
                         BLOCK_M,
-                        peer,
+                        gPeer,
                         i
                     };
                 }
@@ -271,7 +276,7 @@ namespace aristos::packet {
                         padM,
                         pXo + (p == PeerConnectivity::remote ? fTilesM : tileIdx),
                         residue,
-                        peer,
+                        gPeer,
                         fTilesM
                     };
                 }

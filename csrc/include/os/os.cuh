@@ -61,7 +61,7 @@ namespace aristos::os {
             }
         }
         __syncthreads();
-        auto* __restrict__ tQHeads = CAST_TO(uint, taskBound + 1);
+        auto* __restrict__ tQHeads = taskBound + 1;
         auto* __restrict__ rQ = tQHeads + subscriberCount;
         #pragma unroll
         for (uint i = threadIdx.x; i < processors; i += THREADS) {

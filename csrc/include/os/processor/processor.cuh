@@ -418,7 +418,6 @@ namespace aristos::processor{
     __device__ __forceinline__
     void start(cuda::std::byte* __restrict__ const& workspace,
         ScaleWeights const& sW, const uint16_t& _seqBit){
-        assert(__isShared(workspace));
         static_assert(sizeof(SignalPayload<PacketStage::last>) == sizeof(unsigned long long int)
             && alignof(SignalPayload<PacketStage::last>) == alignof(unsigned long long int));
         __shared__ Task currentTask;
@@ -537,9 +536,9 @@ namespace aristos::processor{
                             rSeqBit,
                             currentTask.tileSize
                         };
-                        if (atomicIncrement(pA.tQS + currentTask.syncIdx)
-                            == pA.tN + pA.tNx) {
-                            if (nvshmem_ptr(currentTask.cData[postIndex], currentTask.peerIdx) == nullptr) {
+                        if (nvshmem_ptr(currentTask.cData[postIndex], currentTask.peerIdx) == nullptr) {
+                            // Remote; check if we need to do the transfer
+                            if (atomicIncrement(pA.tQS + currentTask.syncIdx) == pA.tN + pA.tNx) {
                                 // Batch remote network transfer to avoid overwhelming the NIC
                                 nvshmem_putmem_signal_nbi(currentTask.cData[postIndex], currentTask.cData[postIndex],
                                     currentTask.tileSize * pA.tokenSize * sizeof(ElementA),
@@ -547,12 +546,12 @@ namespace aristos::processor{
                                     *CAST_TO(uint64_t, &flagSignal), NVSHMEM_SIGNAL_SET,
                                     currentTask.peerIdx);
                             }
-                            else {
-                                // send individual tile, no batching here
-                                // Already did the network transfer in fGET, so set signal only
-                                nvshmemx_signal_op(pA.flags + currentTask.flagIdx,
-                                 *CAST_TO(uint64_t, &flagSignal), NVSHMEM_SIGNAL_SET, currentTask.peerIdx);
-                            }
+                        }
+                        else {
+                            // send individual tile, no batching here
+                            // Already did the network transfer in fGET, so set signal only
+                            nvshmemx_signal_op(pA.flags + currentTask.flagIdx,
+                             *CAST_TO(uint64_t, &flagSignal), NVSHMEM_SIGNAL_SET, currentTask.peerIdx);
                         }
                     }
                 }

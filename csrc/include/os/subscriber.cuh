@@ -32,7 +32,7 @@ namespace aristos::subscriber{
         // remote experts: {actual & local expert idx, peer idx}
         const cuda::std::tuple<uint, uint, uint>* __restrict__& rE, // shared
         const cuda::std::tuple<uint, uint, uint>* __restrict__& nRe, // p2p experts: like above
-        const unsigned int& rEl, // number of remote peers
+        const unsigned int& rEl, // number of remote experts
         unsigned int* __restrict__ const& status, // shared
         unsigned int* __restrict__ const& taskCount,
         Output const& moeOutput,
@@ -142,6 +142,7 @@ namespace aristos::subscriber{
                                 // decode the received packet
                                 auto expertIdx = flagIdx % nLx;
                                 auto peerIdx = flagIdx / nLx;
+                                const auto gPeer = peerTranslation[peerIdx];
                                 cuda::std::array weights{
                                     CAST_TO(cuda::std::byte, &expertsUp(expertIdx)),
                                     CAST_TO(cuda::std::byte, &expertsDown(expertIdx))
@@ -152,13 +153,13 @@ namespace aristos::subscriber{
                                 };
                                 auto* __restrict__ packet = heap::advance<0, 1, sizeof(Element)>(dA.sHeap, dA.cellSize,
                                     dA.expertSlots, dA.tokenSize, peerIdx, expertIdx);
-                                if (nvshmem_ptr(packet, peerTranslation[peerIdx]) != nullptr) {
+                                if (nvshmem_ptr(packet, gPeer) != nullptr) {
                                     // P2P peer
                                     // Enforce consistency
                                     // before decoding the packet
                                     __threadfence_system();
                                     fPd(dA, packet, status, taskCount, sP->routedTokens, sP->totalTilesM,
-                                        expertIdx, pGB, weights, bias, peerIdx, lTQHead, tQHead);
+                                        expertIdx, pGB, weights, bias, peerIdx, gPeer, lTQHead, tQHead);
                                 }
                                 else {
                                     // Remote peer
@@ -168,7 +169,7 @@ namespace aristos::subscriber{
                                     // as the memory ordering mechanism is internal.
                                     nvshmem_ushort_test(&sP->seqBit, NVSHMEM_CMP_EQ, lSeqBit);
                                     fRd(dA, packet, status, taskCount, sP->routedTokens, sP->totalTilesM,
-                                        expertIdx, pGB, weights, bias, peerIdx, lTQHead, tQHead);
+                                        expertIdx, pGB, weights, bias, peerIdx, gPeer, lTQHead, tQHead);
                                 }
                             }
                         }
@@ -204,6 +205,7 @@ namespace aristos::subscriber{
                                 // decode the received packet
                                 auto expertIdx = flagIdx % nLx;
                                 auto peerIdx = flagIdx / nLx;
+                                const auto gPeer = peerTranslation[peerIdx];
                                 cuda::std::array weights{
                                     CAST_TO(cuda::std::byte, &expertsUp(expertIdx)),
                                     CAST_TO(cuda::std::byte, &expertsDown(expertIdx))
@@ -215,16 +217,16 @@ namespace aristos::subscriber{
 
                                 if (auto* packet = heap::advance<0, 1, sizeof(Element)>(dA.sHeap, dA.cellSize,
                                     dA.expertSlots, dA.tokenSize, peerIdx, expertIdx);
-                                    nvshmem_ptr(packet, peerTranslation[peerIdx]) != nullptr) {
+                                    nvshmem_ptr(packet, gPeer) != nullptr) {
                                     // Enforce consistency before decoding the packet
                                     __threadfence_system();
                                     fPd(packet, status, taskCount, sP->routedTokens, sP->totalTilesM,
-                                        expertIdx, pGB, weights, bias, peerIdx, lTQHead, tQHead);
+                                        expertIdx, pGB, weights, bias, peerIdx, gPeer, lTQHead, tQHead);
                                 }
                                 else {
                                     nvshmem_ushort_test(&sP->seqBit, NVSHMEM_CMP_EQ, lSeqBit);
                                     fRd(dA, packet, status, taskCount, sP->routedTokens, sP->totalTilesM,
-                                        expertIdx, pGB, weights, bias, peerIdx, lTQHead, tQHead);
+                                        expertIdx, pGB, weights, bias, peerIdx, gPeer, lTQHead, tQHead);
                                 }
                             }
                         }

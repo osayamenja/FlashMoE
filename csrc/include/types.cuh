@@ -108,7 +108,7 @@ namespace aristos{
 
     // These could be much more, as supported by CUTLASS
     __host__ __device__
-    enum class ActivationFunction {
+    enum ActivationFunction: uint8_t {
         ReLu,
         GeLU
     };
@@ -223,14 +223,15 @@ namespace aristos{
         const uint hiddenProjDim;
         const uint k;
         const uint capacityFactor;
-        const uint16_t numExperts;
+        const ulong numParameters;
         // logical elements
         const uint p2pBuffer; // in MB
-        const ulong numParameters;
         const uint gradBuffer; // in MB
-        const bool shouldDrop;
-        const JobType jobType;
+        const uint16_t numExperts;
         const uint16_t redAmount;
+        const bool shouldDrop;
+        const ActivationFunction actF;
+        const JobType jobType;
 
         __host__
         InitialConfig(const uint& _vocabSize,
@@ -245,6 +246,7 @@ namespace aristos{
             const uint& _capacityFactor,
             const uint16_t& _numExperts,
             const bool& _shouldDrop,
+            const ActivationFunction& _actF,
             const bool& _isTraining,
             const uint16_t& _redAmount = 1):
         vocabSize(_vocabSize),
@@ -256,12 +258,11 @@ namespace aristos{
         embedDim(_embedDim), // h
         hiddenProjDim(_hiddenProjDim),
         k(_k), capacityFactor(_capacityFactor),
-        numExperts(_numExperts),
-        p2pBuffer(cute::ceil_div(seqLen * miniBatch * embedDim, 1024U * 1024U)),
         numParameters(embedDim * (numLayers * (12U * embedDim + 13U) + (vocabSize + embedDim))),
+        p2pBuffer(cute::ceil_div(seqLen * miniBatch * embedDim, 1024U * 1024U)),
         gradBuffer(cute::ceil_div(numParameters, 1024U * 1024U)),
-        shouldDrop(_shouldDrop), jobType(_isTraining ? JobType::training : JobType::inference),
-        redAmount(_redAmount)
+        numExperts(_numExperts), redAmount(_redAmount),
+        shouldDrop(_shouldDrop), actF(_actF), jobType(_isTraining ? JobType::training : JobType::inference)
         {}
 
         // formula for total number of parameters
@@ -387,7 +388,6 @@ namespace aristos{
         unsigned long int sBfC = 0UL;
         /// gRl + gB + eDsA + sBfC + brs
         unsigned long int bookSize = 0UL;
-
         unsigned int tQXt = 0UL;
         /// length of gTQHeads
         unsigned int gtQCl = 0U;
@@ -401,7 +401,20 @@ namespace aristos{
         unsigned int tQml = 0U;
         /// Task Q length
         unsigned int tQl = 0U;
-
+        /// sequence length
+        unsigned int sl = 0U;
+        /// embedding dimension
+        unsigned int ed = 0U;
+        /// hidden projection dimension
+        unsigned int pd = 0U;
+        /// tiles spanning sequence length
+        unsigned int tM = 0U;
+        /// tiles spanning embedding dimension
+        unsigned int tN = 0U;
+        /// tiles spanning capacity
+        unsigned int tCM = 0U;
+        /// expert capacity
+        unsigned int eCap = 0U;
         /// EP rank
         uint16_t rank = 0U;
         /// EP world
@@ -417,21 +430,9 @@ namespace aristos{
         /// processors
         uint16_t blocks = 0U;
         /// Encoded result of template parameters
-        uint16_t fId = 0U;
-        /// sequence length
-        unsigned int sl = 0U;
-        /// embedding dimension
-        unsigned int ed = 0U;
-        /// hidden projection dimension
-        unsigned int pd = 0U;
-        /// tiles spanning sequence length
-        unsigned int tM = 0U;
-        /// tiles spanning embedding dimension
-        unsigned int tN = 0U;
-        /// tiles spanning capacity
-        unsigned int tCM = 0U;
-        /// expert capacity
-        unsigned int eCap = 0U;
+        uint8_t fId = 0U;
+        /// Encoded result of template parameters
+        uint8_t pfId = 0U;
 
         __device__ __forceinline__
         Bookkeeping() = default;
@@ -451,18 +452,18 @@ namespace aristos{
             const unsigned int& _eCapacity,
             const uint16_t& _blocks,
             const uint16_t& _world,
-            const uint16_t& _fId,
+            const uint8_t& _fId,
+            const uint8_t& _pfId,
             const unsigned int& _eNb // number of bytes for the matrix element type
             ) :
         sHeap(_sHeap), flags(_flags),
         book(_book),
-        rank(_rank), world(_world), nx(_nx),
-        px(pad<BLOCK_N>(_nx)), nLx(_nLx), xs(_xS), blocks(_blocks), fId(_fId),
         sl(_sl), ed(_embedDim), pd(_pd),
         tM(tiles<BLOCK_M>(_sl)),
         tN(tiles<BLOCK_N>(_embedDim)),
         tCM(tiles<BLOCK_M>(_eCapacity)),
-        eCap(_eCapacity){
+        eCap(_eCapacity), rank(_rank), world(_world), nx(_nx),
+        px(pad<BLOCK_N>(_nx)), nLx(_nLx), xs(_xS), blocks(_blocks), fId(_fId), pfId(_pfId){
             if (_nx > 1)[[likely]] {
                 const bool isSingleBlockGate = _nx <= BLOCK_N;
                 // maximum gemm tiles/tasks scheduled by processors
@@ -708,6 +709,20 @@ namespace aristos{
             const uint& tokenDim, const uint& peer, const uint& expert, const uint& token = 0){
             return sHeap + (cellSize * (expertSlots * (CELLS * (peer * STAGES + stage) + cell) + expert) +
                 token * tokenDim) * nBytes;
+        }
+    }
+    __host__ __forceinline__
+    uint8_t eTA(const torch::ScalarType& sT, const ActivationFunction& aF) {
+        switch (sT) {
+            case torch::kFloat32:
+                return aF;
+            case torch::kFloat16:
+                return 2U + aF;
+            case torch::kBFloat16:
+                return 4U + aF;
+            break;
+            default:
+                return 2U + aF; // default is half_t
         }
     }
 }
