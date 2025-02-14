@@ -220,7 +220,7 @@ namespace aristos{
         const uint seqLen;
         const uint embedDim;
         const uint hiddenProjDim;
-        const uint k;
+        const uint16_t k;
         const uint capacityFactor;
         const ulong numParameters;
         // logical elements
@@ -241,7 +241,7 @@ namespace aristos{
             const uint& _seqLen,
             const uint& _embedDim,
             const uint& _hiddenProjDim,
-            const uint& _k,
+            const uint16_t& _k,
             const uint& _capacityFactor,
             const uint16_t& _numExperts,
             const bool& _shouldDrop,

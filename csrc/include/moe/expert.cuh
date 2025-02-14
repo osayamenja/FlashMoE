@@ -163,11 +163,10 @@ namespace aristos {
         typename Element,
         typename ProblemShape_MNK
     >
-    requires(cute::is_tuple_v<ProblemShape_MNK> && rank(ProblemShape_MNK{}) == 3
-    && aristos::TensorValueType<Element> &&
-    !(cuda::std::is_same_v<Element, cute::float_e4m3_t> ||
-            cuda::std::is_same_v<Element, cute::float_e5m2_t> ||
-                cuda::std::is_same_v<Element, cute::tfloat32_t>))
+    requires(cute::is_tuple_v<ProblemShape_MNK> && rank(ProblemShape_MNK{}) == 3 &&
+        aristos::TensorValueType<ElementC> &&
+        (c != CombineMode::multithreaded || !cuda::std::is_same_v<Element, cute::tfloat32_t>)
+        && aristos::TensorValueType<Element>)
     /// D = A * B1 + C1
     /// A = D * B2 + C2
     __global__ __maxnreg__(REGINALD) void expert(ProblemShape_MNK pShape,

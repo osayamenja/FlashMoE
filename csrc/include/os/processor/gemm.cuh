@@ -43,7 +43,7 @@ namespace aristos {
             using vType = cuda::std::conditional_t<Registers::kElements % 2 == 0, __half2, __half>;
             constexpr auto len = Registers::kElements / (sizeof(vType) / sizeof(__half));
             auto* __restrict__ gSv = CAST_TO(vType, gS);
-            const auto* __restrict__ vRegs = CAST_TO(vType, registers.data());
+            const auto* __restrict__ vRegs = CONST_CAST_TO(vType, registers.data());
             #pragma unroll
             for (uint i = 0; i < len; ++i) {
                 atomicAdd(gSv + i, vRegs[i]);
@@ -62,7 +62,7 @@ namespace aristos {
             using vType = cuda::std::conditional_t<Registers::kElements % 2 == 0, __nv_bfloat162, __nv_bfloat16>;
             constexpr auto len = Registers::kElements / (sizeof(vType) / sizeof(__half));
             auto* __restrict__ gSv = CAST_TO(vType, gS);
-            const auto* __restrict__ vRegs = CAST_TO(vType, registers.data());
+            const auto* __restrict__ vRegs = CONST_CAST_TO(vType, registers.data());
             #pragma unroll
             for (uint i = 0; i < len; ++i) {
                 atomicAdd(gSv + i, vRegs[i]);
@@ -83,7 +83,7 @@ namespace aristos {
                 cuda::std::conditional_t<Registers::kElements % 2 == 0, float2, float>>;
             constexpr auto len = Registers::kElements / (sizeof(vType) / sizeof(float));
             auto* __restrict__ gSv = CAST_TO(vType, gS);
-            const auto* __restrict__ vRegs = CAST_TO(vType, registers.data());
+            const auto* __restrict__ vRegs = CONST_CAST_TO(vType, registers.data());
             #pragma unroll
             for (uint i = 0; i < len; ++i) {
                 atomicAdd(gSv + i, vRegs[i]);

@@ -182,6 +182,7 @@ namespace aristos::packet {
         const unsigned int expertSlots;
         const unsigned int nx;
 
+        __device__
         DecoderArg(
             cuda::std::byte* const& _sHeap,
             Task* const& _tQ,

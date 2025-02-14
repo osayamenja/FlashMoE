@@ -96,7 +96,7 @@ namespace aristos::processor{
                 if constexpr (c == CombineMode::multithreaded) {
                     #pragma unroll
                     for (uint i = 0; i < bN; ++i) {
-                        registers[i] *= scaleWeight;
+                        registers[i] = registers[i] * scaleWeight;
                     }
                     vaa(moeOutput + tokenIdx * N, registers);
                 }
@@ -387,6 +387,7 @@ namespace aristos::processor{
         unsigned int tNx = 0U;
 
         ProcessorArgs() = default;
+        __device__
         ProcessorArgs(unsigned int* const& _sQ,
             unsigned int* const& _pDB,
             unsigned int* const& _tQH,

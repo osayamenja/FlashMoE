@@ -61,12 +61,11 @@ namespace aristos{
         typename Activation,
         typename Element
     >
-    requires(cuda::std::is_invocable_r_v<Element, Activation, Element>)
+    requires(cuda::std::is_invocable_r_v<GEA, Activation, GEA>)
     __host__ __forceinline__
     void mFT(WorkerAttribute* __restrict__ const& dWa,
         const unsigned int& M, const unsigned int& N, const unsigned int& K,
-        Element* hP) {
-        const size_t iZ = M * K + 2 * (N + K) + N + K + 2 * M;
+        Element* __restrict__ const& iP, Element* __restrict__ oP) {
         uint* p;
         const auto stateSize = sizeof(uint) * (1 + M / BLOCK_M); // tileSync + dT
         CHECK_ERROR_EXIT(cudaMallocAsync(&p, stateSize, aristosStream));
@@ -75,16 +74,15 @@ namespace aristos{
         using ElementAccum = float;
         constexpr auto blocks = Hardware<Arch>::blocks::value - 1U;
 
-        auto* output = hP + iZ;
         #pragma unroll
         for (uint i = 0; i < skip; ++i) {
             expert<Arch, Activation, c, ElementAccum><<<blocks, ARISTOS_BLOCK_SIZE, 0, aristosStream>>>(pS, p,
-            p + 1, hP, output);
+            p + 1, iP, oP);
             // Needed to clear accumulator buffer
-            CHECK_ERROR_EXIT(cudaMemsetAsync(output + M * N, 0, sizeof(Element) * (M * K), aristosStream));
+            CHECK_ERROR_EXIT(cudaMemsetAsync(oP + M * N, 0, sizeof(Element) * (M * K), aristosStream));
         }
         expert<Arch, Activation, c, ElementAccum><<<blocks, ARISTOS_BLOCK_SIZE, 0, aristosStream>>>(pS, p,
-            p + 1, hP, hP + iZ, false);
+            p + 1, iP, oP, false);
         uint stage = 0;
         CHECK_ERROR_EXIT(cudaMemcpyAsync(&stage, p, sizeof(uint), cudaMemcpyDeviceToHost, aristosStream));
         CHECK_ERROR_EXIT(cudaFreeAsync(p, aristosStream));
@@ -102,7 +100,7 @@ namespace aristos{
         typename Activation,
         unsigned int trials = 128U
     >
-    requires (cuda::std::is_invocable_r_v<Element, ActivationFunction, Element>)
+    requires (cuda::std::is_invocable_r_v<GEA, Activation, GEA>)
     __host__ __forceinline__
     void mT(WorkerAttribute* __restrict__ const& dWa,
         const unsigned int& M, const unsigned int& N, const unsigned int& K, uint const& devId) {
@@ -154,7 +152,9 @@ namespace aristos{
         // Set C2 to 0
         hT.index({0, torch::indexing::Slice(cZ, hZ)}) *= 0.0f;
         CHECK_ERROR_EXIT(cudaDeviceSynchronize());
-        mFT<Arch, trials, c, Activation>(dWa, M, N, K, hT.mutable_data_ptr<Element>());
+        using VT = typename moe::VCT<c, Element>::Element;
+        mFT<Arch, trials, c, Activation>(dWa, M, N, K,
+            CAST_TO(VT, hT.mutable_data_ptr()), CAST_TO(VT, hT.mutable_data_ptr()) + cWz);
     }
 
     __host__ __forceinline__
@@ -380,7 +380,7 @@ namespace aristos{
         cuda::std::byte* book;
         CHECK_ERROR_EXIT(cudaMallocAsync(&book, bookSize, aristosStream));
         CHECK_ERROR_EXIT(cudaMemsetAsync(&book, 0, bookSize, aristosStream));
-        const uint16_t functionId =  4 * (iC.numExperts > BLOCK_N) + 2 * iC.shouldDrop + (iC.k > 1);
+        const uint8_t functionId =  4 * (iC.numExperts > BLOCK_N) + 2 * iC.shouldDrop + (iC.k > 1);
         // Initialize bookkeeping
         hostBookkeeping = Bookkeeping{
             sHb + flagBytes,
@@ -464,6 +464,8 @@ namespace aristos{
         reportError(iC.embedDim % BLOCK_N == 0 && iC.hiddenProjDim % BLOCK_N == 0,
             "Must be multiple of BLOCK_N");
         reportError(iC.seqLen % BLOCK_M == 0, "Must be a multiple of BLOCK_M");
+        reportError(iC.numExperts <= cuda::std::numeric_limits<uint16_t>::max(),
+            "For performance, we assume number of experts <= UINT16_MAX");
         int cudaDevAttribute = 0;
         int dev = 0;
         int blocks = 0;

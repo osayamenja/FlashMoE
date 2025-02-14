@@ -22,6 +22,7 @@ namespace aristos::gate {
         mp_t* gML;
         RingSoftmaxPayload* bRsP;
         RingTopKPayload* rTp;
+        __device__
         GateArgs(uint const& _sl, uint const& _nx,
             TokenIdxTuple* const& _tP,
             BookType* const& _eC, mp_t* const& _gMeC, mp_t* const& _gML,
@@ -246,16 +247,18 @@ namespace aristos::gate {
             }
 
             auto sV = -cuda::std::numeric_limits<ElementC>::infinity();
-            uint sIdx = 0U;
+            uint16_t sIdx = 0U;
             auto mCw = ElementC(0);
             auto lSV = sV;
             auto lSIdx = sIdx;
             bool shouldSweep = true;
 
             #pragma unroll
-            for (uint i = 0; i < k; ++i) {
-                constexpr auto phases = 2U;
-                const auto batonPrefix = phases * i / 2; // needed as we alternate between two buffers
+            for (uint16_t i = 0; i < k; ++i) {
+                constexpr uint16_t phases = 2U;
+                const uint16_t batonPrefix = phases * (i / 2U); // needed as we alternate between two buffers
+                const uint16_t bPf = batonPrefix + 1U;
+                const uint16_t bPs = batonPrefix + 2U;
                 const auto flagPrefix = i % phases * bM * tilesM;
                 // Sentinel that applies to the most westwards peer, as they initiate the proposal per round
                 sV = -cuda::std::numeric_limits<ElementC>::infinity();
@@ -280,7 +283,7 @@ namespace aristos::gate {
                     shouldSweep = false;
                 }
                 if (cute::get<1>(tileCoord) > 0) {
-                    awaitPayload(CAST_TO(ull_t, tkMailbox + flagPrefix), &rTp, batonPrefix + 1);
+                    awaitPayload(CAST_TO(ull_t, tkMailbox + flagPrefix), &rTp, bPf);
                     sV = rTp.sV;
                     sIdx = rTp.sIdx;
                     if (lSV > sV) {
@@ -294,16 +297,16 @@ namespace aristos::gate {
                 if (cute::get<1>(tileCoord) + 1 < tilesN) {
                     // propagate our proposal
                     // Now we pass our proposal through the ring
-                    const auto sP = RingTopKPayload{sV, sIdx, batonPrefix + 1};
+                    const auto sP = RingTopKPayload{sV, sIdx, bPf};
                     signalPayload(tkXMailbox + flagPrefix, &sP);
                     // Now we await the results to return
-                    awaitPayload(CAST_TO(ull_t, tkMailbox + flagPrefix), &rTp, batonPrefix + 2);
+                    awaitPayload(CAST_TO(ull_t, tkMailbox + flagPrefix), &rTp, bPs);
                     sV = rTp.sV;
                     sIdx = rTp.sIdx;
                 }
                 else {
                     // Phase 0 ends with me, let's unblock everyone else in one go
-                    const auto sP = RingTopKPayload{sV, sIdx, batonPrefix + 2};
+                    const auto sP = RingTopKPayload{sV, sIdx, bPs};
                     auto* __restrict__ mailboxes = tkXMailbox;
                     for (uint j = 0; j < tilesM; ++j) {
                         mailboxes += phases * j * bM * tilesM;

@@ -78,8 +78,10 @@ void evalExpert() {
     const auto tRef = torch::clone(hT.index({0, torch::indexing::Slice(cZ, hZ)}));
     aristos::WorkerAttribute wA{};
     // compute & measure fused expert
-    using Activation = cutlass::epilogue::thread::ReLU<cute::half_t>;
-    aristos::mFT<ARISTOS_ARCH, trials, aristos::CombineMode::single, Activation>(&wA, M, N, K, static_cast<cute::half_t*>(hT.mutable_data_ptr()));
+    using Activation = cutlass::epilogue::thread::ReLU<aristos::GEA>;
+    aristos::mFT<ARISTOS_ARCH, trials, aristos::CombineMode::single, Activation>(&wA, M, N, K,
+        CAST_TO(cute::half_t, hT.mutable_data_ptr()),
+        CAST_TO(cute::half_t, hT.mutable_data_ptr()) + cWz);
     // verify and compare
     aristos::reportError(tRef.allclose(hT.index({0, torch::indexing::Slice(cZ, hZ)})),
         "Results are Incorrect!");
