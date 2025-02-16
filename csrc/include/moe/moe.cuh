@@ -240,6 +240,7 @@ namespace aristos::moe{
     __host__ __forceinline__
     void forwardHost(const void* __restrict__ iP, void* __restrict__ oP){
         reportError(isInitialized, "Not initialized");
+        CHECK_ERROR_EXIT(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
         using relu = cutlass::epilogue::thread::ReLU<GEA>;
         using gelu = cutlass::epilogue::thread::GELU<GEA>;
         switch (hostBookkeeping.pfId) {

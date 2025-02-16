@@ -6,16 +6,13 @@
 #define EVAL_CUH
 
 #include <vector>
-
 #include <cuda/std/cmath>
 #include <cuda/std/cstddef>
 #include <cuda/std/memory>
 #include <cute/tensor.hpp>
 #include <fmt/ranges.h>
 #include <fmt/core.h>
-#include <nvshmemx.h>
 #include <nvshmem.h>
-#include <host/nvshmemx_api.h>
 
 #include "include/debug.cuh"
 #include "include/os/decider/decider.cuh"

@@ -7,7 +7,6 @@
 
 #include <vector>
 #include <algorithm>
-#include <numeric>
 #include <queue>
 #include <ranges>
 #include <set>

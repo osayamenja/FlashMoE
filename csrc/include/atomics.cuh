@@ -6,6 +6,7 @@
 #define CSRC_ATOMICS_CUH
 
 #include "types.cuh"
+
 namespace aristos{
     template<typename B>
     concept AtomicType = cuda::std::same_as<B, int> || cuda::std::same_as<B, unsigned int>

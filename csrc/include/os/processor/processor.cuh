@@ -7,10 +7,7 @@
 
 #include <cutlass/array.h>
 #include <cute/tensor.hpp>
-
-#include <nvshmemx.h>
 #include <nvshmem.h>
-#include <host/nvshmemx_api.h>
 
 #include "../../arch.cuh"
 #include "gemm.cuh"

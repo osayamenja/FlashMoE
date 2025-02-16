@@ -9,9 +9,6 @@
 #include <cute/layout.hpp>
 #include <cute/tensor.hpp>
 #include <cutlass/epilogue/thread/activation.h>
-#include <nvshmemx.h>
-#include <nvshmem.h>
-#include <host/nvshmemx_api.h>
 #include <torch/torch.h>
 
 #include "topo.cuh"
@@ -452,7 +449,7 @@ namespace aristos{
         CHECK_ERROR_EXIT(cudaPeekAtLastError());
         CHECK_ERROR_EXIT(cudaStreamSynchronize(aristosStream));
         delete hB;
-        std::free(aP);
+        std::free(mP);
     }
 
     // Should be called before loading the model
@@ -468,11 +465,9 @@ namespace aristos{
             "For performance, we assume number of experts <= UINT16_MAX");
         int cudaDevAttribute = 0;
         int dev = 0;
-        int blocks = 0;
         CHECK_ERROR_EXIT(cudaGetDevice(&dev));
         CHECK_ERROR_EXIT(cudaDeviceGetAttribute(&cudaDevAttribute, cudaDevAttrMemoryPoolsSupported, dev));
         reportError(cudaDevAttribute, "Memory Pools support required");
-        CHECK_ERROR_EXIT(cudaDeviceGetAttribute(&blocks, cudaDevAttrMultiProcessorCount, dev));
         using ElementAccum = float;
         using relu = cutlass::epilogue::thread::ReLU<ElementAccum>;
         using gelu = cutlass::epilogue::thread::GELU<ElementAccum>;

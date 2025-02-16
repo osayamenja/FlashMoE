@@ -4,10 +4,7 @@
 
 #ifndef ARISTOS_QUEUE_CUH
 #define ARISTOS_QUEUE_CUH
-
-#include <nvshmemx.h>
 #include <nvshmem.h>
-#include <host/nvshmemx_api.h>
 
 #include "../types.cuh"
 #include "packet.cuh"

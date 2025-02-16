@@ -4,10 +4,7 @@
 
 #ifndef PACKET_CUH
 #define PACKET_CUH
-
-#include <nvshmemx.h>
 #include <nvshmem.h>
-#include <host/nvshmemx_api.h>
 
 #include "../types.cuh"
 #include "../atomics.cuh"
