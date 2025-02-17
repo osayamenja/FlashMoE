@@ -1,18 +1,17 @@
 /******************************************************************************
  * Copyright (c) 2024, Osayamen Jonathan Aimuyo.
  ******************************************************************************/
-#include <cuda/experimental/device.cuh>
 #include <torch/torch.h>
 
 #include "include/moe/expert.cuh"
-#include "include/bootstrap.cuh"
+#include "include/throughput.cuh"
 #include "include/types.cuh"
 
 __host__ __forceinline__
 void evalExpert() {
-    constexpr auto M = 8192U;
-    constexpr auto N = 4096U;
-    constexpr auto K = 1024U;
+    constexpr auto M = 128U;
+    constexpr auto N = 64U;
+    constexpr auto K = 64U;
     static_assert(M % BLOCK_M == 0 && N % BLOCK_N == 0 && K % BLOCK_K_HALF == 0);
     using clk = std::chrono::high_resolution_clock;
     std::chrono::duration<float> end {};
@@ -41,7 +40,7 @@ void evalExpert() {
     // Pack A, B, D, S into a single, linear tensor
     const auto hT = torch::ones({1, hZ}, options).contiguous();
     const auto activations = torch::rand({M, K}, options);
-    const auto scaleWeights = 0.5f * torch::ones({M, 1}, options);
+    const auto scaleWeights = torch::ones({M, 1}, options);
     // Pack A
     hT.index({0, torch::indexing::Slice(torch::indexing::None, aZ)}) =
         activations.view({aZ}).contiguous();
@@ -59,34 +58,31 @@ void evalExpert() {
     hT.index({0, torch::indexing::Slice(d2Z, sZ)}) =
         scaleWeights.view({M}).contiguous();
     // implicitly set combine to 1
-    // Set C2 to 0
-    hT.index({0, torch::indexing::Slice(cZ, hZ)}) *= 0.0f;
-
+    const auto combineWeights = hT.index({0, torch::indexing::Slice(sZ, cWz)}).view({M, 1});
     // gemm 1 -> ReLU -> gemm 2 -> scale
-    auto result = expert->forward(activations) * scaleWeights;
     constexpr auto trials = 128U;
+    /*auto result = expert->forward(activations) * scaleWeights;
     for (uint i = 0; i < trials - 1; ++i) {
         result = expert->forward(result) * scaleWeights;
-    }
+    }*/
     const auto start = clk::now();
-    result = expert->forward(result) * scaleWeights;
+    const auto result = mul(expert->forward(activations), scaleWeights);
     CHECK_ERROR_EXIT(cudaDeviceSynchronize());
     end = clk::now() - start;
-    std::cout << result[0][0] << std::endl;
     printf("Torch takes %f\n", end.count());
     // Get a copy of the reference result
-    const auto tRef = torch::clone(hT.index({0, torch::indexing::Slice(cZ, hZ)}));
     aristos::WorkerAttribute wA{};
     // compute & measure fused expert
     using Activation = cutlass::epilogue::thread::ReLU<aristos::GEA>;
+    using Element = cute::half_t;
     aristos::mFT<ARISTOS_ARCH, trials, aristos::CombineMode::single, Activation>(&wA, M, N, K,
-        CAST_TO(cute::half_t, hT.mutable_data_ptr()),
-        CAST_TO(cute::half_t, hT.mutable_data_ptr()) + cWz);
+        CAST_TO(Element, hT.mutable_data_ptr()),
+        CAST_TO(Element, hT.mutable_data_ptr()) + cWz);
     // verify and compare
-    aristos::reportError(tRef.allclose(hT.index({0, torch::indexing::Slice(cZ, hZ)})),
-        "Results are Incorrect!");
-    // If we reached here, then we passed :)
-    std::cout << "Passed!" << std::endl;
+    std::cout << "Passed? " << (result.view({M * K})
+        .allclose(hT.index({0, torch::indexing::Slice(cZ, hZ)}), 1E-05,
+            1E-08, true) ? "Yes!" : "No") << std::endl;
+    CHECK_LAST();
 }
 /*__host__ __forceinline__
 void startAristos() {

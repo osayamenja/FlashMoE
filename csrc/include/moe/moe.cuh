@@ -5,31 +5,11 @@
 #ifndef ARISTOS_MOE_CUH
 #define ARISTOS_MOE_CUH
 
-#include <torch/torch.h>
-
 #include "gate.cuh"
 #include "../os/os.cuh"
 #include "../os/processor/processor.cuh"
 
 namespace aristos::moe{
-    template<
-        CombineMode c,
-        typename T
-    >
-    requires(aristos::TensorValueType<T>)
-    struct VCT {
-        static_assert(c == CombineMode::single);
-        using Element = T;
-    };
-    template<
-        typename T
-    >
-    requires(aristos::TensorValueType<T>)
-    struct VCT<CombineMode::multithreaded, T> {
-        // tf32 does not have device intrinsics for atomic operations, so we use float instead
-        using Element = cuda::std::conditional_t<cuda::std::is_same_v<T, cute::tfloat32_t>,
-            float, T>;
-    };
     template<
         unsigned int Arch,
         GateReductionLevel g = GateReductionLevel::singleBlock,
@@ -245,21 +225,11 @@ namespace aristos::moe{
         using gelu = cutlass::epilogue::thread::GELU<GEA>;
         switch (hostBookkeeping.pfId) {
             case 0: {
-                if (at::globalContext().allowTF32CuBLAS() || at::globalContext().allowTF32CuDNN()) {
-                    dispatchKernel<cute::tfloat32_t, relu>(iP, oP);
-                }
-                else {
-                    dispatchKernel<float, relu>(iP, oP);
-                }
+                dispatchKernel<cute::tfloat32_t, relu>(iP, oP);
             }
             break;
             case 1: {
-                if (at::globalContext().allowTF32CuBLAS() || at::globalContext().allowTF32CuDNN()) {
-                    dispatchKernel<cute::tfloat32_t, gelu>(iP, oP);
-                }
-                else {
-                    dispatchKernel<float, gelu>(iP, oP);
-                }
+                dispatchKernel<cute::tfloat32_t, gelu>(iP, oP);
             }
             break;
             case 2:

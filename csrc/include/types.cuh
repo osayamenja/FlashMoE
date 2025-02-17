@@ -154,6 +154,25 @@ namespace aristos{
         inference
     };
 
+    template<
+        CombineMode c,
+        typename T
+    >
+    requires(aristos::TensorValueType<T>)
+    struct VCT {
+        static_assert(c == CombineMode::single);
+        using Element = T;
+    };
+    template<
+        typename T
+    >
+    requires(aristos::TensorValueType<T>)
+    struct VCT<CombineMode::multithreaded, T> {
+        // tf32 does not have device intrinsics for atomic operations, so we use float instead
+        using Element = cuda::std::conditional_t<cuda::std::is_same_v<T, cute::tfloat32_t>,
+            float, T>;
+    };
+
     struct __align__(4) WorkerAttribute{
         uint16_t throughput; // experts per ms
         uint16_t memoryCapacity; // upper bound of experts that we can accommodate

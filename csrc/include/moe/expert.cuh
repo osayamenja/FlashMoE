@@ -33,9 +33,8 @@ namespace aristos {
         const Output& mC,
         const typename BlockGEMM::MatrixDType* __restrict__ const& scaleWeights,
         const typename BlockGEMM::MatrixDType* __restrict__ const& combineWeights,
-        const unsigned int& M,
-        const unsigned int& N,
         const unsigned int& tileIdx) {
+        const auto [M, N] = mC.shape();
         auto accumulator = cute::partition_fragment_C(typename BlockGEMM::MMA{}, typename BlockGEMM::TilerOut{});
         constexpr auto elems = SHARED_SIZE / (THREADS * sizeof(typename BlockGEMM::MatrixDType));
         static_assert(cute::size(accumulator) % elems == 0);
@@ -57,8 +56,9 @@ namespace aristos {
         const auto gC = cute::local_tile(mC, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1,cute::_1, cute::X>{});
         const auto gD = cute::local_tile(mD, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1,cute::_1, cute::X>{});
         // get combine and scale weights
-        auto sW = scaleWeights[tileIdx * bM + threadIdx.x];
-        auto cW = combineWeights[tileIdx * bM + threadIdx.x];
+        const auto rowIdx = (tileIdx / tilesN) * bM;
+        auto sW = scaleWeights[rowIdx + threadIdx.x];
+        auto cW = combineWeights[rowIdx + threadIdx.x];
 
         auto k_tile_iter = cute::make_coord_iterator(size<2>(gA));
         int k_tile_count = size<2>(gA);
@@ -83,7 +83,6 @@ namespace aristos {
                                                     typename decltype(accumulator)::value_type>{};
         constexpr auto gDLoadOp = cutlass::NumericConverter<typename decltype(accumulator)::value_type,
                                                     ElementD>{};
-        constexpr auto scaleOp = cutlass::epilogue::thread::Scale<typename decltype(accumulator)::value_type>{};
 
         // Assume elementwise operator
         constexpr typename BlockGEMM::FusedEpilogue epilogueOp{};
@@ -170,7 +169,7 @@ namespace aristos {
     /// D = A * B1 + C1
     /// A = D * B2 + C2
     __global__ __maxnreg__(REGINALD) void expert(ProblemShape_MNK pShape,
-        uint* deviceThroughput, uint* tileSync,
+        float* deviceThroughput, uint* tileSync,
         const Element* __restrict__ iP /* A, B, D, S, W*/,
         Element* __restrict__ oP /*C*/, const bool skip = true) {
         uint64_t start = 0, end = 0;
@@ -184,10 +183,11 @@ namespace aristos {
         constexpr auto preGEMM = processor::FGT<TaskType::preGEMM, Operation>{};
         constexpr auto threads = Operation::GEMM::block_dim.x;
         // we require M, N, K to be evenly divisible by corresponding block tiling dimensions
-        const auto tilesM = M / cute::get<0>(typename Operation::BlockTiler{});
-        const auto tilesN = N / cute::get<1>(typename Operation::BlockTiler{});
-        const auto tilesK = K / cute::get<2>(typename Operation::BlockTiler{});
+        const auto tilesM = M / cute::get<0>(typename Operation::TilerOut{});
+        const auto tilesN = N / cute::get<1>(typename Operation::TilerOut{});
+        const auto tilesK = K / cute::get<1>(typename Operation::TilerOut{});
         const auto tiles = tilesM * tilesN;
+        const auto tiles2 = tilesM * tilesK;
 
         const auto* __restrict__ pA = iP;
         const auto* __restrict__ pB1 = pA + M * K;
@@ -197,10 +197,9 @@ namespace aristos {
         const auto* __restrict__ pS = pD2 + N;
         const auto* __restrict__ pCw = pS + M;
         auto* __restrict__ pC1 = oP;
-        auto* __restrict__ pC2 = pC1 + M * N; // write results back to input memory
+        auto* __restrict__ pC2 = pC1 + M * N;
 
         asm volatile("mov.u64 %0, %%globaltimer;": "=l"(start)::);
-        #pragma unroll 4
         for (uint i = blockIdx.x; i < tiles; i += blocks) {
             preGEMM(workspace, pA, pB1, pC1, pD1, M, N, K, i);
             // notify this tile's completion
@@ -210,7 +209,6 @@ namespace aristos {
                 atomicIncrement(tileSync + tM);
             }
         }
-
         // Make tensors for below
         // Row-major
         const auto mA = make_tensor(cute::make_gmem_ptr(pC1),
@@ -237,17 +235,19 @@ namespace aristos {
         }
         auto processed = 0U;
         // Below presumes a row-major layout of blocks over tiles
-        const auto nT = tiles / blocks + (blockIdx.x < (tiles % blocks));
+        const auto nT = tiles2 / blocks + (blockIdx.x < (tiles2 % blocks));
         static_assert(sizeof(BlockScan::TempStorage) <= SHARED_SIZE);
         auto* __restrict__ bTs = CAST_TO(typename BlockScan::TempStorage, workspace);
-        const auto fStride = umin(blocks, tilesK);
+        const auto fStride = tilesK > blocks ? blocks * (tilesK / blocks) : blocks;
         while (processed < nT) {
             // concurrently sweep pending flags
             #pragma unroll
             for (uint i = 0; i < tSlice; ++i) {
-                const auto flagIdx = blockIdx.x + fStride * (i * threads + threadIdx.x);
-                if (flagIdx < tiles && flagState[i] != FlagState::completed) {
-                    predicates[i] = atomicLoad(tileSync + flagIdx / tilesK) == tilesN;
+                const auto tileIdx = blockIdx.x + fStride * (i * threads + threadIdx.x);
+                const auto flagIdx = tileIdx / tilesK;
+                const auto isCollision = (i > 0 || threadIdx.x > 0) && (tileIdx - fStride) / tilesK == flagIdx;
+                if (tileIdx < tiles2 && flagState[i] != FlagState::completed && !isCollision) {
+                    predicates[i] = atomicLoad(tileSync + flagIdx) == tilesN;
                     flagState[i] = predicates[i] ? FlagState::identified : FlagState::unidentified;
                 }
             }
@@ -257,30 +257,29 @@ namespace aristos {
             // Populate task queue with identified flag indices
             #pragma unroll
             for (uint i = 0; i < tSlice; ++i) {
-                const auto flagIdx = blockIdx.x + fStride * (i * threads + threadIdx.x);
-                if (flagIdx < tiles && flagState[i] == FlagState::identified) {
+                const auto tileIdx = blockIdx.x + fStride * (i * threads + threadIdx.x);
+                if (tileIdx < tiles2 && flagState[i] == FlagState::identified) {
                     flagState[i] = FlagState::completed;
-                    tQ[predicates[i] - 1] = flagIdx / tilesK;
+                    tQ[predicates[i] - 1] = tileIdx / tilesK;
                 }
             }
             // needed for global visibility of tQ updates
             __syncthreads();
-            #pragma unroll 2
             for (uint i = 0; i < identifiedFlags; ++i) {
                 const auto rowIdx = tQ[i];
                 // Compute prefix index for my first tile in this row
-                const auto startIdx = rowIdx * tilesK / blocks + (blockIdx.x < rowIdx * tilesK % blocks);
+                const auto startIdx = (rowIdx * tilesK) / blocks + (blockIdx.x < rowIdx * tilesK % blocks);
                 const auto endTile = (rowIdx + 1) * tilesK;
                 // do gemm
                 for (uint j = blockIdx.x + startIdx * blocks; j < endTile; j += blocks) {
-                    fGST<OperationX, c>(workspace, mA, mB, mD, mC, pS, pCw, M, N, j);
+                    fGST<OperationX, c>(workspace, mA, mB, mD, mC, pS, pCw, j);
                     processed++;
                 }
             }
         }
         asm volatile("mov.u64 %0, %%globaltimer;": "=l"(end)::);
         if (!skip) {
-            auto tDt = static_cast<float>(end - start) / 1e6f; // convert nano to milliseconds
+            auto tDt = (end - start) / 1e6f; // convert nano to milliseconds
             // Intra-block reduction to get maximum latency
             using BlockReduce = cub::BlockReduce<float, threads>;
             auto* __restrict__ rTs = CAST_TO(typename BlockReduce::TempStorage, workspace);
@@ -288,7 +287,7 @@ namespace aristos {
             auto bT = BlockReduce(*rTs).Reduce(tDt, cub::Max());
             // Inter-block max reduction
             if (!threadIdx.x) {
-                atomicMin(deviceThroughput, __float2uint_rn(__fdividef(1, bT))); // experts per ms
+                cuda::atomic_ref{*deviceThroughput}.fetch_max(bT);
             }
         }
     }

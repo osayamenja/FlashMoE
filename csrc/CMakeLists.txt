@@ -75,6 +75,7 @@ add_executable(csrc main.cu
         include/arch.cuh
         include/os/os.cuh
         include/moe/expert.cuh
+        include/throughput.cuh
 )
 set_target_properties(csrc PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
@@ -187,7 +188,7 @@ target_compile_definitions(csrc
 )
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_compile_options(csrc PRIVATE
-            $<$<COMPILE_LANGUAGE:CXX>:-Og;-g;>
+            $<$<COMPILE_LANGUAGE:CXX>:-O0;-g;>
             $<$<COMPILE_LANGUAGE:CUDA>:-O0; -g; -G>
     )
 elseif(CMAKE_BUILD_TYPE STREQUAL "Release")
