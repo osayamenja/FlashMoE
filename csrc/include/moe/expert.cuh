@@ -262,6 +262,7 @@ namespace aristos {
                     flagState[i] = FlagState::completed;
                     tQ[predicates[i] - 1] = tileIdx / tilesK;
                 }
+                predicates[i] = 0U;
             }
             // needed for global visibility of tQ updates
             __syncthreads();

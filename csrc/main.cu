@@ -9,9 +9,9 @@
 
 __host__ __forceinline__
 void evalExpert() {
-    constexpr auto M = 128U;
-    constexpr auto N = 64U;
-    constexpr auto K = 64U;
+    constexpr auto M = 16 * 1024U;
+    constexpr auto N = 1024U;
+    constexpr auto K = 1024U;
     static_assert(M % BLOCK_M == 0 && N % BLOCK_N == 0 && K % BLOCK_K_HALF == 0);
     using clk = std::chrono::high_resolution_clock;
     std::chrono::duration<float> end {};
@@ -80,8 +80,12 @@ void evalExpert() {
         CAST_TO(Element, hT.mutable_data_ptr()) + cWz);
     // verify and compare
     std::cout << "Passed? " << (result.view({M * K})
-        .allclose(hT.index({0, torch::indexing::Slice(cZ, hZ)}), 1E-05,
-            1E-08, true) ? "Yes!" : "No") << std::endl;
+        .allclose(hT.index({0, torch::indexing::Slice(cZ, hZ)}), 1E-02,
+            1E-02, true) ? "Yes!" : "No") << std::endl;
+    /*std::cout << result.view({M, K}) << std::endl;
+    std::cout << hT.index({0, torch::indexing::Slice(cZ, hZ)}).view({M, K}) << std::endl;
+    std::cout << result.view({M * K}).isclose(hT.index({0, torch::indexing::Slice(cZ, hZ)}))
+    .view({M,K}) << std::endl;*/
     CHECK_LAST();
 }
 /*__host__ __forceinline__

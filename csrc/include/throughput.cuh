@@ -31,18 +31,19 @@ namespace aristos {
         auto pS = cute::make_tuple(M, N, K);
         using ElementAccum = float;
         constexpr auto blocks = Hardware<Arch>::blocks::value - 1U;
-
-        /*#pragma unroll
+        auto* tileSync = CAST_TO(uint, p + 1);
+        #pragma unroll
         for (uint i = 0; i < skip; ++i) {
             expert<Arch, Activation, c, ElementAccum><<<blocks, ARISTOS_BLOCK_SIZE, 0, aristosStream>>>(pS,
-                CAST_TO(float, p), p + 1, iP, oP);
+                p, tileSync, iP, oP);
+            CHECK_ERROR_EXIT(cudaMemsetAsync(tileSync, 0, sizeof(uint) * (M / BLOCK_M), aristosStream));
             // Needed to clear accumulator buffer
             if constexpr (c == CombineMode::multithreaded) {
                 CHECK_ERROR_EXIT(cudaMemsetAsync(oP + M * N, 0, sizeof(Element) * (M * K), aristosStream));
             }
-        }*/
+        }
         expert<Arch, Activation, c, ElementAccum><<<blocks, ARISTOS_BLOCK_SIZE, 0, aristosStream>>>(pS,
-            p, CAST_TO(uint, p + 1), iP, oP, false);
+            p, tileSync, iP, oP, false);
         CHECK_ERROR_EXIT(cudaPeekAtLastError());
         float stage = 0;
         CHECK_ERROR_EXIT(cudaMemcpyAsync(&stage, p, sizeof(float), cudaMemcpyDeviceToHost, aristosStream));
