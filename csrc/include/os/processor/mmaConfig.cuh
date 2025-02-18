@@ -49,8 +49,7 @@ namespace aristos {
     struct MMAConfig {
         using mma = cute::TiledMMA<
                     cute::MMA_Atom<cute::UniversalFMA<TC, TA, TB>>,
-                    cute::Layout<cute::Shape<cute::_16, cute::_8, cute::_1>>,
-                    cute::Tile<cute::_32, cute::_32, cute::_8>
+                    cute::Layout<cute::Shape<cute::_16, cute::_8, cute::_1>>
         >;
     };
 
@@ -103,7 +102,8 @@ namespace aristos {
     struct MMAConfig<800, float, cute::tfloat32_t> {
         using mma = cute::TiledMMA<
           cute::MMA_Atom<cute::SM80_16x8x8_F32TF32TF32F32_TN>,
-          cute::Layout<cute::Shape<cute::_2, cute::_2, cute::_1>>,
+          cute::Layout<cute::Shape<cute::_2, cute::_2, cute::_1>,
+                        cute::Stride<cute::_2, cute::_1, cute::_1>>,
         cute::Tile<cute::_32, cute::_32, cute::_8>
         >;
     };
@@ -183,7 +183,7 @@ namespace aristos {
 
     template<typename Element>
     using sCopyLay = cuda::std::conditional_t<sizeof(Element) >= 4,
-    cute::AutoVectorizingCopyWithAssumedAlignment<8 * alignof(Element)>, cute::SM75_U32x2_LDSM_N>;
+    cute::UniversalCopy<Element>, cute::SM75_U32x2_LDSM_N>;
 
     template<
         typename ElementA,

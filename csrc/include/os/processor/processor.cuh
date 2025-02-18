@@ -209,7 +209,7 @@ namespace aristos::processor{
                 // Fused Bias Add and Activation Function on register fragment
                 #pragma unroll
                 for (int j = 0; j < elems; ++j) {
-                    accumulator(j + i * elems) = gCStoreOp(epilogueOp(accumulator(j + i * elems), gDLoadOp(rScratch[j])));
+                    accumulator(j + i * elems) = epilogueOp(accumulator(j + i * elems), gDLoadOp(rScratch[j]));
                 }
             }
 

@@ -17,9 +17,10 @@ namespace aristos {
         unsigned int skip = 128U,
         CombineMode c,
         typename Activation,
-        typename Element
+        typename Element,
+        typename ElementAccum = float
     >
-    requires(cuda::std::is_invocable_r_v<GEA, Activation, GEA>)
+    requires(cuda::std::is_invocable_r_v<ElementAccum, Activation, ElementAccum>)
     __host__ __forceinline__
     void mFT(WorkerAttribute* __restrict__ const& dWa,
         const unsigned int& M, const unsigned int& N, const unsigned int& K,
@@ -29,7 +30,6 @@ namespace aristos {
         CHECK_ERROR_EXIT(cudaMallocAsync(&p, stateSize, aristosStream));
         CHECK_ERROR_EXIT(cudaMemsetAsync(p, 0, stateSize, aristosStream));
         auto pS = cute::make_tuple(M, N, K);
-        using ElementAccum = float;
         constexpr auto blocks = Hardware<Arch>::blocks::value - 1U;
         auto* tileSync = CAST_TO(uint, p + 1);
         #pragma unroll
