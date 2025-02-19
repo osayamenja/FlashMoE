@@ -91,10 +91,12 @@ namespace aristos::packet {
             const auto peer = pS[expertIdx];
             const auto pe = pT[peer];
             const auto pTT = cute::min(peerTotalTokens[peer], eCap);
-            const auto isRemote = nvshmem_ptr(sHeap, pe) == nullptr;
+            auto* __restrict__ rPH = nvshmem_ptr(heap::advance<0, 1, sizeof(Element)>(sHeap, cellSize, expertSlots,
+                tokenDim, peer, pLIdx), pe);
+            const auto isRemote = rPH == nullptr;
             auto* __restrict__ peerHeap = static_cast<cuda::std::byte*>(isRemote ?
                 heap::advance<0, 0, sizeof(Element)>(sHeap, cellSize, expertSlots, tokenDim, peer, pLIdx):
-                nvshmem_ptr(heap::advance<0, 1, sizeof(Element)>(sHeap, cellSize, expertSlots, tokenDim, peer, pLIdx), pe));
+                rPH);
             if (!routedTokens) {
                 if (isLeader && !pTT) {
                     // single thread sends a noop packet to unblock the remote peer
@@ -254,7 +256,8 @@ namespace aristos::packet {
                         pXo + (p == PeerConnectivity::remote ? i : tileIdx),
                         static_cast<uint16_t>(BLOCK_M),
                         gPeer,
-                        i
+                        i,
+                        p == PeerConnectivity::remote
                     };
                 }
             }
@@ -275,7 +278,8 @@ namespace aristos::packet {
                         pXo + (p == PeerConnectivity::remote ? fTilesM : tileIdx),
                         static_cast<uint16_t>(residue),
                         gPeer,
-                        fTilesM
+                        fTilesM,
+                        p == PeerConnectivity::remote
                     };
                 }
             }

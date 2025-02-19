@@ -42,6 +42,7 @@ namespace aristos::os {
         const auto tN = bookkeeping.tN;
         const auto eCap = bookkeeping.eCap;
         const auto world = bookkeeping.world;
+        const auto sHeap = bookkeeping.sHeap;
         // shared memory arrays
         // Upper bound for expectant tasks
         auto*  taskBound = scratch;
@@ -76,13 +77,18 @@ namespace aristos::os {
         }
         auto* __restrict__ status = interrupt + SUBSCRIBERS;
         const auto* __restrict__ pT = status + world;
+        const auto* __restrict__ pR = pT + world;
         scratch = status + world; // use this instead to preserve the const attribute of pT
         for (uint i = threadIdx.x; i < world; i += THREADS) {
-            scratch[i] = __ldg(gPT + i);
+            const auto pe = __ldg(gPT + i);
             status[i] = 0U;
+            scratch[i] = pe;
+            // pR
+            scratch[world + i] = nvshmem_ptr(sHeap, pe) == nullptr;
         }
+        __syncthreads();
         static_assert(alignof(uint) % alignof(EDT) == 0);
-        auto* __restrict__ xD = static_cast<const EDT*>(static_cast<const void*>(pT + world));
+        auto* __restrict__ xD = static_cast<const EDT*>(static_cast<const void*>(pR + world));
         auto* __restrict__ sxD = static_cast<EDT*>(static_cast<void*>(scratch + world));
         for (uint i = threadIdx.x; i < nx; i += THREADS) {
             // copy from above
@@ -103,8 +109,9 @@ namespace aristos::os {
         }
         else {
             // subscriber
-            subscriber::start<wSet>(workspace, interrupt, pT, xD, xD + nRx, nRx, status,
-                taskBound, moeOutput, expertsUp, expertsDown, biasUp, biasDown, lSeqBit);
+            subscriber::start<wSet>(workspace, interrupt, pT, pR,
+                xD, xD + nRx, nRx, status,taskBound, moeOutput,
+                expertsUp, expertsDown, biasUp, biasDown, lSeqBit);
         }
     }
 }

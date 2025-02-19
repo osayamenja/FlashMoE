@@ -24,7 +24,144 @@ namespace aristos::decider{
     /// Necessary to use path halving to ensure amortized "practical constant" time
     using DisjointSet = boost::disjoint_sets_with_storage<boost::identity_property_map,
             boost::identity_property_map, boost::find_with_path_halving>;
-    template<typename AdjMatrix>
+    template <JobType jT = JobType::training>
+    struct Decider {
+        static_assert(jT == JobType::training);
+        template<
+            typename AdjMatrix
+        >
+        requires(cute::is_tensor_v<AdjMatrix> && rank(AdjMatrix{}) == 2 &&
+            cuda::std::is_same_v<typename AdjMatrix::value_type, floatPair>)
+        __forceinline__ __host__
+        void operator()(const AdjMatrix& adjMatrix,
+            uint* __restrict__ dTg, /*devices to groups*/
+            const Worker* __restrict__ const& workers,
+            const unsigned int& totalExpertCost,
+            const unsigned int& totalExpertMem,
+            const ModelConfig& modelConfig) {
+            const auto world = cute::size<0>(adjMatrix);
+            auto infeasibleGroups = std::unordered_set<unsigned int>{};
+            for(uint i = 0; i < world; ++i){
+                if(const auto w = workers[i]; w.memoryCapacity < totalExpertMem)
+                    infeasibleGroups.insert(w.id);
+            }
+            DisjointSet groups(world);
+            std::priority_queue<Edge, std::vector<Edge>, std::greater<>> candidateEdges;
+            std::priority_queue<Edge> externalEdges;
+            auto groupInfo = std::unordered_map<unsigned int, Group>{};
+            auto effectiveWorld = world - infeasibleGroups.size();
+            for(int i = 0; i < world; ++i) {
+                auto dp = std::vector<floatPair>(world);
+                for (int j = 0; j < world; ++j) {
+                    dp[j] = {0.0, 0.0};
+                    if (i != j)[[likely]] {
+                        const auto alpha = adjMatrix(i, j).alpha;
+                        const auto beta = adjMatrix(i, j).beta;
+                        candidateEdges.emplace(i, j,
+                                                 ObjArgs::p2pTransferTime(alpha, beta,
+                                                                          modelConfig.p2pBuffer));
+                        externalEdges.emplace(i, j, ARArgs::bottleneck(alpha, beta,
+                                                                         modelConfig.gradBuffer, 2));
+                        /// Invert the edge for the dp table
+                        dp[j] = adjMatrix(j, i);
+                    }
+                }
+                groupInfo.insert({i, Group(i,
+                                           workers[i].memoryCapacity,
+                                           workers[i].processingRate,
+                                           world,
+                                           ObjArgs(totalExpertCost, effectiveWorld, totalExpertMem, modelConfig),
+                                           dp)});
+            }
+            auto extEdge = externalEdges.top();
+            auto arArgs = ARArgs(adjMatrix(extEdge.node1, extEdge.node2).alpha,
+                                   adjMatrix(extEdge.node1, extEdge.node2).beta,
+                                   effectiveWorld, modelConfig.gradBuffer);
+            const auto art = allReduceT(arArgs);
+            /// Second-pass group construction
+            for(auto& g : std::views::values(groupInfo)){
+                g.construct(art, effectiveWorld);
+            }
+
+            auto limbo = Edge::limboEdge();
+            while (!candidateEdges.empty()){
+                const auto candidate = candidateEdges.top();
+                candidateEdges.pop();
+                auto group1 = groups.find_set(candidate.node1);
+                auto group2 = groups.find_set(candidate.node2);
+                if (group1 == group2)[[likely]]{
+                    continue;
+                }
+                extEdge = externalEdges.top();
+                /// if number of groups is <= 2, then there is no need to find the edge when it coincides
+                /// as the ar cost would be zero anyway for a single group
+                auto extGroup1 = groups.find_set(extEdge.node1);
+                auto extGroup2 = groups.find_set(extEdge.node2);
+                if(groupInfo.size() > 2 && dualSetCompare(extGroup1, extGroup2, group1, group2))[[unlikely]]{
+                    limbo = extEdge;
+                }
+
+                while(groupInfo.size() > 2 && ((groups.find_set(extEdge.node1) == groups.find_set(extEdge.node2))
+                || dualSetCompare(groups.find_set(extEdge.node1), groups.find_set(extEdge.node2), group1, group2))){
+                    externalEdges.pop();
+                    extEdge = externalEdges.top();
+                }
+                const bool satisfiesConstraint = groupInfo.at(group1).memCapacity + groupInfo.at(group2).memCapacity >= totalExpertMem;
+                arArgs.numGroups = groupInfo.size() - infeasibleGroups.size();
+                if(infeasibleGroups.contains(group1) && infeasibleGroups.contains(group2)){
+                    if(satisfiesConstraint){
+                        arArgs.numGroups += 1;
+                    }
+                }
+                else if(!infeasibleGroups.contains(group1) && !infeasibleGroups.contains(group2)){
+                    arArgs.numGroups -= 1;
+                }
+                arArgs.refresh(adjMatrix(extEdge.node1, extEdge.node2).alpha, adjMatrix(extEdge.node1, extEdge.node2).beta);
+                if(groupInfo.at(group1).shouldMerge(groupInfo.at(group2), arArgs, effectiveWorld)){
+                    limbo = Edge::limboEdge();
+                    groups.link(group1, group2);
+                    auto parent = group1;
+                    auto child = group2;
+                    if(group1 != groups.find_set(group1)){
+                        parent = group2;
+                        child = group1;
+                    }
+                    if(satisfiesConstraint){
+                        if(infeasibleGroups.contains(parent)){
+                            infeasibleGroups.erase(parent);
+                            effectiveWorld += groupInfo.at(parent).numNodes();
+                        }
+                        if(infeasibleGroups.contains(child)){
+                            infeasibleGroups.erase(child);
+                            effectiveWorld += groupInfo.at(child).numNodes();
+                        }
+                    }
+                    else{
+                        infeasibleGroups.erase(child);
+                    }
+                    groupInfo.at(parent).subsume(groupInfo.at(child));
+                    groupInfo.erase(child);
+                }
+                if(!limbo.isLimboEdge()){
+                    externalEdges.push(limbo);
+                }
+            }
+
+            /// Post-processing
+            for(const auto& i: std::views::keys(groupInfo)){
+                if(infeasibleGroups.contains(i)){
+                    groupInfo.erase(i);
+                }
+            }
+
+            for (uint i = 0; i < world; ++i) {
+                dTg[i] = static_cast<uint>(groups.parents()[i]);
+            }
+        }
+    };
+    template<
+        typename AdjMatrix
+    >
     requires(cute::is_tensor_v<AdjMatrix> && rank(AdjMatrix{}) == 2 &&
         cuda::std::is_same_v<typename AdjMatrix::value_type, floatPair>)
     /// Generates DP-EP groups [D, G] -> Devices to Groups

@@ -35,7 +35,6 @@
 #define BLOCK_K_FULL 8U
 #define MAX_REGS (BLOCK_M * BLOCK_N) / THREADS
 #define PIPELINE_STAGES 2U
-#define SHARED_SIZE 16 * 1024U
 #define GEMMs 2U // per expert
 #define REGINALD 128 // max registers per thread
 
@@ -49,6 +48,7 @@
 #define BETA_MB 1024.0f // 1GB
 
 #include <cuda/barrier>
+#include <cuda/std/tuple>
 #include <cuda/std/array>
 #include <cute/tensor.hpp>
 
@@ -65,6 +65,38 @@ namespace aristos{
     concept isTensor = cute::is_tensor<T>::value && TensorValueType<typename T::value_type>;
     template<typename T>
     concept isMatrix = isTensor<T> && rank(T{}) == 2;
+
+    template<typename S>
+    struct ToCute {
+        using T = S;
+        static_assert(aristos::TensorValueType<T>);
+    };
+    template<>
+    struct ToCute<__half> {
+        using T = cute::half_t;
+    };
+    template<>
+    struct ToCute<__nv_bfloat16> {
+        using T = cute::bfloat16_t;
+    };
+
+    template<typename S>
+    requires(aristos::TensorValueType<S>)
+    struct ToCDx {
+        using T = S;
+    };
+    template<>
+    struct ToCDx<cute::tfloat32_t> {
+        using T = float;
+    };
+    template<>
+    struct ToCDx<cute::half_t> {
+        using T = __half;
+    };
+    template<>
+    struct ToCDx<cute::bfloat16_t> {
+        using T = __nv_bfloat16;
+    };
     using mp_t = float; // or tf32
     using GEA = float;
     using specType = unsigned int;
@@ -130,6 +162,12 @@ namespace aristos{
         p2p
     };
 
+    __host__ __device__
+    enum class UseBarrier {
+        yes,
+        no
+    };
+
     __device__
     enum class DropTokens {
         yes,
@@ -174,7 +212,7 @@ namespace aristos{
     };
 
     struct __align__(4) WorkerAttribute{
-        uint16_t throughput; // experts per ms
+        cute::half_t throughput; // ms for a single expert
         uint16_t memoryCapacity; // upper bound of experts that we can accommodate
     };
     struct __align__(8) TopologySignal{
@@ -324,7 +362,7 @@ namespace aristos{
     // Index and gate combine weight
     using TokenIdxTuple = cuda::std::pair<unsigned int, mp_t>;
 
-    enum class TaskType {
+    enum class TaskType : uint8_t {
         preGEMM,
         postGEMM,
         combine,
@@ -349,6 +387,7 @@ namespace aristos{
         unsigned int expertIdx = 0U;
         uint16_t tileSize = 0U; // <= BLOCK_M
         TaskType taskType = TaskType::Interrupt;
+        bool isPeerRemote = false;
 
         __forceinline__ __device__
         Task() = default;
@@ -366,11 +405,12 @@ namespace aristos{
             const unsigned int& _flagIdx,
             const uint16_t& _size,
             const unsigned int& _peerIdx,
-            const unsigned int& _batchIdx):
+            const unsigned int& _batchIdx,
+            const bool& _isPeerRemote):
         aData(_aData), bData(_bData),
         cData(_cData), dData(_dData),
         syncIdx(_syncIdx), tileIdx(_tile), peerIdx(_peerIdx), M(_M), flagIdx(_flagIdx),
-        batchIdx(_batchIdx), tileSize(_size), taskType(_taskType){}
+        batchIdx(_batchIdx), tileSize(_size), taskType(_taskType), isPeerRemote(_isPeerRemote){}
 
         // Stage 2
         __device__ __forceinline__

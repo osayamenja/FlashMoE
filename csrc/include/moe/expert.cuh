@@ -7,7 +7,6 @@
 
 #include <cub/cub.cuh>
 #include <cuda/std/array>
-#include <cuda/std/cstddef>
 #include <cute/tensor.hpp>
 
 #include "../arch.cuh"
@@ -155,12 +154,15 @@ namespace aristos {
     };
     // Stylized expert for evaluation only
     template<
-        unsigned int Arch,
+        typename GPUType,
         typename ActivationOp,
         CombineMode c,
         typename ElementC,
+        UseBarrier u = UseBarrier::no,
         typename Element,
-        typename ProblemShape_MNK
+        typename ProblemShape_MNK,
+        unsigned int blocks = GPUType::OS::processorBlocks::value,
+        unsigned int arch = GPUType::arch::value
     >
     requires(cute::is_tuple_v<ProblemShape_MNK> && rank(ProblemShape_MNK{}) == 3 &&
         aristos::TensorValueType<ElementC> &&
@@ -168,18 +170,18 @@ namespace aristos {
         && aristos::TensorValueType<Element>)
     /// D = A * B1 + C1
     /// A = D * B2 + C2
-    __global__ __maxnreg__(REGINALD) void expert(ProblemShape_MNK pShape,
+    __global__ __maxnreg__(GPUType::registers::value) void expert(ProblemShape_MNK pShape,
+        cuda::barrier<cuda::thread_scope_device>* dB,
         float* deviceThroughput, uint* tileSync,
         const Element* __restrict__ iP /* A, B, D, S, W*/,
         Element* __restrict__ oP /*C*/, const bool skip = true) {
         uint64_t start = 0, end = 0;
-        constexpr auto blocks = Hardware<Arch>::blocks::value - 1U;
         constexpr auto tMu = 1024; // upper bound of tM for this exercise
         __shared__ __align__(16) Element workspace[SHARED_SIZE / sizeof(Element)];
         __shared__ __align__(16) uint16_t tQ[tMu];
         const auto [M, N, K] = pShape;
-        using Operation = BlockMM<Arch, Element, Element, ElementC, ActivationOp>;
-        using OperationX = BlockMM<Arch, Element, Element, ElementC>;
+        using Operation = BlockMM<arch, Element, Element, ElementC, ActivationOp>;
+        using OperationX = BlockMM<arch, Element, Element, ElementC>;
         constexpr auto preGEMM = processor::FGT<TaskType::preGEMM, Operation>{};
         constexpr auto threads = Operation::GEMM::block_dim.x;
         // we require M, N, K to be evenly divisible by corresponding block tiling dimensions
@@ -199,14 +201,34 @@ namespace aristos {
         auto* __restrict__ pC1 = oP;
         auto* __restrict__ pC2 = pC1 + M * N;
 
+        const auto tSCl = umin(tilesK, blocks);
+        // transposed layout to enable coalescing during polling,
+        // tradeoffs by disabling coalescing in one-shot propagation.
+        const auto tSync = make_tensor(cute::make_gmem_ptr(tileSync),
+            make_layout(cute::make_shape(tSCl, tilesM), cute::LayoutRight{}));
         asm volatile("mov.u64 %0, %%globaltimer;": "=l"(start)::);
         for (uint i = blockIdx.x; i < tiles; i += blocks) {
             preGEMM(workspace, pA, pB1, pC1, pD1, M, N, K, i);
-            // notify this tile's completion
-            if (!threadIdx.x) {
-                __threadfence();
-                const auto tM = i / tilesN;
-                atomicIncrement(tileSync + tM);
+            __syncthreads();
+            // Pick warp 0
+            if constexpr (u == UseBarrier::no) {
+                if (constexpr auto wS = 32; threadIdx.x / wS == 0) {
+                    const auto tM = i / tilesN;
+                    uint propagate = 0U;
+                    if (!threadIdx.x) {
+                        __threadfence();
+                        // Notify this tile's completion
+                        propagate = atomicIncrement(&tSync(0, tM)) == tilesN - 1;
+                    }
+                    // Broadcast from t0 to everyone else in the warp
+                    propagate = __shfl_sync(0xffffffff, propagate, 0);
+                    if (propagate) {
+                        // We were the last, let's propagate this information down
+                        for (uint j = threadIdx.x + 1; j < tSCl; j += wS) {
+                            atomicExch(&tSync(j, tM), tilesN);
+                        }
+                    }
+                }
             }
         }
         // Make tensors for below
@@ -222,59 +244,75 @@ namespace aristos {
         const auto mD = make_tensor(cute::make_gmem_ptr(pD2),
             make_layout(cute::make_shape(M, K), cute::make_stride(0, 1)));
 
-        // Below, is a more sophisticated method for scheduling the next GEMM task.
-        using BlockScan = cub::BlockScan<uint16_t, threads>;
-        constexpr auto tSlice = tMu / threads;
-        // Register allocations
-        uint16_t predicates[tSlice];
-        FlagState flagState[tSlice];
-        #pragma unroll
-        for (uint i = 0; i < tSlice; ++i) {
-            predicates[i] = 0U;
-            flagState[i] = FlagState::unidentified;
-        }
-        auto processed = 0U;
-        // Below presumes a row-major layout of blocks over tiles
-        const auto nT = tiles2 / blocks + (blockIdx.x < (tiles2 % blocks));
-        static_assert(sizeof(BlockScan::TempStorage) <= SHARED_SIZE);
-        auto* __restrict__ bTs = CAST_TO(typename BlockScan::TempStorage, workspace);
-        const auto fStride = tilesK > blocks ? blocks * (tilesK / blocks) : blocks;
-        while (processed < nT) {
-            // concurrently sweep pending flags
-            #pragma unroll
-            for (uint i = 0; i < tSlice; ++i) {
-                const auto tileIdx = blockIdx.x + fStride * (i * threads + threadIdx.x);
-                const auto flagIdx = tileIdx / tilesK;
-                const auto isCollision = (i > 0 || threadIdx.x > 0) && (tileIdx - fStride) / tilesK == flagIdx;
-                if (tileIdx < tiles2 && flagState[i] != FlagState::completed && !isCollision) {
-                    predicates[i] = atomicLoad(tileSync + flagIdx) == tilesN;
-                    flagState[i] = predicates[i] ? FlagState::identified : FlagState::unidentified;
-                }
+        if constexpr (u == UseBarrier::yes) {
+            if (!threadIdx.x) {
+                __threadfence();
+                dB->arrive_and_wait();
             }
-            uint16_t identifiedFlags = 0U;
-            // Perform block-wide Aggregation
-            BlockScan(*bTs).InclusiveSum(predicates, predicates, identifiedFlags);
-            // Populate task queue with identified flag indices
-            #pragma unroll
-            for (uint i = 0; i < tSlice; ++i) {
-                const auto tileIdx = blockIdx.x + fStride * (i * threads + threadIdx.x);
-                if (tileIdx < tiles2 && flagState[i] == FlagState::identified) {
-                    flagState[i] = FlagState::completed;
-                    tQ[predicates[i] - 1] = tileIdx / tilesK;
-                }
-                predicates[i] = 0U;
-            }
-            // needed for global visibility of tQ updates
             __syncthreads();
-            for (uint i = 0; i < identifiedFlags; ++i) {
-                const auto rowIdx = tQ[i];
-                // Compute prefix index for my first tile in this row
-                const auto startIdx = (rowIdx * tilesK) / blocks + (blockIdx.x < rowIdx * tilesK % blocks);
-                const auto endTile = (rowIdx + 1) * tilesK;
-                // do gemm
-                for (uint j = blockIdx.x + startIdx * blocks; j < endTile; j += blocks) {
-                    fGST<OperationX, c>(workspace, mA, mB, mD, mC, pS, pCw, j);
-                    processed++;
+            for (uint i = blockIdx.x; i < tiles2; i += blocks) {
+                fGST<OperationX, c>(workspace, mA, mB, mD, mC, pS, pCw, i);
+            }
+        }
+        else {
+            // Below, is a more sophisticated method for scheduling the next GEMM task.
+            using BlockScan = cub::BlockScan<uint16_t, threads>;
+            constexpr auto tSlice = tMu / threads;
+            // Register allocations
+            uint16_t predicates[tSlice];
+            FlagState flagState[tSlice];
+            #pragma unroll
+            for (uint i = 0; i < tSlice; ++i) {
+                predicates[i] = 0U;
+                flagState[i] = FlagState::unidentified;
+            }
+            auto processed = 0U;
+            // Below presumes a row-major layout of blocks over tiles
+            const auto nT = tiles2 / blocks + (blockIdx.x < (tiles2 % blocks));
+            static_assert(sizeof(BlockScan::TempStorage) <= SHARED_SIZE);
+            auto* __restrict__ bTs = CAST_TO(typename BlockScan::TempStorage, workspace);
+            const auto underSubscribed = tilesK > blocks;
+            const auto fStride = underSubscribed ? blocks * (tilesK / blocks) : blocks;
+            while (processed < nT) {
+                // concurrently sweep pending flags
+                #pragma unroll
+                for (uint i = 0; i < tSlice; ++i) {
+                    const auto tileIdx = blockIdx.x + fStride * (i * threads + threadIdx.x);
+                    const auto flagColIdx = tileIdx / tilesK;
+                    const auto isCollision = underSubscribed && (i > 0 || threadIdx.x > 0) &&
+                        (tileIdx - fStride) / tilesK == flagColIdx;
+                    const auto flagRowIdx = underSubscribed ? blockIdx.x : tileIdx % tilesK;
+                    if (tileIdx < tiles2 && flagState[i] != FlagState::completed && !isCollision) {
+                        predicates[i] = atomicLoad(&tSync(flagColIdx, flagRowIdx)) == tilesN;
+                        flagState[i] = predicates[i] ? FlagState::identified : FlagState::unidentified;
+                    }
+                }
+                uint16_t identifiedFlags = 0U;
+                // Perform block-wide Aggregation
+                BlockScan(*bTs).InclusiveSum(predicates, predicates, identifiedFlags);
+                // Populate task queue with identified flag indices
+                #pragma unroll
+                for (uint i = 0; i < tSlice; ++i) {
+                    const auto tileIdx = blockIdx.x + fStride * (i * threads + threadIdx.x);
+                    if (tileIdx < tiles2 && flagState[i] == FlagState::identified) {
+                        flagState[i] = FlagState::completed;
+                        tQ[predicates[i] - 1] = tileIdx / tilesK;
+                    }
+                    predicates[i] = 0U;
+                }
+                // needed for global visibility of tQ updates
+                __syncthreads();
+                #pragma unroll 2
+                for (uint i = 0; i < identifiedFlags; ++i) {
+                    const auto rowIdx = tQ[i];
+                    // Compute prefix index for my first tile in this row
+                    const auto startIdx = (rowIdx * tilesK) / blocks + (blockIdx.x < rowIdx * tilesK % blocks);
+                    const auto endTile = (rowIdx + 1) * tilesK;
+                    // do gemm
+                    for (uint j = blockIdx.x + startIdx * blocks; j < endTile; j += blocks) {
+                        fGST<OperationX, c>(workspace, mA, mB, mD, mC, pS, pCw, j);
+                        processed++;
+                    }
                 }
             }
         }

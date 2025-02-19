@@ -26,6 +26,7 @@ namespace aristos::subscriber{
     void start(cuda::std::byte* __restrict__ const& workspace,
         unsigned int* const& interrupt,
         const unsigned int* __restrict__ const& peerTranslation, // shared
+        const unsigned int* __restrict__ const& peerRemote, // shared
         // remote experts: {actual & local expert idx, peer idx}
         const cuda::std::tuple<uint, uint, uint>* __restrict__ const& rE, // shared
         const cuda::std::tuple<uint, uint, uint>* __restrict__ const& nRe, // p2p experts: like above
@@ -140,6 +141,7 @@ namespace aristos::subscriber{
                                 const auto expertIdx = flagIdx % nLx;
                                 const auto peerIdx = flagIdx / nLx;
                                 const auto gPeer = peerTranslation[peerIdx];
+                                const auto isRemote = peerRemote[peerIdx];
                                 cuda::std::array weights{
                                     CONST_CAST_TO(cuda::std::byte, &expertsUp(expertIdx)),
                                     CONST_CAST_TO(cuda::std::byte, &expertsDown(expertIdx))
@@ -150,7 +152,7 @@ namespace aristos::subscriber{
                                 };
                                 const auto* packet = heap::advance<0, 1, sizeof(Element)>(dA.sHeap,
                                     dA.cellSize, dA.expertSlots, dA.tokenSize, peerIdx, expertIdx);
-                                if (nvshmem_ptr(packet, gPeer) != nullptr) {
+                                if (!isRemote) {
                                     // P2P peer
                                     // Enforce consistency
                                     // before decoding the packet
@@ -203,6 +205,7 @@ namespace aristos::subscriber{
                                 auto expertIdx = flagIdx % nLx;
                                 auto peerIdx = flagIdx / nLx;
                                 const auto gPeer = peerTranslation[peerIdx];
+                                const auto isRemote = peerRemote[peerIdx];
                                 cuda::std::array weights{
                                     CONST_CAST_TO(cuda::std::byte, &expertsUp(expertIdx)),
                                     CONST_CAST_TO(cuda::std::byte, &expertsDown(expertIdx))
@@ -214,7 +217,7 @@ namespace aristos::subscriber{
 
                                 if (const auto* packet = heap::advance<0, 1, sizeof(Element)>(dA.sHeap, dA.cellSize,
                                     dA.expertSlots, dA.tokenSize, peerIdx, expertIdx);
-                                    nvshmem_ptr(packet, gPeer) != nullptr) {
+                                    !isRemote) {
                                     // Enforce consistency before decoding the packet
                                     __threadfence_system();
                                     fPd(dA, packet, status, taskCount, sP->routedTokens, sP->totalTilesM,

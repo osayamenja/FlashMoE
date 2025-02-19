@@ -7,56 +7,65 @@
 
 #include <torch/torch.h>
 
-#include "arch.cuh"
 #include "debug.cuh"
+#include "moe/expert.cuh"
 #include "types.cuh"
 
 namespace aristos {
     template<
-        unsigned int Arch,
+        typename GPUType,
         unsigned int skip = 128U,
         CombineMode c,
         typename Activation,
         typename Element,
-        typename ElementAccum = float
+        typename ElementAccum = float,
+        unsigned int blocks = GPUType::OS::processorBlocks::value,
+        unsigned int threads = GPUType::OS::threads::value
     >
     requires(cuda::std::is_invocable_r_v<ElementAccum, Activation, ElementAccum>)
     __host__ __forceinline__
     void mFT(WorkerAttribute* __restrict__ const& dWa,
         const unsigned int& M, const unsigned int& N, const unsigned int& K,
         Element* __restrict__ const& iP, Element* __restrict__ oP) {
-        float* p;
-        const auto stateSize = sizeof(float) + sizeof(uint) * (M / BLOCK_M); // tileSync + dT
+        cuda::std::byte* p;
+        const auto stateSize = sizeof(cuda::barrier<cuda::thread_scope_device>) +
+            sizeof(float) + sizeof(uint) * (M / BLOCK_M) * umin(K / BLOCK_N, blocks); // tileSync + dT
         CHECK_ERROR_EXIT(cudaMallocAsync(&p, stateSize, aristosStream));
         CHECK_ERROR_EXIT(cudaMemsetAsync(p, 0, stateSize, aristosStream));
+        const auto hB = new cuda::barrier<cuda::thread_scope_device>{blocks};
+        CHECK_ERROR_EXIT(cudaMemcpyAsync(p, hB,
+            sizeof(cuda::barrier<cuda::thread_scope_device>),
+            cudaMemcpyHostToDevice, aristosStream));
+
         auto pS = cute::make_tuple(M, N, K);
-        constexpr auto blocks = Hardware<Arch>::blocks::value - 1U;
-        auto* tileSync = CAST_TO(uint, p + 1);
+        auto* dT = CAST_TO(float, p + sizeof(cuda::barrier<cuda::thread_scope_device>));
+        auto* tileSync = CAST_TO(uint, dT + 1);
         #pragma unroll
         for (uint i = 0; i < skip; ++i) {
-            expert<Arch, Activation, c, ElementAccum><<<blocks, ARISTOS_BLOCK_SIZE, 0, aristosStream>>>(pS,
-                p, tileSync, iP, oP);
+            expert<GPUType, Activation, c, ElementAccum><<<blocks, threads, 0, aristosStream>>>(pS,
+                CAST_TO(cuda::barrier<cuda::thread_scope_device>, p), dT, tileSync, iP, oP);
             CHECK_ERROR_EXIT(cudaMemsetAsync(tileSync, 0, sizeof(uint) * (M / BLOCK_M), aristosStream));
             // Needed to clear accumulator buffer
             if constexpr (c == CombineMode::multithreaded) {
                 CHECK_ERROR_EXIT(cudaMemsetAsync(oP + M * N, 0, sizeof(Element) * (M * K), aristosStream));
             }
         }
-        expert<Arch, Activation, c, ElementAccum><<<blocks, ARISTOS_BLOCK_SIZE, 0, aristosStream>>>(pS,
-            p, tileSync, iP, oP, false);
+        expert<GPUType, Activation, c, ElementAccum><<<blocks, threads, 0, aristosStream>>>(pS,
+        CAST_TO(cuda::barrier<cuda::thread_scope_device>, p), dT, tileSync, iP, oP, false);
         CHECK_ERROR_EXIT(cudaPeekAtLastError());
         float stage = 0;
-        CHECK_ERROR_EXIT(cudaMemcpyAsync(&stage, p, sizeof(float), cudaMemcpyDeviceToHost, aristosStream));
+        CHECK_ERROR_EXIT(cudaMemcpyAsync(&stage, dT, sizeof(float), cudaMemcpyDeviceToHost, aristosStream));
         CHECK_ERROR_EXIT(cudaFreeAsync(p, aristosStream));
         CHECK_ERROR_EXIT(cudaStreamSynchronize(aristosStream));
-        // quantize to uint16_t, this should be safe as the value is very small: in the hundreds
-        // we use uint due to the API requirement of CUDA atomicMin
+        delete hB;
         printf("Kernel took %fms\n", stage);
-        dWa->throughput = static_cast<uint16_t>(stage);
+        // quantize to half-precision, this should be safe as the value is very small: in the hundreds
+        // we use float for compatibility with device atomics
+        dWa->throughput = cute::half_t(stage);
     }
 
     template<
-        unsigned int Arch,
+        typename GPUType,
         typename Element,
         CombineMode c,
         typename Activation,
@@ -110,12 +119,9 @@ namespace aristos {
         // Pack Scale
         hT.index({0, torch::indexing::Slice(d2Z, sZ)}) =
             scaleWeights.view({M}).contiguous();
-        // implicitly set combine to 1
-        // Set C2 to 0
-        hT.index({0, torch::indexing::Slice(cZ, hZ)}) *= 0.0f;
         CHECK_ERROR_EXIT(cudaDeviceSynchronize());
         using VT = typename VCT<c, Element>::Element;
-        mFT<Arch, trials, c, Activation>(dWa, M, N, K,
+        mFT<GPUType, trials, c, Activation>(dWa, M, N, K,
             CAST_TO(VT, hT.mutable_data_ptr()), CAST_TO(VT, hT.mutable_data_ptr()) + cWz);
     }
 }

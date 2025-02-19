@@ -8,6 +8,8 @@
 #include <cub/cub.cuh>
 #include <cuda/std/cstddef>
 #include <cutlass/array.h>
+
+#include "../atomics.cuh"
 #include "../types.cuh"
 
 namespace aristos::scheduler {

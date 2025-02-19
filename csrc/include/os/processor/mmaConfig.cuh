@@ -12,38 +12,6 @@
 #include "../../types.cuh"
 
 namespace aristos {
-    template<typename S>
-    struct ToCute {
-        using T = S;
-        static_assert(aristos::TensorValueType<T>);
-    };
-    template<>
-    struct ToCute<__half> {
-        using T = cute::half_t;
-    };
-    template<>
-    struct ToCute<__nv_bfloat16> {
-        using T = cute::bfloat16_t;
-    };
-
-    template<typename S>
-    requires(aristos::TensorValueType<S>)
-    struct ToCDx {
-        using T = S;
-    };
-    template<>
-    struct ToCDx<cute::tfloat32_t> {
-        using T = float;
-    };
-    template<>
-    struct ToCDx<cute::half_t> {
-        using T = __half;
-    };
-    template<>
-    struct ToCDx<cute::bfloat16_t> {
-        using T = __nv_bfloat16;
-    };
-
     template<unsigned int Arch, typename TC, typename TA=TC, typename TB=TA>
     requires (Arch >= 700)
     struct MMAConfig {

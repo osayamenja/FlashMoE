@@ -5,26 +5,31 @@
 #ifndef ARISTOS_MOE_CUH
 #define ARISTOS_MOE_CUH
 
-#include "gate.cuh"
+#include "../arch.cuh"
+#include "../debug.cuh"
 #include "../os/os.cuh"
 #include "../os/processor/processor.cuh"
+#include "gate.cuh"
 
 namespace aristos::moe{
     template<
-        unsigned int Arch,
+        typename GPUType,
         GateReductionLevel g = GateReductionLevel::singleBlock,
         DropTokens d = DropTokens::yes,
         CombineMode c = CombineMode::single,
         typename ActivationOp = cute::identity,
         typename ActivationOpX = cute::identity,
         typename ElementC = float,
-        typename Element
+        typename Element,
+        unsigned int Arch = GPUType::arch::value,
+        unsigned int blocks = GPUType::blocks::value,
+        unsigned int processors = GPUType::OS::processorBlocks::value
     >
     requires(aristos::TensorValueType<ElementC> &&
         aristos::TensorValueType<Element> &&
         cuda::std::is_invocable_r_v<ElementC, ActivationOp, ElementC> &&
         cuda::std::is_invocable_r_v<ElementC, ActivationOpX, ElementC>)
-    __global__ __maxnreg__(REGINALD) void forward(
+    __global__ __maxnreg__(GPUType::registers::value) void forward(
         const Element* __restrict__ iP, /* A, G, B, D*/ Element* __restrict__ oP /*G, O*/) {
         // Salami slice pointers
         const auto S = bookkeeping.sl;
@@ -39,9 +44,6 @@ namespace aristos::moe{
         const auto* __restrict__ bd = bU + lE * P;
         auto* __restrict__ gOp = oP;
         auto* __restrict__ mOp = gOp + S * E;
-
-        constexpr auto blocks = Hardware<Arch>::blocks::value;
-        constexpr auto processors = blocks - 1;
         __shared__ __align__(16) cuda::std::byte workspace[SHARED_SIZE];
         // wipe buffers here and read the sequence bit, before the grid-wide barrier
         const auto gtQCl = bookkeeping.gtQCl;
@@ -95,7 +97,6 @@ namespace aristos::moe{
                 packet::encode<cutoff, d, ARISTOS_SUPER_BLOCK_SIZE>(activations, CAST_TO(uint, workspace));
             }
             processor::start<
-                processors,
                 Arch,
                 c,
                 ActivationOp,
@@ -109,10 +110,9 @@ namespace aristos::moe{
     }
 
     template<
-        unsigned int Arch
+        typename GPUType
     >
-    requires(aristos::SupportedArch<Arch>)
-    __global__ __maxnreg__(REGINALD) void backward(){
+    __global__ __maxnreg__(GPUType::registers::value) void backward(){
     }
 
     template<
@@ -124,6 +124,9 @@ namespace aristos::moe{
     void dispatchKernel(const void* __restrict__ iP, /* A, G, B, D*/ void* __restrict__ oP /*G, O*/) {
         using ElementC = GEA;
         // Decode function id
+        using GPUType = aristos::Hardware<ARISTOS_ARCH, 255>;
+        constexpr auto blocks = GPUType::OS::processorBlocks::value;
+        constexpr auto threads = GPUType::OS::threads::value;
         switch (hostBookkeeping.fId) {
             case 0: {
                 constexpr auto g = GateReductionLevel::singleBlock;
@@ -131,8 +134,7 @@ namespace aristos::moe{
                 constexpr auto c = CombineMode::single;
                 using V = typename VCT<c, T>::Element;
                 // Call forward pass
-                moe::forward<ARISTOS_ARCH, g, d, c, ActivationOp, ActivationOpX, ElementC>
-                 <<<Hardware<ARISTOS_ARCH>::blocks::value, THREADS>>>(
+                moe::forward<GPUType, g, d, c, ActivationOp, ActivationOpX, ElementC><<<blocks, threads>>>(
                      static_cast<const V*>(iP), static_cast<V*>(oP));
             }
             break;
@@ -142,8 +144,7 @@ namespace aristos::moe{
                 constexpr auto c = CombineMode::multithreaded;
                 using V = typename VCT<c, T>::Element;
                 // Call forward pass
-                moe::forward<ARISTOS_ARCH, g, d, c, ActivationOp, ActivationOpX, ElementC>
-                 <<<Hardware<ARISTOS_ARCH>::blocks::value, THREADS>>>(
+                moe::forward<GPUType, g, d, c, ActivationOp, ActivationOpX, ElementC><<<blocks, threads>>>(
                      static_cast<const V*>(iP), static_cast<V*>(oP));
             }
             break;
@@ -153,8 +154,7 @@ namespace aristos::moe{
                 constexpr auto c = CombineMode::single;
                 using V = typename VCT<c, T>::Element;
                 // Call forward pass
-                moe::forward<ARISTOS_ARCH, g, d, c, ActivationOp, ActivationOpX, ElementC>
-                 <<<Hardware<ARISTOS_ARCH>::blocks::value, THREADS>>>(
+                moe::forward<GPUType, g, d, c, ActivationOp, ActivationOpX, ElementC><<<blocks, threads>>>(
                      static_cast<const V*>(iP), static_cast<V*>(oP));
             }
             break;
@@ -164,8 +164,7 @@ namespace aristos::moe{
                 constexpr auto c = CombineMode::multithreaded;
                 using V = typename VCT<c, T>::Element;
                 // Call forward pass
-                moe::forward<ARISTOS_ARCH, g, d, c, ActivationOp, ActivationOpX, ElementC>
-                 <<<Hardware<ARISTOS_ARCH>::blocks::value, THREADS>>>(
+                moe::forward<GPUType, g, d, c, ActivationOp, ActivationOpX, ElementC><<<blocks, threads>>>(
                      static_cast<const V*>(iP), static_cast<V*>(oP));
             }
             case 4: {
@@ -174,8 +173,7 @@ namespace aristos::moe{
                 constexpr auto c = CombineMode::single;
                 using V = typename VCT<c, T>::Element;
                 // Call forward pass
-                moe::forward<ARISTOS_ARCH, g, d, c, ActivationOp, ActivationOpX, ElementC>
-                 <<<Hardware<ARISTOS_ARCH>::blocks::value, THREADS>>>(
+                moe::forward<GPUType, g, d, c, ActivationOp, ActivationOpX, ElementC><<<blocks, threads>>>(
                      static_cast<const V*>(iP), static_cast<V*>(oP));
             }
             break;
@@ -185,8 +183,7 @@ namespace aristos::moe{
                 constexpr auto c = CombineMode::multithreaded;
                 using V = typename VCT<c, T>::Element;
                 // Call forward pass
-                moe::forward<ARISTOS_ARCH, g, d, c, ActivationOp, ActivationOpX, ElementC>
-                 <<<Hardware<ARISTOS_ARCH>::blocks::value, THREADS>>>(
+                moe::forward<GPUType, g, d, c, ActivationOp, ActivationOpX, ElementC><<<blocks, threads>>>(
                      static_cast<const V*>(iP), static_cast<V*>(oP));
             }
             break;
@@ -196,8 +193,7 @@ namespace aristos::moe{
                 constexpr auto c = CombineMode::single;
                 using V = typename VCT<c, T>::Element;
                 // Call forward pass
-                moe::forward<ARISTOS_ARCH, g, d, c, ActivationOp, ActivationOpX, ElementC>
-                 <<<Hardware<ARISTOS_ARCH>::blocks::value, THREADS>>>(
+                moe::forward<GPUType, g, d, c, ActivationOp, ActivationOpX, ElementC><<<blocks, threads>>>(
                      static_cast<const V*>(iP), static_cast<V*>(oP));
             }
             break;
@@ -207,13 +203,18 @@ namespace aristos::moe{
                 constexpr auto c = CombineMode::multithreaded;
                 using V = typename VCT<c, T>::Element;
                 // Call forward pass
-                moe::forward<ARISTOS_ARCH, g, d, c, ActivationOp, ActivationOpX, ElementC>
-                 <<<Hardware<ARISTOS_ARCH>::blocks::value, THREADS>>>(
+                moe::forward<GPUType, g, d, c, ActivationOp, ActivationOpX, ElementC><<<blocks, threads>>>(
                      static_cast<const V*>(iP), static_cast<V*>(oP));
             }
             break;
-            default:
-                reportError(false, "No such function exists!");
+            default: {
+                constexpr auto g = GateReductionLevel::singleBlock;
+                constexpr auto d = DropTokens::yes;
+                constexpr auto c = CombineMode::single;
+                using V = typename VCT<c, T>::Element;
+                moe::forward<GPUType, g, d, c, ActivationOp, ActivationOpX, ElementC><<<blocks, threads>>>(
+                     static_cast<const V*>(iP), static_cast<V*>(oP));
+            }
         }
     }
 

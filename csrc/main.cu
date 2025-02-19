@@ -3,16 +3,17 @@
  ******************************************************************************/
 #include <torch/torch.h>
 
-#include "include/moe/expert.cuh"
+#include "include/moe/moe.cuh"
 #include "include/throughput.cuh"
 #include "include/types.cuh"
 
 __host__ __forceinline__
 void evalExpert() {
-    constexpr auto blocks = aristos::Hardware<ARISTOS_ARCH>::blocks::value - 1U;
-    constexpr auto M = 16 * 1024UL;
-    constexpr auto N = 16 * 1024UL;
-    constexpr auto K = 16 * 1024UL;
+    using GPUType = aristos::Hardware<ARISTOS_ARCH>;
+    constexpr auto blocks = GPUType::OS::processorBlocks::value;
+    constexpr auto M = 8 * 1024UL;
+    constexpr auto N = 8 * 1024UL;
+    constexpr auto K = 8 * 1024UL;
     static_assert(M % BLOCK_M == 0 && M < 128 * blocks * 1024 &&
         N % BLOCK_N == 0 && K % BLOCK_K_HALF == 0);
     using clk = std::chrono::high_resolution_clock;
@@ -80,7 +81,7 @@ void evalExpert() {
     // Get a copy of the reference result
     aristos::WorkerAttribute wA{};
     // compute & measure fused expert
-    aristos::mFT<ARISTOS_ARCH, trials, aristos::CombineMode::single, Activation>(&wA, M, N, K,
+    aristos::mFT<GPUType, trials, aristos::CombineMode::single, Activation>(&wA, M, N, K,
         CAST_TO(Element, hT.mutable_data_ptr()),
         CAST_TO(Element, hT.mutable_data_ptr()) + cWz);
     // verify and compare

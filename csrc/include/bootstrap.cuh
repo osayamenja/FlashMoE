@@ -207,8 +207,8 @@ namespace aristos{
         // Pointer to adjacency matrix and throughput of all devices
         const auto aD = globalWorld * globalWorld;
         const auto dZ = sizeof(EPG) + 2 * sizeof(Worker) * globalWorld + sizeof(Expert) * iC.numExperts;
-        const auto sZ = sizeof(EDT) * iC.numExperts + sizeof(uint) * (globalWorld + 2 * iC.numExperts + 1) +
-            sizeof(uint16_t) * globalWorld + sizeof(bool) * iC.numExperts;
+        const auto sZ = sizeof(EDT) * iC.numExperts + sizeof(uint) * (2 * globalWorld +
+            2 * iC.numExperts + 1) + sizeof(uint16_t) * globalWorld + sizeof(bool) * iC.numExperts;
         const auto cZ = dZ + aD * sizeof(floatPair) + globalWorld * sizeof(WorkerAttribute) + sZ;
 
         // allocate all memory in one go
@@ -235,13 +235,14 @@ namespace aristos{
         auto* scratch = CAST_TO(uint16_t, nRXp + 1);
         auto* __restrict__ eRs = CAST_TO(bool, scratch + globalWorld);
 
+        using GPUType = Hardware<Arch>;
         estimateMemory<Element>(iC, &wAp[rank]);
         if (iC.k > 1) {
-            mT<Arch, Element, CombineMode::multithreaded, Activation>(wAp + rank, iC.seqLen, iC.hiddenProjDim,
+            mT<GPUType, Element, CombineMode::multithreaded, Activation>(wAp + rank, iC.seqLen, iC.hiddenProjDim,
                 iC.embedDim, devId);
         }
         else {
-            mT<Arch, Element, CombineMode::single, Activation>(wAp + rank, iC.seqLen, iC.hiddenProjDim,
+            mT<GPUType, Element, CombineMode::single, Activation>(wAp + rank, iC.seqLen, iC.hiddenProjDim,
                 iC.embedDim, devId);
         }
 
@@ -266,7 +267,7 @@ namespace aristos{
         auto* sHb = static_cast<cuda::std::byte*>(sHeap);
 
         // local bookkeeping memory
-        constexpr auto blocks = Hardware<Arch>::blocks::value - 1U;
+        constexpr auto blocks = GPUType::blocks::value - 1U;
         const auto bookSize = Bookkeeping::bookLength(iC.seqLen,
             iC.numExperts, ePgD.nLx, iC.hiddenProjDim,
             iC.embedDim, eCap, blocks, ePgD.epWorld, sizeof(Element));
