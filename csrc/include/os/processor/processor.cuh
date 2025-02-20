@@ -9,18 +9,19 @@
 #include <cute/tensor.hpp>
 #include <nvshmem.h>
 
-#include "../../arch.cuh"
 #include "gemm.cuh"
 
 namespace aristos::processor{
     template<
-        unsigned Arch,
+        typename GPUType,
         CombineMode c = CombineMode::single
-    > requires SupportedArch<Arch>
+    >
     struct Combine {
         template<
             class ScaleWeights,
-            typename Element
+            typename Element,
+            unsigned int Arch = GPUType::arch::value,
+            unsigned int elems = GPUType::rScratch::value
         >
         requires(TensorValueType<Element> &&
             aristos::isMatrix<ScaleWeights> &&
@@ -40,7 +41,6 @@ namespace aristos::processor{
             constexpr BlockTiler tiler{};
             constexpr auto bM = cute::get<0>(tiler);
             constexpr auto bN = cute::get<1>(tiler);
-            constexpr auto threads = THREADS;
             cutlass::AlignedArray<Element, bN> registers{};
             // Eagerly issue gmem read.
             auto [tokenIdx, combineWeight] = TokenIdxTuple{};
@@ -63,7 +63,6 @@ namespace aristos::processor{
             const auto tileCoord = idx2crd(tileIdx, cute::Shape(tilesM, tilesN), cute::Stride(tilesN ,1));
             const auto ctaCoord = cute::make_coord(cute::get<0>(tileCoord), cute::get<1>(tileCoord));
             const auto gA = cute::local_tile(mA, tiler, ctaCoord);
-            constexpr auto elems = SHARED_SIZE / (threads * sizeof(Element));
             static_assert(bN % elems == 0);
             constexpr auto trips = bN / elems;
 
@@ -114,7 +113,10 @@ namespace aristos::processor{
     // Fused GEMM, Epilogue and data Transfer
     template<
         TaskType t,
-        typename BlockGEMM
+        typename BlockGEMM,
+        typename GPUType,
+        unsigned int elems = GPUType::rScratch::value,
+        unsigned int threads = GPUType::OS::threads::value
     >
     struct FGT {
         static_assert(t == TaskType::preGEMM);
@@ -129,7 +131,6 @@ namespace aristos::processor{
         const unsigned int& K,
         const unsigned int& tileIdx) const {
             auto accumulator = cute::partition_fragment_C(typename BlockGEMM::MMA{}, typename BlockGEMM::TilerOut{});
-            constexpr auto elems = SHARED_SIZE / (THREADS * sizeof(typename BlockGEMM::MatrixDType));
             static_assert(cute::size(accumulator) % elems == 0);
             cutlass::AlignedArray<typename BlockGEMM::MatrixDType, elems> rScratch{};
             constexpr auto bM = cute::get<0>(typename BlockGEMM::BlockTiler{});
@@ -193,17 +194,17 @@ namespace aristos::processor{
             // Prefetch from global to shared memory
             #pragma unroll
             for (int j = 0; j < elems; ++j) {
-                workspace[threadIdx.x + j * THREADS] = tDgD(j);
+                workspace[threadIdx.x + j * threads] = tDgD(j);
             }
 
             #pragma unroll
             for (unsigned int i = 0; i < trips; ++i) {
                 #pragma unroll
                 for (unsigned int j = 0; j < elems; ++j) {
-                    rScratch[j] = workspace[threadIdx.x + j * THREADS];
+                    rScratch[j] = workspace[threadIdx.x + j * threads];
                     if (i + 1 < trips) {
                         // Eagerly start loads for the next batch, if needed
-                        workspace[threadIdx.x + j * THREADS] = tDgD(j + (i + 1) * elems);
+                        workspace[threadIdx.x + j * threads] = tDgD(j + (i + 1) * elems);
                     }
                 }
                 // Fused Bias Add and Activation Function on register fragment
@@ -236,9 +237,14 @@ namespace aristos::processor{
     };
 
     template<
-        typename BlockGEMM
+        typename BlockGEMM,
+        typename GPUType
     >
-    struct FGT<TaskType::postGEMM, BlockGEMM> {
+    struct FGT<TaskType::postGEMM, BlockGEMM, GPUType> {
+        template<
+            unsigned int elems = GPUType::rScratch::value,
+            unsigned int threads = GPUType::OS::threads::value
+        >
         __forceinline__ __device__
         void operator()(typename BlockGEMM::MatrixDType* __restrict__ const& workspace,
         const typename BlockGEMM::MatrixAType* __restrict__ const& inputs,
@@ -250,7 +256,6 @@ namespace aristos::processor{
         const unsigned int& K,
         const unsigned int& tileIdx) const {
             auto accumulator = cute::partition_fragment_C(typename BlockGEMM::MMA{}, typename BlockGEMM::TilerOut{});
-            constexpr auto elems = SHARED_SIZE / (THREADS * sizeof(typename BlockGEMM::MatrixDType));
             static_assert(cute::size(accumulator) % elems == 0);
             cutlass::AlignedArray<typename BlockGEMM::MatrixDType, elems> rScratch{};
             constexpr auto bM = cute::get<0>(typename BlockGEMM::BlockTiler{});
@@ -314,17 +319,17 @@ namespace aristos::processor{
             // Prefetch from global to shared memory
             #pragma unroll
             for (int j = 0; j < elems; ++j) {
-                workspace[threadIdx.x + j * THREADS] = tDgD(j);
+                workspace[threadIdx.x + j * threads] = tDgD(j);
             }
 
             #pragma unroll
             for (unsigned int i = 0; i < trips; ++i) {
                 #pragma unroll
                 for (unsigned int j = 0; j < elems; ++j) {
-                    rScratch[j] = workspace[threadIdx.x + j * THREADS];
+                    rScratch[j] = workspace[threadIdx.x + j * threads];
                     if (i + 1 < trips) {
                         // Eagerly start loads for the next batch, if needed
-                        workspace[threadIdx.x + j * THREADS] = tDgD(j + (i + 1) * elems);
+                        workspace[threadIdx.x + j * threads] = tDgD(j + (i + 1) * elems);
                     }
                 }
 
@@ -388,7 +393,7 @@ namespace aristos::processor{
     };
 
     template<
-        unsigned int Arch,
+        typename GPUType,
         CombineMode c,
         typename ActivationOp = cute::identity,
         typename ActivationOpX = cute::identity,
@@ -422,11 +427,11 @@ namespace aristos::processor{
                 Bookkeeping::tiles<BLOCK_N>(bookkeeping.pd)
             };
         }
-        using Operation = BlockMM<Arch, ElementA, ElementB, ElementC, ActivationOp>;
-        using OperationX = BlockMM<Arch, ElementA, ElementB, ElementC, ActivationOpX>;
-        constexpr auto preGEMM = FGT<TaskType::preGEMM, Operation>{};
-        constexpr auto postGEMM = FGT<TaskType::postGEMM, OperationX>{};
-        constexpr auto combineOp = Combine<Arch, c>{};
+        using Operation = BlockMM<GPUType, ElementA, ElementB, ElementC, ActivationOp>;
+        using OperationX = BlockMM<GPUType, ElementA, ElementB, ElementC, ActivationOpX>;
+        constexpr auto preGEMM = FGT<TaskType::preGEMM, Operation, GPUType>{};
+        constexpr auto postGEMM = FGT<TaskType::postGEMM, OperationX, GPUType>{};
+        constexpr auto combineOp = Combine<GPUType, c>{};
         __syncthreads();
 
         while (!interrupt) {

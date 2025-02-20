@@ -21,7 +21,7 @@ namespace aristos::subscriber{
         typename BiasDown,
         typename Element = typename Output::value_type
     >
-    requires(cutlass::ispow2(wSet) && wSet > 1 && wSet <= 32)
+    requires(cutlass::ispow2(wSet) && wSet > 1 && wSet <= 16)
     __device__ __forceinline__
     void start(cuda::std::byte* __restrict__ const& workspace,
         unsigned int* const& interrupt,
@@ -187,13 +187,18 @@ namespace aristos::subscriber{
                         const auto flagIdx = tIdx + (j + fSt * wSet) * subscriberCount;
                         sharedSpace[tIdx + j * subscriberCount] = ffC[flagIdx];
                     }
-                    for (uint j = 0; j < residue; ++j) {
-                        rWSet[j] = sharedSpace[tIdx + j * subscriberCount];
+                    // predicated loops, necessary to ensure the compiler maintains register storage
+                    #pragma unroll
+                    for (uint j = 0; j < wSet; ++j) {
+                        if (j < residue) {
+                            rWSet[j] = sharedSpace[tIdx + j * subscriberCount];
+                        }
                     }
-                    for (uint j = 0; j < residue; ++j) {
+                    #pragma unroll
+                    for (uint j = 0; j < wSet; ++j) {
                         const auto flagIdx = tIdx + (j + fSt * wSet) * subscriberCount;
                         // main loop
-                        if (!rWSet[j]) {
+                        if (!rWSet[j] && j < residue) {
                             // we need to check this flag
                             auto signal = atomicLoad<cuda::thread_scope_system>(
                                     CAST_TO(unsigned long long int, flags + flagIdx));
@@ -231,9 +236,12 @@ namespace aristos::subscriber{
                             }
                         }
                     }
-                    for (uint j = 0; j < residue; ++j) {
-                        const auto flagIdx = tIdx + (j + fSt * wSet) * subscriberCount;
-                        rWSet[j] = ffC[flagIdx];
+                    #pragma unroll
+                    for (uint j = 0; j < wSet; ++j) {
+                        if (j < residue) {
+                            const auto flagIdx = tIdx + (j + fSt * wSet) * subscriberCount;
+                            rWSet[j] = ffC[flagIdx];
+                        }
                     }
                 }
             }
@@ -297,12 +305,16 @@ namespace aristos::subscriber{
                     const auto flagIdx = tIdx + (j + sRt * wSet) * subscriberCount;
                     sharedSpace[tIdx + j * subscriberCount] = ffC[flagIdx];
                 }
-                for (uint j = 0; j < residue; ++j) {
-                    rWSet[j] = sharedSpace[tIdx + j * subscriberCount];
+                #pragma unroll
+                for (uint j = 0; j < wSet; ++j) {
+                    if (j < residue) {
+                        rWSet[j] = sharedSpace[tIdx + j * subscriberCount];
+                    }
                 }
-                for (uint j = 0; j < residue; ++j) {
+                #pragma unroll
+                for (uint j = 0; j < wSet; ++j) {
                     const auto flagIdx = tIdx + (j + sRt * wSet) * subscriberCount;
-                    if (!rWSet[j]) {
+                    if (!rWSet[j] && j < residue) {
                         auto signal = atomicLoad<cuda::thread_scope_system>(
                                 CAST_TO(unsigned long long int, flags + flagIdx));
                         // SignalPayload -> {batchIdx, {seqNo, M}}, where M <= BLOCK_M
@@ -323,9 +335,12 @@ namespace aristos::subscriber{
                         }
                     }
                 }
-                for (uint j = 0; j < residue; ++j) {
-                    const auto flagIdx = tIdx + (j + sRt * wSet) * subscriberCount;
-                    rfC[flagIdx] = rWSet[j];
+                #pragma unroll
+                for (uint j = 0; j < wSet; ++j) {
+                    if (j < residue) {
+                        const auto flagIdx = tIdx + (j + sRt * wSet) * subscriberCount;
+                        rfC[flagIdx] = rWSet[j];
+                    }
                 }
             }
 
@@ -388,12 +403,16 @@ namespace aristos::subscriber{
                     const auto flagIdx = tIdx + (j + sPt * wSet) * subscriberCount;
                     sharedSpace[tIdx + j * subscriberCount] = pfC[flagIdx];
                 }
-                for (uint j = 0; j < residue; ++j) {
-                    rWSet[j] = sharedSpace[tIdx + j * subscriberCount];
+                #pragma unroll
+                for (uint j = 0; j < wSet; ++j) {
+                    if (j < residue) {
+                        rWSet[j] = sharedSpace[tIdx + j * subscriberCount];
+                    }
                 }
-                for (uint j = 0; j < residue; ++j) {
+                #pragma unroll
+                for (uint j = 0; j < wSet; ++j) {
                     const auto flagIdx = tIdx + (j + sPt * wSet) * subscriberCount;
-                    if (!rWSet[j]) {
+                    if (!rWSet[j] && j < residue) {
                         auto signal = atomicLoad<cuda::thread_scope_system>(
                                 CAST_TO(unsigned long long int, flags + flagIdx));
                         // SignalPayload -> {batchIdx, {seqNo, M}}, where M <= BLOCK_M
@@ -417,9 +436,12 @@ namespace aristos::subscriber{
                         }
                     }
                 }
-                for (uint j = 0; j < residue; ++j) {
-                    const auto flagIdx = tIdx + (j + sPt * wSet) * subscriberCount;
-                    pfC[flagIdx] = rWSet[j];
+                #pragma unroll
+                for (uint j = 0; j < wSet; ++j) {
+                    if (j < residue) {
+                        const auto flagIdx = tIdx + (j + sPt * wSet) * subscriberCount;
+                        pfC[flagIdx] = rWSet[j];
+                    }
                 }
             }
         }

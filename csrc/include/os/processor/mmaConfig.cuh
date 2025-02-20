@@ -77,72 +77,13 @@ namespace aristos {
     };
 
     template <cublasdx::arrangement a, unsigned int midSwizzle, unsigned int sizeK>
-    requires((a == cublasdx::arrangement::row_major || a == cublasdx::arrangement::col_major)
-        && (midSwizzle == 2 || midSwizzle == 3) && (sizeK == BLOCK_K_HALF || sizeK == BLOCK_K_FULL))
-    struct SwizzleAtom {};
-
-    template<>
-    struct SwizzleAtom<cublasdx::arrangement::row_major, 2, BLOCK_K_FULL> {
+    requires(a == cublasdx::arrangement::row_major
+        && (midSwizzle == 2 || midSwizzle == 3) && (sizeK >= 8 && sizeK <= 64))
+    struct SwizzleAtom {
         using swizzleAtom =  decltype(
-        cute::composition(cute::Swizzle<3,2,3>{},
-                    cute::Layout<cute::Shape<cute::_8, cute::_8>,
-                           cute::Stride<cute::_8, cute::_1>>{}));
-    };
-
-    template<>
-    struct SwizzleAtom<cublasdx::arrangement::col_major, 2, BLOCK_K_FULL> {
-        using swizzleAtom =  decltype(
-        composition(cute::Swizzle<3,2,3>{},
-                    cute::Layout<cute::Shape <cute::_8, cute::_8>,
-                           cute::Stride< cute::_1,cute::_8>>{}));
-    };
-
-    template<>
-    struct SwizzleAtom<cublasdx::arrangement::row_major, 2, BLOCK_K_HALF> {
-        using swizzleAtom =  decltype(
-        cute::composition(cute::Swizzle<3,2,3>{},
-                    cute::Layout<cute::Shape < cute::_8,cute::_16>,
-                           cute::Stride<cute::_16, cute::_1>>{}));
-    };
-
-    template<>
-    struct SwizzleAtom<cublasdx::arrangement::col_major, 2, BLOCK_K_HALF> {
-        using swizzleAtom =  decltype(
-        composition(cute::Swizzle<3,2,3>{},
-                    cute::Layout<cute::Shape <cute::_16, cute::_8>,
-                           cute::Stride< cute::_1, cute::_16>>{}));
-    };
-
-    template<>
-    struct SwizzleAtom<cublasdx::arrangement::row_major, 3, BLOCK_K_FULL> {
-        using swizzleAtom =  decltype(
-        composition(cute::Swizzle<3,3,3>{},
-                    cute::Layout<cute::Shape < cute::_8,cute::_8>,
-                           cute::Stride<cute::_8, cute::_1>>{}));
-    };
-
-    template<>
-    struct SwizzleAtom<cublasdx::arrangement::col_major, 3, BLOCK_K_FULL> {
-        using swizzleAtom =  decltype(
-        composition(cute::Swizzle<3,3,3>{},
-                    cute::Layout<cute::Shape <cute::_8, cute::_8>,
-                           cute::Stride< cute::_1,cute::_8>>{}));
-    };
-
-    template<>
-    struct SwizzleAtom<cublasdx::arrangement::row_major, 3, BLOCK_K_HALF> {
-        using swizzleAtom =  decltype(
-        composition(cute::Swizzle<3,3,3>{},
-                    cute::Layout<cute::Shape < cute::_8,cute::_16>,
-                           cute::Stride<cute::_16, cute::_1>>{}));
-    };
-
-    template<>
-    struct SwizzleAtom<cublasdx::arrangement::col_major, 3, BLOCK_K_HALF> {
-        using swizzleAtom =  decltype(
-        composition(cute::Swizzle<3,3,3>{},
-                    cute::Layout<cute::Shape <cute::_16, cute::_8>,
-                           cute::Stride< cute::_1,cute::_16>>{}));
+        cute::composition(cute::Swizzle<3, midSwizzle, 3>{},
+                    cute::Layout<cute::Shape<cute::_8, cute::Int<sizeK>>,
+                           cute::Stride<cute::Int<sizeK>, cute::_1>>{}));
     };
 
     template<typename Element, unsigned int Arch>
@@ -161,11 +102,6 @@ namespace aristos {
         cublasdx::arrangement b = cublasdx::arrangement::row_major  // N
     >
     struct CopyOp {
-        static_assert((a == cublasdx::arrangement::row_major &&
-            b == cublasdx::arrangement::row_major )||
-            (a == cublasdx::arrangement::col_major &&
-                b == cublasdx::arrangement::col_major));
-
         using copyAT = decltype(cute::make_tiled_copy(
             cute::Copy_Atom<copyArch<ElementA, Arch>, ElementA>{},
             cute::Layout<cute::Shape<cute::_16, cute::_8>,
@@ -214,6 +150,9 @@ namespace aristos {
     && cublasdx::sm_of<GEMM>::value >= MIN_ARCH
     && cublasdx::sm_of<GEMM>::value < 900)
     struct CollectiveMMAConfig{
+        static_assert(cublasdx::arrangement_of<GEMM>::a == cublasdx::arrangement::row_major &&
+            cublasdx::arrangement_of<GEMM>::b == cublasdx::arrangement::row_major,
+            "Only row-major is supported for either A or B");
         using ldA = cuda::std::conditional_t<cublasdx::arrangement_of<GEMM>::a == cublasdx::row_major,
         cute::Int<cublasdx::size_of<GEMM>::k>, cute::Int<cublasdx::size_of<GEMM>::m>>; // A: (m,k)
         using ldB = cuda::std::conditional_t<cublasdx::arrangement_of<GEMM>::b == cublasdx::row_major,
@@ -260,9 +199,6 @@ namespace aristos {
 
         using mma_t = typename MMAConfig<cublasdx::sm_of<GEMM>::value, ElementC, ElementA,
         ElementB>::mma;
-        using dispatch = cuda::std::conditional_t<cublasdx::sm_of<GEMM>::value < 800,
-        cutlass::gemm::MainloopSm70TwoStageUnpredicated,
-        cutlass::gemm::MainloopSm80CpAsyncUnpredicated<PIPELINE_STAGES>>;
     };
 }
 #endif //MMACONFIG_CUH

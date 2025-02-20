@@ -17,6 +17,7 @@ namespace aristos {
         unsigned int skip = 128U,
         CombineMode c,
         typename Activation,
+        UseBarrier u = UseBarrier::no,
         typename Element,
         typename ElementAccum = float,
         unsigned int blocks = GPUType::OS::processorBlocks::value,
@@ -28,8 +29,8 @@ namespace aristos {
         const unsigned int& M, const unsigned int& N, const unsigned int& K,
         Element* __restrict__ const& iP, Element* __restrict__ oP) {
         cuda::std::byte* p;
-        const auto stateSize = sizeof(cuda::barrier<cuda::thread_scope_device>) +
-            sizeof(float) + sizeof(uint) * (M / BLOCK_M) * umin(K / BLOCK_N, blocks); // tileSync + dT
+        const auto tSz = sizeof(uint) * (M / BLOCK_M) * umin(K / BLOCK_N, blocks);
+        const auto stateSize = sizeof(cuda::barrier<cuda::thread_scope_device>) + sizeof(float) + tSz;
         CHECK_ERROR_EXIT(cudaMallocAsync(&p, stateSize, aristosStream));
         CHECK_ERROR_EXIT(cudaMemsetAsync(p, 0, stateSize, aristosStream));
         const auto hB = new cuda::barrier<cuda::thread_scope_device>{blocks};
@@ -42,15 +43,17 @@ namespace aristos {
         auto* tileSync = CAST_TO(uint, dT + 1);
         #pragma unroll
         for (uint i = 0; i < skip; ++i) {
-            expert<GPUType, Activation, c, ElementAccum><<<blocks, threads, 0, aristosStream>>>(pS,
+            expert<GPUType, Activation, c, ElementAccum, u><<<blocks, threads, 0, aristosStream>>>(pS,
                 CAST_TO(cuda::barrier<cuda::thread_scope_device>, p), dT, tileSync, iP, oP);
-            CHECK_ERROR_EXIT(cudaMemsetAsync(tileSync, 0, sizeof(uint) * (M / BLOCK_M), aristosStream));
+            if constexpr (u == UseBarrier::no) {
+                CHECK_ERROR_EXIT(cudaMemsetAsync(tileSync, 0, tSz, aristosStream));
+            }
             // Needed to clear accumulator buffer
             if constexpr (c == CombineMode::multithreaded) {
                 CHECK_ERROR_EXIT(cudaMemsetAsync(oP + M * N, 0, sizeof(Element) * (M * K), aristosStream));
             }
         }
-        expert<GPUType, Activation, c, ElementAccum><<<blocks, threads, 0, aristosStream>>>(pS,
+        expert<GPUType, Activation, c, ElementAccum, u><<<blocks, threads, 0, aristosStream>>>(pS,
         CAST_TO(cuda::barrier<cuda::thread_scope_device>, p), dT, tileSync, iP, oP, false);
         CHECK_ERROR_EXIT(cudaPeekAtLastError());
         float stage = 0;
@@ -102,7 +105,7 @@ namespace aristos {
         // Pack A, B, D, S into a single, linear tensor
         const auto hT = torch::ones({1, hZ}, options).contiguous();
         const auto activations = torch::rand({M, K}, options);
-        const auto scaleWeights = 0.5f * torch::ones({M, 1}, options);
+        const auto scaleWeights = torch::ones({M, 1}, options);
         // Pack A
         hT.index({0, torch::indexing::Slice(torch::indexing::None, aZ)}) =
             activations.view({aZ}).contiguous();

@@ -33,7 +33,8 @@ namespace aristos::gate {
     /// Supporting the latter is trivial; the former requires a completely new algorithm
     template<
         GateReductionLevel g,
-        typename BlockGEMM
+        typename BlockGEMM,
+        typename GPUType
     >
     struct FusedGate {
         static_assert(g == GateReductionLevel::multiBlock);
@@ -41,16 +42,18 @@ namespace aristos::gate {
             typename MatrixA,
             typename MatrixB,
             typename MatrixC,
-            typename ElementC
+            typename ElementC,
+            unsigned int elems = GPUType::rScratch::value,
+            unsigned int sharedSize = GPUType::sharedMemory::value
         >
         __device__ __forceinline__
         void operator()(
             const MatrixA& activations,
-            const MatrixB& weights, MatrixC& routing,
+            const MatrixB& weights, MatrixC const& routing,
             const unsigned int& tileIdx,
             GateArgs const& gArg,
             ElementC* __restrict__ gateScratch,
-            const unsigned int& k) {
+            const uint16_t& k) {
             static_assert(cuda::std::is_same_v<ElementC, mp_t>);
             typename BlockGEMM::CollectiveMainloop mainLoop{};
             auto accumulator = cute::partition_fragment_C(typename BlockGEMM::MMA{}, typename BlockGEMM::TilerOut{});
@@ -111,8 +114,6 @@ namespace aristos::gate {
             __syncthreads();
 
             /// Epilogue
-            static_assert(SHARED_SIZE % (threads * sizeof(ElementC)) == 0);
-            constexpr auto elems = SHARED_SIZE / (threads * sizeof(ElementC));
             static_assert(size(accumulator) % elems == 0);
             static_assert(elems % 32 == 0);
             constexpr auto trips = size(accumulator) / elems;
@@ -231,7 +232,7 @@ namespace aristos::gate {
             // Prep shared memory view tensors
             constexpr auto tkTiler = cute::Shape<cute::_2, cute::Int<bN>>{};
             // Ensures enough bytes per thread
-            static_assert(SHARED_SIZE / threads >= cute::size(tkTiler));
+            static_assert(sharedSize / threads >= cute::size(tkTiler));
             static_assert(cute::get<1>(sC.shape()) * (sizeof(typename decltype(sC)::value_type) / sizeof(uint8_t))
                 >= cute::size(tkTiler));
             const auto tK = cute::make_tensor(cute::make_smem_ptr(CAST_TO(uint8_t, gateScratch)),
@@ -253,7 +254,6 @@ namespace aristos::gate {
             auto lSIdx = sIdx;
             bool shouldSweep = true;
 
-            #pragma unroll
             for (uint16_t i = 0; i < k; ++i) {
                 constexpr uint16_t phases = 2U;
                 const uint16_t batonPrefix = phases * (i / 2U); // needed as we alternate between two buffers
@@ -332,7 +332,7 @@ namespace aristos::gate {
             // needed for reusing shared memory
             __syncthreads();
             using BlockScan = cub::BlockScan<uint8_t, threads>;
-            static_assert(sizeof(typename BlockScan::TempStorage) * bN <= SHARED_SIZE);
+            static_assert(sizeof(typename BlockScan::TempStorage) * bN <= sharedSize);
             auto* __restrict__ scanTempStorage = CAST_TO(typename BlockScan::TempStorage, gateScratch);
             auto* __restrict__ startIndices = CAST_TO(uint, scanTempStorage + bN);
             // Ensures we can safely use uint8_t without any concern for overflow
@@ -366,22 +366,25 @@ namespace aristos::gate {
 
     // Special, nice case where N <= BLOCK_N
     template<
-        typename BlockGEMM
+        typename BlockGEMM,
+        typename GPUType
     >
-    struct FusedGate<GateReductionLevel::singleBlock, BlockGEMM> {
+    struct FusedGate<GateReductionLevel::singleBlock, BlockGEMM, GPUType> {
         template<
             typename MatrixA,
             typename MatrixB,
             typename MatrixC,
-            typename ElementC
+            typename ElementC,
+            unsigned int elems = GPUType::rScratch::value,
+            unsigned int sharedSize = GPUType::sharedMemory::value
         >
         __device__ __forceinline__
         void operator()(const MatrixA& activations,
-            const MatrixB& weights, MatrixC& routing,
+            const MatrixB& weights, MatrixC const& routing,
             const unsigned int& tileIdx,
             GateArgs const& gArg,
             ElementC* __restrict__ const& gateScratch,
-            const unsigned int& k) {
+            const uint16_t& k) {
             static_assert(cuda::std::is_same_v<ElementC, float> && cuda::std::is_same_v<ElementC, mp_t>);
             typename BlockGEMM::CollectiveMainloop mainLoop{};
             auto accumulator = cute::partition_fragment_C(typename BlockGEMM::MMA{}, typename BlockGEMM::TilerOut{});
@@ -419,8 +422,6 @@ namespace aristos::gate {
             __syncthreads();
 
             /// Epilogue
-            static_assert(SHARED_SIZE % (threads * sizeof(ElementC)) == 0);
-            constexpr auto elems = SHARED_SIZE / (threads * sizeof(ElementC));
             static_assert(bN % elems == 0);
             constexpr auto trips = bN / elems;
 
@@ -518,7 +519,7 @@ namespace aristos::gate {
             // Prep shared memory view tensors
             constexpr auto tkTiler = cute::Shape<cute::_2, cute::Int<bN>>{};
             // Ensures enough bytes per thread
-            static_assert(SHARED_SIZE / threads >= cute::size(tkTiler));
+            static_assert(sharedSize / threads >= cute::size(tkTiler));
             static_assert(cute::get<1>(sC.shape()) * (sizeof(typename decltype(sC)::value_type) / sizeof(uint8_t))
                 >= cute::size(tkTiler));
             const auto tK = cute::make_tensor(cute::make_smem_ptr(CAST_TO(uint8_t, gateScratch)),
@@ -534,8 +535,7 @@ namespace aristos::gate {
             for (uint i = 0; i < bN; ++i) {
                 topK[i] = 0U;
             }
-            #pragma unroll
-            for (uint i = 0; i < k; ++i) {
+            for (uint16_t i = 0; i < k; ++i) {
                 auto sV = -cuda::std::numeric_limits<ElementC>::infinity();
                 uint sIdx = 0U;
                 #pragma unroll
@@ -560,7 +560,7 @@ namespace aristos::gate {
             // needed for reusing shared memory
             __syncthreads();
             using BlockScan = cub::BlockScan<uint8_t, threads>;
-            static_assert(sizeof(typename BlockScan::TempStorage) * bN <= SHARED_SIZE);
+            static_assert(sizeof(typename BlockScan::TempStorage) * bN <= sharedSize);
             auto* __restrict__ scanTempStorage = CAST_TO(typename BlockScan::TempStorage, gateScratch);
             auto* __restrict__ startIndices = CAST_TO(uint, scanTempStorage + bN);
             // Ensures we can safely use uint8_t without any concern for overflow
@@ -593,19 +593,19 @@ namespace aristos::gate {
     };
 
     template<
-        unsigned int Arch,
-        unsigned int blocks,
+        typename GPUType,
         GateReductionLevel g = GateReductionLevel::singleBlock,
         typename ElementC = float,
         typename MatrixA,
         typename MatrixB,
-        typename MatrixC
+        typename MatrixC,
+        unsigned int blocks = GPUType::blocks::value
     >
     __device__ __forceinline__
     void forward(const MatrixA& activations,
         const MatrixB& weights,
-        MatrixC& routing,
-        const unsigned int& k,
+        MatrixC const& routing,
+        const uint16_t& k,
         ElementC* __restrict__ const& scratch){
         const auto gArg = GateArgs {
                 bookkeeping.sl,
@@ -621,13 +621,12 @@ namespace aristos::gate {
         static_assert(cuda::std::is_same_v<mp_t, ElementC>);
         using ElementA = typename MatrixA::value_type;
         using ElementB = typename MatrixB::value_type;
-        using Operation = BlockMM<Arch, ElementA, ElementB, ElementC>;
+        using Operation = BlockMM<GPUType, ElementA, ElementB, ElementC>;
         using ctaTiler = typename Operation::BlockTiler; // (BLK_M, BLK_N, BLK_K)
         constexpr auto threads = Operation::GEMM::block_dim.x;
         constexpr auto bM = cute::get<0>(ctaTiler{});
         constexpr auto bN = cute::get<1>(ctaTiler{});
-        constexpr auto elems = SHARED_SIZE / (threads * sizeof(ElementC));
-        FusedGate<g, Operation> fusedGate{};
+        FusedGate<g, Operation, GPUType> fusedGate{};
 
         const auto nTiles = cute::ceil_div(cute::get<0>(routing.shape()), bM) *
             cute::ceil_div(cute::get<1>(routing.shape()), bN);

@@ -34,7 +34,6 @@
 #define BLOCK_K_HALF 16U
 #define BLOCK_K_FULL 8U
 #define MAX_REGS (BLOCK_M * BLOCK_N) / THREADS
-#define PIPELINE_STAGES 2U
 #define GEMMs 2U // per expert
 #define REGINALD 128 // max registers per thread
 

@@ -128,25 +128,30 @@ namespace aristos {
     struct isFAA<FAA<Element, ActivationFunction>> : cuda::std::true_type {};
 
     template<
-        unsigned int Arch,
+        typename GPUType,
         typename ElementA,
         typename ElementB = ElementA,
         typename ElementC = float,
-        typename ActivationOp = cute::identity>
+        typename ActivationOp = cute::identity,
+        unsigned int sizeK = GPUType::bKBase::value * sizeof(mp_t) / sizeof(ElementA),
+        unsigned int Arch = GPUType::arch::value,
+        unsigned int threads = GPUType::OS::threads::value,
+        unsigned int pipeStages = GPUType::pipeStages::value
+    >
     struct BlockMM {
         // will clamp at Ampere for now, until we implement Hopper specific GEMM
         using GEMMArch = cute::Int<cute::min(Arch, 800U)>;
-        static_assert(BLOCK_M == THREADS);
+        static_assert(BLOCK_M == THREADS && BLOCK_M == threads);
         static_assert(BLOCK_M == 128);
         static_assert(BLOCK_N == 64, "64 is a very good value for N, change it back!");
-        using GEMM = decltype(cublasdx::Size<BLOCK_M, BLOCK_N, BLOCK_K_FULL * 4 / sizeof(ElementA)>()
+        using GEMM = decltype(cublasdx::Size<BLOCK_M, BLOCK_N, sizeK>()
                               + cublasdx::Precision<typename ToCDx<ElementA>::T, typename ToCDx<ElementB>::T, typename ToCDx<ElementC>::T>()
                               + cublasdx::Type<cublasdx::type::real>()
                               + cublasdx::Arrangement<cublasdx::row_major, cublasdx::row_major, cublasdx::row_major>()
                               + cublasdx::Function<cublasdx::function::MM>()
                               + cublasdx::SM<GEMMArch::value>()
                               + cublasdx::Block()
-                              + cublasdx::BlockDim<THREADS>());
+                              + cublasdx::BlockDim<threads>());
         using MatrixAType = ElementA;
         using MatrixBType = ElementB;
         using MatrixCType = ElementC;
@@ -158,7 +163,9 @@ namespace aristos {
         using Parameters = CollectiveMMAConfig<GEMM, LayoutOptimization::UseSwizzle>;
         using MMA = typename Parameters::mma_t;
         using CollectiveMainloop = cutlass::gemm::collective::CollectiveMma<
-            typename Parameters::dispatch,
+            cuda::std::conditional_t<cublasdx::sm_of<GEMM>::value < 800,
+                    cutlass::gemm::MainloopSm70TwoStageUnpredicated,
+                        cutlass::gemm::MainloopSm80CpAsyncUnpredicated<pipeStages>>,
             BlockTiler,
             ElementA,
             cute::Underscore,

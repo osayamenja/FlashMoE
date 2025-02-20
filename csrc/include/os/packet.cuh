@@ -65,7 +65,6 @@ namespace aristos::packet {
         constexpr auto vF = sizeof(uint4) / sizeof(uint);
         const auto vDsL = dSl / vF;
         const auto* __restrict__ vPDs = static_cast<const uint4*>(static_cast<const void*>(pDs));
-        #pragma unroll
         for (uint i = threadIdx.x; i < vDsL; i += THREADS) {
             CAST_TO(uint4, workspace)[i] = vPDs[i];
         }
@@ -78,7 +77,6 @@ namespace aristos::packet {
             pTTx[i] = 0U;
         }
         __syncthreads();
-        #pragma unroll
         for (uint i = threadIdx.x; i < nx; i += THREADS) {
             const auto peer = __ldg(pS + i);
             atomicAdd_block(pTTx + peer, expertCounts[i]);
@@ -114,7 +112,7 @@ namespace aristos::packet {
                 continue;
             }
             // copy tokens: not padded
-            #pragma unroll 4
+            #pragma unroll 2
             for (uint j = lBid; j < routedTokens; j += superBlockSize) {
                 const auto [tokenIdx, _] = tokenIds(expertIdx, j);
                 auto* __restrict__ localPH = peerHeap + j * tokenDim * sizeof(Element);
@@ -338,7 +336,6 @@ namespace aristos::packet {
             constexpr auto tB = 8;
             const auto tBs = dA.tN / tB;
             for (uint i = 0; i < tBs; ++i) {
-                #pragma unroll
                 for (uint j = 0; j < tB; ++j) {
                     tQ[j + i * tB] = Task{
                         TaskType::combine,

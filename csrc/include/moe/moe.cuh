@@ -21,9 +21,10 @@ namespace aristos::moe{
         typename ActivationOpX = cute::identity,
         typename ElementC = float,
         typename Element,
-        unsigned int Arch = GPUType::arch::value,
         unsigned int blocks = GPUType::blocks::value,
-        unsigned int processors = GPUType::OS::processorBlocks::value
+        unsigned int processors = GPUType::OS::processorBlocks::value,
+        unsigned int sharedSize = GPUType::sharedMemory::value,
+        unsigned int threads = GPUType::OS::threads::value
     >
     requires(aristos::TensorValueType<ElementC> &&
         aristos::TensorValueType<Element> &&
@@ -44,23 +45,23 @@ namespace aristos::moe{
         const auto* __restrict__ bd = bU + lE * P;
         auto* __restrict__ gOp = oP;
         auto* __restrict__ mOp = gOp + S * E;
-        __shared__ __align__(16) cuda::std::byte workspace[SHARED_SIZE];
+        __shared__ __align__(16) cuda::std::byte workspace[sharedSize];
         // wipe buffers here and read the sequence bit, before the grid-wide barrier
         const auto gtQCl = bookkeeping.gtQCl;
         const auto sb = seqBit;
         auto* __restrict__ gtQHeads = bookkeeping.tQH();
-        for (uint i = THREADS * blockIdx.x + threadIdx.x; i < gtQCl; i += blocks * THREADS) {
+        for (uint i = threads * blockIdx.x + threadIdx.x; i < gtQCl; i += blocks * threads) {
             gtQHeads[i] = 0U;
         }
         if constexpr (c == CombineMode::multithreaded) {
             // clear output buffer
             const auto sz = S * H;
             const auto vL = sz / sizeof(uint4);
-            for (uint i = THREADS * blockIdx.x + threadIdx.x; i < vL; i += blocks * THREADS) {
+            for (uint i = threads * blockIdx.x + threadIdx.x; i < vL; i += blocks * threads) {
                 CAST_TO(uint4, mOp)[i] = uint4{0U, 0U, 0U, 0U};
             }
             // residue
-            for (uint i = THREADS * blockIdx.x + threadIdx.x + vL * sizeof(uint); i < sz; i += blocks * THREADS) {
+            for (uint i = threads * blockIdx.x + threadIdx.x + vL * sizeof(uint); i < sz; i += blocks * threads) {
                 mOp[i] = Element(0);
             }
         }
@@ -89,7 +90,7 @@ namespace aristos::moe{
         const auto moeOutput = cute::make_tensor(cute::make_gmem_ptr(mOp),
             make_layout(make_layout(cute::make_shape(S, H), cute::LayoutRight{})));
 
-        gate::forward<Arch, blocks, g, ElementC>(activations,
+        gate::forward<GPUType, g>(activations,
             gateWeights, gateOutput, bookkeeping.k, CAST_TO(ElementC, workspace));
         if (blockIdx.x + 1 < blocks) {
             constexpr auto cutoff = processors / ARISTOS_SUPER_BLOCK_SIZE * ARISTOS_SUPER_BLOCK_SIZE;
@@ -97,7 +98,7 @@ namespace aristos::moe{
                 packet::encode<cutoff, d, ARISTOS_SUPER_BLOCK_SIZE>(activations, CAST_TO(uint, workspace));
             }
             processor::start<
-                Arch,
+                GPUType,
                 c,
                 ActivationOp,
                 ActivationOpX,
