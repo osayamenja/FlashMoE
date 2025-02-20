@@ -8,7 +8,6 @@
 #include <cublasdx.hpp>
 #include <cute/arch/copy.hpp>
 #include <cute/arch/copy_sm80.hpp>
-#include <cutlass/gemm/dispatch_policy.hpp>
 #include "../../types.cuh"
 
 namespace aristos {
@@ -92,7 +91,7 @@ namespace aristos {
 
     template<typename Element>
     using sCopyLay = cuda::std::conditional_t<sizeof(Element) >= 4,
-    cute::UniversalCopy<Element>, cute::SM75_U32x2_LDSM_N>;
+    cute::SM75_U32x4_LDSM_N, cute::SM75_U32x2_LDSM_N>;
 
     template<
         typename ElementA,
@@ -141,10 +140,10 @@ namespace aristos {
 
     template<
         class GEMM,
-        LayoutOptimization lOpt = LayoutOptimization::UseVanilla,
-        typename ElementA = typename ToCute<typename GEMM::a_value_type>::T,
-        typename ElementB = typename ToCute<typename GEMM::b_value_type>::T,
-        typename ElementC = typename ToCute<typename GEMM::c_value_type>::T
+        typename ElementA,
+        typename ElementB,
+        typename ElementC,
+        LayoutOptimization lOpt = LayoutOptimization::UseVanilla
     >
     requires (cublasdx::is_complete_blas<GEMM>::value
     && cublasdx::sm_of<GEMM>::value >= MIN_ARCH

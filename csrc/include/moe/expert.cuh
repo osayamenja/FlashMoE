@@ -14,7 +14,7 @@
 #include "../types.cuh"
 #include "../os/processor/gemm.cuh"
 #include "../os/processor/processor.cuh"
-
+#define TIME_EXPERT 0
 namespace aristos {
     template<
         typename BlockGEMM,
@@ -175,10 +175,10 @@ namespace aristos {
     /// A = D * B2 + C2
     __global__ __maxnreg__(GPUType::registers::value) void expert(ProblemShape_MNK pShape,
         cuda::barrier<cuda::thread_scope_device>* dB,
-        float* deviceThroughput, uint* tileSync,
+        [[maybe_unused]]float* deviceThroughput, uint* tileSync,
         const Element* __restrict__ iP /* A, B, D, S, W*/,
-        Element* __restrict__ oP /*C*/, const bool skip = true) {
-        uint64_t start = 0, end = 0;
+        Element* __restrict__ oP /*C*/,
+        [[maybe_unused]] const bool skip = true) {
         constexpr auto tMu = 128; // upper bound of tiles per block for this exercise
         __shared__ __align__(16) Element workspace[sharedSize / sizeof(Element)];
         __shared__ __align__(16) uint16_t tQ[tMu];
@@ -209,7 +209,10 @@ namespace aristos {
         // tradeoffs by disabling coalescing in one-shot propagation.
         const auto tSync = make_tensor(cute::make_gmem_ptr(tileSync),
             make_layout(cute::make_shape(tSCl, tilesM), cute::LayoutRight{}));
+#if TIME_EXPERT
+        uint64_t start = 0, end = 0;
         asm volatile("mov.u64 %0, %%globaltimer;": "=l"(start)::);
+#endif
         for (uint i = blockIdx.x; i < tiles; i += blocks) {
             preGEMM(workspace, pA, pB1, pC1, pD1, M, N, K, i);
             // Pick warp 0
@@ -321,6 +324,7 @@ namespace aristos {
                 }
             }
         }
+#if TIME_EXPERT
         asm volatile("mov.u64 %0, %%globaltimer;": "=l"(end)::);
         if (!skip) {
             auto tDt = (end - start) / 1e6f; // convert nano to milliseconds
@@ -334,6 +338,7 @@ namespace aristos {
                 cuda::atomic_ref{*deviceThroughput}.fetch_max(bT);
             }
         }
+#endif
     }
 }
 #endif //EXPERT_CUH

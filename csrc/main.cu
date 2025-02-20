@@ -3,17 +3,17 @@
  ******************************************************************************/
 #include <torch/torch.h>
 
-#include "include/moe/moe.cuh"
 #include "include/throughput.cuh"
 #include "include/types.cuh"
+#include "include/os/processor/mmaConfig.cuh"
 
 __host__ __forceinline__
 void evalExpert() {
     using GPUType = aristos::Hardware<ARISTOS_ARCH, 255>;
     constexpr auto blocks = GPUType::OS::processorBlocks::value;
-    constexpr auto M = 8 * 1024UL;
-    constexpr auto N = 1024UL;
-    constexpr auto K = 1024UL;
+    constexpr auto M = 128UL;
+    constexpr auto N = 64UL;
+    constexpr auto K = 64UL;
     static_assert(M % BLOCK_M == 0 && M < BLOCK_M * blocks * 128 &&
         N % BLOCK_N == 0 && K % BLOCK_N == 0);
     using clk = std::chrono::high_resolution_clock;

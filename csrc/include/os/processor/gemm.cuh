@@ -140,7 +140,6 @@ namespace aristos {
     >
     struct BlockMM {
         // will clamp at Ampere for now, until we implement Hopper specific GEMM
-        using GEMMArch = cute::Int<cute::min(Arch, 800U)>;
         static_assert(BLOCK_M == THREADS && BLOCK_M == threads);
         static_assert(BLOCK_M == 128);
         static_assert(BLOCK_N == 64, "64 is a very good value for N, change it back!");
@@ -149,7 +148,7 @@ namespace aristos {
                               + cublasdx::Type<cublasdx::type::real>()
                               + cublasdx::Arrangement<cublasdx::row_major, cublasdx::row_major, cublasdx::row_major>()
                               + cublasdx::Function<cublasdx::function::MM>()
-                              + cublasdx::SM<GEMMArch::value>()
+                              + cublasdx::SM<cute::min(Arch, 800)>()
                               + cublasdx::Block()
                               + cublasdx::BlockDim<threads>());
         using MatrixAType = ElementA;
@@ -160,7 +159,7 @@ namespace aristos {
                                         cute::Int<cublasdx::size_of<GEMM>::n>,
                                         cute::Int<cublasdx::size_of<GEMM>::k>>;
         using TilerOut = cute::Shape<cute::Int<cublasdx::size_of<GEMM>::m>, cute::Int<cublasdx::size_of<GEMM>::n>>;
-        using Parameters = CollectiveMMAConfig<GEMM, LayoutOptimization::UseSwizzle>;
+        using Parameters = CollectiveMMAConfig<GEMM, ElementA, ElementB, ElementC, LayoutOptimization::UseSwizzle>;
         using MMA = typename Parameters::mma_t;
         using CollectiveMainloop = cutlass::gemm::collective::CollectiveMma<
             cuda::std::conditional_t<cublasdx::sm_of<GEMM>::value < 800,
