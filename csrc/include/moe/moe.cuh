@@ -10,40 +10,37 @@
 #include "../os/os.cuh"
 #include "../os/processor/processor.cuh"
 #include "gate.cuh"
+#include "../config.cuh"
 
 namespace aristos::moe{
-    template<
-        typename GPUType,
-        GateReductionLevel g = GateReductionLevel::singleBlock,
-        DropTokens d = DropTokens::yes,
-        CombineMode c = CombineMode::single,
-        typename ActivationOp = cute::identity,
-        typename ActivationOpX = cute::identity,
-        typename ElementC = float,
-        typename Element,
-        unsigned int blocks = GPUType::blocks::value,
-        unsigned int processors = GPUType::OS::processorBlocks::value,
-        unsigned int sharedSize = GPUType::sharedMemory::value,
-        unsigned int threads = GPUType::OS::threads::value
-    >
-    requires(aristos::TensorValueType<ElementC> &&
-        aristos::TensorValueType<Element> &&
-        cuda::std::is_invocable_r_v<ElementC, ActivationOp, ElementC> &&
-        cuda::std::is_invocable_r_v<ElementC, ActivationOpX, ElementC>)
-    __global__ __maxnreg__(GPUType::registers::value) void forward(
-        const Element* __restrict__ iP, /* A, G, B, D*/ Element* __restrict__ oP /*G, O*/) {
+    __global__ __maxnreg__(ACC::PeakHardware::registers::value) void forward(
+        const void* __restrict__ iP, /* A, G, B, D*/ void* __restrict__ oP /*G, O*/) {
+        using Config = ACC;
+        using GPUType = Config::PeakHardware;
+        constexpr auto blocks = GPUType::blocks::value;
+        constexpr auto processors = GPUType::OS::processorBlocks::value;
+        constexpr auto sharedSize = GPUType::sharedMemory::value;
+        constexpr auto threads = GPUType::OS::threads::value;
+        constexpr auto g = Config::GRL::value;
+        constexpr auto d = Config::DTK::value;
+        constexpr auto c = Config::CM::value;
+        using Element = Config::Element;
+        using ActivationOp = Config::ActivationOp;
+        using ActivationOpX = Config::ActivationOpX;
+        using ElementC = GEA;
+
         // Salami slice pointers
-        const auto S = bookkeeping.sl;
-        const auto P = bookkeeping.pd;
-        const auto H = bookkeeping.ed;
-        const auto E = bookkeeping.nx;
+        constexpr auto S = Config::S::value;
+        constexpr auto P = Config::P::value;
+        constexpr auto H = Config::H::value;
+        constexpr auto E = Config::E::value;
         const auto lE = bookkeeping.nLx;
-        const auto* __restrict__ gP = iP + S * H;
+        const auto* __restrict__ gP = CONST_CAST_TO(Element, iP) + S * H;
         const auto* __restrict__ ePu = gP + H * E;
         const auto* __restrict__ ePd = ePu + lE * P * H;
         const auto* __restrict__ bU = ePd + lE * H * P;
         const auto* __restrict__ bd = bU + lE * P;
-        auto* __restrict__ gOp = oP;
+        auto* __restrict__ gOp = CAST_TO(Element, oP);
         auto* __restrict__ mOp = gOp + S * E;
         __shared__ __align__(16) cuda::std::byte workspace[sharedSize];
         // wipe buffers here and read the sequence bit, before the grid-wide barrier
@@ -55,8 +52,8 @@ namespace aristos::moe{
         }
         if constexpr (c == CombineMode::multithreaded) {
             // clear output buffer
-            const auto sz = S * H;
-            const auto vL = sz / sizeof(uint4);
+            constexpr auto sz = S * H;
+            constexpr auto vL = sz / sizeof(uint4);
             for (uint i = threads * blockIdx.x + threadIdx.x; i < vL; i += blocks * threads) {
                 CAST_TO(uint4, mOp)[i] = uint4{0U, 0U, 0U, 0U};
             }
@@ -66,29 +63,36 @@ namespace aristos::moe{
             }
         }
 
-        const auto activations = cute::make_tensor(cute::make_gmem_ptr(iP),
-            make_layout(cute::make_shape(S, H), cute::LayoutRight{}));
-        const auto gateWeights = cute::make_tensor(cute::make_gmem_ptr(gP),
-            make_layout(cute::make_shape(E, H), cute::LayoutRight{}));
+        const auto activations = make_tensor(
+            cute::make_gmem_ptr(CONST_CAST_TO(Element, iP)),
+                    cute::Layout<cute::Shape<cute::Int<S>, cute::Int<H>>,
+                            cute::Stride<cute::Int<H>, cute::_1>>{});
+        const auto gateWeights = make_tensor(cute::make_gmem_ptr(gP),
+            cute::Layout<cute::Shape<cute::Int<E>, cute::Int<H>>,
+                cute::Stride<cute::Int<H>, cute::_1>>{});
         // Experts Weights
-        const auto expertsUp = cute::make_tensor(cute::make_gmem_ptr(ePu),
-            make_layout(make_shape(lE, cute::make_shape(P, H)), cute::LayoutRight{}));
-        const auto expertsDown = cute::make_tensor(cute::make_gmem_ptr(ePd),
-            make_layout(make_shape(lE, cute::make_shape(H, P)), cute::LayoutRight{}));
+        const auto expertsUp = make_tensor(cute::make_gmem_ptr(ePu),
+            make_layout(make_shape(lE, cute::Shape<cute::Int<P>, cute::Int<H>>{}),
+                cute::LayoutRight{}));
+        const auto expertsDown = make_tensor(cute::make_gmem_ptr(ePd),
+            make_layout(make_shape(lE, cute::Shape<cute::Int<H>, cute::Int<P>>{}),
+                cute::LayoutRight{}));
         // Bias
         // Broadcast from vector to matrix
-        const auto biasUp = cute::make_tensor(cute::make_gmem_ptr(bU),
-            make_layout(make_shape(lE, cute::make_shape(S, P)),
-                make_stride(P, cute::Stride<cute::_0, cute::_1>{})));
-        const auto biasDown = cute::make_tensor(cute::make_gmem_ptr(bd),
-            make_layout(make_shape(lE, cute::make_shape(S, H)),
-                make_stride(H, cute::Stride<cute::_0, cute::_1>{})));
+        const auto biasUp = make_tensor(cute::make_gmem_ptr(bU),
+            make_layout(make_shape(lE, cute::Shape<cute::Int<S>, cute::Int<P>>{}),
+                cute::Stride<cute::Int<P>, cute::Stride<cute::_0, cute::_1>>{}));
+        const auto biasDown = make_tensor(cute::make_gmem_ptr(bd),
+            make_layout(make_shape(lE, cute::Shape<cute::Int<S>, cute::Int<H>>{}),
+                cute::Stride<cute::Int<H>, cute::Stride<cute::_0, cute::_1>>{}));
 
         // Output
-        const auto gateOutput = cute::make_tensor(cute::make_gmem_ptr(gOp),
-            make_layout(cute::make_shape(S, E), cute::LayoutRight{}));
-        const auto moeOutput = cute::make_tensor(cute::make_gmem_ptr(mOp),
-            make_layout(make_layout(cute::make_shape(S, H), cute::LayoutRight{})));
+        const auto gateOutput = make_tensor(cute::make_gmem_ptr(gOp),
+            cute::Layout<cute::Shape<cute::Int<S>, cute::Int<E>>,
+                cute::Stride<cute::Int<E>, cute::_1>>{});
+        const auto moeOutput = make_tensor(cute::make_gmem_ptr(mOp),
+            cute::Layout<cute::Shape<cute::Int<S>, cute::Int<H>>,
+                cute::Stride<cute::Int<H>, cute::_1>>{});
 
         gate::forward<GPUType, g>(activations,
             gateWeights, gateOutput, bookkeeping.k, CAST_TO(ElementC, workspace));
@@ -110,152 +114,18 @@ namespace aristos::moe{
         }
     }
 
-    template<
-        typename GPUType
-    >
-    __global__ __maxnreg__(GPUType::registers::value) void backward(){
-    }
-
-    template<
-        typename T,
-        typename ActivationOp = cutlass::epilogue::thread::ReLU<T>,
-        typename ActivationOpX = cute::identity
-    >
     __host__ __forceinline__
-    void dispatchKernel(const void* __restrict__ iP, /* A, G, B, D*/ void* __restrict__ oP /*G, O*/) {
-        using ElementC = GEA;
-        // Decode function id
+    void forwardHost(const void* __restrict__ iP, void* __restrict__ oP){
+        //reportError(isInitialized, "Not initialized");
+        CHECK_ERROR_EXIT(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
+
+        /// Consume precompiled macros
         using GPUType = aristos::Hardware<ARISTOS_ARCH, 255>;
         constexpr auto blocks = GPUType::OS::processorBlocks::value;
         constexpr auto threads = GPUType::OS::threads::value;
-        switch (hostBookkeeping.fId) {
-            case 0: {
-                constexpr auto g = GateReductionLevel::singleBlock;
-                constexpr auto d = DropTokens::no;
-                constexpr auto c = CombineMode::single;
-                using V = typename VCT<c, T>::Element;
-                // Call forward pass
-                moe::forward<GPUType, g, d, c, ActivationOp, ActivationOpX, ElementC><<<blocks, threads>>>(
-                     static_cast<const V*>(iP), static_cast<V*>(oP));
-            }
-            break;
-            case 1: {
-                constexpr auto g = GateReductionLevel::singleBlock;
-                constexpr auto d = DropTokens::no;
-                constexpr auto c = CombineMode::multithreaded;
-                using V = typename VCT<c, T>::Element;
-                // Call forward pass
-                moe::forward<GPUType, g, d, c, ActivationOp, ActivationOpX, ElementC><<<blocks, threads>>>(
-                     static_cast<const V*>(iP), static_cast<V*>(oP));
-            }
-            break;
-            case 2: {
-                constexpr auto g = GateReductionLevel::singleBlock;
-                constexpr auto d = DropTokens::yes;
-                constexpr auto c = CombineMode::single;
-                using V = typename VCT<c, T>::Element;
-                // Call forward pass
-                moe::forward<GPUType, g, d, c, ActivationOp, ActivationOpX, ElementC><<<blocks, threads>>>(
-                     static_cast<const V*>(iP), static_cast<V*>(oP));
-            }
-            break;
-            case 3: {
-                constexpr auto g = GateReductionLevel::singleBlock;
-                constexpr auto d = DropTokens::yes;
-                constexpr auto c = CombineMode::multithreaded;
-                using V = typename VCT<c, T>::Element;
-                // Call forward pass
-                moe::forward<GPUType, g, d, c, ActivationOp, ActivationOpX, ElementC><<<blocks, threads>>>(
-                     static_cast<const V*>(iP), static_cast<V*>(oP));
-            }
-            case 4: {
-                constexpr auto g = GateReductionLevel::multiBlock;
-                constexpr auto d = DropTokens::no;
-                constexpr auto c = CombineMode::single;
-                using V = typename VCT<c, T>::Element;
-                // Call forward pass
-                moe::forward<GPUType, g, d, c, ActivationOp, ActivationOpX, ElementC><<<blocks, threads>>>(
-                     static_cast<const V*>(iP), static_cast<V*>(oP));
-            }
-            break;
-            case 5: {
-                constexpr auto g = GateReductionLevel::multiBlock;
-                constexpr auto d = DropTokens::no;
-                constexpr auto c = CombineMode::multithreaded;
-                using V = typename VCT<c, T>::Element;
-                // Call forward pass
-                moe::forward<GPUType, g, d, c, ActivationOp, ActivationOpX, ElementC><<<blocks, threads>>>(
-                     static_cast<const V*>(iP), static_cast<V*>(oP));
-            }
-            break;
-            case 6: {
-                constexpr auto g = GateReductionLevel::multiBlock;
-                constexpr auto d = DropTokens::yes;
-                constexpr auto c = CombineMode::single;
-                using V = typename VCT<c, T>::Element;
-                // Call forward pass
-                moe::forward<GPUType, g, d, c, ActivationOp, ActivationOpX, ElementC><<<blocks, threads>>>(
-                     static_cast<const V*>(iP), static_cast<V*>(oP));
-            }
-            break;
-            case 7: {
-                constexpr auto g = GateReductionLevel::multiBlock;
-                constexpr auto d = DropTokens::yes;
-                constexpr auto c = CombineMode::multithreaded;
-                using V = typename VCT<c, T>::Element;
-                // Call forward pass
-                moe::forward<GPUType, g, d, c, ActivationOp, ActivationOpX, ElementC><<<blocks, threads>>>(
-                     static_cast<const V*>(iP), static_cast<V*>(oP));
-            }
-            break;
-            default: {
-                constexpr auto g = GateReductionLevel::singleBlock;
-                constexpr auto d = DropTokens::yes;
-                constexpr auto c = CombineMode::single;
-                using V = typename VCT<c, T>::Element;
-                moe::forward<GPUType, g, d, c, ActivationOp, ActivationOpX, ElementC><<<blocks, threads>>>(
-                     static_cast<const V*>(iP), static_cast<V*>(oP));
-            }
-        }
-    }
 
-    __host__ __forceinline__
-    void forwardHost(const void* __restrict__ iP, void* __restrict__ oP){
-        reportError(isInitialized, "Not initialized");
-        CHECK_ERROR_EXIT(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
-        using relu = cutlass::epilogue::thread::ReLU<GEA>;
-        using gelu = cutlass::epilogue::thread::GELU<GEA>;
-        switch (hostBookkeeping.pfId) {
-            case 0: {
-                dispatchKernel<cute::tfloat32_t, relu>(iP, oP);
-            }
-            break;
-            case 1: {
-                dispatchKernel<cute::tfloat32_t, gelu>(iP, oP);
-            }
-            break;
-            case 2:
-                dispatchKernel<cute::half_t, relu>(iP, oP);
-            break;
-            case 3:
-                dispatchKernel<cute::half_t, gelu>(iP, oP);
-            break;
-            case 4:
-                dispatchKernel<cute::bfloat16_t, relu>(iP, oP);
-            break;
-            case 5:
-                dispatchKernel<cute::bfloat16_t, gelu>(iP, oP);
-            break;
-            default:
-                dispatchKernel<cute::half_t, relu>(iP, oP);
-        }
-    }
-
-    template<typename Element>
-    requires(aristos::TensorValueType<Element>)
-    __host__ __forceinline__
-    void backwardHost(){
-        reportError(isInitialized, "Not initialized");
+        // Call forward pass
+        moe::forward<<<blocks, threads>>>(iP, oP);
     }
 }
 #endif //ARISTOS_MOE_CUH

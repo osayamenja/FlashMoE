@@ -50,6 +50,7 @@
 #include <cuda/std/tuple>
 #include <cuda/std/array>
 #include <cute/tensor.hpp>
+#include <cutlass/epilogue/thread/activation.h>
 
 namespace aristos{
     template<typename V>
@@ -60,10 +61,17 @@ namespace aristos{
             cuda::std::is_same_v<V, cute::float_e4m3_t> ||
             cuda::std::is_same_v<V, cute::float_e5m2_t>*/;
 
+    template <class T>
+    struct isTensor : cuda::std::false_type {};
+    template <class Engine, class Layout>
+    requires(TensorValueType<typename Engine::value_type>)
+    struct isTensor<cute::Tensor<Engine,Layout>> : cuda::std::true_type {};
+    template <class Engine, class Layout>
+    requires(TensorValueType<typename Engine::value_type>)
+    struct isTensor<const cute::Tensor<Engine,Layout>> : cuda::std::true_type {};
+
     template<typename T>
-    concept isTensor = cute::is_tensor<T>::value && TensorValueType<typename T::value_type>;
-    template<typename T>
-    concept isMatrix = isTensor<T> && rank(T{}) == 2;
+    concept isMatrix = isTensor<T>::value && cuda::std::is_same_v<decltype(rank(T{})), cute::Int<2>>;
 
     template<typename S>
     struct ToCute {
@@ -96,6 +104,50 @@ namespace aristos{
     struct ToCDx<cute::bfloat16_t> {
         using T = __nv_bfloat16;
     };
+
+    template<unsigned int dType>
+    struct DType {
+        static_assert(dType <= 3);
+    };
+
+    template<>
+    struct DType<0U> {
+        using DT = float;
+    };
+
+    template<>
+    struct DType<1U> {
+        using DT = cute::tfloat32_t;
+    };
+
+    template<>
+    struct DType<2U> {
+        using DT = cute::bfloat16_t;
+    };
+
+    template<>
+    struct DType<3U> {
+        using DT = cute::half_t;
+    };
+
+    template<
+        unsigned int aFunction,
+        typename Element
+    > requires(TensorValueType<Element>)
+    struct AFunction {
+        static_assert(aFunction <= 2U);
+    };
+
+    template<typename Element>
+    struct AFunction<0U, Element> {
+        using DT = cutlass::epilogue::thread::ReLU<Element>;
+    };
+
+    template<typename Element>
+    struct AFunction<1U, Element> {
+        using DT = cutlass::epilogue::thread::GELU<Element>;
+    };
+
     using mp_t = float; // or tf32
     using GEA = float;
     using specType = unsigned int;
@@ -488,10 +540,6 @@ namespace aristos{
         uint16_t xs = 0U;
         /// processors
         uint16_t blocks = 0U;
-        /// Encoded result of template parameters
-        uint8_t fId = 0U;
-        /// Encoded result of template parameters
-        uint8_t pfId = 0U;
 
         __device__ __forceinline__
         Bookkeeping() = default;
@@ -512,8 +560,6 @@ namespace aristos{
             const unsigned int& _eCapacity,
             const uint16_t& _blocks,
             const uint16_t& _world,
-            const uint8_t& _fId,
-            const uint8_t& _pfId,
             const unsigned int& _eNb // number of bytes for the matrix element type
             ) :
         sHeap(_sHeap), flags(_flags),
@@ -523,7 +569,7 @@ namespace aristos{
         tN(tiles<BLOCK_N>(_embedDim)),
         tCM(tiles<BLOCK_M>(_eCapacity)),
         eCap(_eCapacity), rank(_rank), world(_world), nx(_nx), k(_k),
-        px(pad<BLOCK_N>(_nx)), nLx(_nLx), xs(_xS), blocks(_blocks), fId(_fId), pfId(_pfId){
+        px(pad<BLOCK_N>(_nx)), nLx(_nLx), xs(_xS), blocks(_blocks){
             if (_nx > 1)[[likely]] {
                 const bool isSingleBlockGate = _nx <= BLOCK_N;
                 // maximum gemm tiles/tasks scheduled by processors

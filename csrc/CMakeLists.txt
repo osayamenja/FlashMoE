@@ -76,6 +76,7 @@ add_executable(csrc main.cu
         include/os/os.cuh
         include/moe/expert.cuh
         include/throughput.cuh
+        include/config.cuh
 )
 set_target_properties(csrc PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
@@ -180,11 +181,61 @@ target_compile_options(csrc PRIVATE
         $<$<COMPILE_LANGUAGE:CUDA>:-t0; --generate-line-info>
         $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-gencode=arch=compute_${COMPUTE_CAPABILITY},code=sm_${COMPUTE_CAPABILITY}>
 )
+
+# Pre-compile constants
+# Read JSON file content
+file(READ "aristos_config.json" ARISTOS_CONFIG)
+
+string(JSON CAP_FACTOR_V GET ${ARISTOS_CONFIG} "capacity_factor")
+message(STATUS "capacity_factor: ${CAP_FACTOR_V}")
+
+string(JSON DROP_TOKENS_V GET ${ARISTOS_CONFIG} "drop_tokens")
+message(STATUS "drop_tokens: ${DROP_TOKENS_V}")
+
+string(JSON E_TOP_K_V GET ${ARISTOS_CONFIG} "expert_top_k")
+message(STATUS "expert_top_k: ${E_TOP_K_V}")
+
+string(JSON IS_TRAINING_V GET ${ARISTOS_CONFIG} "is_training")
+message(STATUS "is_training: ${IS_TRAINING_V}")
+
+string(JSON HIDDEN_ACT_V GET ${ARISTOS_CONFIG} "hidden_act")
+message(STATUS "hidden_act: ${HIDDEN_ACT_V}")
+
+string(JSON HIDDEN_SIZE_V GET ${ARISTOS_CONFIG} "hidden_size")
+message(STATUS "hidden_size: ${HIDDEN_SIZE_V}")
+
+string(JSON I_SIZE_V GET ${ARISTOS_CONFIG} "intermediate_size")
+message(STATUS "intermediate_size: ${I_SIZE_V}")
+
+string(JSON MINI_BATCH_V GET ${ARISTOS_CONFIG} "mini_batch")
+message(STATUS "mini_batch: ${MU_BATCH_V}")
+
+string(JSON NUM_EXPERTS_V GET ${ARISTOS_CONFIG} "num_experts")
+message(STATUS "num_experts: ${NUM_EXPERTS_V}")
+
+string(JSON NUM_LAYERS_V GET ${ARISTOS_CONFIG} "num_layers")
+message(STATUS "num_experts: ${NUM_EXPERTS_V}")
+
+string(JSON SEQ_LEN_V GET ${ARISTOS_CONFIG} "sequence_len")
+message(STATUS "sequence_len: ${SEQ_LEN_V}")
+
+string(JSON DTYPE_V GET ${ARISTOS_CONFIG} "torch_dtype")
+message(STATUS "torch_dtype: ${DTYPE_V}")
+
 target_compile_definitions(csrc
         PRIVATE
-        CHECK_TENSORS=0
-        DECODE_MOE=1
         ARISTOS_ARCH=${GPU_ARCH}
+        CAP_FACTOR=${CAP_FACTOR_V}
+        DROP_TOKENS=${DROP_TOKENS_V}
+        E_TOP_K=${E_TOP_K_V}
+        HIDDEN_ACT=${HIDDEN_ACT_V}
+        HIDDEN_SIZE=${HIDDEN_SIZE_V}
+        I_SIZE=${I_SIZE_V}
+        MOE_FREQ=${MOE_FREQ_V}
+        MINI_BATCH=${MINI_BATCH_V}
+        NUM_EXPERTS=${NUM_EXPERTS_V}
+        SEQ_LEN=${SEQ_LEN_V}
+        DTYPE=${DTYPE_V}
 )
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_compile_options(csrc PRIVATE

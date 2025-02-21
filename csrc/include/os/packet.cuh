@@ -16,7 +16,7 @@ namespace aristos::packet {
         unsigned int superBlockSize = ARISTOS_SUPER_BLOCK_SIZE,
         typename Activations
     >
-    requires aristos::isMatrix<Activations>
+    requires (isTensor<Activations>::value)
     __forceinline__ __device__
     void encode(const Activations& activations, unsigned int* const& __restrict__ workspace) {
         using Element = typename Activations::value_type;

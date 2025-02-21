@@ -90,8 +90,9 @@ namespace aristos {
         cute::SM80_CP_ASYNC_CACHEALWAYS<Element>, cute::UniversalCopy<Element>>;
 
     template<typename Element>
-    using sCopyLay = cuda::std::conditional_t<sizeof(Element) >= 4,
-    cute::SM75_U32x4_LDSM_N, cute::SM75_U32x2_LDSM_N>;
+    using sCopyLay = cuda::std::conditional_t<cuda::std::is_same_v<Element, float>,
+    cute::UniversalCopy<float>, cuda::std::conditional_t<sizeof(Element) >= 4,
+    cute::SM75_U32x4_LDSM_N, cute::SM75_U32x2_LDSM_N>>;
 
     template<
         typename ElementA,

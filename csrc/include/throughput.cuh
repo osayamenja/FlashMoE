@@ -59,13 +59,13 @@ namespace aristos {
         float stage = 0;
 #if TIME_EXPERT
         CHECK_ERROR_EXIT(cudaMemcpyAsync(&stage, dT, sizeof(float), cudaMemcpyDeviceToHost, aristosStream));
+        CHECK_ERROR_EXIT(cudaStreamSynchronize(aristosStream));
         printf("Kernel took %fms\n", stage);
         // quantize to half-precision, this should be safe as the value is very small: in the hundreds
         // we use float for compatibility with device atomics
 #endif
         dWa->throughput = cute::half_t(stage);
         CHECK_ERROR_EXIT(cudaFreeAsync(p, aristosStream));
-        CHECK_ERROR_EXIT(cudaStreamSynchronize(aristosStream));
         delete hB;
     }
 

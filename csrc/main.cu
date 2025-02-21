@@ -3,24 +3,24 @@
  ******************************************************************************/
 #include <torch/torch.h>
 
+#include "include/moe/moe.cuh"
 #include "include/throughput.cuh"
 #include "include/types.cuh"
-#include "include/os/processor/mmaConfig.cuh"
 
 __host__ __forceinline__
 void evalExpert() {
     using GPUType = aristos::Hardware<ARISTOS_ARCH, 255>;
     constexpr auto blocks = GPUType::OS::processorBlocks::value;
-    constexpr auto M = 128UL;
-    constexpr auto N = 64UL;
-    constexpr auto K = 64UL;
+    constexpr auto M = 8192UL;
+    constexpr auto N = 4096UL;
+    constexpr auto K = 1024UL;
     static_assert(M % BLOCK_M == 0 && M < BLOCK_M * blocks * 128 &&
         N % BLOCK_N == 0 && K % BLOCK_N == 0);
     using clk = std::chrono::high_resolution_clock;
     std::chrono::duration<float> end {};
     // create torch tensors
     CHECK_ERROR_EXIT(cudaSetDevice(0));
-    constexpr auto sT = torch::kFloat32;
+    constexpr auto sT = torch::kFloat16;
     at::globalContext().setAllowTF32CuBLAS(true);
     at::globalContext().setAllowTF32CuDNN(true);
     const auto options = torch::TensorOptions().dtype(sT).layout(torch::kStrided).device(torch::kCUDA, 0);
@@ -35,7 +35,7 @@ void evalExpert() {
 
     using ElementAccum = float;
     using Activation = cutlass::epilogue::thread::ReLU<ElementAccum>;
-    using Element = cute::tfloat32_t;
+    using Element = cute::half_t;
     constexpr auto aZ =  M * K;
     constexpr auto bZ =  aZ + N * K;
     constexpr auto b2Z =  bZ + N * K;
@@ -75,7 +75,7 @@ void evalExpert() {
     const auto result = mul(expert->forward(activations), scaleWeights);
     CHECK_ERROR_EXIT(cudaDeviceSynchronize());
     end = clk::now() - start;
-    printf("Torch takes %f\n", end.count());
+    printf("Torch takes %fms\n", end.count() * 1000);
 
     // Get a copy of the reference result
     aristos::WorkerAttribute wA{};
@@ -86,7 +86,13 @@ void evalExpert() {
     // verify and compare
     std::cout << "Passed? " << (result.view({M * K})
         .allclose(hT.index({0, torch::indexing::Slice(cZ, hZ)}),
-            1e-03, 1e-03, true) ? "Yes!" : "No")
+            1e-03, 1e-05, true) ? "Yes!" : "No")
+    << std::endl;
+    std::cout << result.index({1024,
+        torch::indexing::Slice(256, 266)}).view({1, 10})
+    << std::endl;
+    std::cout << hT.index({0, torch::indexing::Slice(cZ, hZ)}).view({M, K}).
+        index({1024, torch::indexing::Slice(256, 266)}).view({1, 10})
     << std::endl;
     CHECK_LAST();
 }

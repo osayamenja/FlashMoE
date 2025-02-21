@@ -14,7 +14,7 @@
 #include "../types.cuh"
 #include "../os/processor/gemm.cuh"
 #include "../os/processor/processor.cuh"
-#define TIME_EXPERT 0
+#define TIME_EXPERT 1
 namespace aristos {
     template<
         typename BlockGEMM,
@@ -163,7 +163,6 @@ namespace aristos {
         typename Element,
         typename ProblemShape_MNK,
         unsigned int blocks = GPUType::OS::processorBlocks::value,
-        unsigned int arch = GPUType::arch::value,
         unsigned int sharedSize = GPUType::sharedMemory::value,
         unsigned int elems = GPUType::rScratch::value
     >
@@ -175,10 +174,10 @@ namespace aristos {
     /// A = D * B2 + C2
     __global__ __maxnreg__(GPUType::registers::value) void expert(ProblemShape_MNK pShape,
         cuda::barrier<cuda::thread_scope_device>* dB,
-        [[maybe_unused]]float* deviceThroughput, uint* tileSync,
+        float* deviceThroughput, uint* tileSync,
         const Element* __restrict__ iP /* A, B, D, S, W*/,
         Element* __restrict__ oP /*C*/,
-        [[maybe_unused]] const bool skip = true) {
+        const bool skip = true) {
         constexpr auto tMu = 128; // upper bound of tiles per block for this exercise
         __shared__ __align__(16) Element workspace[sharedSize / sizeof(Element)];
         __shared__ __align__(16) uint16_t tQ[tMu];

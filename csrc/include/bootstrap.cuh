@@ -187,16 +187,11 @@ namespace aristos{
         ePg->epWorld = epWorld;
     }
 
-    template<
-        unsigned int Arch,
-        uint8_t pfId,
-        typename Element,
-        typename Activation
-    >
-    requires(aristos::TensorValueType<Element> && SupportedArch<Arch> &&
-        cuda::std::is_invocable_r_v<GEA, Activation, GEA>)
     __host__ __forceinline__
     void specificInit(const InitialConfig& iC) {
+        using GPUType = Hardware<ARISTOS_ARCH, 255>;
+        using Element = ACC::Element;
+        using Activation = ACC::ActivationOp;
         // initialize communication backend
         nvshmem_init();
         const uint devId = nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE);
@@ -235,16 +230,9 @@ namespace aristos{
         auto* scratch = CAST_TO(uint16_t, nRXp + 1);
         auto* __restrict__ eRs = CAST_TO(bool, scratch + globalWorld);
 
-        using GPUType = Hardware<Arch>;
         estimateMemory<Element>(iC, &wAp[rank]);
-        if (iC.k > 1) {
-            mT<GPUType, Element, CombineMode::multithreaded, Activation>(wAp + rank, iC.seqLen, iC.hiddenProjDim,
+        mT<GPUType, Element, ACC::CM::value, Activation>(wAp + rank, iC.seqLen, iC.hiddenProjDim,
                 iC.embedDim, devId);
-        }
-        else {
-            mT<GPUType, Element, CombineMode::single, Activation>(wAp + rank, iC.seqLen, iC.hiddenProjDim,
-                iC.embedDim, devId);
-        }
 
         discoverTopology(aP, globalWorld, globalWorld, wAp[rank]);
 
@@ -275,7 +263,6 @@ namespace aristos{
         cuda::std::byte* book;
         CHECK_ERROR_EXIT(cudaMallocAsync(&book, bookSize, aristosStream));
         CHECK_ERROR_EXIT(cudaMemsetAsync(&book, 0, bookSize, aristosStream));
-        const uint8_t functionId =  4 * (iC.numExperts > BLOCK_N) + 2 * iC.shouldDrop + (iC.k > 1);
         // Initialize bookkeeping
         hostBookkeeping = Bookkeeping{
             sHb + flagBytes,
@@ -292,8 +279,6 @@ namespace aristos{
             eCap,
             blocks,
             ePgD.epWorld,
-            functionId,
-            pfId,
             sizeof(Element)
         };
         // copy peer translation and parallelism spec to device memory
@@ -352,47 +337,22 @@ namespace aristos{
 
     // Should be called before loading the model
     __host__ __forceinline__
-    void initialize(const InitialConfig& iC, const torch::ScalarType& sT) {
-        static_assert(ARISTOS_ARCH >= 700, "Volta and above is required!");
+    void initialize(const InitialConfig& iC) {
         reportError(!isInitialized, "Already Initialized");
+        using GPUType = aristos::Hardware<ARISTOS_ARCH, 255>;
+        constexpr auto blocks = GPUType::OS::processorBlocks::value;
+        static_assert(ARISTOS_ARCH >= 700, "Volta and above is required!");
         isInitialized = true;
-        reportError(iC.embedDim % BLOCK_N == 0 && iC.hiddenProjDim % BLOCK_N == 0,
-            "Must be multiple of BLOCK_N");
-        reportError(iC.seqLen % BLOCK_M == 0, "Must be a multiple of BLOCK_M");
-        reportError(iC.numExperts <= cuda::std::numeric_limits<uint16_t>::max(),
+        static_assert(SEQ_LEN % BLOCK_M == 0 && SEQ_LEN < BLOCK_M * blocks * 128 &&
+        I_SIZE % BLOCK_N == 0 && HIDDEN_SIZE % BLOCK_N == 0);
+        static_assert(NUM_EXPERTS <= cuda::std::numeric_limits<uint16_t>::max(),
             "For performance, we assume number of experts <= UINT16_MAX");
         int cudaDevAttribute = 0;
         int dev = 0;
         CHECK_ERROR_EXIT(cudaGetDevice(&dev));
         CHECK_ERROR_EXIT(cudaDeviceGetAttribute(&cudaDevAttribute, cudaDevAttrMemoryPoolsSupported, dev));
         reportError(cudaDevAttribute, "Memory Pools support required");
-        using ElementAccum = float;
-        using relu = cutlass::epilogue::thread::ReLU<ElementAccum>;
-        using gelu = cutlass::epilogue::thread::GELU<ElementAccum>;
-        switch (eTA(sT, iC.actF)) {
-            case 0: {
-                specificInit<ARISTOS_ARCH, 0, cute::tfloat32_t, relu>(iC);
-            }
-            break;
-            case 1: {
-                specificInit<ARISTOS_ARCH, 1, cute::tfloat32_t, gelu>(iC);
-            }
-            break;
-            case 2:
-                specificInit<ARISTOS_ARCH, 2, cute::half_t, relu>(iC);
-            break;
-            case 3:
-                specificInit<ARISTOS_ARCH, 3, cute::half_t, gelu>(iC);
-            break;
-            case 4:
-                specificInit<ARISTOS_ARCH, 4, cute::bfloat16_t, relu>(iC);
-            break;
-            case 5:
-                specificInit<ARISTOS_ARCH, 5, cute::bfloat16_t, gelu>(iC);
-            break;
-            default:
-                specificInit<ARISTOS_ARCH, 6, cute::half_t, relu>(iC);
-        }
+        specificInit(iC);
     }
 
     __host__ __forceinline__
