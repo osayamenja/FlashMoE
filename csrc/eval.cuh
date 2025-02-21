@@ -58,7 +58,7 @@ namespace aristos {
         // Starting index of heap
         auto* sHeap = CAST_TO(cuda::std::byte, syncArray + 2);
         const uint16_t pr = globalRank + 1;
-        const auto self = WorkerAttribute{pr, pr};
+        const auto self = WorkerAttribute{cute::half_t(pr), pr};
         const auto remotePresent = [&n, &results] {
             for (int i = 0; i< n; ++i) {
                 if (nvshmem_ptr(results, i) == nullptr) return true;
@@ -114,7 +114,7 @@ namespace aristos {
 
         for (uint i = 0; i < n; ++i){
             const auto [t, m] = attributesPtr[i];
-            aT[i] = t;
+            aT[i] = static_cast<uint16_t>(t);
             aM[i] = m;
         }
         fmt::print(file, "Rank {}: \n\t Throughput: {}\n\t MemoryCapacity: {}\n", globalRank, aT, aM);
@@ -145,8 +145,6 @@ namespace aristos {
             sizeof (Expert) * nExp + sizeof(floatPair) * dim * dim +
                 sizeof(uint) * (dim + nExp);
         auto* hP = std::calloc(hPz, sizeof(cuda::std::byte));
-        constexpr auto z = std::max(dim, nExp);
-        std::array<uint, z> pS{};
         // Pointer salami slicing
         auto* __restrict__ ePwG = CAST_TO(Worker, hP);
         auto* __restrict__ wG = ePwG + dim;
@@ -174,13 +172,13 @@ namespace aristos {
             }
         }
 
-        auto constexpr deviceGigaFlopsPerMs = static_cast<unsigned int>(0.43*312U * (1e9 / (1024*1024*1024)));
-        for(uint i = 0; i < dim; ++i){
+        auto constexpr expertGigaFlops = 128U; // Giga == 2^30
+        auto constexpr deviceGigaFlopsPerMs = static_cast<float>(0.43*312U * (1e9 / (1024*1024*1024)));
+        for(uint16_t i = 0; i < dim; ++i){
             auto constexpr deviceMem = 8U;
             wG[i] = Worker{i, deviceGigaFlopsPerMs, deviceMem};
         }
 
-        auto constexpr expertGigaFlops = 128U; // Giga == 2^30
         for(uint i = 0; i < nExp; ++i){
             experts[i] = Expert{i, expertGigaFlops};
         }
@@ -196,9 +194,12 @@ namespace aristos {
         fmt::println("Device to Groups: {}", spec);
 
         const auto epWorld = subsets(spec, pT, 0);
-        std::memcpy(pS.data(), pT, sizeof(uint) * epWorld);
+        std::vector<uint> pS (epWorld);
+        for (uint i = 0; i < epWorld; ++i) {
+            pS[i] = pT[i];
+        }
         fmt::println("Rank {} Group {}", 0, pS); // peer translation
-        for(uint i = 0; i < epWorld; ++i){
+        for(uint16_t i = 0; i < epWorld; ++i){
             const auto wId = pT[i];
             ePwG[i] = Worker{i, wG[wId].processingRate, wG[wId].memoryCapacity};
         }
@@ -206,8 +207,12 @@ namespace aristos {
         decider::assign(ePwG, epWorld, experts, nExp, ePs);
         end += clk::now() - start;
         fmt::println("Total time is {}s", end.count());
-        std::memcpy(pS.data(), ePs, sizeof(uint) * nExp);
-        fmt::println("Experts to Devices {}", pS); // sharding spec
+        std::vector<uint> assignment (nExp);
+        for (uint i = 0; i < nExp; ++i) {
+            assignment[i] = ePs[i];
+        }
+        fmt::println("Experts to Devices {}", assignment); // sharding spec
+        free(hP);
     }
 }
 #endif //EVAL_CUH

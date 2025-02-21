@@ -263,7 +263,7 @@ namespace aristos{
     };
 
     struct __align__(4) WorkerAttribute{
-        cute::half_t throughput; // ms for a single expert
+        cute::half_t throughput; // expert per ms; could be fractional
         uint16_t memoryCapacity; // upper bound of experts that we can accommodate
     };
     struct __align__(8) TopologySignal{
@@ -814,20 +814,6 @@ namespace aristos{
             const uint& tokenDim, const uint& peer, const uint& expert, const uint& token = 0){
             return sHeap + (cellSize * (expertSlots * (CELLS * (peer * STAGES + stage) + cell) + expert) +
                 token * tokenDim) * nBytes;
-        }
-    }
-    __host__ __forceinline__
-    uint8_t eTA(const torch::ScalarType& sT, const ActivationFunction& aF) {
-        switch (sT) {
-            case torch::kFloat32:
-                return aF;
-            case torch::kFloat16:
-                return 2U + aF;
-            case torch::kBFloat16:
-                return 4U + aF;
-            break;
-            default:
-                return 2U + aF; // default is half_t
         }
     }
 }

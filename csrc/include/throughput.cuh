@@ -56,15 +56,15 @@ namespace aristos {
         expert<GPUType, Activation, c, ElementAccum, u><<<blocks, threads, 0, aristosStream>>>(pS,
         CAST_TO(cuda::barrier<cuda::thread_scope_device>, p), dT, tileSync, iP, oP, false);
         CHECK_ERROR_EXIT(cudaPeekAtLastError());
-        float stage = 0;
+        float latency = 0;
 #if TIME_EXPERT
-        CHECK_ERROR_EXIT(cudaMemcpyAsync(&stage, dT, sizeof(float), cudaMemcpyDeviceToHost, aristosStream));
+        CHECK_ERROR_EXIT(cudaMemcpyAsync(&latency, dT, sizeof(float), cudaMemcpyDeviceToHost, aristosStream));
         CHECK_ERROR_EXIT(cudaStreamSynchronize(aristosStream));
-        printf("Kernel took %fms\n", stage);
+        printf("Kernel took %fms\n", latency);
         // quantize to half-precision, this should be safe as the value is very small: in the hundreds
         // we use float for compatibility with device atomics
 #endif
-        dWa->throughput = cute::half_t(stage);
+        dWa->throughput = cute::half_t(1 / latency); // latency should be > 0
         CHECK_ERROR_EXIT(cudaFreeAsync(p, aristosStream));
         delete hB;
     }

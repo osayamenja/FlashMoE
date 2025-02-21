@@ -14,7 +14,7 @@ namespace aristos{
         std::unordered_set<unsigned int> internalNodes{};
         unsigned int id;
         unsigned int memCapacity;
-        unsigned long deviceRate;
+        float deviceRate;
         float allReduceTime{};
         ObjArgs objArgs;
         float currentObjective{};
@@ -22,7 +22,7 @@ namespace aristos{
         float cachedObjective{};
         float cachedAllReduceTime{};
 
-        Group(const unsigned int& _id, const unsigned int& _mem, const unsigned long& _rate,
+        Group(const unsigned int& _id, const unsigned int& _mem, const float& _rate,
               const unsigned int& _world, const ObjArgs& _args,
               const std::vector<floatPair>& dp):
               id(_id), memCapacity(_mem), deviceRate(_rate),

@@ -45,8 +45,8 @@ namespace aristos{
     };
 
     struct ObjArgs{
-        unsigned long totalDeviceRate{};
-        unsigned long totalExpertCost;
+        float totalDeviceRate{};
+        unsigned int totalExpertCost;
         unsigned int globalMoEStages;
         unsigned int totalExpertMemoryDemand;
         float allReduceTime{};
@@ -56,7 +56,7 @@ namespace aristos{
         unsigned int effectiveWorld;
         unsigned int p2pBuffer;
 
-        ObjArgs(const unsigned long& _totalCost,
+        ObjArgs(const unsigned int& _totalCost,
                 const unsigned int& _effW, const unsigned int& _totalMem,
                 const ModelConfig& m) :
                 totalExpertCost(_totalCost),

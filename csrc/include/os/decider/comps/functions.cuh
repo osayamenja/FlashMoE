@@ -13,7 +13,7 @@ namespace aristos{
         return (a.groupMemCapacity < a.totalExpertMemoryDemand) ?
         std::numeric_limits<float>::infinity() :
                (ObjArgs::getGamma(a.globalMoEStages, a.effectiveWorld)
-               *((static_cast<float>(a.totalExpertCost) / static_cast<float>(a.totalDeviceRate))
+               *((static_cast<float>(a.totalExpertCost) / a.totalDeviceRate)
                + (a.commFreq * a.intraCommunicationCost))) + a.allReduceTime;
     }
 

@@ -7,11 +7,11 @@
 
 namespace aristos{
     struct __align__(8) Worker{
-        unsigned int id;
-        uint16_t processingRate;
+        float processingRate; // ms per expert
+        uint16_t id;
         uint16_t memoryCapacity;
 
-        Worker(const unsigned int& _id, const uint16_t& _processingRate, const uint16_t& memoryCapacity):
+        Worker(const uint16_t& _id, const float& _processingRate, const uint16_t& memoryCapacity):
                 id(_id), processingRate(_processingRate), memoryCapacity(memoryCapacity){}
 
         __forceinline__

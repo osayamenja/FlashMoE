@@ -314,7 +314,7 @@ namespace aristos::decider{
         if(totalMem % world != 0){
             reqCap = static_cast<int>(std::ceil(static_cast<float>(totalMem) / static_cast<float>(world)));
         }
-        auto totalRate = 0U;
+        auto totalRate = 0.0f;
         for(uint i = 0; i < world; ++i){
             const auto w = wG[i];
             wellDistributedCapacity = wellDistributedCapacity && w.memoryCapacity >= reqCap;
@@ -324,7 +324,7 @@ namespace aristos::decider{
 
         auto j = 0U;
         while(!t.empty()){
-            auto budget = static_cast<unsigned int>(std::ceil(static_cast<float>(wG[j].processingRate * totalCost) / static_cast<float>(totalRate)));
+            auto budget = static_cast<int>(std::ceil(wG[j].processingRate * totalCost / totalRate));
             const auto allocated = budget;
             while(budget > 0 && wG[j].memoryCapacity > 0 && !t.empty() > 0){
                 auto expertBudget = Expert(budget);

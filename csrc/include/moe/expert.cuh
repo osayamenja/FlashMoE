@@ -153,7 +153,7 @@ namespace aristos {
         identified,
         completed
     };
-    // Stylized expert for evaluation only
+    // Fused FFN
     template<
         typename GPUType,
         typename ActivationOp,
