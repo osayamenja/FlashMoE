@@ -49,7 +49,7 @@ namespace aristos{
         unsigned int totalExpertCost;
         unsigned int globalMoEStages;
         unsigned int totalExpertMemoryDemand;
-        float allReduceTime{};
+        float allReduceTime;
         unsigned int commFreq;
         unsigned int groupMemCapacity{};
         float intraCommunicationCost;
@@ -61,6 +61,7 @@ namespace aristos{
                 const ModelConfig& m) :
                 totalExpertCost(_totalCost),
                 totalExpertMemoryDemand(_totalMem), effectiveWorld(_effW){
+            allReduceTime = 0.0f; // default, in case of inference where this is indeed 0
             globalMoEStages = getGlobalMoEStages(m);
             intraCommunicationCost = 0.0;
             p2pBuffer = m.p2pBuffer;

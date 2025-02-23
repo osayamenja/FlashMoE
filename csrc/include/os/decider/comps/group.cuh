@@ -27,6 +27,7 @@ namespace aristos{
               const std::vector<floatPair>& dp):
               id(_id), memCapacity(_mem), deviceRate(_rate),
               objArgs(_args),worldSize(_world){
+            currentObjective = obj(objArgs);
             internalNodes.insert(id);
             p2pTimes = dp;
         }
@@ -41,7 +42,7 @@ namespace aristos{
         }
 
         __forceinline__
-        bool shouldMerge(Group& neighbor, const ARArgs& arArgs, const unsigned int& effectiveW){
+        bool shouldMerge(Group& neighbor, float const& aRt, const unsigned int& effectiveW){
             if(visited.contains(neighbor.id)){
                 if(auto [myState, theirState] = visited.at(neighbor.id);
                     myState == numNodes() && theirState == neighbor.numNodes()){
@@ -67,7 +68,7 @@ namespace aristos{
             objArgs.totalDeviceRate = deviceRate + neighbor.deviceRate;
             objArgs.groupMemCapacity = memCapacity + neighbor.memCapacity;
 
-            cachedAllReduceTime = allReduceT(arArgs);
+            cachedAllReduceTime = aRt;
             neighbor.cachedAllReduceTime = cachedAllReduceTime;
             objArgs.intraCommunicationCost = evalP2PTime(neighbor, numNodes() + neighbor.numNodes());
             objArgs.allReduceTime = cachedAllReduceTime;

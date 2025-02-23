@@ -186,9 +186,11 @@ namespace aristos {
         const auto m = ModelConfig(24, 1, 256, 4, 24, 16, 512);
 
         auto start = clk::now();
-        decider::decide(adj, wG, nExp*expertGigaFlops, nExp, m);
+        constexpr Decider<JobType::training> judge{};
+
+        decide(adj, wG, nExp*expertGigaFlops, nExp, m);
         end = clk::now() - start;
-        const auto spec = decider::decide(adj, wG,
+        const auto spec = decide(adj, wG,
             nExp*expertGigaFlops, nExp, m);
         fmt::println("Measured time for the Decider is {}s", end.count());
         fmt::println("Device to Groups: {}", spec);
@@ -204,7 +206,7 @@ namespace aristos {
             ePwG[i] = Worker{i, wG[wId].processingRate, wG[wId].memoryCapacity};
         }
         start = clk::now();
-        decider::assign(ePwG, epWorld, experts, nExp, ePs);
+        assign(ePwG, epWorld, experts, nExp, ePs);
         end += clk::now() - start;
         fmt::println("Total time is {}s", end.count());
         std::vector<uint> assignment (nExp);

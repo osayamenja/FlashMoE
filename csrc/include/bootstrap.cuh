@@ -109,12 +109,12 @@ namespace aristos{
             iC.gradBuffer,
         };
 
-        for (uint i = 0; i < world; ++i) {
+        for (uint16_t i = 0; i < world; ++i) {
             const auto [t, m] = attributes[i];
             wG[i] = Worker{i, t, m};
         }
         const auto adj = make_tensor(aP, make_layout(cute::make_shape(world, world), cute::LayoutRight{}));
-        const auto dTg = decider::decide(adj, wG, iC.numExperts,
+        const auto dTg = decide(adj, wG, iC.numExperts,
             iC.numExperts, mC);
         auto epWorld = subsets(dTg, pT, rank);
         for (uint i = 0; i < iC.numExperts; ++i) {
@@ -123,14 +123,14 @@ namespace aristos{
         }
         // repurpose memory as the expert parallel group
         uint16_t epRank = 0U;
-        for (uint i = 0; i < epWorld; ++i) {
+        for (uint16_t i = 0; i < epWorld; ++i) {
             const auto wRank = pT[i];
             if (wRank == rank) {
                 epRank = i;
             }
             ePwG[i] = Worker{i, wG[wRank].processingRate, wG[wRank].memoryCapacity};
         }
-        decider::assign(ePwG, epWorld, experts, iC.numExperts, ePs);
+        assign(ePwG, epWorld, experts, iC.numExperts, ePs);
         uint16_t expertSlots = 0U;
         // compute expert slots for our group
         for (uint16_t i = 0; i < iC.numExperts; ++i) {
@@ -167,12 +167,12 @@ namespace aristos{
                 for (uint i = 0; i < ePw; ++i) {
                     const auto wRank = pTs[i];
                     ePwG[i] = Worker{
-                        wRank,
+                        static_cast<uint16_t>(wRank),
                         wG[wRank].processingRate,
                         wG[wRank].memoryCapacity
                     };
                 }
-                decider::assign(ePwG, epWorld, experts, iC.numExperts, ePsX);
+                assign(ePwG, epWorld, experts, iC.numExperts, ePsX);
                 for (uint16_t i = 0; i < iC.numExperts; ++i) {
                     const auto wIdx = ePsX[i];
                     const uint16_t tally = scratch[wIdx] + 1U;

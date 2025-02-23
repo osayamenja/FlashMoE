@@ -11,8 +11,8 @@ namespace aristos{
     template<typename F> requires cuda::std::is_floating_point_v<F>
     __forceinline__
     bool floatEqual(const F& a, const F& b){
-        return cuda::std::abs(a - b) <=
-               ( (cuda::std::abs(a) > cuda::std::abs(b) ? cuda::std::abs(b) : cuda::std::abs(a)) * cuda::std::numeric_limits<F>::epsilon());
+        return fabs(a - b) <=
+               ( (fabs(a) > fabs(b) ? fabs(b) : fabs(a)) * cuda::std::numeric_limits<F>::epsilon());
     }
 
     struct Edge{

@@ -20,11 +20,13 @@
 #include "comps/group.cuh"
 #include "comps/worker.cuh"
 
-namespace aristos::decider{
+namespace aristos{
     /// Necessary to use path halving to ensure amortized "practical constant" time
     using DisjointSet = boost::disjoint_sets_with_storage<boost::identity_property_map,
             boost::identity_property_map, boost::find_with_path_halving>;
-    template <JobType jT = JobType::training>
+    template <
+        JobType jT = JobType::training
+    >
     struct Decider {
         static_assert(jT == JobType::training);
         template<
@@ -33,12 +35,12 @@ namespace aristos::decider{
         requires(cute::is_tensor_v<AdjMatrix> && rank(AdjMatrix{}) == 2 &&
             cuda::std::is_same_v<typename AdjMatrix::value_type, floatPair>)
         __forceinline__ __host__
-        void operator()(const AdjMatrix& adjMatrix,
-            uint* __restrict__ dTg, /*devices to groups*/
+        bool operator()(const AdjMatrix& adjMatrix,
             const Worker* __restrict__ const& workers,
             const unsigned int& totalExpertCost,
             const unsigned int& totalExpertMem,
-            const ModelConfig& modelConfig) {
+            const ModelConfig& modelConfig,
+            uint* __restrict__ deviceToGroups) {
             const auto world = cute::size<0>(adjMatrix);
             auto infeasibleGroups = std::unordered_set<unsigned int>{};
             for(uint i = 0; i < world; ++i){
@@ -46,20 +48,22 @@ namespace aristos::decider{
                     infeasibleGroups.insert(w.id);
             }
             DisjointSet groups(world);
-            std::priority_queue<Edge, std::vector<Edge>, std::greater<>> candidateEdges;
+            const uint edgeLen = world * (world - 1);
+            uint current = 0U;
+            std::vector<Edge> candidateEdges(edgeLen);
             std::priority_queue<Edge> externalEdges;
             auto groupInfo = std::unordered_map<unsigned int, Group>{};
             auto effectiveWorld = world - infeasibleGroups.size();
-            for(int i = 0; i < world; ++i) {
+            for(uint i = 0; i < world; ++i) {
                 auto dp = std::vector<floatPair>(world);
-                for (int j = 0; j < world; ++j) {
+                for (uint j = 0; j < world; ++j) {
                     dp[j] = {0.0, 0.0};
                     if (i != j)[[likely]] {
                         const auto alpha = adjMatrix(i, j).alpha;
                         const auto beta = adjMatrix(i, j).beta;
-                        candidateEdges.emplace(i, j,
+                        candidateEdges[current++] = {i, j,
                                                  ObjArgs::p2pTransferTime(alpha, beta,
-                                                                          modelConfig.p2pBuffer));
+                                                                          modelConfig.p2pBuffer)};
                         externalEdges.emplace(i, j, ARArgs::bottleneck(alpha, beta,
                                                                          modelConfig.gradBuffer, 2));
                         /// Invert the edge for the dp table
@@ -84,9 +88,10 @@ namespace aristos::decider{
             }
 
             auto limbo = Edge::limboEdge();
-            while (!candidateEdges.empty()){
-                const auto candidate = candidateEdges.top();
-                candidateEdges.pop();
+            current = 0U;
+            std::ranges::sort(candidateEdges.begin(), candidateEdges.end(), std::less{});
+            while (current < edgeLen){
+                const auto candidate = candidateEdges[current++];
                 auto group1 = groups.find_set(candidate.node1);
                 auto group2 = groups.find_set(candidate.node2);
                 if (group1 == group2)[[likely]]{
@@ -117,7 +122,7 @@ namespace aristos::decider{
                     arArgs.numGroups -= 1;
                 }
                 arArgs.refresh(adjMatrix(extEdge.node1, extEdge.node2).alpha, adjMatrix(extEdge.node1, extEdge.node2).beta);
-                if(groupInfo.at(group1).shouldMerge(groupInfo.at(group2), arArgs, effectiveWorld)){
+                if(groupInfo.at(group1).shouldMerge(groupInfo.at(group2), allReduceT(arArgs), effectiveWorld)){
                     limbo = Edge::limboEdge();
                     groups.link(group1, group2);
                     auto parent = group1;
@@ -154,9 +159,112 @@ namespace aristos::decider{
                 }
             }
 
-            for (uint i = 0; i < world; ++i) {
-                dTg[i] = static_cast<uint>(groups.parents()[i]);
+            uint i = 0U;
+            for (const auto& groupId: groups.parents()) {
+                deviceToGroups[i++] = static_cast<uint>(groupId);
             }
+
+            return infeasibleGroups.size() > 0; // provably, this can only be 0 or 1
+        }
+    };
+    // No gradient all reduce modeling here
+    template <>
+    struct Decider<JobType::inference> {
+        template<
+            typename AdjMatrix
+        >
+        requires(cute::is_tensor_v<AdjMatrix> && rank(AdjMatrix{}) == 2 &&
+            cuda::std::is_same_v<typename AdjMatrix::value_type, floatPair>)
+        __forceinline__ __host__
+        bool operator()(const AdjMatrix& adjMatrix,
+            const Worker* __restrict__ const& workers,
+            const unsigned int& totalExpertCost,
+            const unsigned int& totalExpertMem,
+            const ModelConfig& modelConfig,
+            uint* __restrict__ deviceToGroups) {
+            const auto world = cute::size<0>(adjMatrix);
+            auto infeasibleGroups = std::unordered_set<unsigned int>{};
+            for(uint i = 0; i < world; ++i){
+                if(const auto w = workers[i]; w.memoryCapacity < totalExpertMem)
+                    infeasibleGroups.insert(w.id);
+            }
+            DisjointSet groups(world);
+            const uint edgeLen = world * (world - 1);
+            uint current = 0U;
+            std::vector<Edge> candidateEdges(edgeLen);
+            auto groupInfo = std::unordered_map<unsigned int, Group>{};
+            auto effectiveWorld = world - infeasibleGroups.size();
+            for(uint i = 0; i < world; ++i) {
+                auto dp = std::vector<floatPair>(world);
+                for (uint j = 0; j < world; ++j) {
+                    dp[j] = {0.0, 0.0};
+                    if (i != j)[[likely]] {
+                        const auto alpha = adjMatrix(i, j).alpha;
+                        const auto beta = adjMatrix(i, j).beta;
+                        candidateEdges[current++] = {i, j,
+                                                 ObjArgs::p2pTransferTime(alpha, beta,
+                                                                          modelConfig.p2pBuffer)};
+                        /// Invert the edge for the dp table
+                        dp[j] = adjMatrix(j, i);
+                    }
+                }
+                groupInfo.insert({i, Group(i,
+                                           workers[i].memoryCapacity,
+                                           workers[i].processingRate,
+                                           world,
+                                           ObjArgs(totalExpertCost, effectiveWorld, totalExpertMem, modelConfig),
+                                           dp)});
+            }
+            current = 0U;
+            std::ranges::sort(candidateEdges.begin(), candidateEdges.end(), std::less{});
+            while (current < edgeLen){
+                const auto candidate = candidateEdges[current++];
+                auto group1 = groups.find_set(candidate.node1);
+                auto group2 = groups.find_set(candidate.node2);
+                if (group1 == group2)[[likely]]{
+                    continue;
+                }
+                const bool satisfiesConstraint = groupInfo.at(group1).memCapacity + groupInfo.at(group2).memCapacity >= totalExpertMem;
+                if(groupInfo.at(group1).shouldMerge(groupInfo.at(group2), 0.0f, effectiveWorld)){
+                    groups.link(group1, group2);
+                    auto parent = group1;
+                    auto child = group2;
+                    if(group1 != groups.find_set(group1)){
+                        parent = group2;
+                        child = group1;
+                    }
+                    if(satisfiesConstraint){
+                        if(infeasibleGroups.contains(parent)){
+                            infeasibleGroups.erase(parent);
+                            effectiveWorld += groupInfo.at(parent).numNodes();
+                        }
+                        if(infeasibleGroups.contains(child)){
+                            infeasibleGroups.erase(child);
+                            effectiveWorld += groupInfo.at(child).numNodes();
+                        }
+                    }
+                    else{
+                        infeasibleGroups.erase(child);
+                    }
+                    groupInfo.at(parent).subsume(groupInfo.at(child));
+                    groupInfo.erase(child);
+                }
+            }
+            /// Post-processing
+            for(const auto& i: std::views::keys(groupInfo)){
+                if(infeasibleGroups.contains(i)){
+                    groupInfo.erase(i);
+                }
+            }
+
+            // If there is an infeasible group by this point,
+            // then all nodes would be in that group, therefore return an empty vector
+            uint i = 0U;
+            for (const auto& groupId: groups.parents()) {
+                deviceToGroups[i++] = static_cast<uint>(groupId);
+            }
+
+            return infeasibleGroups.size() > 0; // provably, this can only be 0 or 1
         }
     };
     template<
@@ -180,6 +288,7 @@ namespace aristos::decider{
                 infeasibleGroups.insert(w.id);
         }
         DisjointSet groups(world);
+        // min queue
         std::priority_queue<Edge, std::vector<Edge>, std::greater<>> candidateEdges;
         std::priority_queue<Edge> externalEdges;
         auto groupInfo = std::unordered_map<unsigned int, Group>{};
@@ -251,7 +360,7 @@ namespace aristos::decider{
                 arArgs.numGroups -= 1;
             }
             arArgs.refresh(adjMatrix(extEdge.node1, extEdge.node2).alpha, adjMatrix(extEdge.node1, extEdge.node2).beta);
-            if(groupInfo.at(group1).shouldMerge(groupInfo.at(group2), arArgs, effectiveWorld)){
+            if(groupInfo.at(group1).shouldMerge(groupInfo.at(group2), allReduceT(arArgs), effectiveWorld)){
                 limbo = Edge::limboEdge();
                 groups.link(group1, group2);
                 auto parent = group1;
