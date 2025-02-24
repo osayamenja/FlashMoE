@@ -8,6 +8,7 @@
 #include <cub/cub.cuh>
 #include <cuda/std/array>
 
+#include "../config.cuh"
 #include "../os/processor/gemm.cuh"
 #include "../types.cuh"
 #include "../atomics.cuh"
@@ -80,7 +81,7 @@ namespace aristos::gate {
                 (cute::get<1>(tileCoord) + 1 == tilesN ? 0 : cute::get<1>(tileCoord) + 1) * tilesM) + threadIdx.x;
 
             // cache
-            const auto nx = gArg.nx;
+            constexpr uint nx = ACC::E::value;
             auto* __restrict__ tP = gArg.tP;
             auto* __restrict__ eC = gArg.eC;
             auto* __restrict__ gMeC = gArg.gMeC;
@@ -144,8 +145,8 @@ namespace aristos::gate {
             // Handle padding before softmax
             if (cute::get<1>(tileCoord) + 1 == tilesN) {
                 #pragma unroll
-                for (uint i = 0; i < bN; ++i) {
-                    accumulator(i) = i < nx ? accumulator(i) : -cuda::std::numeric_limits<ElementC>::infinity();
+                for (uint i = bN; i < nx; ++i) {
+                    accumulator(i) = -cuda::std::numeric_limits<ElementC>::infinity();
                 }
             }
 
@@ -385,6 +386,8 @@ namespace aristos::gate {
             GateArgs const& gArg,
             ElementC* __restrict__ const& gateScratch,
             const uint16_t& k) {
+            // Get Static Config
+
             static_assert(cuda::std::is_same_v<ElementC, float> && cuda::std::is_same_v<ElementC, mp_t>);
             typename BlockGEMM::CollectiveMainloop mainLoop{};
             auto accumulator = cute::partition_fragment_C(typename BlockGEMM::MMA{}, typename BlockGEMM::TilerOut{});
@@ -492,7 +495,7 @@ namespace aristos::gate {
             ElementC cache[bN / wS];
             using BlockReduce = cub::BlockReduce<ElementC, threads>;
             auto* __restrict__ cS = CAST_TO(typename BlockReduce::TempStorage, gateScratch);
-            const auto sl = static_cast<float>(gArg.sl);
+            const auto sl = ACC::
             // Prior to reusing shared memory
             __syncthreads();
             // Reduce down columns with bespoke collective, completes in about 8.2 𝜇s
@@ -596,6 +599,7 @@ namespace aristos::gate {
         typename GPUType,
         GateReductionLevel g = GateReductionLevel::singleBlock,
         typename ElementC = float,
+        JobType jT = JobType::inference,
         typename MatrixA,
         typename MatrixB,
         typename MatrixC,
@@ -643,16 +647,20 @@ namespace aristos::gate {
         }
         __syncthreads();
 
-        // Compute Gate loss
-        auto* __restrict__ gBK = bookkeeping.gateBk();
-        auto* __restrict__ gL = bookkeeping.gL();
-        const auto fl = bookkeeping.brs;
 
-        for (unsigned int i = threads * blockIdx.x + threadIdx.x; i < gArg.nx; i+= threads * blocks) {
-            const auto me = gArg.gML[i];
-            const auto ce = gArg.gMeC[i];
-            atomicAdd(gL, __fdividef(me * ce, static_cast<mp_t>(gArg.nx)));
+        if constexpr (jT == JobType::training) {
+            // Compute Gate loss
+            auto* __restrict__ gBK = bookkeeping.gateBk();
+            auto* __restrict__ gL = bookkeeping.gL();
+            const auto fl = bookkeeping.brs;
+
+            for (unsigned int i = threads * blockIdx.x + threadIdx.x; i < gArg.nx; i+= threads * blocks) {
+                const auto me = gArg.gML[i];
+                const auto ce = gArg.gMeC[i];
+                atomicAdd(gL, __fdividef(me * ce, static_cast<mp_t>(gArg.nx)));
+            }
         }
+
 
         // wipe flags clean for next iteration
         for (unsigned int i = threads * blockIdx.x + threadIdx.x; i < fl; i += threads * blocks) {

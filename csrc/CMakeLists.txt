@@ -229,6 +229,7 @@ target_compile_definitions(csrc
         CAP_FACTOR=${CAP_FACTOR_V}
         DROP_TOKENS=${DROP_TOKENS_V}
         E_TOP_K=${E_TOP_K_V}
+        IS_TRAINING=${IS_TRAINING_V}
         HIDDEN_ACT=${HIDDEN_ACT_V}
         HIDDEN_SIZE=${HIDDEN_SIZE_V}
         I_SIZE=${I_SIZE_V}

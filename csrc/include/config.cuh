@@ -17,6 +17,7 @@ namespace aristos {
         using ActivationOp = AFunction<HIDDEN_ACT, GEA>::DT;
         using ActivationOpX = cute::identity;
         using PeakHardware = aristos::Hardware<ARISTOS_ARCH, 255>;
+        using JT = cute::C<IS_TRAINING? JobType::training : JobType::inference>;
         using S = cute::C<SEQ_LEN>;
         using P = cute::C<I_SIZE>;
         using H = cute::C<HIDDEN_SIZE>;
