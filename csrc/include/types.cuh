@@ -49,8 +49,11 @@
 #include <cuda/barrier>
 #include <cuda/std/tuple>
 #include <cuda/std/array>
+#include <cute/numeric/integral_constant.hpp>
 #include <cute/tensor.hpp>
 #include <cutlass/epilogue/thread/activation.h>
+
+#include "arch.cuh"
 
 namespace aristos{
     template<typename V>
@@ -299,6 +302,24 @@ namespace aristos{
         uint batchIdx;
         uint16_t seqBit;
         uint16_t tokensM; // <= BLOCK_M
+    };
+
+    /// Aristos Compile-time Config
+    struct ACC {
+        using GRL = cute::C<NUM_EXPERTS <= BLOCK_N ? GateReductionLevel::singleBlock :
+            GateReductionLevel::multiBlock>;
+        using TK = cute::C<E_TOP_K>;
+        using CM = cute::C<(E_TOP_K > 1) ? CombineMode::multithreaded : CombineMode::single>;
+        using Element = VCT<CM::value, DType<DTYPE>::DT>::Element;
+        using DTK = cute::C<DROP_TOKENS? DropTokens::yes : DropTokens::no>;
+        using ActivationOp = AFunction<HIDDEN_ACT, GEA>::DT;
+        using ActivationOpX = cute::identity;
+        using PeakHardware = aristos::Hardware<ARISTOS_ARCH, 255>;
+        using JT = cute::C<IS_TRAINING? JobType::training : JobType::inference>;
+        using S = cute::C<SEQ_LEN>;
+        using P = cute::C<I_SIZE>;
+        using H = cute::C<HIDDEN_SIZE>;
+        using E = cute::C<NUM_EXPERTS>;
     };
 
     /// A more apropos name would be "static storage" rather than registers.

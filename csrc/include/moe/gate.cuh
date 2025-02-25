@@ -8,15 +8,12 @@
 #include <cub/cub.cuh>
 #include <cuda/std/array>
 
-#include "../config.cuh"
 #include "../os/processor/gemm.cuh"
 #include "../types.cuh"
 #include "../atomics.cuh"
 
 namespace aristos::gate {
     struct GateArgs {
-        const uint sl;
-        const uint nx;
         TokenIdxTuple* tP;
         BookType* eC;
         mp_t* gMeC;
@@ -24,11 +21,10 @@ namespace aristos::gate {
         RingSoftmaxPayload* bRsP;
         RingTopKPayload* rTp;
         __device__
-        GateArgs(uint const& _sl, uint const& _nx,
-            TokenIdxTuple* const& _tP,
+        GateArgs(TokenIdxTuple* const& _tP,
             BookType* const& _eC, mp_t* const& _gMeC, mp_t* const& _gML,
             RingSoftmaxPayload* const& _bRsP, RingTopKPayload* const& _rTp) :
-        sl(_sl), nx(_nx), tP(_tP), eC(_eC), gMeC(_gMeC), gML(_gML), bRsP(_bRsP), rTp(_rTp) {}
+        tP(_tP), eC(_eC), gMeC(_gMeC), gML(_gML), bRsP(_bRsP), rTp(_rTp) {}
     };
     /// Fused GEMM, softmax, topKMask, and loss, assuming blocks >= tiles.N and no bias.
     /// Supporting the latter is trivial; the former requires a completely new algorithm
@@ -53,8 +49,7 @@ namespace aristos::gate {
             const MatrixB& weights, MatrixC const& routing,
             const unsigned int& tileIdx,
             GateArgs const& gArg,
-            ElementC* __restrict__ gateScratch,
-            const uint16_t& k) {
+            ElementC* __restrict__ gateScratch) {
             static_assert(cuda::std::is_same_v<ElementC, mp_t>);
             typename BlockGEMM::CollectiveMainloop mainLoop{};
             auto accumulator = cute::partition_fragment_C(typename BlockGEMM::MMA{}, typename BlockGEMM::TilerOut{});
@@ -82,6 +77,7 @@ namespace aristos::gate {
 
             // cache
             constexpr uint nx = ACC::E::value;
+            constexpr uint sl = ACC::S::value;
             auto* __restrict__ tP = gArg.tP;
             auto* __restrict__ eC = gArg.eC;
             auto* __restrict__ gMeC = gArg.gMeC;
@@ -208,7 +204,6 @@ namespace aristos::gate {
             ElementC cache[bN / wS]; // |cache| == 2
             using BlockReduce = cub::BlockReduce<ElementC, threads>;
             auto* __restrict__ cS = CAST_TO(typename BlockReduce::TempStorage, gateScratch);
-            const auto sl = static_cast<float>(gArg.sl);
             // Prior to reusing shared memory
             __syncthreads();
             // Reduce down columns with bespoke collective, completes in about 8.2 𝜇s
@@ -255,7 +250,8 @@ namespace aristos::gate {
             auto lSIdx = sIdx;
             bool shouldSweep = true;
 
-            for (uint16_t i = 0; i < k; ++i) {
+            #pragma unroll
+            for (uint16_t i = 0; i < ACC::TK::value; ++i) {
                 constexpr uint16_t phases = 2U;
                 const uint16_t batonPrefix = phases * (i / 2U); // needed as we alternate between two buffers
                 const uint16_t bPf = batonPrefix + 1U;
@@ -434,7 +430,7 @@ namespace aristos::gate {
             typename BlockGEMM::MMA tiledMMA{};
             const auto tCsC = tiledMMA.get_slice(threadIdx.x).partition_C(sC);
             // cache
-            const auto nx = gArg.nx;
+            constexpr uint nx = ACC::E::value;
             auto* __restrict__ tP = gArg.tP;
             auto* __restrict__ eC = gArg.eC;
             auto* __restrict__ gMeC = gArg.gMeC;
@@ -463,8 +459,8 @@ namespace aristos::gate {
 
             // Handle padding before softmax
             #pragma unroll
-            for (uint i = 0; i < bN; ++i) {
-                accumulator(i) = i < nx ? accumulator(i) : -cuda::std::numeric_limits<ElementC>::infinity();
+            for (uint i = nx; i < bN; ++i) {
+                accumulator(i) = -cuda::std::numeric_limits<ElementC>::infinity();
             }
 
             /// Reduce
@@ -609,11 +605,8 @@ namespace aristos::gate {
     void forward(const MatrixA& activations,
         const MatrixB& weights,
         MatrixC const& routing,
-        const uint16_t& k,
         ElementC* __restrict__ const& scratch){
         const auto gArg = GateArgs {
-                bookkeeping.sl,
-                bookkeeping.nx,
                 bookkeeping.tP(),
                 bookkeeping.eC(),
                 bookkeeping.gMeC(),
@@ -636,7 +629,7 @@ namespace aristos::gate {
             cute::ceil_div(cute::get<1>(routing.shape()), bN);
 
         for (unsigned int i = blockIdx.x; i < nTiles; i += blocks) {
-            fusedGate(activations, weights, routing, i, gArg, scratch, k);
+            fusedGate(activations, weights, routing, i, gArg, scratch);
         }
 
         __syncthreads();
@@ -650,10 +643,7 @@ namespace aristos::gate {
 
         if constexpr (jT == JobType::training) {
             // Compute Gate loss
-            auto* __restrict__ gBK = bookkeeping.gateBk();
             auto* __restrict__ gL = bookkeeping.gL();
-            const auto fl = bookkeeping.brs;
-
             for (unsigned int i = threads * blockIdx.x + threadIdx.x; i < gArg.nx; i+= threads * blocks) {
                 const auto me = gArg.gML[i];
                 const auto ce = gArg.gMeC[i];
@@ -661,8 +651,9 @@ namespace aristos::gate {
             }
         }
 
-
         // wipe flags clean for next iteration
+        auto* __restrict__ gBK = bookkeeping.gateBk();
+        const auto fl = bookkeeping.brs;
         for (unsigned int i = threads * blockIdx.x + threadIdx.x; i < fl; i += threads * blocks) {
             gBK[i] = uint2{0U, 0U};
         }

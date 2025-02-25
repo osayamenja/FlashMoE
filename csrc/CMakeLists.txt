@@ -76,7 +76,6 @@ add_executable(csrc main.cu
         include/os/os.cuh
         include/moe/expert.cuh
         include/throughput.cuh
-        include/config.cuh
         correctness.cuh
 )
 set_target_properties(csrc PROPERTIES

@@ -224,7 +224,8 @@ namespace aristos{
                 if (group1 == group2)[[likely]]{
                     continue;
                 }
-                const bool satisfiesConstraint = groupInfo.at(group1).memCapacity + groupInfo.at(group2).memCapacity >= totalExpertMem;
+                const bool satisfiesConstraint = groupInfo.at(group1).memCapacity +
+                    groupInfo.at(group2).memCapacity >= totalExpertMem;
                 if(groupInfo.at(group1).shouldMerge(groupInfo.at(group2), 0.0f, effectiveWorld)){
                     groups.link(group1, group2);
                     auto parent = group1;
