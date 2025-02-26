@@ -10,7 +10,6 @@
 #include "../os/os.cuh"
 #include "../os/processor/processor.cuh"
 #include "gate.cuh"
-#include "../config.cuh"
 
 namespace aristos::moe{
     __global__ __maxnreg__(ACC::PeakHardware::registers::value) void forward(

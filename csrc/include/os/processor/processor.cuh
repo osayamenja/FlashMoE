@@ -410,7 +410,7 @@ namespace aristos::processor{
         __shared__ Task currentTask;
         __shared__ ProcessorArgs pA;
         unsigned int signal = 0U;
-        unsigned int interrupt = 0U;
+        uint16_t interrupt = 0U;
         const auto rSeqBit = _seqBit;
         if (!threadIdx.x) {
             pA = ProcessorArgs{
