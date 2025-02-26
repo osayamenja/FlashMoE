@@ -442,6 +442,8 @@ namespace aristos{
     };
 
     struct __align__(16) Task {
+        using TST = uint16_t;
+        static_assert(BLOCK_M <= cuda::std::numeric_limits<TST>::max());
         // D = A * B + C
         // sensible sentinel values
         const cuda::std::byte* aData = nullptr;
@@ -451,13 +453,13 @@ namespace aristos{
         // crd2Idx(peer, expertIdx, offset)
         unsigned int syncIdx = 0UL;
         unsigned int tileIdx = 0U;
-        unsigned int peerIdx = 0U;
         //padded
         unsigned int M = 0U;
         unsigned int flagIdx = 0U;
         unsigned int batchIdx = 0U;
-        unsigned int expertIdx = 0U;
-        uint16_t tileSize = 0U; // <= BLOCK_M
+        uint16_t peerIdx = 0U;
+        uint16_t expertIdx = 0U;
+        TST tileSize = 0U; // <= BLOCK_M
         TaskType taskType = TaskType::Interrupt;
         bool isPeerRemote = false;
 

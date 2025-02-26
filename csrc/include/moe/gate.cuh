@@ -13,17 +13,67 @@
 #include "../atomics.cuh"
 
 namespace aristos::gate {
+    template<
+        GateReductionLevel g = GateReductionLevel::singleBlock,
+        JobType j = JobType::inference
+    >
     struct GateArgs {
-        TokenIdxTuple* tP;
-        BookType* eC;
-        mp_t* gMeC;
-        mp_t* gML;
-        RingSoftmaxPayload* bRsP;
-        RingTopKPayload* rTp;
+        static_assert(g == GateReductionLevel::singleBlock && j == JobType::inference);
+        TokenIdxTuple* __restrict__ tP;
+        BookType* __restrict__ eC;
         __device__
         GateArgs(TokenIdxTuple* const& _tP,
-            BookType* const& _eC, mp_t* const& _gMeC, mp_t* const& _gML,
-            RingSoftmaxPayload* const& _bRsP, RingTopKPayload* const& _rTp) :
+            BookType* const& _eC,
+            mp_t* const&,
+            mp_t* const&,
+            RingSoftmaxPayload* const&,
+            RingTopKPayload* const&) : tP(_tP), eC(_eC) {}
+    };
+    template<>
+    struct GateArgs<GateReductionLevel::singleBlock, JobType::training> {
+        TokenIdxTuple* __restrict__ tP;
+        BookType* __restrict__ eC;
+        mp_t* __restrict__ gMeC;
+        mp_t* __restrict__ gML;
+        __device__
+        GateArgs(TokenIdxTuple* const& _tP,
+            BookType* const& _eC,
+            mp_t* const& _gMeC,
+            mp_t* const& _gML,
+            RingSoftmaxPayload* const&,
+            RingTopKPayload* const&) :
+        tP(_tP), eC(_eC), gMeC(_gMeC), gML(_gML) {}
+    };
+    template<>
+    struct GateArgs<GateReductionLevel::multiBlock, JobType::inference> {
+        TokenIdxTuple* __restrict__ tP;
+        BookType* __restrict__ eC;
+        RingSoftmaxPayload* __restrict__ bRsP;
+        RingTopKPayload* __restrict__ rTp;
+        __device__
+        GateArgs(TokenIdxTuple* const& _tP,
+            BookType* const& _eC,
+            mp_t* const&,
+            mp_t* const&,
+            RingSoftmaxPayload* const& _bRsP,
+            RingTopKPayload* const& _rTp) :
+        tP(_tP), eC(_eC), bRsP(_bRsP), rTp(_rTp) {}
+    };
+    template<>
+    struct GateArgs<GateReductionLevel::multiBlock, JobType::training> {
+        TokenIdxTuple* __restrict__ tP;
+        BookType* __restrict__ eC;
+        mp_t* __restrict__ gMeC;
+        mp_t* __restrict__ gML;
+        RingSoftmaxPayload* __restrict__ bRsP;
+        RingTopKPayload* __restrict__ rTp;
+        __device__
+        GateArgs(TokenIdxTuple* const& _tP,
+            BookType* const& _eC,
+            mp_t* const& _gMeC,
+            mp_t* const& _gML,
+            RingSoftmaxPayload* const& _bRsP,
+            RingTopKPayload* const& _rTp) :
         tP(_tP), eC(_eC), gMeC(_gMeC), gML(_gML), bRsP(_bRsP), rTp(_rTp) {}
     };
     /// Fused GEMM, softmax, topKMask, and loss, assuming blocks >= tiles.N and no bias.
@@ -39,6 +89,7 @@ namespace aristos::gate {
             typename MatrixA,
             typename MatrixB,
             typename MatrixC,
+            typename GArg,
             typename ElementC,
             unsigned int elems = GPUType::rScratch::value,
             unsigned int sharedSize = GPUType::sharedMemory::value
@@ -48,22 +99,31 @@ namespace aristos::gate {
             const MatrixA& activations,
             const MatrixB& weights, MatrixC const& routing,
             const unsigned int& tileIdx,
-            GateArgs const& gArg,
+            GArg const& gArg,
             ElementC* __restrict__ gateScratch) {
+            constexpr uint S = ACC::S::value;
+            constexpr auto M = ACC::S::value;
+            constexpr auto K = ACC::H::value;
+            constexpr auto E = ACC::E::value;
+            constexpr auto k = ACC::TK::value;
+            constexpr auto jT = ACC::JT::value;
+
             static_assert(cuda::std::is_same_v<ElementC, mp_t>);
             typename BlockGEMM::CollectiveMainloop mainLoop{};
             auto accumulator = cute::partition_fragment_C(typename BlockGEMM::MMA{}, typename BlockGEMM::TilerOut{});
             cute::clear(accumulator);
             constexpr auto bM = cute::get<0>(typename BlockGEMM::BlockTiler{});
             constexpr auto bN = cute::get<1>(typename BlockGEMM::BlockTiler{});
+            constexpr auto bK = cute::get<2>(typename BlockGEMM::BlockTiler{});
             constexpr auto threads = BlockGEMM::GEMM::block_dim.x;
 
-            // padded to fill bM
-            const auto tilesM = cute::ceil_div(cute::get<0>(routing.shape()), bM);
+            constexpr auto tilesM = M / bM;
             // padded to fill bN
-            const auto tilesN = cute::ceil_div(cute::get<1>(routing.shape()), bN);
+            constexpr auto tilesN = cute::ceil_div(E, bN);
 
-            const auto tileCoord = idx2crd(tileIdx, cute::Shape(tilesM, tilesN), cute::Stride(tilesN, 1));
+            const auto tileCoord = idx2crd(tileIdx,
+                cute::Shape<cute::Int<tilesM>, cute::Int<tilesN>>{},
+                    cute::Stride<cute::Int<tilesN>, cute::_1>{});
             const auto ctaCoord = make_coord(cute::get<0>(tileCoord), cute::get<1>(tileCoord), cute::_);
             const auto gA = cute::local_tile(activations, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1, cute::X,cute::_1>{});
             const auto gB = cute::local_tile(weights, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step< cute::X,cute::_1,cute::_1>{});
@@ -74,14 +134,6 @@ namespace aristos::gate {
             const auto myTileOffset = bM * (cute::get<0>(tileCoord) + cute::get<1>(tileCoord) * tilesM) + threadIdx.x;
             const auto nextTileOffset = bM * (cute::get<0>(tileCoord) +
                 (cute::get<1>(tileCoord) + 1 == tilesN ? 0 : cute::get<1>(tileCoord) + 1) * tilesM) + threadIdx.x;
-
-            // cache
-            constexpr uint nx = ACC::E::value;
-            constexpr uint sl = ACC::S::value;
-            auto* __restrict__ tP = gArg.tP;
-            auto* __restrict__ eC = gArg.eC;
-            auto* __restrict__ gMeC = gArg.gMeC;
-            auto* __restrict__ gML = gArg.gML;
 
             // Block Ring SoftMax pointers
             auto* brsMailbox = gArg.bRsP + myTileOffset;
@@ -139,10 +191,12 @@ namespace aristos::gate {
             }
 
             // Handle padding before softmax
-            if (cute::get<1>(tileCoord) + 1 == tilesN) {
-                #pragma unroll
-                for (uint i = nx - ; i < nx; ++i) {
-                    accumulator(i) = -cuda::std::numeric_limits<ElementC>::infinity();
+            if constexpr (E % bN != 0) {
+                if (cute::get<1>(tileCoord) + 1 == tilesN) {
+                    #pragma unroll
+                    for (uint i = E - E / bN * bN; i < bN; ++i) {
+                        accumulator(i) = -cuda::std::numeric_limits<ElementC>::infinity();
+                    }
                 }
             }
 
@@ -220,7 +274,7 @@ namespace aristos::gate {
                 // Only the first warp aggregates atomically, as other warps have garbage values
                 #pragma unroll
                 for (uint i = 0; i < bN / wS; ++i) {
-                    atomicAdd(gML + (threadIdx.x + i * wS), __fdividef(cache[i], sl));
+                    atomicAdd(gML + (threadIdx.x + i * wS), __fdividef(cache[i], S));
                 }
             }
 
@@ -346,15 +400,15 @@ namespace aristos::gate {
             }
 
             if (threadIdx.x < bN) {
-                startIndices[threadIdx.x] = atomicAdd(eC + threadIdx.x, cachedSelected);
-                atomicAdd(gMeC + threadIdx.x, __fdividef(static_cast<ElementC>(cachedSelected),
-                    static_cast<ElementC>(sl)));
+                startIndices[threadIdx.x] = atomicAdd(gArg.eC + threadIdx.x, cachedSelected);
+                atomicAdd(gArg.gMec + threadIdx.x, __fdividef(static_cast<ElementC>(cachedSelected),
+                    static_cast<ElementC>(S)));
             }
             __syncthreads();
             #pragma unroll
             for (uint i = 0; i < bN; ++i) {
                 if (rTopK[i]) {
-                    tP[startIndices[i] + myIndices[i] - 1] =
+                    gArg.tP[startIndices[i] + myIndices[i] - 1] =
                         TokenIdxTuple{bM * cute::get<0>(tileCoord) + threadIdx.x, mCw};
                 }
             }
@@ -371,6 +425,7 @@ namespace aristos::gate {
             typename MatrixA,
             typename MatrixB,
             typename MatrixC,
+            typename GArg,
             typename ElementC,
             unsigned int elems = GPUType::rScratch::value,
             unsigned int sharedSize = GPUType::sharedMemory::value
@@ -379,10 +434,13 @@ namespace aristos::gate {
         void operator()(const MatrixA& activations,
             const MatrixB& weights, MatrixC const& routing,
             const unsigned int& tileIdx,
-            GateArgs const& gArg,
-            ElementC* __restrict__ const& gateScratch,
-            const uint16_t& k) {
-            // Get Static Config
+            GArg const& gArg,
+            ElementC* __restrict__ const& gateScratch) {
+            // Matrix dimensions
+            constexpr auto M = ACC::S::value;
+            constexpr auto K = ACC::H::value;
+            constexpr auto E = ACC::E::value;
+            constexpr auto k = ACC::TK::value;
             constexpr auto jT = ACC::JT::value;
             static_assert(cuda::std::is_same_v<ElementC, float> && cuda::std::is_same_v<ElementC, mp_t>);
             typename BlockGEMM::CollectiveMainloop mainLoop{};
@@ -390,15 +448,17 @@ namespace aristos::gate {
             cute::clear(accumulator);
             constexpr auto bM = cute::get<0>(typename BlockGEMM::BlockTiler{});
             constexpr auto bN = cute::get<1>(typename BlockGEMM::BlockTiler{});
+            constexpr auto bK = cute::get<2>(typename BlockGEMM::BlockTiler{});
             static_assert(cute::size(accumulator) == bN);
             constexpr auto threads = BlockGEMM::GEMM::block_dim.x;
 
-            // padded to fill bM
-            const auto tilesM = cute::ceil_div(cute::get<0>(routing.shape()), bM);
-            // padded to fill bN
-            const auto tilesN = cute::ceil_div(cute::get<1>(routing.shape()), bN);
+            constexpr auto tilesM = M / bM;
+            constexpr auto tilesN = cute::ceil_div(E, bN);
+            constexpr auto tilesK = K / bK;
 
-            const auto tileCoord = idx2crd(tileIdx, cute::Shape(tilesM, tilesN), cute::Stride(tilesN, 1));
+            const auto tileCoord = idx2crd(tileIdx,
+                cute::Shape<cute::Int<tilesM>, cute::Int<tilesN>>{},
+                    cute::Stride<cute::Int<tilesN>, cute::_1>{});
             const auto ctaCoord = make_coord(cute::get<0>(tileCoord), cute::get<1>(tileCoord), cute::_);
             const auto gA = cute::local_tile(activations, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1, cute::X,cute::_1>{});
             const auto gB = cute::local_tile(weights, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step< cute::X,cute::_1,cute::_1>{});
@@ -406,8 +466,8 @@ namespace aristos::gate {
 
             static_assert(cuda::std::numeric_limits<ElementC>::is_iec559, "IEEE 754 required");
             static_assert(cuda::std::numeric_limits<ElementC>::has_infinity);
-            auto k_tile_iter = cute::make_coord_iterator(size<2>(gA));
-            int k_tile_count = size<2>(gA);
+            auto k_tile_iter = cute::make_coord_iterator(tilesK);
+            int k_tile_count = tilesK;
 
             mainLoop(
                 accumulator,
@@ -429,10 +489,6 @@ namespace aristos::gate {
             const auto sC = cute::make_tensor(cute::make_smem_ptr(gateScratch), sCLay);
             typename BlockGEMM::MMA tiledMMA{};
             const auto tCsC = tiledMMA.get_slice(threadIdx.x).partition_C(sC);
-            // cache
-            constexpr uint nx = ACC::E::value;
-            auto* __restrict__ tP = gArg.tP;
-            auto* __restrict__ eC = gArg.eC;
 
             // Begin softmax
             // using notation from https://courses.cs.washington.edu/courses/cse599m/23sp/notes/flashattn.pdf
@@ -457,7 +513,7 @@ namespace aristos::gate {
 
             // Handle padding before softmax
             #pragma unroll
-            for (uint i = nx; i < bN; ++i) {
+            for (uint i = E; i < bN; ++i) {
                 accumulator(i) = -cuda::std::numeric_limits<ElementC>::infinity();
             }
 
@@ -485,7 +541,7 @@ namespace aristos::gate {
 
             // Begin loss computation and global token ordering construction
             constexpr auto wS = 32U; // warpSize
-            constexpr auto sl = ACC::S::value;
+            constexpr auto S = ACC::S::value;
             if constexpr (jT == JobType::training) {
                 auto* __restrict__ gML = gArg.gML;
                 static_assert(bN % wS == 0);
@@ -508,7 +564,7 @@ namespace aristos::gate {
                     // Only the first warp aggregates atomically, as other warps have garbage values
                     #pragma unroll
                     for (uint i = 0; i < bN / wS; ++i) {
-                        atomicAdd(gML + (threadIdx.x + i * wS), __fdividef(cache[i], sl));
+                        atomicAdd(gML + (threadIdx.x + i * wS), __fdividef(cache[i], S));
                     }
                 }
             }
@@ -578,18 +634,18 @@ namespace aristos::gate {
             }
 
             if (threadIdx.x < bN) {
-                startIndices[threadIdx.x] = atomicAdd(eC + threadIdx.x, cachedSelected);
+                startIndices[threadIdx.x] = atomicAdd(gArg.eC + threadIdx.x, cachedSelected);
                 if constexpr (jT == JobType::training) {
                     auto* __restrict__ gMeC = gArg.gMeC;
                     atomicAdd(gMeC + threadIdx.x, __fdividef(static_cast<ElementC>(cachedSelected),
-                    static_cast<ElementC>(sl)));
+                    static_cast<ElementC>(S)));
                 }
             }
             __syncthreads();
             #pragma unroll
             for (uint i = 0; i < bN; ++i) {
                 if (rTopK[i]) {
-                    tP[startIndices[i] + myIndices[i] - 1] =
+                    gArg.tP[startIndices[i] + myIndices[i] - 1] =
                         TokenIdxTuple{bM * cute::get<0>(tileCoord) + threadIdx.x, mCw};
                 }
             }
@@ -597,21 +653,19 @@ namespace aristos::gate {
     };
 
     template<
-        typename GPUType,
-        GateReductionLevel g = GateReductionLevel::singleBlock,
-        typename ElementC = float,
-        JobType jT = JobType::inference,
+        typename ElementC,
         typename MatrixA,
         typename MatrixB,
-        typename MatrixC,
-        unsigned int blocks = GPUType::blocks::value
+        typename MatrixC
     >
     __device__ __forceinline__
     void forward(const MatrixA& activations,
         const MatrixB& weights,
         MatrixC const& routing,
         ElementC* __restrict__ const& scratch){
-        const auto gArg = GateArgs {
+        constexpr auto g = ACC::GRL::value;
+        constexpr auto jT = ACC::JT::value;
+        const auto gArg = GateArgs<g, jT> {
                 bookkeeping.tP(),
                 bookkeeping.eC(),
                 bookkeeping.gMeC(),
@@ -619,7 +673,9 @@ namespace aristos::gate {
                 bookkeeping.bRsP(),
                 bookkeeping.rTp()
         };
-        assert(__isShared(scratch));
+        using GPUType = ACC::PeakHardware;
+        // ALL SMs execute this function
+        constexpr auto blocks = GPUType::blocks::value;
         static_assert(cuda::std::is_same_v<mp_t, ElementC>);
         using ElementA = typename MatrixA::value_type;
         using ElementB = typename MatrixB::value_type;
@@ -632,7 +688,7 @@ namespace aristos::gate {
         FusedGate<g, Operation, GPUType> fusedGate{};
 
         constexpr auto nT = (ACC::S::value / bM) * (ACC::E::value / bN);
-
+        #pragma unroll
         for (unsigned int i = blockIdx.x; i < nT; i += blocks) {
             fusedGate(activations, weights, routing, i, gArg, scratch);
         }
@@ -644,8 +700,6 @@ namespace aristos::gate {
             bookkeeping.dB()->arrive_and_wait();
         }
         __syncthreads();
-
-
         if constexpr (jT == JobType::training) {
             // Compute Gate loss
             auto* __restrict__ gL = bookkeeping.gL();

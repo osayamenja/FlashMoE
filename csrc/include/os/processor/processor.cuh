@@ -36,7 +36,7 @@ namespace aristos::processor{
             const unsigned int& N,
             const unsigned int& tileIdx,
             const uint16_t& tileSize,
-            const unsigned int& expertIdx) const {
+            const uint16_t& expertIdx) const {
             using BlockTiler = cute::Shape<cute::Int<BLOCK_M>, cute::Int<BLOCK_N>>;
             constexpr BlockTiler tiler{};
             constexpr auto bM = cute::get<0>(tiler);
@@ -370,10 +370,6 @@ namespace aristos::processor{
         Task* __restrict__ gtQ = nullptr;
         Task* __restrict__ tQ = nullptr;
         unsigned int* __restrict__ tQS = nullptr;
-        unsigned int pd = 0U;
-        unsigned int tokenSize = 0U;
-        unsigned int tN = 0U;
-        unsigned int tNx = 0U;
 
         ProcessorArgs() = default;
         __device__
@@ -383,13 +379,8 @@ namespace aristos::processor{
             flagsType* const& _flags,
             Task* const& _gtQ,
             Task* const& _tQ,
-            unsigned int* const& _tQS,
-            unsigned int const& _pd,
-            unsigned int const& _tokenSize,
-            unsigned int const& _tN,
-            unsigned int const& _tNx) :
-        sQ(_sQ), pDB(_pDB), tQH(_tQH), flags(_flags), gtQ(_gtQ), tQ(_tQ), tQS(_tQS), pd(_pd),
-        tokenSize(_tokenSize), tN(_tN), tNx(_tNx) {}
+            unsigned int* const& _tQS) :
+        sQ(_sQ), pDB(_pDB), tQH(_tQH), flags(_flags), gtQ(_gtQ), tQ(_tQ), tQS(_tQS) {}
     };
 
     template<
@@ -405,10 +396,11 @@ namespace aristos::processor{
     __device__ __forceinline__
     void start(cuda::std::byte* const& workspace,
         ScaleWeights const& sW, const uint16_t& _seqBit){
-        static_assert(sizeof(SignalPayload<PacketStage::last>) == sizeof(unsigned long long int)
-            && alignof(SignalPayload<PacketStage::last>) == alignof(unsigned long long int));
+        static_assert(sizeof(SignalPayload<PacketStage::last>) == sizeof(flagsType)
+            && alignof(SignalPayload<PacketStage::last>) == alignof(flagsType));
         __shared__ Task currentTask;
         __shared__ ProcessorArgs pA;
+
         unsigned int signal = 0U;
         uint16_t interrupt = 0U;
         const auto rSeqBit = _seqBit;
@@ -420,11 +412,7 @@ namespace aristos::processor{
                 bookkeeping.flags,
                 bookkeeping.tQ(),
                 bookkeeping.tQ() + bookkeeping.tPs * SUBSCRIBERS, // should be the external Q
-                bookkeeping.tQS(),
-                bookkeeping.pd,
-                bookkeeping.ed,
-                bookkeeping.tN,
-                Bookkeeping::tiles<BLOCK_N>(bookkeeping.pd)
+                bookkeeping.tQS()
             };
         }
         using Operation = BlockMM<GPUType, ElementA, ElementB, ElementC, ActivationOp>;
@@ -520,8 +508,8 @@ namespace aristos::processor{
                         currentTask.tileIdx);
                     __syncthreads();
                     if (!threadIdx.x) {
-                        // Pack payload into single signal word
-                        auto flagSignal = SignalPayload<PacketStage::last>{
+                        // Pack payload into single signal word of 8 bytes
+                        const auto flagSignal = SignalPayload<PacketStage::last>{
                             currentTask.batchIdx,
                             rSeqBit,
                             currentTask.tileSize
@@ -534,18 +522,18 @@ namespace aristos::processor{
                                 nvshmem_putmem_signal_nbi(currentTask.cData[postIndex], currentTask.cData[postIndex],
                                     currentTask.tileSize * pA.tokenSize * sizeof(ElementA),
                                     pA.flags + currentTask.flagIdx,
-                                    *CAST_TO(uint64_t, &flagSignal), NVSHMEM_SIGNAL_SET,
+                                    *CONST_CAST_TO(flagsType, &flagSignal), NVSHMEM_SIGNAL_SET,
                                     currentTask.peerIdx);
                             }
                         }
                         else {
-                            // Below is expensive, so we only invoke when necessary
                             __threadfence_system();
+
                             // send individual tile, no batching here
-                            // Already did the network transfer in fGET, so set signal only
-                            nvshmemx_signal_op(pA.flags + currentTask.flagIdx,
-                             *CAST_TO(uint64_t, &flagSignal), NVSHMEM_SIGNAL_SET,
-                             currentTask.peerIdx);
+                            // Already did the network transfer, so set signal only
+                            /*nvshmemx_signal_op(pA.flags + currentTask.flagIdx,
+                             *CAST_TO(flagsType, &flagSignal), NVSHMEM_SIGNAL_SET,
+                             currentTask.peerIdx);*/
                         }
                     }
                 }

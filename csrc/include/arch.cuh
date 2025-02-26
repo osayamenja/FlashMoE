@@ -8,14 +8,72 @@
 #include <cute/numeric/integral_constant.hpp>
 #define BASE_SHARED_SIZE 16 * 1024U
 #define BASE_PIPE_STAGES 2U
+#define MAX_THREADS_PER_SM 2048U
 namespace aristos {
     template<unsigned int arch>
     concept SupportedArch = arch >= 700;
 
+    __device__
+    // Uses 48KB as upper bound rather than hardware maximum.
+    // Avoids setting cudaFuncAttribute
+    enum class UseSharedBound {
+        yes,
+        no
+    };
     __host__ __device__
     enum class Board {
         pcie,
         sxm,
+    };
+
+    template<
+        unsigned int Arch,
+        unsigned int blocksPerSM,
+        unsigned int sharedSlice,
+        UseSharedBound u
+    >
+    requires(blocksPerSM <= MAX_THREADS_PER_SM / THREADS && blocksPerSM > 0
+        && sharedSlice == BASE_SHARED_SIZE || sharedSlice == BASE_SHARED_SIZE * 2)
+    struct ArchShared {
+        static_assert(Arch == 700 || Arch == 800 || Arch == 900, "Unregistered Config!");
+    };
+
+    template<
+        unsigned int blocksPerSM,
+        unsigned int sharedSlice,
+        UseSharedBound u
+    >
+    struct ArchShared<700, blocksPerSM, sharedSlice, u> {
+        using Max = cute::C<96 * 1024U>;
+        using Spare = cute::C<u == UseSharedBound::yes ?
+            cute::min(48 * 1024U - (sharedSlice + 1024U),
+                (Max::value - blocksPerSM * (sharedSlice + 1024U)) / blocksPerSM)
+                    :(Max::value - blocksPerSM * (sharedSlice + 1024U)) / blocksPerSM>;
+    };
+    template<
+        unsigned int blocksPerSM,
+        unsigned int sharedSlice,
+        UseSharedBound u
+    >
+    struct ArchShared<800, blocksPerSM, sharedSlice, u> {
+        using Max = cute::C<164 * 1024U>;
+        using Spare = cute::C<u == UseSharedBound::yes ?
+            cute::min(48 * 1024U - (sharedSlice + 1024U),
+                (Max::value - blocksPerSM * (sharedSlice + 1024U)) / blocksPerSM)
+                    :(Max::value - blocksPerSM * (sharedSlice + 1024U)) / blocksPerSM>;
+    };
+
+    template<
+        unsigned int blocksPerSM,
+        unsigned int sharedSlice,
+        UseSharedBound u
+    >
+    struct ArchShared<900, blocksPerSM, sharedSlice, u> {
+        using Max = cute::C<228 * 1024U>;
+        using Spare = cute::C<u == UseSharedBound::yes ?
+            cute::min(48 * 1024U - (sharedSlice + 1024U),
+                (Max::value - blocksPerSM * (sharedSlice + 1024U)) / blocksPerSM)
+                    :(Max::value - blocksPerSM * (sharedSlice + 1024U)) / blocksPerSM>;
     };
 
     template<unsigned int blocks>
@@ -35,149 +93,172 @@ namespace aristos {
     struct Hardware {
         static_assert(Arch == 800 && maxRegisters == 128 && b == Board::pcie,
             "Unregistered Arch");
+        using blocksPerSM = cute::C<4U>;
         using arch = cute::C<800U>;
         using registers = cute::C<128U>;
-        using blocks = cute::C<4U * 108>;
+        using blocks = cute::C<blocksPerSM::value * 108>;
         using bKBase = cute::C<8U>;
         using rScratch = cute::C<32U>;
         using pipeStages = cute::C<BASE_PIPE_STAGES * 2>;
         using sharedMemory = cute::C<BASE_SHARED_SIZE * 2>;
+        using spare = ArchShared<800U, blocksPerSM::value, sharedMemory::value, UseSharedBound::yes>::Spare;
         using OS = OSD<blocks::value>;
     };
 
     template<>
     struct Hardware<800, 96> {
+        using blocksPerSM = cute::C<5U>;
         using arch = cute::C<800U>;
         using registers = cute::C<96U>;
-        using blocks = cute::C<5U * 108>;
+        using blocks = cute::C<blocksPerSM::value * 108>;
         using bKBase = cute::C<8U>;
         using rScratch = cute::C<32U>;
         using sharedMemory = cute::C<BASE_SHARED_SIZE>;
         using pipeStages = cute::C<BASE_PIPE_STAGES>;
+        using spare = ArchShared<800U, blocksPerSM::value, sharedMemory::value, UseSharedBound::yes>::Spare;
         using OS = OSD<blocks::value>;
     };
 
     template<>
     struct Hardware<800, 255> {
+        using blocksPerSM = cute::C<2U>;
         using arch = cute::C<800U>;
         using registers = cute::C<255U>;
-        using blocks = cute::C<2U * 108>;
+        using blocks = cute::C<blocksPerSM::value * 108>;
         using bKBase = cute::C<8U>;
         using rScratch = cute::C<64U>;
         using pipeStages = cute::C<BASE_PIPE_STAGES * 2>;
         using sharedMemory = cute::C<BASE_SHARED_SIZE * 2>;
+        using spare = ArchShared<800U, blocksPerSM::value, sharedMemory::value, UseSharedBound::yes>::Spare;
         using OS = OSD<blocks::value>;
     };
 
     template<>
     struct Hardware<700> {
+        using blocksPerSM = cute::C<4U>;
         using arch = cute::C<700U>;
         using registers = cute::C<128U>;
-        using blocks = cute::C<4U * 80>;
+        using blocks = cute::C<blocksPerSM::value * 80>;
         using bKBase = cute::C<16U>;
         using rScratch = cute::C<32U>;
         using pipeStages = cute::C<1U>;
         using sharedMemory = cute::C<BASE_SHARED_SIZE>;
+        using spare = ArchShared<700U, blocksPerSM::value, sharedMemory::value, UseSharedBound::yes>::Spare;
         using OS = OSD<blocks::value>;
     };
 
     template<>
     struct Hardware<700, 96> {
+        using blocksPerSM = cute::C<5U>;
         using arch = cute::C<700U>;
         using registers = cute::C<96U>;
-        using blocks = cute::C<5U * 80>;
+        using blocks = cute::C<blocksPerSM::value * 80>;
         using pipeStages = cute::C<1U>;
         using bKBase = cute::C<16U>;
         using rScratch = cute::C<32U>;
         using sharedMemory = cute::C<BASE_SHARED_SIZE>;
+        using spare = ArchShared<700U, blocksPerSM::value, sharedMemory::value, UseSharedBound::yes>::Spare;
         using OS = OSD<blocks::value>;
     };
 
     template<>
     struct Hardware<700, 255> {
         // recommended
+        using blocksPerSM = cute::C<2U>;
         using arch = cute::C<700U>;
         using registers = cute::C<255U>;
-        using blocks = cute::C<2U * 80>;
+        using blocks = cute::C<blocksPerSM::value * 80>;
         using pipeStages = cute::C<1U>;
         using bKBase = cute::C<32U>;
         using rScratch = cute::C<64U>;
         using sharedMemory = cute::C<BASE_SHARED_SIZE * 2>;
+        using spare = ArchShared<700U, blocksPerSM::value, sharedMemory::value, UseSharedBound::yes>::Spare;
         using OS = OSD<blocks::value>;
     };
 
     // Hopper
     template<>
     struct Hardware<900, 128, Board::sxm> {
+        using blocksPerSM = cute::C<4U>;
         using arch = cute::C<900U>;
         using registers = cute::C<128U>;
-        using blocks = cute::C<4U * 132>;
+        using blocks = cute::C<blocksPerSM::value * 132>;
         using bKBase = cute::C<8U>;
         using rScratch = cute::C<32U>;
         using pipeStages = cute::C<BASE_PIPE_STAGES * 2>;
         using sharedMemory = cute::C<BASE_SHARED_SIZE * 2>;
+        using spare = ArchShared<900U, blocksPerSM::value, sharedMemory::value, UseSharedBound::yes>::Spare;
         using OS = OSD<blocks::value>;
     };
 
     template<>
     struct Hardware<900, 128, Board::pcie> {
+        using blocksPerSM = cute::C<4U>;
         using arch = cute::C<900U>;
         using registers = cute::C<128U>;
-        using blocks = cute::C<4U * 114>;
+        using blocks = cute::C<blocksPerSM::value * 114>;
         using bKBase = cute::C<8U>;
         using rScratch = cute::C<32U>;
         using pipeStages = cute::C<BASE_PIPE_STAGES * 2>;
         using sharedMemory = cute::C<BASE_SHARED_SIZE * 2>;
+        using spare = ArchShared<900U, blocksPerSM::value, sharedMemory::value, UseSharedBound::yes>::Spare;
         using OS = OSD<blocks::value>;
     };
 
     template<>
     struct Hardware<900, 255, Board::sxm> {
+        using blocksPerSM = cute::C<2U>;
         using arch = cute::C<900U>;
         using registers = cute::C<255U>;
-        using blocks = cute::C<2U * 132>;
+        using blocks = cute::C<blocksPerSM::value * 132>;
         using bKBase = cute::C<8U>;
         using rScratch = cute::C<64U>;
         using pipeStages = cute::C<BASE_PIPE_STAGES * 2>;
         using sharedMemory = cute::C<BASE_SHARED_SIZE * 2>;
+        using spare = ArchShared<900U, blocksPerSM::value, sharedMemory::value, UseSharedBound::yes>::Spare;
         using OS = OSD<blocks::value>;
     };
 
     template<>
     struct Hardware<900, 255, Board::pcie> {
+        using blocksPerSM = cute::C<2U>;
         using arch = cute::C<900U>;
         using registers = cute::C<255U>;
-        using blocks = cute::C<2U * 114>;
+        using blocks = cute::C<blocksPerSM::value * 114>;
         using bKBase = cute::C<8U>;
         using rScratch = cute::C<64U>;
         using pipeStages = cute::C<BASE_PIPE_STAGES * 2>;
         using sharedMemory = cute::C<BASE_SHARED_SIZE * 2>;
+        using spare = ArchShared<900U, blocksPerSM::value, sharedMemory::value, UseSharedBound::yes>::Spare;
         using OS = OSD<blocks::value>;
     };
 
     template<>
     struct Hardware<900, 96, Board::sxm> {
+        using blocksPerSM = cute::C<5U>;
         using arch = cute::C<900U>;
         using registers = cute::C<96U>;
-        using blocks = cute::C<5U * 132>;
+        using blocks = cute::C<blocksPerSM::value * 132>;
         using bKBase = cute::C<8U>;
         using rScratch = cute::C<64U>;
         using pipeStages = cute::C<BASE_PIPE_STAGES * 2>;
         using sharedMemory = cute::C<BASE_SHARED_SIZE * 2>;
+        using spare = ArchShared<900U, blocksPerSM::value, sharedMemory::value, UseSharedBound::yes>::Spare;
         using OS = OSD<blocks::value>;
     };
 
     template<>
     struct Hardware<900, 96, Board::pcie> {
+        using blocksPerSM = cute::C<5U>;
         using arch = cute::C<900U>;
         using registers = cute::C<96U>;
-        using blocks = cute::C<5U * 114>;
+        using blocks = cute::C<blocksPerSM::value * 114>;
         using bKBase = cute::C<8U>;
         using rScratch = cute::C<64U>;
         using pipeStages = cute::C<BASE_PIPE_STAGES * 2>;
         using sharedMemory = cute::C<BASE_SHARED_SIZE * 2>;
+        using spare = ArchShared<900U, blocksPerSM::value, sharedMemory::value, UseSharedBound::yes>::Spare;
         using OS = OSD<blocks::value>;
     };
-
 }
 #endif //ARCH_CUH

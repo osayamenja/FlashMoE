@@ -23,7 +23,7 @@ namespace aristos{
     template<cuda::thread_scope scope = cuda::thread_scope_device, typename T>
     requires AtomicType<T> && AtomicScope<scope>
     __device__ __forceinline__
-    T atomicLoad(T* const& addr){
+    T atomicLoad(T* __restrict__ const& addr){
         if constexpr (scope == cuda::thread_scope_block || scope == cuda::thread_scope_thread) {
             return atomicOr_block(addr, 0U);
         }
@@ -37,7 +37,7 @@ namespace aristos{
     unsigned int bound = cuda::std::numeric_limits<unsigned int>::max()>
     requires(AtomicScope<scope> && bound <= cuda::std::numeric_limits<unsigned int>::max())
     __device__ __forceinline__
-    unsigned int atomicIncrement(unsigned int* const& addr) {
+    unsigned int atomicIncrement(unsigned int* __restrict__ const& addr) {
         if constexpr (scope == cuda::thread_scope_block || scope == cuda::thread_scope_thread) {
             return atomicInc_block(addr, bound);
         }
@@ -52,7 +52,7 @@ namespace aristos{
     requires AtomicCASType<T> && AtomicScope<scope> &&
         (!cuda::std::is_same_v<T, unsigned short int> || scope == cuda::thread_scope_device)
     __device__ __forceinline__
-    T atomicTAS(T* const& addr) {
+    T atomicTAS(T* __restrict__ const& addr) {
         if constexpr (scope == cuda::thread_scope_block || scope == cuda::thread_scope_thread) {
             return atomicCAS_block(addr, 0U, 1U);
         }
@@ -63,6 +63,7 @@ namespace aristos{
     }
 
     template<cuda::thread_scope scope = cuda::thread_scope_device>
+    requires(AtomicScope<scope>)
     __device__ __forceinline__
     void fence() {
         if constexpr (scope == cuda::thread_scope_block) {
@@ -79,11 +80,11 @@ namespace aristos{
     template<cuda::thread_scope scope = cuda::thread_scope_device, typename Payload>
     requires(sizeof(Payload) == sizeof(unsigned long long int) && alignof(Payload) == alignof(unsigned long long int))
     __device__ __forceinline__
-    void awaitPayload(unsigned long long int* const& addr, Payload* __restrict__ const& dest, const uint16_t& baton = 1U) {
-        auto mail = atomicLoad<scope>(addr);
-        auto* payload = CAST_TO(Payload, &mail);
+    void awaitPayload(Payload* __restrict__ const& addr, Payload* __restrict__ const& dest, const uint16_t& baton = 1U) {
+        auto mail = atomicLoad<scope>(CAST_TO(unsigned long long int, addr));
+        auto* __restrict__ payload = CAST_TO(Payload, &mail);
         while (payload->signal != baton) {
-            mail = atomicLoad<scope>(addr);
+            mail = atomicLoad<scope>(CAST_TO(unsigned long long int, addr));
             payload = CAST_TO(Payload, &mail);
         }
         *dest = *payload;
@@ -96,7 +97,7 @@ namespace aristos{
     requires(AtomicScope<scope>
         && sizeof(unsigned long long int) == sizeof(Payload) && alignof(Payload) == alignof(unsigned long long int))
     __device__ __forceinline__
-    void signalPayload(Payload* const& addr, const Payload* const& payload) {
+    void signalPayload(Payload* __restrict__ const& addr, const Payload* const& payload) {
         if constexpr (scope == cuda::thread_scope_block || scope == cuda::thread_scope_thread) {
             atomicExch_block(CAST_TO(unsigned long long int, addr), *CONST_CAST_TO(unsigned long long int, payload));
         }

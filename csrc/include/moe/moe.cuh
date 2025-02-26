@@ -93,8 +93,7 @@ namespace aristos::moe{
             cute::Layout<cute::Shape<cute::Int<S>, cute::Int<H>>,
                 cute::Stride<cute::Int<H>, cute::_1>>{});
 
-        gate::forward<GPUType, g>(activations,
-            gateWeights, gateOutput, CAST_TO(ElementC, workspace));
+        gate::forward(activations, gateWeights, gateOutput, CAST_TO(ElementC, workspace));
         if (blockIdx.x + 1 < blocks) {
             constexpr auto cutoff = processors / ARISTOS_SUPER_BLOCK_SIZE * ARISTOS_SUPER_BLOCK_SIZE;
             if (blockIdx.x < cutoff) {

@@ -27,7 +27,7 @@ namespace aristos::topology{
         }
         for (int i = threadIdx.x; i < n; i += ARISTOS_BLOCK_SIZE) {
             if (i != rank) {
-                awaitPayload<cuda::thread_scope_system>(CAST_TO(unsigned long long int, flags + i), &result, seqNo);
+                awaitPayload<cuda::thread_scope_system>(CAST_TO(Payload, flags + i), &result, seqNo);
                 workerAttributes[i] = result.wA;
                 // Enforce consistency
                 nvshmem_uint_test(&CAST_TO(Payload, flags + i)->signal, NVSHMEM_CMP_EQ, seqNo);
