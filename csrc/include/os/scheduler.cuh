@@ -182,14 +182,14 @@ namespace aristos::scheduler {
         uint scheduled = 0U;
         constexpr auto wS = 32U;
         constexpr auto sQsL = cute::ceil_div(processors, wS);
-        static_assert(sQsL <= 64);
+        static_assert(sQsL <= 32);
 
         constexpr auto subscribers = 128 - wS;
         static_assert(subscribers % wS == 0);
         constexpr auto sL = subscribers / wS;
         // initialize register buffers
         cutlass::Array<TQState, 16 + sL> tqState{};
-        cutlass::Array<uint8_t, sQsL> sQState{};
+        cutlass::Array<uint, sQsL> sQState{};
         cutlass::Array<uint, 16> wSet{};
         tqState.fill({0U,0U});
         sQState.fill(0U);

@@ -512,7 +512,7 @@ namespace aristos::processor{
                                 if (!threadIdx.x) {
                                     __threadfence();
                                     // notify scheduler
-                                    atomicAdd(tQH, tNx);
+                                    atomicAdd(tQH + rCurrentTask.syncIdx, tNx);
                                 }
                             }
                         }

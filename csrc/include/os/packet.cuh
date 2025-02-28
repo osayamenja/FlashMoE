@@ -14,11 +14,17 @@ namespace aristos::packet {
         unsigned int blocks,
         DropTokens d = DropTokens::yes,
         unsigned int superBlockSize = ARISTOS_SUPER_BLOCK_SIZE,
+        unsigned int S = ACC::E::value,
+        unsigned int H = ACC::H::value,
+        unsigned int E = ACC::E::value,
+        unsigned int EC = expertCapacity<S, E>,
+        unsigned int threads = ACC::PeakHardware::OS::threads::value,
         typename Activations
     >
     requires (isTensor<Activations>::value)
     __forceinline__ __device__
     void encode(const Activations& activations, unsigned int* const& __restrict__ workspace) {
+        static_assert(sizeof(SignalPayload<>) == sizeof(ull_t) && alignof(SignalPayload<>) == alignof(ull_t));
         using Element = typename Activations::value_type;
         using NativeElement = typename ToCDx<Element>::T;
         // Below is always true, but we assert to ensure
@@ -30,84 +36,109 @@ namespace aristos::packet {
         const auto lBid = blockIdx.x % superBlockSize;
         const bool isLeader = !lBid && !threadIdx.x;
 
+        constexpr auto cellSize = EC * H;
         // cache
         const auto* __restrict__ tP = bookkeeping.tP();
-        const auto nx = bookkeeping.nx;
         const auto world = bookkeeping.world;
-        const auto eCap = bookkeeping.eCap;
         auto* __restrict__ pSA = bookkeeping.pSA();
         const auto* __restrict__ pDs = bookkeeping.pDs();
         auto* __restrict__ sHeap = bookkeeping.sHeap;
         auto* __restrict__ flags = bookkeeping.flags;
-        const auto cellSize = bookkeeping.cellSize();
         const auto expertSlots = bookkeeping.xs;
-        const auto tokenDim = bookkeeping.ed;
         const auto rank = bookkeeping.rank;
         const auto rSeqBit = seqBit;
 
         const auto tokenIds = make_tensor(cute::make_gmem_ptr(tP),
-            make_layout(cute::make_shape(nx, eCap), cute::LayoutRight{}));
+            cute::Layout<cute::Shape<cute::Int<E>, cute::Int<EC>>,
+                cute::Stride<cute::Int<EC>, cute::_1>>{});
 
         // readonly arrays
         // copy only what we need
         // Note that the length of these arrays is rather small,
         // which is why shared memory can accommodate them
-        const auto dSl = 3 * nx + world;
-        const auto* __restrict__ expertCounts = workspace;
-        const auto* __restrict__ pS = expertCounts + nx;
-        const auto* __restrict__ pT = pS + nx;
+        constexpr auto sF = sizeof(cuda::std::byte*) / sizeof(uint);
+        const auto dSl = 3 * E + world * (2 * sF + 1);
+        const auto* __restrict__ fP = CAST_TO(cuda::std::byte*, workspace);
+        const auto* __restrict__ hP = fP + world;
+        auto* __restrict__ pDsP = workspace + sF * 2 * world;
+        const auto* __restrict__ expertCounts = pDsP;
+        const auto* __restrict__ pS = expertCounts + E;
+        const auto* __restrict__ pT = pS + E;
         const auto* __restrict__ xLs = pT + world;
+        const auto* __restrict__ peerTotalTokens = xLs + E;
 
-        const auto* __restrict__ peerTotalTokens = xLs + nx;
         auto* __restrict__ pTTx = workspace + dSl;
-
         // Populate above data structures
         constexpr auto vF = sizeof(uint4) / sizeof(uint);
         const auto vDsL = dSl / vF;
         const auto* __restrict__ vPDs = static_cast<const uint4*>(static_cast<const void*>(pDs));
-        for (uint i = threadIdx.x; i < vDsL; i += THREADS) {
-            CAST_TO(uint4, workspace)[i] = vPDs[i];
+        for (uint i = threadIdx.x; i < vDsL; i += threads) {
+            CAST_TO(uint4, pDsP)[i] = vPDs[i];
         }
-        for (uint i = threadIdx.x + vDsL * vF; i < dSl; i += THREADS) {
-            workspace[i] = pDs[i];
+        for (uint i = threadIdx.x + vDsL * vF; i < dSl; i += threads) {
+            pDsP[i] = pDs[i];
         }
         // wipe clean first
-        for (uint i = threadIdx.x; i < world; i += THREADS) {
+        for (uint i = threadIdx.x; i < world; i += threads) {
             // done this way to preserve const attribute
             pTTx[i] = 0U;
         }
         __syncthreads();
-        for (uint i = threadIdx.x; i < nx; i += THREADS) {
+        // symmetric heap pointer
+        auto* __restrict__ sFp = CAST_TO(cuda::std::byte*, workspace);
+        auto* __restrict__ sHp = sFp + world;
+        for (uint i = 0; i < world; i += threads) {
+            // get peer idx
+            const auto peer = pT[i];
+            if (const auto rSHeap = nvshmem_ptr(sHeap, peer); rSHeap == nullptr) {
+                sFp[i] = nullptr;
+                sHp[i] = nullptr;
+            }
+            else {
+                sFp[i] = CAST_TO(cuda::std::byte, nvshmem_ptr(flags, peer));
+                sHp[i] = CAST_TO(cuda::std::byte, rSHeap);
+            }
+        }
+        #pragma unroll
+        for (uint i = threadIdx.x; i < E; i += threads) {
             const auto peer = __ldg(pS + i);
             atomicAdd_block(pTTx + peer, expertCounts[i]);
         }
         __syncthreads();
-        for (uint expertIdx = superBlockIdx; expertIdx < nx; expertIdx += numSuperBlocks) {
+        #pragma unroll
+        for (uint expertIdx = superBlockIdx; expertIdx < E; expertIdx += numSuperBlocks) {
             const auto pLIdx = xLs[expertIdx]; // local index for current expert on peer
             const auto routedTokens = d == DropTokens::yes ?
-                cute::min(expertCounts[expertIdx], eCap) : expertCounts[expertIdx];
+                cute::min(expertCounts[expertIdx], EC) : expertCounts[expertIdx];
             const auto peer = pS[expertIdx];
             const auto pe = pT[peer];
-            const auto pTT = cute::min(peerTotalTokens[peer], eCap);
-            auto* __restrict__ rPH = nvshmem_ptr(heap::advance<0, 1, sizeof(Element)>(sHeap, cellSize, expertSlots,
-                tokenDim, peer, pLIdx), pe);
-            const auto isRemote = rPH == nullptr;
-            auto* __restrict__ peerHeap = static_cast<cuda::std::byte*>(isRemote ?
-                heap::advance<0, 0, sizeof(Element)>(sHeap, cellSize, expertSlots, tokenDim, peer, pLIdx):
-                rPH);
+            const auto pTT = cute::min(peerTotalTokens[peer], EC);
+            auto* __restrict__ pH = hP[peer];
+            auto* __restrict__ pF = fP[peer];
+            const auto isRemote = pH == nullptr;
+            auto* __restrict__ peerHeap = isRemote ?
+                heap::advance<0, 0, sizeof(Element)>(sHeap, cellSize, expertSlots, H, peer, pLIdx):
+                heap::advance<0, 1, sizeof(Element)>(pH, cellSize, expertSlots, H, peer, pLIdx);
+
             if (!routedTokens) {
                 if (isLeader && !pTT) {
                     // single thread sends a noop packet to unblock the remote peer
-                    uint64_t flagSignal = 0;
                     // Pack payload into single signal word
-                    *CAST_TO(SignalPayload<>, &flagSignal) = SignalPayload{
+                    const auto sigPayload = SignalPayload{
                         routedTokens,
                         rSeqBit,
                         static_cast<uint16_t>(Bookkeeping::tiles<BLOCK_M>(pTT)) // this should be safe
                     };
-                    // transmit signal
-                    nvshmemx_signal_op(flags + rank * expertSlots + pLIdx,
-                        flagSignal, NVSHMEM_SIGNAL_SET, pe);
+                    if (isRemote) {
+                        // transmit signal
+                        nvshmemx_signal_op(flags + rank * expertSlots + pLIdx,
+                            *CAST_TO(flagsType, &sigPayload), NVSHMEM_SIGNAL_SET, pe);
+                    }
+                    else {
+                        // Better to use below than the volatile write operation used in the public-facing NVSHMEM API
+                        atomicExch_system(CAST_TO(ull_t, pF + rank * expertSlots + pLIdx),
+                            *CONST_CAST_TO(ull_t, sigPayload));
+                    }
                 }
                 continue;
             }
@@ -115,17 +146,19 @@ namespace aristos::packet {
             #pragma unroll 2
             for (uint j = lBid; j < routedTokens; j += superBlockSize) {
                 const auto [tokenIdx, _] = tokenIds(expertIdx, j);
-                auto* __restrict__ localPH = peerHeap + j * tokenDim * sizeof(Element);
+                auto* __restrict__ localPH = peerHeap + j * H * sizeof(Element);
                 const auto* __restrict__ aP = CONST_CAST_TO(NativeElement, &activations(tokenIdx, 0));
                 const auto* __restrict__ vAP = static_cast<const uint4*>(static_cast<const void*>(aP));
-                const auto vTokenSize = tokenDim / (sizeof(uint4) / sizeof(Element));
+                constexpr auto vTokenSize = H / (sizeof(uint4) / sizeof(Element));
                 // Use high-throughput vector copy
-                for (uint k = threadIdx.x; k < vTokenSize; k += THREADS) {
+                #pragma unroll
+                for (uint k = threadIdx.x; k < vTokenSize; k += threads) {
                     CAST_TO(uint4, localPH)[k] = __ldg(vAP + k);
                 }
                 const auto rIdx = vTokenSize * (sizeof(uint4) / sizeof(Element));
                 localPH += sizeof(uint4) * vTokenSize;
-                for (uint k = threadIdx.x + rIdx; k < tokenDim; k += THREADS) {
+                #pragma unroll
+                for (uint k = threadIdx.x + rIdx; k < H; k += threads) {
                     CAST_TO(NativeElement, localPH)[k] = __ldg(aP + k);
                 }
             }
@@ -139,27 +172,26 @@ namespace aristos::packet {
                 }
                 if (atomicIncrement(pSA + expertIdx) + 1 == superBlockSize) {
                     // I am the last block, let's finalize this transfer.
-                    uint64_t flagSignal = 0;
-                    *CAST_TO(SignalPayload<>, &flagSignal) = SignalPayload{
+                    const auto sigPayload = SignalPayload{
                         routedTokens,
                         rSeqBit,
-                        static_cast<uint16_t>(Bookkeeping::tiles<BLOCK_M>(pTT))
+                        static_cast<uint16_t>(Bookkeeping::tiles<BLOCK_M>(pTT)) // this should be safe
                     };
                     if (isRemote) {
                         // do RDMA transfer + signal
                         nvshmem_putmem_signal_nbi(
-                            heap::advance<0, 1>(sHeap, cellSize, expertSlots, tokenDim, peer, pLIdx),
+                            heap::advance<0, 1>(sHeap, cellSize, expertSlots, H, peer, pLIdx),
                             peerHeap,
-                            sizeof(Element) * routedTokens * tokenDim,
+                            sizeof(Element) * routedTokens * H,
                             flags + rank * expertSlots + pLIdx,
-                            flagSignal,
+                            *CAST_TO(flagsType, &sigPayload),
                             NVSHMEM_SIGNAL_SET,
                             pe);
                     }
                     else {
                         // we've done the DMA transfer already, so we set the signal instead
-                        nvshmemx_signal_op(flags + rank * expertSlots + pLIdx,
-                            flagSignal, NVSHMEM_SIGNAL_SET, pe);
+                        atomicExch_system(CAST_TO(ull_t, pF + rank * expertSlots + pLIdx),
+                            *CONST_CAST_TO(ull_t, sigPayload));
                     }
                 }
             }

@@ -103,9 +103,7 @@ namespace aristos::gate {
             ElementC* __restrict__ gateScratch) {
             constexpr uint S = ACC::S::value;
             constexpr auto M = ACC::S::value;
-            constexpr auto K = ACC::H::value;
             constexpr auto E = ACC::E::value;
-            constexpr auto k = ACC::TK::value;
             constexpr auto jT = ACC::JT::value;
 
             static_assert(cuda::std::is_same_v<ElementC, mp_t>);
@@ -255,26 +253,28 @@ namespace aristos::gate {
 
             // Begin loss computation and global token ordering construction
             constexpr auto wS = 32U; // warpSize
-            ElementC cache[bN / wS]; // |cache| == 2
-            using BlockReduce = cub::BlockReduce<ElementC, threads>;
-            auto* __restrict__ cS = CAST_TO(typename BlockReduce::TempStorage, gateScratch);
-            // Prior to reusing shared memory
-            __syncthreads();
-            // Reduce down columns with bespoke collective, completes in about 8.2 𝜇s
-            #pragma unroll
-            for (uint i = 0; i < bN; ++i) {
-                auto colAgg = BlockReduce(cS[i]).Sum(accumulator(i));
-                // thread0 only has the aggregate, which it broadcasts to all threads in its warp
-                colAgg = __shfl_sync(0xffffffff, colAgg , 0);
-                // Each thread owns bN / warpSize elements in striped arrangement.
-                // We duplicate this value layout across all warps in the block, but only use the first warp's values.
-                cache[i / wS] = threadIdx.x % wS == i % wS? colAgg : cache[i / wS];
-            }
-            if (threadIdx.x < wS) {
-                // Only the first warp aggregates atomically, as other warps have garbage values
+            if constexpr (jT == JobType::training) {
+                ElementC cache[bN / wS]; // |cache| == 2
+                using BlockReduce = cub::BlockReduce<ElementC, threads>;
+                auto* __restrict__ cS = CAST_TO(typename BlockReduce::TempStorage, gateScratch);
+                // Prior to reusing shared memory
+                __syncthreads();
+                // Reduce down columns with bespoke collective, completes in about 8.2 𝜇s
                 #pragma unroll
-                for (uint i = 0; i < bN / wS; ++i) {
-                    atomicAdd(gML + (threadIdx.x + i * wS), __fdividef(cache[i], S));
+                for (uint i = 0; i < bN; ++i) {
+                    auto colAgg = BlockReduce(cS[i]).Sum(accumulator(i));
+                    // thread0 only has the aggregate, which it broadcasts to all threads in its warp
+                    colAgg = __shfl_sync(0xffffffff, colAgg , 0);
+                    // Each thread owns bN / warpSize elements in striped arrangement.
+                    // We duplicate this value layout across all warps in the block, but only use the first warp's values.
+                    cache[i / wS] = threadIdx.x % wS == i % wS? colAgg : cache[i / wS];
+                }
+                if (threadIdx.x < wS) {
+                    // Only the first warp aggregates atomically, as other warps have garbage values
+                    #pragma unroll
+                    for (uint i = 0; i < bN / wS; ++i) {
+                        atomicAdd(gArg.gML + (threadIdx.x + i * wS), __fdividef(cache[i], S));
+                    }
                 }
             }
 
@@ -401,8 +401,10 @@ namespace aristos::gate {
 
             if (threadIdx.x < bN) {
                 startIndices[threadIdx.x] = atomicAdd(gArg.eC + threadIdx.x, cachedSelected);
-                atomicAdd(gArg.gMec + threadIdx.x, __fdividef(static_cast<ElementC>(cachedSelected),
+                if constexpr (jT == JobType::training) {
+                    atomicAdd(gArg.gMec + threadIdx.x, __fdividef(static_cast<ElementC>(cachedSelected),
                     static_cast<ElementC>(S)));
+                }
             }
             __syncthreads();
             #pragma unroll

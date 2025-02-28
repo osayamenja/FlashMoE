@@ -505,6 +505,9 @@ namespace aristos{
         tileSize(_size), taskType(_taskType){}
     };
 
+    template<unsigned int S, unsigned int E>
+    constexpr auto expertCapacity = cute::ceil_div(S, E);
+
     /// Information about auxiliary data structures comprising bookkeeping state
     /// Includes length of data structures (arrays) and pointer arithmetic functions
     using BookType = unsigned int;
@@ -602,7 +605,7 @@ namespace aristos{
                 tPs = cute::ceil_div(sT, SUBSCRIBERS);
                 sT = tPs * SUBSCRIBERS;
                 tQl = sizeof(Task) * (sT + prT);
-                tQml = tQl + blocks * sizeof(Task); // interrupt tasks
+                tQml = tQl + blocks * sizeof(TQSignal); // processor doorbells
                 brs = tQml + (isSingleBlockGate ? 0U : sl * tiles<BLOCK_N>(px) *
                     (sizeof(RingSoftmaxPayload) + 2 * sizeof(RingTopKPayload)));
                 tQXt = brs + sizeof(EDT) * _nx + sizeof(TokenIdxTuple) * (px * _eCapacity) +
@@ -642,7 +645,7 @@ namespace aristos{
                 const auto tPs = cute::ceil_div(sT, SUBSCRIBERS);
                 sT = tPs * SUBSCRIBERS;
                 const auto tQl = sizeof(Task) * (sT + prT);
-                const auto tQml = tQl + _blocks * sizeof(Task); // interrupt tasks
+                const auto tQml = tQl + _blocks * sizeof(TQSignal); // interrupt tasks
                 const auto brs = tQml + (isSingleBlockGate ? 0U : _sl * tiles<BLOCK_N>(_px) *
                                     (sizeof(RingSoftmaxPayload) + 2 * sizeof(RingTopKPayload)));
                 const auto tQXt = brs + sizeof(EDT) * _nx + sizeof(TokenIdxTuple) * (_px * _eCap) +
@@ -669,18 +672,13 @@ namespace aristos{
             return cute::ceil_div(dimension, tileDimension);
         }
 
-        __device__ __forceinline__
-        auto cellSize() const {
-            return eCap * ed;
-        }
-
         /**********Salami slice Pointers!************/
         /// task queue
         __device__ __forceinline__
         auto* tQ() const {
             return CAST_TO(Task, book);
         }
-        static_assert(alignof(Task) % alignof(ull_t) == 0);
+        static_assert(alignof(Task) % alignof(TQSignal) == 0);
         /// processors' doorbell
         __device__ __forceinline__
         auto* pDB() const {

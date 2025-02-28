@@ -12,6 +12,12 @@
 #include "gate.cuh"
 
 namespace aristos::moe{
+    template<
+        unsigned S = ACC::S::value,
+        unsigned int P = ACC::P::value,
+        unsigned int H = ACC::H::value,
+        unsigned int E = ACC::E::value
+    >
     __global__ __maxnreg__(ACC::PeakHardware::registers::value) void forward(
         const void* __restrict__ iP, /* A, G, B, D*/ void* __restrict__ oP /*G, O*/) {
         using Config = ACC;
@@ -20,7 +26,6 @@ namespace aristos::moe{
         constexpr auto processors = GPUType::OS::processorBlocks::value;
         constexpr auto sharedSize = GPUType::sharedMemory::value;
         constexpr auto threads = GPUType::OS::threads::value;
-        constexpr auto g = Config::GRL::value;
         constexpr auto d = Config::DTK::value;
         constexpr auto c = Config::CM::value;
         using Element = Config::Element;
@@ -29,10 +34,6 @@ namespace aristos::moe{
         using ElementC = GEA;
 
         // Salami slice pointers
-        constexpr auto S = Config::S::value;
-        constexpr auto P = Config::P::value;
-        constexpr auto H = Config::H::value;
-        constexpr auto E = Config::E::value;
         const auto lE = bookkeeping.nLx;
         const auto* __restrict__ gP = CONST_CAST_TO(Element, iP) + S * H;
         const auto* __restrict__ ePu = gP + H * E;
@@ -97,7 +98,7 @@ namespace aristos::moe{
         if (blockIdx.x + 1 < blocks) {
             constexpr auto cutoff = processors / ARISTOS_SUPER_BLOCK_SIZE * ARISTOS_SUPER_BLOCK_SIZE;
             if (blockIdx.x < cutoff) {
-                packet::encode<cutoff, d, ARISTOS_SUPER_BLOCK_SIZE>(activations, CAST_TO(uint, workspace));
+                packet::encode<cutoff, d, ARISTOS_SUPER_BLOCK_SIZE>(activations, workspace);
             }
             processor::start<
                 GPUType,
