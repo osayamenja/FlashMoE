@@ -19,7 +19,9 @@ namespace aristos::scheduler {
     void schedule(WSet& wSet, const uint& cSetB,
     const uint& canSchedule, const uint& taskIdx, uint& lRQIdx,
     const uint& gRQIdx, uint* __restrict__ const& rQ,
-    unsigned int* __restrict__ const& pDB) {
+    TQSignal* __restrict__ const& pDB,
+    const uint& interrupt = 0U) {
+        auto sig = TQSignal{interrupt};
         for (uint k = 0; k < cSetB; ++k) {
             #pragma unroll
             for (uint l = 0; l < WSet::kElements; ++l) {
@@ -28,7 +30,8 @@ namespace aristos::scheduler {
             #pragma unroll
             for (uint l = 0; l < WSet::kElements; ++l) {
                 // signal processor
-                atomicExch(pDB + wSet[l], taskIdx + (k * WSet::kElements + l));
+                sig.signal = taskIdx + (k * WSet::kElements + l);
+                signalPayload(pDB + wSet[l], &sig);
             }
         }
         // Residual scheduling
@@ -42,7 +45,8 @@ namespace aristos::scheduler {
         #pragma unroll
         for (uint l = 0; l < WSet::kElements; ++l) {
             if (l < residue) {
-                atomicExch(pDB + wSet[l], taskIdx + (cSetB * WSet::kElements + l));
+                sig.signal = taskIdx + (cSetB * WSet::kElements + l);
+                signalPayload(pDB + wSet[l], &sig);
             }
         }
     }
@@ -66,8 +70,9 @@ namespace aristos::scheduler {
         typename WarpScan::TempStorage* __restrict__ const& wSt,
         unsigned int* __restrict__ const& sQ,
         uint* __restrict__ const& rQ,
-        unsigned int* __restrict__ const& pDB,
-        const bool isMedley = false) {
+        TQSignal* __restrict__ const& pDB,
+        const bool& isMedley = false,
+        const uint& interrupt = 0U) {
         uint lRQIdx;
         uint taskTally;
         // things are about to get warped :)
@@ -135,7 +140,8 @@ namespace aristos::scheduler {
                                 tqState[j].tasks -= canSchedule;
                                 tqState[j].tQTail += canSchedule;
                                 const auto cSetB = canSchedule / WSet::kElements;
-                                schedule<processors>(wSet, cSetB, canSchedule, taskIdx, lRQIdx, gRQIdx, rQ, pDB);
+                                schedule<processors>(wSet, cSetB, canSchedule, taskIdx, lRQIdx, gRQIdx, rQ,
+                                    pDB, interrupt);
                             }
                         }
                     }
@@ -149,7 +155,8 @@ namespace aristos::scheduler {
                         tqState[j].tasks -= canSchedule;
                         tqState[j].tQTail += canSchedule;
                         const auto cSetB = canSchedule / WSet::kElements;
-                        schedule<processors>(wSet, cSetB, canSchedule, taskIdx, lRQIdx, gRQIdx, rQ, pDB);
+                        schedule<processors>(wSet, cSetB, canSchedule, taskIdx, lRQIdx, gRQIdx, rQ,
+                            pDB, interrupt);
                     }
                 }
             }
@@ -171,7 +178,7 @@ namespace aristos::scheduler {
         unsigned int* const& taskBound, // shared
         unsigned int* __restrict__ const& rQ, // shared
         unsigned int* __restrict__ const& sQ, // global
-        unsigned int* __restrict__ const& pDB) { //  global
+        TQSignal* __restrict__ const& pDB) { //  global
         uint scheduled = 0U;
         constexpr auto wS = 32U;
         constexpr auto sQsL = cute::ceil_div(processors, wS);
@@ -266,16 +273,6 @@ namespace aristos::scheduler {
             atomicExch_block(sInterrupts + i, 1U);
         }
 
-        // enqueue interrupts and schedule them
-        auto* __restrict__ tQI = bookkeeping.tQI();
-        #pragma unroll
-        for (uint i = threadIdx.x; i < processors; i += wS) {
-            tQI[i] = Task{TaskType::Interrupt};
-        }
-
-        __threadfence();
-        __syncwarp();
-
         uint lTt = 0U; // local task tally
         if constexpr (constexpr auto trips = processors / (dQL * WARP_SIZE); trips > 0) {
             #pragma unroll
@@ -288,7 +285,7 @@ namespace aristos::scheduler {
                 }
                 schedulerLoop<processors, 0U>(sQState, tqState, wSet, 0U, lTt,
                     processorTally, gRQIdx, pTEpilog, scheduled,
-                    wSt, sQ, rQ, pDB);
+                    wSt, sQ, rQ, pDB, false, 1U);
             }
         }
         lTt = 0U;
@@ -306,7 +303,7 @@ namespace aristos::scheduler {
         lTt += residue;
         schedulerLoop<processors, 0U>(sQState, tqState, wSet, 0U, lTt,
                 processorTally, gRQIdx, pTEpilog, scheduled,
-                wSt, sQ, rQ, pDB);
+                wSt, sQ, rQ, pDB, false, 1U);
     }
 }
 #endif //SCHEDULER_CUH

@@ -212,6 +212,7 @@ namespace aristos::topology{
     }
 
     /// Build Adjacency Matrix
+    /// TODO parallelize across all device blocks and deprecate singular/plural specializations
     __global__ void discover(__grid_constant__ const int n, __grid_constant__ const int rank,
         __grid_constant__ const bool remotePresent, __grid_constant__ const WorkerAttribute self,
         cuda::std::byte* __restrict__ sHeap, uint64_t* flags,

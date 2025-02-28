@@ -18,6 +18,7 @@ namespace aristos::processor{
     >
     struct Combine {
         template<
+            unsigned int N = ACC::H::value,
             class ScaleWeights,
             typename Element,
             unsigned int Arch = GPUType::arch::value,
@@ -33,7 +34,6 @@ namespace aristos::processor{
             Element* __restrict__ const& moeOutput,
             ScaleWeights const& scale,
             const unsigned int& M,
-            const unsigned int& N,
             const unsigned int& tileIdx,
             const uint16_t& tileSize,
             const uint16_t& expertIdx) const {
@@ -114,12 +114,16 @@ namespace aristos::processor{
     template<
         TaskType t,
         typename BlockGEMM,
-        typename GPUType,
-        unsigned int elems = GPUType::rScratch::value,
-        unsigned int threads = GPUType::OS::threads::value
+        typename GPUType
     >
     struct FGT {
         static_assert(t == TaskType::preGEMM);
+        template<
+            unsigned int N = ACC::P::value,
+            unsigned int K = ACC::H::value,
+            unsigned int elems = GPUType::rScratch::value,
+            unsigned int threads = GPUType::OS::threads::value
+        >
         __forceinline__ __device__
         void operator()(typename BlockGEMM::MatrixDType* __restrict__ const& workspace,
         const typename BlockGEMM::MatrixAType* __restrict__ const& inputs,
@@ -127,44 +131,45 @@ namespace aristos::processor{
         typename BlockGEMM::MatrixDType* __restrict__ const&output,
         const typename BlockGEMM::MatrixDType* __restrict__ const& bias,
         const unsigned int& M,
-        const unsigned int& N,
-        const unsigned int& K,
         const unsigned int& tileIdx) const {
             auto accumulator = cute::partition_fragment_C(typename BlockGEMM::MMA{}, typename BlockGEMM::TilerOut{});
             static_assert(cute::size(accumulator) % elems == 0);
             cutlass::AlignedArray<typename BlockGEMM::MatrixDType, elems> rScratch{};
             constexpr auto bM = cute::get<0>(typename BlockGEMM::BlockTiler{});
             constexpr auto bN = cute::get<1>(typename BlockGEMM::BlockTiler{});
+            constexpr auto bK = cute::get<2>(typename BlockGEMM::BlockTiler{});
             // Instantiate mainloop
             typename BlockGEMM::CollectiveMainloop mainLoop{};
             cute::clear(accumulator);
 
             // Row-major
             const auto mA = make_tensor(cute::make_gmem_ptr(inputs),
-                make_layout(cute::make_shape(M, K), cute::make_stride(K, 1)));
+                make_layout(cute::make_shape(M, K), cute::Stride<cute::Int<K>, cute::_1>{}));
             // Row-major, transposed
             const auto mB = make_tensor(cute::make_gmem_ptr(weights),
-                make_layout(cute::make_shape(N, K), cute::make_stride(K, 1)));
+                cute::Layout<cute::Shape<cute::Int<N>, cute::Int<K>>,
+                    cute::Stride<cute::Int<K>, cute::_1>>{});
             // Row-major
             const auto mC = make_tensor(cute::make_gmem_ptr(output),
-                make_layout(cute::make_shape(M, N), cute::make_stride(N, 1)));
+                make_layout(cute::make_shape(M, N), cute::Stride<cute::Int<N>, cute::_1>{}));
             const auto mD = make_tensor(cute::make_gmem_ptr(bias),
-                make_layout(cute::make_shape(M, N), cute::make_stride(0, 1)));
+                make_layout(cute::make_shape(M, N), cute::Stride<cute::_0, cute::_1>{}));
 
             // M is padded, such that the below is correct
             const auto tilesM = M / bM;
             // We assert the below prior to this point
-            const auto tilesN = N / bN;
+            constexpr auto tilesN = N / bN;
+            constexpr auto tilesK = K / bK;
 
-            const auto tileCoord = idx2crd(tileIdx, cute::Shape(tilesM, tilesN), cute::Stride(tilesN ,1));
+            const auto tileCoord = idx2crd(tileIdx, cute::Shape(tilesM, tilesN),
+                cute::Stride<cute::Int<tilesN>, cute::_1>{});
             const auto ctaCoord = make_coord(cute::get<0>(tileCoord), cute::get<1>(tileCoord), cute::_);
             const auto gA = cute::local_tile(mA, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1, cute::X,cute::_1>{});
             const auto gB = cute::local_tile(mB, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step< cute::X,cute::_1,cute::_1>{});
             const auto gC = cute::local_tile(mC, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1,cute::_1, cute::X>{});
             const auto gD = cute::local_tile(mD, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1,cute::_1, cute::X>{});
 
-            auto k_tile_iter = cute::make_coord_iterator(size<2>(gA));
-            int k_tile_count = size<2>(gA);
+            auto k_tile_iter = cute::make_coord_iterator(tilesK);
 
             using ElementD = typename BlockGEMM::MatrixDType;
             mainLoop(
@@ -172,7 +177,7 @@ namespace aristos::processor{
                 gA,
                 gB,
                 accumulator,
-                k_tile_iter, k_tile_count,
+                k_tile_iter, tilesK,
                 cute::Underscore{},
                 threadIdx.x,
                 CAST_TO(char, workspace));
@@ -242,6 +247,8 @@ namespace aristos::processor{
     >
     struct FGT<TaskType::postGEMM, BlockGEMM, GPUType> {
         template<
+            unsigned int N = ACC::H::value,
+            unsigned int K = ACC::P::value,
             unsigned int elems = GPUType::rScratch::value,
             unsigned int threads = GPUType::OS::threads::value
         >
@@ -252,8 +259,6 @@ namespace aristos::processor{
         typename BlockGEMM::MatrixDType* __restrict__ const& output,
         const typename BlockGEMM::MatrixDType* __restrict__ const& bias,
         const unsigned int& M,
-        const unsigned int& N,
-        const unsigned int& K,
         const unsigned int& tileIdx) const {
             auto accumulator = cute::partition_fragment_C(typename BlockGEMM::MMA{}, typename BlockGEMM::TilerOut{});
             static_assert(cute::size(accumulator) % elems == 0);
@@ -266,30 +271,31 @@ namespace aristos::processor{
 
             // Row-major
             const auto mA = make_tensor(cute::make_gmem_ptr(inputs),
-                make_layout(cute::make_shape(M, K), cute::make_stride(K, 1)));
+                make_layout(cute::make_shape(M, K), cute::Stride<cute::Int<K>, cute::_1>{}));
             // Row-major, transposed
             const auto mB = make_tensor(cute::make_gmem_ptr(weights),
-                make_layout(cute::make_shape(N, K), cute::make_stride(K, 1)));
+                cute::Layout<cute::Shape<cute::Int<N>, cute::Int<K>>, cute::Stride<cute::Int<K>, cute::_1>>{});
             // Row-major
             const auto mC = make_tensor(cute::make_gmem_ptr(output),
-                make_layout(cute::make_shape(M, N), cute::make_stride(N, 1)));
+                make_layout(cute::make_shape(M, N), cute::Stride<cute::Int<N>, cute::_1>{}));
             const auto mD = make_tensor(cute::make_gmem_ptr(bias),
-                make_layout(cute::make_shape(M, N), cute::make_stride(0, 1)));
+                make_layout(cute::make_shape(M, N), cute::Stride<cute::_0, cute::_1>{}));
 
             // M is padded, such that the below is correct
-            const auto tilesM = M / cute::get<0>(typename BlockGEMM::BlockTiler{});
+            const auto tilesM = M / bM;
             // We assert the below prior to this point
-            const auto tilesN = N / cute::get<1>(typename BlockGEMM::BlockTiler{});
+            constexpr auto tilesN = N / cute::get<1>(typename BlockGEMM::BlockTiler{});
+            constexpr auto tilesK = K / cute::get<2>(typename BlockGEMM::BlockTiler{});
 
-            const auto tileCoord = idx2crd(tileIdx, cute::Shape(tilesM, tilesN), cute::Stride(tilesN ,1));
+            const auto tileCoord = idx2crd(tileIdx, cute::Shape(tilesM, tilesN),
+                cute::Stride<cute::Int<tilesN>, cute::_1>{});
             const auto ctaCoord = make_coord(cute::get<0>(tileCoord), cute::get<1>(tileCoord), cute::_);
             const auto gA = cute::local_tile(mA, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1, cute::X,cute::_1>{});
             const auto gB = cute::local_tile(mB, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step< cute::X,cute::_1,cute::_1>{});
             const auto gC = cute::local_tile(mC, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1,cute::_1, cute::X>{});
             const auto gD = cute::local_tile(mD, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1,cute::_1, cute::X>{});
 
-            auto k_tile_iter = cute::make_coord_iterator(size<2>(gA));
-            int k_tile_count = size<2>(gA);
+            constexpr auto k_tile_iter = cute::make_coord_iterator(tilesK);
 
             using ElementD = typename BlockGEMM::MatrixDType;
             mainLoop(
@@ -297,7 +303,7 @@ namespace aristos::processor{
                 gA,
                 gB,
                 accumulator,
-                k_tile_iter, k_tile_count,
+                k_tile_iter, tilesK,
                 cute::Underscore{},
                 threadIdx.x,
                 CAST_TO(char, workspace));
@@ -364,7 +370,7 @@ namespace aristos::processor{
     struct ProcessorArgs{
         // sensible sentinel values
         unsigned int* __restrict__ sQ = nullptr;
-        unsigned int* __restrict__ pDB = nullptr;
+        TQSignal* __restrict__ pDB = nullptr;
         unsigned int* __restrict__ tQH = nullptr;
         flagsType* __restrict__ flags = nullptr;
         Task* __restrict__ gtQ = nullptr;
@@ -374,7 +380,7 @@ namespace aristos::processor{
         ProcessorArgs() = default;
         __device__
         ProcessorArgs(unsigned int* const& _sQ,
-            unsigned int* const& _pDB,
+            TQSignal* const& _pDB,
             unsigned int* const& _tQH,
             flagsType* const& _flags,
             Task* const& _gtQ,
@@ -398,13 +404,20 @@ namespace aristos::processor{
         ScaleWeights const& sW, const uint16_t& _seqBit){
         static_assert(sizeof(SignalPayload<PacketStage::last>) == sizeof(flagsType)
             && alignof(SignalPayload<PacketStage::last>) == alignof(flagsType));
+
         __shared__ Task currentTask;
         __shared__ ProcessorArgs pA;
+        __shared__ uint globalInterrupt;
+        __shared__ void* cachedFlags;
 
-        unsigned int signal = 0U;
+        // Register allocations
         uint16_t interrupt = 0U;
         const auto rSeqBit = _seqBit;
+        Task rCurrentTask{};
+        TQSignal tqs{};
+
         if (!threadIdx.x) {
+            globalInterrupt = 0U;
             pA = ProcessorArgs{
                 bookkeeping.sQ() + blockIdx.x,
                 bookkeeping.pDB() + blockIdx.x,
@@ -415,143 +428,150 @@ namespace aristos::processor{
                 bookkeeping.tQS()
             };
         }
+
         using Operation = BlockMM<GPUType, ElementA, ElementB, ElementC, ActivationOp>;
         using OperationX = BlockMM<GPUType, ElementA, ElementB, ElementC, ActivationOpX>;
         constexpr auto preGEMM = FGT<TaskType::preGEMM, Operation, GPUType>{};
         constexpr auto postGEMM = FGT<TaskType::postGEMM, OperationX, GPUType>{};
         constexpr auto combineOp = Combine<GPUType, c>{};
+        constexpr uint H = ACC::H::value;
+        constexpr uint P = ACC::P::value;
+        constexpr auto bN = cute::get<1>(typename Operation::BlockTiler{});
+        constexpr auto tN = P / bN;
+        constexpr auto tNx = H / bN;
         __syncthreads();
 
         while (!interrupt) {
             if (!threadIdx.x) {
-                auto* tQSignal = pA.pDB;
+                auto* __restrict__ tQSignal = pA.pDB;
                 const auto* __restrict__ gtQ = pA.gtQ;
                 // Grabs next task
-                auto nextTask = atomicLoad(tQSignal);
-                while (nextTask == signal) {
-                    nextTask = atomicLoad(tQSignal);
-                }
-                signal = nextTask;
-                // below ensures task read happens after signal reception
-                __threadfence();
-                currentTask = gtQ[signal - 1];
-                if (currentTask.taskType != TaskType::Interrupt) {
+                awaitNotification(tQSignal, &tqs, tqs.signal);
+                globalInterrupt = tqs.interrupt;
+                if (!tqs.interrupt) {
+                    // below ensures task read happens after signal reception
+                    __threadfence();
+                    // global -> shared
+                    currentTask = gtQ[tqs.signal - 1];
+                    // shared -> register
+                    rCurrentTask = currentTask;
                     // Eagerly indicate readiness for the next task
                     atomicExch(pA.sQ, ready);
                 }
             }
             __syncthreads();
-            switch (currentTask.taskType) {
-                case TaskType::preGEMM: {
-                    constexpr unsigned int preIndex = 0;
-                    preGEMM(CAST_TO(typename Operation::MatrixDType, workspace),
-                        CONST_CAST_TO(typename Operation::MatrixAType, currentTask.aData),
-                        CONST_CAST_TO(typename Operation::MatrixBType, currentTask.bData[preIndex]),
-                        CAST_TO(typename Operation::MatrixDType, currentTask.cData[preIndex]),
-                        CONST_CAST_TO(typename Operation::MatrixDType, currentTask.dData[preIndex]),
-                        currentTask.M,
-                        pA.pd,
-                        pA.tokenSize,
-                        currentTask.tileIdx);
-                    __syncthreads();
-                    // use warp 0
-                    if (constexpr auto wS = 32; threadIdx.x / wS == 0) {
-                        uint enqueue = 0U;
-                        if (!threadIdx.x) {
-                            __threadfence();
-                            enqueue = atomicAdd(pA.tQS + currentTask.syncIdx, 1U) == pA.tN;
-                        }
-                        // Broadcast from t0 to everyone else in the warp
-                        enqueue = __shfl_sync(0xffffffff, enqueue, 0);
-                        if (enqueue) {
-                            const auto tasks = pA.tNx;
-                            auto* tQ = pA.tQ + currentTask.syncIdx;
-                            auto nextTask = Task {
-                                TaskType::postGEMM,
-                                currentTask.cData[preIndex],
-                                currentTask.bData,
-                                currentTask.cData,
-                                currentTask.dData,
-                                currentTask.syncIdx,
-                                0,
-                                currentTask.M,
-                                currentTask.flagIdx,
-                                currentTask.tileSize,
-                                currentTask.peerIdx,
-                                currentTask.batchIdx,
-                                currentTask.isPeerRemote,
-                            };
-                            for (unsigned int i = threadIdx.x; i < tasks; i += wS) {
-                                nextTask.tileIdx = i;
-                                tQ[i] = nextTask;
-                            }
-                            __syncwarp();
+            interrupt = globalInterrupt;
+            // if received interrupt, there is nothing to do next
+            if (!interrupt) {
+                // shared -> registers
+                rCurrentTask = currentTask;
+                switch (rCurrentTask.taskType) {
+                    case TaskType::preGEMM: {
+                        constexpr unsigned int preIndex = 0;
+                        preGEMM(CAST_TO(typename Operation::MatrixDType, workspace),
+                            CONST_CAST_TO(typename Operation::MatrixAType, rCurrentTask.aData),
+                            CONST_CAST_TO(typename Operation::MatrixBType, rCurrentTask.bData[preIndex]),
+                            CAST_TO(typename Operation::MatrixDType, rCurrentTask.cData[preIndex]),
+                            CONST_CAST_TO(typename Operation::MatrixDType, rCurrentTask.dData[preIndex]),
+                            rCurrentTask.M,
+                            rCurrentTask.tileIdx);
+                        __syncthreads();
+                        // use warp 0
+                        if (constexpr auto wS = 32; threadIdx.x / wS == 0) {
+                            uint enqueue = 0U;
                             if (!threadIdx.x) {
                                 __threadfence();
-                                // notify scheduler
-                                atomicAdd(pA.tQH, tasks);
+                                enqueue = atomicAdd(pA.tQS + rCurrentTask.syncIdx, 1U) == tN;
+                            }
+                            // Broadcast from t0 to everyone else in the warp
+                            enqueue = __shfl_sync(0xffffffff, enqueue, 0);
+                            if (enqueue) {
+                                auto* __restrict__ tQ = pA.tQ + rCurrentTask.syncIdx;
+                                auto* __restrict__ tQH = pA.tQH;
+                                auto nextTask = Task {
+                                    TaskType::postGEMM,
+                                    rCurrentTask.cData[preIndex],
+                                    rCurrentTask.bData,
+                                    rCurrentTask.cData,
+                                    rCurrentTask.dData,
+                                    rCurrentTask.syncIdx,
+                                    0,
+                                    rCurrentTask.M,
+                                    rCurrentTask.flagIdx,
+                                    rCurrentTask.tileSize,
+                                    rCurrentTask.peerIdx,
+                                    rCurrentTask.batchIdx,
+                                    rCurrentTask.isPeerRemote,
+                                };
+                                #pragma unroll
+                                for (unsigned int i = threadIdx.x; i < tNx; i += wS) {
+                                    nextTask.tileIdx = i;
+                                    tQ[i] = nextTask;
+                                }
+                                __syncwarp();
+                                if (!threadIdx.x) {
+                                    __threadfence();
+                                    // notify scheduler
+                                    atomicAdd(tQH, tNx);
+                                }
                             }
                         }
                     }
-                }
-                break;
-                case TaskType::postGEMM: {
-                    constexpr unsigned int postIndex = 0;
-                    postGEMM(CAST_TO(typename Operation::MatrixDType, workspace),
-                        CONST_CAST_TO(typename Operation::MatrixAType, currentTask.aData),
-                        CONST_CAST_TO(typename Operation::MatrixBType, currentTask.bData[postIndex]),
-                        CAST_TO(typename Operation::MatrixDType, currentTask.cData[postIndex]),
-                        CONST_CAST_TO(typename Operation::MatrixDType, currentTask.dData[postIndex]),
-                        currentTask.M,
-                        pA.tokenSize,
-                        pA.pd,
-                        currentTask.tileIdx);
-                    __syncthreads();
-                    if (!threadIdx.x) {
-                        // Pack payload into single signal word of 8 bytes
-                        const auto flagSignal = SignalPayload<PacketStage::last>{
-                            currentTask.batchIdx,
-                            rSeqBit,
-                            currentTask.tileSize
-                        };
-                        if (currentTask.isPeerRemote) {
-                            // Remote; check if we need to do the transfer
-                            __threadfence();
-                            if (atomicIncrement(pA.tQS + currentTask.syncIdx) == pA.tN + pA.tNx) {
-                                // Batch remote network transfer to avoid overwhelming the NIC
-                                nvshmem_putmem_signal_nbi(currentTask.cData[postIndex], currentTask.cData[postIndex],
-                                    currentTask.tileSize * pA.tokenSize * sizeof(ElementA),
-                                    pA.flags + currentTask.flagIdx,
-                                    *CONST_CAST_TO(flagsType, &flagSignal), NVSHMEM_SIGNAL_SET,
-                                    currentTask.peerIdx);
+                    break;
+                    case TaskType::postGEMM: {
+                        if (!threadIdx.x) {
+                            // below is a ldg read so initiate it early
+                            cachedFlags = nvshmem_ptr(pA.flags, rCurrentTask.peerIdx);
+                        }
+                        constexpr unsigned int postIndex = 0;
+                        postGEMM(CAST_TO(typename Operation::MatrixDType, workspace),
+                            CONST_CAST_TO(typename Operation::MatrixAType, rCurrentTask.aData),
+                            CONST_CAST_TO(typename Operation::MatrixBType, rCurrentTask.bData[postIndex]),
+                            CAST_TO(typename Operation::MatrixDType, rCurrentTask.cData[postIndex]),
+                            CONST_CAST_TO(typename Operation::MatrixDType, rCurrentTask.dData[postIndex]),
+                            rCurrentTask.M,
+                            currentTask.tileIdx);
+                        __syncthreads();
+                        if (!threadIdx.x) {
+                            // Pack payload into single signal word of 8 bytes
+                            const auto flagSignal = SignalPayload<PacketStage::last>{
+                                rCurrentTask.batchIdx,
+                                rSeqBit,
+                                rCurrentTask.tileSize
+                            };
+                            if (rCurrentTask.isPeerRemote) {
+                                // Remote; check if we need to do the transfer
+                                __threadfence();
+                                if (atomicIncrement(pA.tQS + rCurrentTask.syncIdx) == tN + tNx) {
+                                    // Batch remote network transfer to avoid overwhelming the NIC
+                                    nvshmem_putmem_signal_nbi(rCurrentTask.cData[postIndex], rCurrentTask.cData[postIndex],
+                                        rCurrentTask.tileSize * H * sizeof(ElementA),
+                                        pA.flags + rCurrentTask.flagIdx,
+                                        *CONST_CAST_TO(flagsType, &flagSignal), NVSHMEM_SIGNAL_SET,
+                                        rCurrentTask.peerIdx);
+                                }
+                            }
+                            else {
+                                // individual tile, no batching here
+                                // Already did the network transfer,
+                                // so set signal only
+                                __threadfence_system();
+                                atomicExch_system(CAST_TO(ull_t, cachedFlags), *CONST_CAST_TO(ull_t, &flagSignal));
                             }
                         }
-                        else {
-                            __threadfence_system();
-
-                            // send individual tile, no batching here
-                            // Already did the network transfer, so set signal only
-                            /*nvshmemx_signal_op(pA.flags + currentTask.flagIdx,
-                             *CAST_TO(flagsType, &flagSignal), NVSHMEM_SIGNAL_SET,
-                             currentTask.peerIdx);*/
-                        }
                     }
-                }
-                break;
-                case TaskType::combine: {
-                    combineOp(CAST_TO(typename Operation::MatrixDType, workspace),
-                        CONST_CAST_TO(TokenIdxTuple, currentTask.aData),
-                        CONST_CAST_TO(typename Operation::MatrixAType, currentTask.bData[0]),
-                        CAST_TO(typename Operation::MatrixDType, currentTask.cData[0]),
-                        sW,
-                        currentTask.M,
-                        pA.tokenSize,
-                        currentTask.tileIdx,
-                        currentTask.tileSize, currentTask.expertIdx);
-                }
-                break;
-                case TaskType::Interrupt: {
-                    interrupt = 1U;
+                    break;
+                    case TaskType::combine: {
+                        combineOp(CAST_TO(typename Operation::MatrixDType, workspace),
+                            CONST_CAST_TO(TokenIdxTuple, rCurrentTask.aData),
+                            CONST_CAST_TO(typename Operation::MatrixAType, rCurrentTask.bData[0]),
+                            CAST_TO(typename Operation::MatrixDType, rCurrentTask.cData[0]),
+                            sW,
+                            rCurrentTask.M,
+                            rCurrentTask.tileIdx,
+                            rCurrentTask.tileSize, rCurrentTask.expertIdx);
+                    }
+                    break;
                 }
             }
         }

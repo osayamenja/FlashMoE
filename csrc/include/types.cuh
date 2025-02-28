@@ -191,6 +191,12 @@ namespace aristos{
         uint16_t tasks;
     };
 
+    __device__
+    struct __align__(8) TQSignal{
+        uint interrupt;
+        uint signal; // one ahead
+    };
+
     // These could be much more, as supported by CUTLASS
     __host__ __device__
     enum ActivationFunction: uint8_t {
@@ -437,8 +443,7 @@ namespace aristos{
     enum class TaskType : uint8_t {
         preGEMM,
         postGEMM,
-        combine,
-        Interrupt,
+        combine
     };
 
     struct __align__(16) Task {
@@ -460,7 +465,7 @@ namespace aristos{
         uint16_t peerIdx = 0U;
         uint16_t expertIdx = 0U;
         TST tileSize = 0U; // <= BLOCK_M
-        TaskType taskType = TaskType::Interrupt;
+        TaskType taskType;
         bool isPeerRemote = false;
 
         __forceinline__ __device__
@@ -498,11 +503,6 @@ namespace aristos{
         const unsigned int& _expertIdx):
         aData(_aData), bData(_bData), cData(_cData), tileIdx(_tile), M(_M), expertIdx(_expertIdx),
         tileSize(_size), taskType(_taskType){}
-
-
-        __device__ __forceinline__
-        explicit Task(const TaskType& _taskType):
-        taskType(_taskType) {}
     };
 
     /// Information about auxiliary data structures comprising bookkeeping state
@@ -680,15 +680,15 @@ namespace aristos{
         auto* tQ() const {
             return CAST_TO(Task, book);
         }
-
-        // processor interrupts
+        static_assert(alignof(Task) % alignof(ull_t) == 0);
+        /// processors' doorbell
         __device__ __forceinline__
-        auto* tQI() const {
-            return tQ() + tQl;
+        auto* pDB() const {
+            return CAST_TO(TQSignal, tQ() + tQl);
         }
 
-        static_assert(alignof(Task) % alignof(RingSoftmaxPayload) == 0
-            && alignof(Task) % alignof(RingTopKPayload) == 0
+        static_assert(alignof(ull_t) % alignof(RingSoftmaxPayload) == 0
+            && alignof(ull_t) % alignof(RingTopKPayload) == 0
             && alignof(RingSoftmaxPayload) % alignof(RingTopKPayload) == 0);
         /***********CONTIGUOUS**************/
         __device__ __forceinline__
@@ -789,14 +789,9 @@ namespace aristos{
         }
 
         /// Scheduler buffers and flag checkpoints
-        /// processors' doorbell
-        __device__ __forceinline__
-        auto* pDB() const {
-            return CAST_TO(BookType, book + eDsA);
-        }
         __device__ __forceinline__
         auto* sQ() const {
-            return pDB() + blocks;
+            return CAST_TO(BookType, book + eDsA);
         }
         __device__ __forceinline__
         auto* tQH() const {

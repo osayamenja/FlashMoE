@@ -10,11 +10,11 @@
 namespace aristos{
     template<typename B>
     concept AtomicType = cuda::std::same_as<B, int> || cuda::std::same_as<B, unsigned int>
-    || cuda::std::same_as<B, unsigned long long int>;
+    || cuda::std::same_as<B, ull_t>;
 
     template<typename B>
     concept AtomicCASType = cuda::std::same_as<B, int> || cuda::std::same_as<B, unsigned int>
-    || cuda::std::same_as<B, unsigned long long int> || cuda::std::same_as<B, unsigned short int>;
+    || cuda::std::same_as<B, ull_t> || cuda::std::same_as<B, unsigned short int>;
 
     template<cuda::thread_scope scope>
     concept AtomicScope = scope == cuda::thread_scope_thread ||
@@ -27,10 +27,12 @@ namespace aristos{
         if constexpr (scope == cuda::thread_scope_block || scope == cuda::thread_scope_thread) {
             return atomicOr_block(addr, 0U);
         }
-        if constexpr (scope == cuda::thread_scope_system) {
+        else if constexpr (scope == cuda::thread_scope_system) {
             return atomicOr_system(addr, 0U);
         }
-        return atomicOr(addr, 0U);
+        else {
+            return atomicOr(addr, 0U);
+        }
     }
 
     template<cuda::thread_scope scope = cuda::thread_scope_device,
@@ -41,10 +43,12 @@ namespace aristos{
         if constexpr (scope == cuda::thread_scope_block || scope == cuda::thread_scope_thread) {
             return atomicInc_block(addr, bound);
         }
-        if constexpr (scope == cuda::thread_scope_system) {
+        else if constexpr (scope == cuda::thread_scope_system) {
             return atomicInc_system(addr, bound);
         }
-        return atomicInc(addr, bound);
+        else {
+            return atomicInc(addr, bound);
+        }
     }
 
     // Atomic Test and set
@@ -56,10 +60,12 @@ namespace aristos{
         if constexpr (scope == cuda::thread_scope_block || scope == cuda::thread_scope_thread) {
             return atomicCAS_block(addr, 0U, 1U);
         }
-        if constexpr (scope == cuda::thread_scope_system) {
+        else if constexpr (scope == cuda::thread_scope_system) {
             return atomicCAS_system(addr, 0U, 1U);
         }
-        return atomicCAS(addr, 0U, 1U);
+        else {
+            return atomicCAS(addr, 0U, 1U);
+        }
     }
 
     template<cuda::thread_scope scope = cuda::thread_scope_device>
@@ -72,20 +78,38 @@ namespace aristos{
         else if constexpr (scope == cuda::thread_scope_device) {
             __threadfence();
         }
-        __threadfence_system();
+        else {
+            __threadfence_system();
+        }
     }
 
 
-    // no fences are needed because the payload and signal comprise the atomically received data word
-    template<cuda::thread_scope scope = cuda::thread_scope_device, typename Payload>
-    requires(sizeof(Payload) == sizeof(unsigned long long int) && alignof(Payload) == alignof(unsigned long long int))
+    /// Expected Signal is known
+    template<cuda::thread_scope scope = cuda::thread_scope_device,typename Payload, typename T>
+    requires(sizeof(Payload) == sizeof(ull_t) && alignof(Payload) == alignof(ull_t))
     __device__ __forceinline__
-    void awaitPayload(Payload* __restrict__ const& addr, Payload* __restrict__ const& dest, const uint16_t& baton = 1U) {
-        auto mail = atomicLoad<scope>(CAST_TO(unsigned long long int, addr));
+    void awaitPayload(Payload* __restrict__ const& addr, Payload* __restrict__ const& dest, const T& expected = 1U) {
+        static_assert(cuda::std::is_same_v<decltype(addr->signal), T>, "Signal types should be the same!");
+        auto mail = atomicLoad<scope>(CAST_TO(ull_t, addr));
         auto* __restrict__ payload = CAST_TO(Payload, &mail);
-        while (payload->signal != baton) {
+        while (payload->signal != expected) {
             mail = atomicLoad<scope>(CAST_TO(unsigned long long int, addr));
             payload = CAST_TO(Payload, &mail);
+        }
+        *dest = *payload;
+    }
+
+    template<cuda::thread_scope scope = cuda::thread_scope_device, typename Notification, typename T>
+    requires(sizeof(Notification) == sizeof(ull_t) && alignof(Notification) == alignof(ull_t))
+    __device__ __forceinline__
+    void awaitNotification(Notification* __restrict__ const& addr, Notification* __restrict__ const& dest,
+        const T& previous) {
+        static_assert(cuda::std::is_same_v<decltype(addr->signal), T>, "Signal types should be the same!");
+        auto mail = atomicLoad<scope>(CAST_TO(ull_t, addr));
+        auto* __restrict__ payload = CAST_TO(Notification, &mail);
+        while (payload->signal == previous) {
+            mail = atomicLoad<scope>(CAST_TO(unsigned long long int, addr));
+            payload = CAST_TO(Notification, &mail);
         }
         *dest = *payload;
     }
@@ -95,16 +119,18 @@ namespace aristos{
         typename Payload
     >
     requires(AtomicScope<scope>
-        && sizeof(unsigned long long int) == sizeof(Payload) && alignof(Payload) == alignof(unsigned long long int))
+        && sizeof(ull_t) == sizeof(Payload) && alignof(Payload) == alignof(ull_t))
     __device__ __forceinline__
-    void signalPayload(Payload* __restrict__ const& addr, const Payload* const& payload) {
+    void signalPayload(Payload* __restrict__ const& addr, const Payload* __restrict__ const& payload) {
         if constexpr (scope == cuda::thread_scope_block || scope == cuda::thread_scope_thread) {
-            atomicExch_block(CAST_TO(unsigned long long int, addr), *CONST_CAST_TO(unsigned long long int, payload));
+            atomicExch_block(CAST_TO(ull_t, addr), *CONST_CAST_TO(ull_t, payload));
         }
-        if constexpr (scope == cuda::thread_scope_system) {
-            atomicExch_system(CAST_TO(unsigned long long int, addr), *CONST_CAST_TO(unsigned long long int, payload));
+        else if constexpr (scope == cuda::thread_scope_system) {
+            atomicExch_system(CAST_TO(ull_t, addr), *CONST_CAST_TO(ull_t, payload));
         }
-        atomicExch(CAST_TO(unsigned long long int, addr), *CONST_CAST_TO(unsigned long long int, payload));
+        else {
+            atomicExch(CAST_TO(ull_t, addr), *CONST_CAST_TO(ull_t, payload));
+        }
     }
 }
 #endif //CSRC_ATOMICS_CUH
