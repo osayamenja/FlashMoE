@@ -119,12 +119,11 @@ namespace aristos::moe{
         CHECK_ERROR_EXIT(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
 
         /// Consume precompiled macros
-        using GPUType = aristos::Hardware<ARISTOS_ARCH, 255>;
-        constexpr auto blocks = GPUType::OS::processorBlocks::value;
-        constexpr auto threads = GPUType::OS::threads::value;
+        constexpr auto blocks = ACC::PeakHardware::OS::processorBlocks::value;
+        constexpr auto threads = ACC::PeakHardware::OS::threads::value;
 
         // Call forward pass
-        moe::forward<<<blocks, threads>>>(iP, oP, seqBit);
+        moe::forward<<<blocks, threads, 0, aristosStream>>>(iP, oP, seqBit);
         if (seqBit == cuda::std::numeric_limits<decltype(seqBit)>::max()) {
             // TODO sequence bit sync logic
         }

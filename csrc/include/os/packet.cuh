@@ -22,7 +22,7 @@ namespace aristos::packet {
     >
     requires (isTensor<Activations>::value)
     __forceinline__ __device__
-    void encode(const Activations& activations, unsigned int* const& __restrict__ workspace, const uint16_t& rSeqBit) {
+    void encode(const Activations& activations, cuda::std::byte* __restrict__ const& workspace, const uint16_t& rSeqBit) {
         static_assert(sizeof(SignalPayload<>) == sizeof(ull_t) && alignof(SignalPayload<>) == alignof(ull_t));
         using Element = typename Activations::value_type;
         using NativeElement = typename ToCDx<Element>::T;
@@ -37,103 +37,80 @@ namespace aristos::packet {
 
         // cache
         const auto* __restrict__ tP = bookkeeping.tP();
-        const auto world = bookkeeping.world;
         auto* __restrict__ pSA = bookkeeping.pSA();
-        const auto* __restrict__ pDs = bookkeeping.pDs();
         auto* __restrict__ sHeap = bookkeeping.sHeap;
         auto* __restrict__ flags = bookkeeping.flags;
         const auto expertSlots = bookkeeping.xs;
-        const auto rank = bookkeeping.rank;
+        const auto rank = bookkeeping.rank; // ep rank
 
         const auto tokenIds = make_tensor(cute::make_gmem_ptr(tP),
             cute::Layout<cute::Shape<cute::Int<E>, cute::Int<EC>>,
                 cute::Stride<cute::Int<EC>, cute::_1>>{});
 
-        // readonly arrays
-        // copy only what we need
-        // Note that the length of these arrays is rather small,
-        // which is why shared memory can accommodate them
-        constexpr auto sF = sizeof(cuda::std::byte*) / sizeof(uint);
-        const auto dSl = 3 * E + world * (2 * sF + 1);
-        const auto* __restrict__ fP = CAST_TO(cuda::std::byte*, workspace);
-        const auto* __restrict__ hP = fP + world;
-        auto* __restrict__ pDsP = workspace + sF * 2 * world;
-        const auto* __restrict__ expertCounts = pDsP;
-        const auto* __restrict__ pS = expertCounts + E;
-        const auto* __restrict__ pT = pS + E;
-        const auto* __restrict__ xLs = pT + world;
-        const auto* __restrict__ peerTotalTokens = xLs + E;
+        /// Populate Data Structures
+        const auto* __restrict__ enL = CAST_TO(PEL, workspace);
+        const auto* __restrict__ eC = bookkeeping.eC();
+        const auto* __restrict__ eL = CAST_TO(ulonglong4, bookkeeping.pEL());
+        static_assert(sizeof(ulonglong4) == sizeof(PEL) &&
+            alignof(ulonglong4) == alignof(PEL));
+        constexpr auto oT = E * sizeof(PEL);
+        const auto* __restrict__ seC = CAST_TO(uint, workspace + oT);
 
-        auto* __restrict__ pTTx = workspace + dSl;
-        // Populate above data structures
-        constexpr auto vF = sizeof(uint4) / sizeof(uint);
-        const auto vDsL = dSl / vF;
-        const auto* __restrict__ vPDs = static_cast<const uint4*>(static_cast<const void*>(pDs));
-        for (uint i = threadIdx.x; i < vDsL; i += threads) {
-            CAST_TO(uint4, pDsP)[i] = vPDs[i];
-        }
-        for (uint i = threadIdx.x + vDsL * vF; i < dSl; i += threads) {
-            pDsP[i] = pDs[i];
-        }
-        // wipe clean first
-        for (uint i = threadIdx.x; i < world; i += threads) {
-            // done this way to preserve const attribute
-            pTTx[i] = 0U;
-        }
-        __syncthreads();
-        // symmetric heap pointer
-        auto* __restrict__ sFp = CAST_TO(cuda::std::byte*, workspace);
-        auto* __restrict__ sHp = sFp + world;
-        for (uint i = 0; i < world; i += threads) {
-            // get peer idx
-            const auto peer = pT[i];
-            if (const auto rSHeap = nvshmem_ptr(sHeap, peer); rSHeap == nullptr) {
-                sFp[i] = nullptr;
-                sHp[i] = nullptr;
-            }
-            else {
-                sFp[i] = CAST_TO(cuda::std::byte, nvshmem_ptr(flags, peer));
-                sHp[i] = CAST_TO(cuda::std::byte, rSHeap);
-            }
-        }
         #pragma unroll
         for (uint i = threadIdx.x; i < E; i += threads) {
-            const auto peer = __ldg(pS + i);
-            atomicAdd_block(pTTx + peer, expertCounts[i]);
+            CAST_TO(ulonglong4, workspace)[i] = eL[i];
+            CAST_TO(uint, workspace + oT)[i] = eC[i];
+        }
+        constexpr auto oT2 = oT + E * sizeof(uint);
+        const auto* __restrict__ sPTT = CAST_TO(uint, workspace + oT2);
+        __syncthreads();
+        #pragma unroll
+        for (uint i = threadIdx.x; i < E; i += threads) {
+            const auto peer = enL[i].peer;
+            atomicAdd_block(CAST_TO(uint, workspace + oT2) + peer, seC[i]);
+        }
+        __syncthreads();
+        // Update encoding lookup table
+        #pragma unroll
+        for (uint i = threadIdx.x; i < E; i += threads) {
+            auto* __restrict__ eLI = CAST_TO(PEL, workspace) + i;
+            const auto peer = eLI->peer;
+            const auto isRemote = eLI->isRemote;
+            const auto xLIdx = eLI->expertLocalIdx;
+            eLI->eC = seC[i];
+            eLI->pTT = sPTT[peer];
+            if (!isRemote) {
+                eLI->remoteSFlags += rank * expertSlots + xLIdx;
+            }
         }
         __syncthreads();
         #pragma unroll
         for (uint expertIdx = superBlockIdx; expertIdx < E; expertIdx += numSuperBlocks) {
-            const auto pLIdx = xLs[expertIdx]; // local index for current expert on peer
+            const auto lI = enL[expertIdx];
+            const auto flagOffset = rank * expertSlots + lI.expertLocalIdx;
             const auto routedTokens = d == DropTokens::yes ?
-                cute::min(expertCounts[expertIdx], EC) : expertCounts[expertIdx];
-            const auto peer = pS[expertIdx];
-            const auto pe = pT[peer];
-            const auto pTT = cute::min(peerTotalTokens[peer], EC);
-            auto* __restrict__ pH = hP[peer];
-            auto* __restrict__ pF = fP[peer];
-            const auto isRemote = pH == nullptr;
-            auto* __restrict__ peerHeap = isRemote ?
-                heap::cAdvance<0, 0>(sHeap, peer, pLIdx) :
-            heap::cAdvance<0, 1>(pH, peer, pLIdx);
+                cute::min(lI.eC, EC) : lI.eC;
+            auto* __restrict__ peerHeap = lI.isRemote ?
+                heap::cAdvance<0, 0>(sHeap, lI.peer, lI.expertLocalIdx) :
+            heap::cAdvance<0, 1>(lI.remoteSHeap, lI.peer, lI.expertLocalIdx);
 
             if (!routedTokens) {
-                if (isLeader && !pTT) {
+                if (isLeader && !lI.pTT) {
                     // single thread sends a noop packet to unblock the remote peer
                     // Pack payload into single signal word
                     const auto sigPayload = SignalPayload{
                         routedTokens,
                         rSeqBit,
-                        static_cast<uint16_t>(Bookkeeping::tiles<BLOCK_M>(pTT)) // this should be safe
+                        static_cast<uint16_t>(Bookkeeping::tiles<BLOCK_M>(lI.pTT)) // this should be safe
                     };
-                    if (isRemote) {
+                    if (lI.isRemote) {
                         // transmit signal
-                        nvshmemx_signal_op(flags + rank * expertSlots + pLIdx,
-                            *CAST_TO(flagsType, &sigPayload), NVSHMEM_SIGNAL_SET, pe);
+                        nvshmemx_signal_op(flags + flagOffset,
+                            *CAST_TO(flagsType, &sigPayload), NVSHMEM_SIGNAL_SET, lI.pe);
                     }
                     else {
-                        // Better to use below than the volatile write operation used in the public-facing NVSHMEM API
-                        atomicExch_system(CAST_TO(ull_t, pF + rank * expertSlots + pLIdx),
+                        // Better to use below than the volatile write operation used in the public-facing API
+                        atomicExch_system(CAST_TO(ull_t, lI.remoteSFlags),
                             *CONST_CAST_TO(ull_t, sigPayload));
                     }
                 }
@@ -160,7 +137,7 @@ namespace aristos::packet {
             }
             __syncthreads();
             if (!threadIdx.x) {
-                if (isRemote) {
+                if (lI.isRemote) {
                     __threadfence();
                 }
                 else {
@@ -171,22 +148,22 @@ namespace aristos::packet {
                     const auto sigPayload = SignalPayload{
                         routedTokens,
                         rSeqBit,
-                        static_cast<uint16_t>(Bookkeeping::tiles<BLOCK_M>(pTT)) // this should be safe
+                        static_cast<uint16_t>(Bookkeeping::tiles<BLOCK_M>(lI.pTT)) // this should be safe
                     };
-                    if (isRemote) {
+                    if (lI.isRemote) {
                         // do RDMA transfer + signal
                         nvshmem_putmem_signal_nbi(
-                            heap::cAdvance<0, 1>(sHeap, peer, pLIdx),
+                            heap::cAdvance<0, 1>(sHeap, lI.peer, lI.expertLocalIdx),
                             peerHeap,
                             sizeof(Element) * routedTokens * H,
-                            flags + rank * expertSlots + pLIdx,
+                            flags + flagOffset,
                             *CAST_TO(flagsType, &sigPayload),
                             NVSHMEM_SIGNAL_SET,
-                            pe);
+                            lI.pe);
                     }
                     else {
                         // we've done the DMA transfer already, so we set the signal instead
-                        atomicExch_system(CAST_TO(ull_t, pF + rank * expertSlots + pLIdx),
+                        atomicExch_system(CAST_TO(ull_t, lI.remoteSFlags),
                             *CONST_CAST_TO(ull_t, sigPayload));
                     }
                 }

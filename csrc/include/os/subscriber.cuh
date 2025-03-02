@@ -230,7 +230,7 @@ namespace aristos::subscriber{
     };
     /// Decode packets deposited
     template<
-        unsigned int wSet = 32U,
+        unsigned int wSet = 16U,
         unsigned int subscriberCount = SUBSCRIBERS,
         typename Output,
         typename ExpertsUp,

@@ -316,6 +316,19 @@ namespace aristos{
         uint16_t isRemote;
     };
 
+    /// Packet Encoding Lookup info, retrievable in a single memory lookup
+    __device__
+    struct __align__(16) PEL{
+        cuda::std::byte* remoteSHeap;
+        cuda::std::byte* remoteSFlags;
+        uint eC;
+        uint pTT;
+        uint16_t expertLocalIdx;
+        uint16_t peer;
+        uint16_t pe;
+        uint16_t isRemote;
+    };
+
     /// Aristos Compile-time Config
     struct ACC {
         using GRL = cute::C<NUM_EXPERTS <= BLOCK_N ? GateReductionLevel::singleBlock :
@@ -614,7 +627,7 @@ namespace aristos{
                 tPs = cute::ceil_div(sT, SUBSCRIBERS);
                 sT = tPs * SUBSCRIBERS;
                 tQl = sizeof(Task) * (sT + prT);
-                tQml = tQl + blocks * sizeof(TQSignal); // processor doorbells
+                tQml = tQl + blocks * sizeof(TQSignal) + nx; // processor doorbells
                 brs = tQml + (isSingleBlockGate ? 0U : sl * tiles<BLOCK_N>(px) *
                     (sizeof(RingSoftmaxPayload) + 2 * sizeof(RingTopKPayload)));
                 tQXt = brs + sizeof(EDT) * _nx + sizeof(TokenIdxTuple) * (px * _eCapacity) +
@@ -653,7 +666,7 @@ namespace aristos{
                 const auto tPs = cute::ceil_div(sT, SUBSCRIBERS);
                 sT = tPs * SUBSCRIBERS;
                 const auto tQl = sizeof(Task) * (sT + prT);
-                const auto tQml = tQl + _blocks * sizeof(TQSignal); // interrupt tasks
+                const auto tQml = tQl + _blocks * sizeof(TQSignal) + _nx; // interrupt tasks
                 const auto brs = tQml + (isSingleBlockGate ? 0U : _sl * tiles<BLOCK_N>(_px) *
                                     (sizeof(RingSoftmaxPayload) + 2 * sizeof(RingTopKPayload)));
                 const auto tQXt = brs + sizeof(EDT) * _nx + sizeof(TokenIdxTuple) * (_px * _eCap) +
@@ -685,11 +698,15 @@ namespace aristos{
         auto* tQ() const {
             return CAST_TO(Task, book);
         }
+        static_assert(alignof(Task) % alignof(PEL) == 0);
+        auto* pEL() const {
+            return CAST_TO(PEL, tQ() + tQl);
+        }
         static_assert(alignof(Task) % alignof(TQSignal) == 0);
         /// processors' doorbell
         __device__ __forceinline__
         auto* pDB() const {
-            return CAST_TO(TQSignal, tQ() + tQl);
+            return CAST_TO(TQSignal, eL() + nx);
         }
 
         static_assert(alignof(ull_t) % alignof(RingSoftmaxPayload) == 0
@@ -711,6 +728,7 @@ namespace aristos{
         auto* rTp() const {
             return CAST_TO(RingTopKPayload, bRsP() + sl * tiles<BLOCK_N>(px));
         }
+        /***********CONTIGUOUS**************/
 
         static_assert(alignof(RingTopKPayload) % alignof(cuda::barrier<cuda::thread_scope_device>) == 0);
         /// Device-wide barrier
@@ -718,7 +736,6 @@ namespace aristos{
         auto* dB() const {
             return CAST_TO(cuda::barrier<cuda::thread_scope_device>, book + brs);
         }
-        /***********CONTIGUOUS**************/
         static_assert(alignof(cuda::barrier<cuda::thread_scope_device>) % alignof(ELI) == 0);
         /// Expert Lookup
         /// expert index -> ELI
@@ -773,7 +790,6 @@ namespace aristos{
         auto* pT() const {
             return ePs() + nx;
         }
-
         /*************CONTIGUOUS************/
 
         /// number of remote experts
