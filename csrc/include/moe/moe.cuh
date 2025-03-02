@@ -19,7 +19,8 @@ namespace aristos::moe{
         unsigned int E = ACC::E::value
     >
     __global__ __maxnreg__(ACC::PeakHardware::registers::value) void forward(
-        const void* __restrict__ iP, /* A, G, B, D*/ void* __restrict__ oP /*G, O*/) {
+        const void* __restrict__ iP, /* A, G, B, D*/ void* __restrict__ oP /*G, O*/,
+        const __grid_constant__ uint16_t sb) {
         using Config = ACC;
         using GPUType = Config::PeakHardware;
         constexpr auto blocks = GPUType::blocks::value;
@@ -43,9 +44,8 @@ namespace aristos::moe{
         auto* __restrict__ gOp = CAST_TO(Element, oP);
         auto* __restrict__ mOp = gOp + S * E;
         __shared__ __align__(16) cuda::std::byte workspace[sharedSize];
-        // wipe buffers here and read the sequence bit, before the grid-wide barrier
+        // wipe buffers before the grid-wide barrier
         const auto gtQCl = bookkeeping.gtQCl;
-        const auto sb = seqBit;
         auto* __restrict__ gtQHeads = bookkeeping.tQH();
         for (uint i = threads * blockIdx.x + threadIdx.x; i < gtQCl; i += blocks * threads) {
             gtQHeads[i] = 0U;
@@ -98,7 +98,7 @@ namespace aristos::moe{
         if (blockIdx.x + 1 < blocks) {
             constexpr auto cutoff = processors / ARISTOS_SUPER_BLOCK_SIZE * ARISTOS_SUPER_BLOCK_SIZE;
             if (blockIdx.x < cutoff) {
-                packet::encode<cutoff, d, ARISTOS_SUPER_BLOCK_SIZE>(activations, workspace);
+                packet::encode<cutoff, d, ARISTOS_SUPER_BLOCK_SIZE>(activations, workspace, sb);
             }
             processor::start<
                 GPUType,
@@ -124,7 +124,12 @@ namespace aristos::moe{
         constexpr auto threads = GPUType::OS::threads::value;
 
         // Call forward pass
-        moe::forward<<<blocks, threads>>>(iP, oP);
+        moe::forward<<<blocks, threads>>>(iP, oP, seqBit);
+        if (seqBit == cuda::std::numeric_limits<decltype(seqBit)>::max()) {
+            // TODO sequence bit sync logic
+        }
+        // The below wrapping around to zero is fine
+        seqBit++;
     }
 }
 #endif //ARISTOS_MOE_CUH

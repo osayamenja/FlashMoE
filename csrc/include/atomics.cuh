@@ -93,7 +93,7 @@ namespace aristos{
         auto mail = atomicLoad<scope>(CAST_TO(ull_t, addr));
         auto* __restrict__ payload = CAST_TO(Payload, &mail);
         while (payload->signal != expected) {
-            mail = atomicLoad<scope>(CAST_TO(unsigned long long int, addr));
+            mail = atomicLoad<scope>(CAST_TO(ull_t, addr));
             payload = CAST_TO(Payload, &mail);
         }
         *dest = *payload;
@@ -108,7 +108,7 @@ namespace aristos{
         auto mail = atomicLoad<scope>(CAST_TO(ull_t, addr));
         auto* __restrict__ payload = CAST_TO(Notification, &mail);
         while (payload->signal == previous) {
-            mail = atomicLoad<scope>(CAST_TO(unsigned long long int, addr));
+            mail = atomicLoad<scope>(CAST_TO(ull_t, addr));
             payload = CAST_TO(Notification, &mail);
         }
         *dest = *payload;

@@ -35,7 +35,6 @@
 #define BLOCK_K_FULL 8U
 #define MAX_REGS (BLOCK_M * BLOCK_N) / THREADS
 #define GEMMs 2U // per expert
-#define REGINALD 128 // max registers per thread
 
 #define TOPO_LOOP_TRIP 4U // this may be too much
 #define BETA_BUFFER (1024UL * 1024UL) // 1MB
@@ -205,7 +204,7 @@ namespace aristos{
     };
 
     __device__
-    enum class PacketStage {
+    enum class PacketStage: uint {
         initial,
         last,
     };
@@ -298,16 +297,23 @@ namespace aristos{
     struct __align__(8) SignalPayload {
         static_assert(p == PacketStage::initial);
         uint routedTokens;
-        uint16_t seqBit;
         uint16_t totalTilesM;
+        uint16_t seqBit;
     };
 
     template<>
     __device__
     struct __align__(8) SignalPayload<PacketStage::last> {
         uint batchIdx;
-        uint16_t seqBit;
         uint16_t tokensM; // <= BLOCK_M
+        uint16_t seqBit;
+    };
+
+    __device__
+    struct __align__(8) ELI {
+        uint epRank; // host peer
+        uint16_t localExpertIndex;
+        uint16_t isRemote;
     };
 
     /// Aristos Compile-time Config
@@ -326,6 +332,12 @@ namespace aristos{
         using P = cute::C<I_SIZE>;
         using H = cute::C<HIDDEN_SIZE>;
         using E = cute::C<NUM_EXPERTS>;
+        using EC = cute::C<DTK::value == DropTokens::no ? S::value : cute::ceil_div(S::value, E::value)>;
+        using SZ = cute::C<EC::value * H::value>;
+        using TM = cute::C<S::value / BLOCK_M>;
+        using TN = cute::C<P::value / BLOCK_N>;
+        using TNx = cute::C<H::value / BLOCK_N>;
+        using TCM = cute::C<EC::value / BLOCK_M>;
     };
 
     /// A more apropos name would be "static storage" rather than registers.
@@ -488,8 +500,8 @@ namespace aristos{
             const bool& _isPeerRemote):
         aData(_aData), bData(_bData),
         cData(_cData), dData(_dData),
-        syncIdx(_syncIdx), tileIdx(_tile), peerIdx(_peerIdx), M(_M), flagIdx(_flagIdx),
-        batchIdx(_batchIdx), tileSize(_size), taskType(_taskType), isPeerRemote(_isPeerRemote){}
+        syncIdx(_syncIdx), tileIdx(_tile),  M(_M), flagIdx(_flagIdx),
+        batchIdx(_batchIdx), peerIdx(_peerIdx), tileSize(_size), taskType(_taskType), isPeerRemote(_isPeerRemote){}
 
         // Stage 2
         __device__ __forceinline__
@@ -504,9 +516,6 @@ namespace aristos{
         aData(_aData), bData(_bData), cData(_cData), tileIdx(_tile), M(_M), expertIdx(_expertIdx),
         tileSize(_size), taskType(_taskType){}
     };
-
-    template<unsigned int S, unsigned int E>
-    constexpr auto expertCapacity = cute::ceil_div(S, E);
 
     /// Information about auxiliary data structures comprising bookkeeping state
     /// Includes length of data structures (arrays) and pointer arithmetic functions
@@ -611,9 +620,8 @@ namespace aristos{
                 tQXt = brs + sizeof(EDT) * _nx + sizeof(TokenIdxTuple) * (px * _eCapacity) +
                     sizeof(cuda::barrier<cuda::thread_scope_device>);
                 gRl = tQXt + sizeof(mp_t) * (2 * nx + 1);
-                eDsA = gRl + sizeof(BookType) * (4 * nx + world + 1);
-                const unsigned int fCl = sizeof(bool) * (world * nLx + nx * tCM * tN);
-                sBfC = eDsA + sizeof(BookType) * 2 * (blocks + world * nLx * tCM) + fCl;
+                eDsA = gRl + sizeof(BookType) * (3 * nx + world + 1);
+                sBfC = eDsA + sizeof(BookType) * 2 * (world * nLx * tCM) + blocks + (tCM * tN * nx);
             }
             gtQCl = world * nLx * tCM;
             bookSize = sBfC + _eNb * (_world * _nLx * tCM * tN);
@@ -651,9 +659,8 @@ namespace aristos{
                 const auto tQXt = brs + sizeof(EDT) * _nx + sizeof(TokenIdxTuple) * (_px * _eCap) +
                     sizeof(cuda::barrier<cuda::thread_scope_device>);
                 const auto gRl = tQXt + sizeof(mp_t) * (2 * _nx + 1);
-                const auto eDsA = gRl + sizeof(BookType) * (4 * _nx + _world + 1);
-                const unsigned int fCl = sizeof(bool) * (_world * _nLx + _nx * tCM * tN);
-                sBfC = eDsA + sizeof(BookType) * 2 * (_blocks + _world * _nLx * tCM) + fCl;
+                const auto eDsA = gRl + sizeof(BookType) * (3 * _nx + _world + 1);
+                sBfC = eDsA + sizeof(BookType) * 2 * (_blocks + _world * _nLx * tCM) + (tCM * tN * _nx);
             }
             return sBfC + _eNb * (_world * _nLx * tCM * tN);
         }
@@ -712,18 +719,18 @@ namespace aristos{
             return CAST_TO(cuda::barrier<cuda::thread_scope_device>, book + brs);
         }
         /***********CONTIGUOUS**************/
-        static_assert(alignof(cuda::barrier<cuda::thread_scope_device>) % alignof(EDT) == 0);
-        /// Expert Data
-        /// remote experts first: {actual & local expert idx, peer idx}
+        static_assert(alignof(cuda::barrier<cuda::thread_scope_device>) % alignof(ELI) == 0);
+        /// Expert Lookup
+        /// expert index -> ELI
         __host__ __device__ __forceinline__
-        auto* eD() const {
-            return CAST_TO(EDT, dB() + 1);
+        auto* eL() const {
+            return CAST_TO(ELI, dB() + 1);
         }
 
         static_assert(alignof(EDT) % alignof(TokenIdxTuple) == 0);
         __device__ __forceinline__
         auto* tP() const {
-            return CAST_TO(TokenIdxTuple, eD() + nx);
+            return CAST_TO(TokenIdxTuple, eL() + nx);
         }
 
         static_assert(alignof(TokenIdxTuple) % alignof(mp_t) == 0);
@@ -766,18 +773,13 @@ namespace aristos{
         auto* pT() const {
             return ePs() + nx;
         }
-        /// Expert index to local expert index
-        __host__ __device__ __forceinline__
-        auto* eLs() const {
-            return pT() + world;
-        }
 
         /*************CONTIGUOUS************/
 
         /// number of remote experts
         __host__ __device__ __forceinline__
         auto* nRx() const {
-            return eLs() + nx;
+            return pT() + world;
         }
 
         /// Packet Sync array
@@ -801,7 +803,7 @@ namespace aristos{
             return tQH() + world * nLx * tCM;
         }
         __device__ __forceinline__
-        auto* fC() const {
+        auto* tIx() const {
             return CAST_TO(BookType, tQS() + world * nLx * tCM);
         }
 
@@ -813,14 +815,16 @@ namespace aristos{
         }
     };
 
-    __device__ __inline__ uint16_t seqBit;
+    // monotonically increasing integer
+    // has to differ from the ground state of 0, so starts at 1U
+    __inline__ uint16_t seqBit = 1U;
     __constant__ __inline__ Bookkeeping bookkeeping{};
     __inline__ Bookkeeping hostBookkeeping{};
     __inline__ bool isInitialized = false;
     __inline__ auto aristosStream = cudaStreamPerThread;
 
     namespace heap {
-        // The symmetric heap is a 6-D tensor (P, S, C, E, M, H)
+        // The symmetric heap is a 6-D tensor (P, S, C, E, EC, H)
         /// where P, S, C, E, M, and H  denote dimensions for peers, communication stages,
         /// cells, experts, expert capacity, and token hidden dimension, respectively.
         template<unsigned int stage = 0, unsigned cell = 0, unsigned long int nBytes = 1>
@@ -829,6 +833,22 @@ namespace aristos{
         auto* advance(cuda::std::byte* __restrict__ const& sHeap, const uint& cellSize, const uint& expertSlots,
             const uint& tokenDim, const uint& peer, const uint& expert, const uint& token = 0){
             return sHeap + (cellSize * (expertSlots * (CELLS * (peer * STAGES + stage) + cell) + expert) +
+                token * tokenDim) * nBytes;
+        }
+        /// Clean API for accessing the heap
+        template<
+            unsigned int stage = 0,
+            unsigned int cell = 0,
+            /*The user should not specify the parameters below*/
+            unsigned int tokenDim = ACC::H::value,
+            unsigned int slotSize = ACC::SZ::value,
+            unsigned int nBytes = sizeof(ACC::Element)
+        >
+        requires (stage < STAGES && cell < CELLS)
+        __device__ __forceinline__
+        auto* cAdvance(cuda::std::byte* __restrict__ const& sHeap, const uint& peer,
+            const uint& expert, const uint& token = 0){
+            return sHeap + (slotSize * (bookkeeping.xs * (CELLS * (peer * STAGES + stage) + cell) + expert) +
                 token * tokenDim) * nBytes;
         }
     }

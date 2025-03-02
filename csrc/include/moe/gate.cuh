@@ -451,6 +451,7 @@ namespace aristos::gate {
             constexpr auto bM = cute::get<0>(typename BlockGEMM::BlockTiler{});
             constexpr auto bN = cute::get<1>(typename BlockGEMM::BlockTiler{});
             constexpr auto bK = cute::get<2>(typename BlockGEMM::BlockTiler{});
+            static_assert(E <= bN);
             static_assert(cute::size(accumulator) == bN);
             constexpr auto threads = BlockGEMM::GEMM::block_dim.x;
 
@@ -519,7 +520,7 @@ namespace aristos::gate {
                 accumulator(i) = -cuda::std::numeric_limits<ElementC>::infinity();
             }
 
-            /// Reduce
+            /// Softmax Reduction
             #pragma unroll
             for (uint i = 0; i < bN; ++i) {
                 const auto pM = mI;
@@ -703,11 +704,13 @@ namespace aristos::gate {
         }
         __syncthreads();
         if constexpr (jT == JobType::training) {
+            auto* __restrict__ gML = bookkeeping.gML();
+            auto* __restrict__ gMeC = bookkeeping.gMeC();
             // Compute Gate loss
             auto* __restrict__ gL = bookkeeping.gL();
             for (unsigned int i = threads * blockIdx.x + threadIdx.x; i < nx; i+= threads * blocks) {
-                const auto me = gArg.gML[i];
-                const auto ce = gArg.gMeC[i];
+                const auto me = gML[i];
+                const auto ce = gMeC[i];
                 atomicAdd(gL, __fdividef(me * ce, static_cast<mp_t>(nx)));
             }
         }
