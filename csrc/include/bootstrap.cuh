@@ -5,10 +5,8 @@
 #ifndef BOOTSRAP_CUH
 #define BOOTSTRAP_CUH
 
-#include <vector>
 #include <cute/layout.hpp>
 #include <cute/tensor.hpp>
-#include <cutlass/epilogue/thread/activation.h>
 
 #include "throughput.cuh"
 #include "topo.cuh"
@@ -84,11 +82,11 @@ namespace aristos{
     }
 
     __host__ __forceinline__
-    void runDecider(const InitialConfig& iC,
-        EPG* __restrict__ const& ePg,
+    void runDecider(EPG* __restrict__ const& ePg,
         Expert* __restrict__ const& experts,
         Worker* __restrict__ const& wG,
         Worker* __restrict__ const& ePwG,
+        uint* __restrict__ const& dTg,
         uint* __restrict__ const& pT,
         uint* __restrict__ const& ePs,
         uint* __restrict__ const& ePsX,
@@ -96,25 +94,17 @@ namespace aristos{
         const floatPair* __restrict__ const& aP,
         const WorkerAttribute* __restrict__ const& attributes,
         const uint& rank, const uint& world) {
-        const auto mC = ModelConfig{
-            iC.numLayers,
-            iC.redAmount,
-            iC.globalBatch,
-            iC.miniBatch,
-            iC.moeFrequency,
-            iC.p2pBuffer,
-            iC.gradBuffer,
-        };
+        constexpr auto E = ACC::E::value;
 
         for (uint16_t i = 0; i < world; ++i) {
             const auto [t, m] = attributes[i];
             wG[i] = Worker{i, t, m};
         }
         const auto adj = make_tensor(aP, make_layout(cute::make_shape(world, world), cute::LayoutRight{}));
-        const auto dTg = decide(adj, wG, iC.numExperts,
-            iC.numExperts, mC);
-        auto epWorld = subsets(dTg, pT, rank);
-        for (uint i = 0; i < iC.numExperts; ++i) {
+        constexpr Decider<ACC::JT::value> decider{};
+        decider(adj, wG, E, E, dTg);
+        auto epWorld = subsets(dTg, pT, world, rank);
+        for (uint i = 0; i < E; ++i) {
             // assuming homogenous experts, where each has normalized compute cost of 1
             experts[i] = Expert{i, 1};
         }
@@ -127,10 +117,10 @@ namespace aristos{
             }
             ePwG[i] = Worker{i, wG[wRank].processingRate, wG[wRank].memoryCapacity};
         }
-        assign(ePwG, epWorld, experts, iC.numExperts, ePs);
+        assign(ePwG, epWorld, experts, E, ePs);
         uint16_t expertSlots = 0U;
         // compute expert slots for our group
-        for (uint16_t i = 0; i < iC.numExperts; ++i) {
+        for (uint16_t i = 0; i < E; ++i) {
             const auto wIdx = ePs[i];
             const uint16_t tally = scratch[wIdx] + 1U;
             scratch[wIdx] = tally;
@@ -159,7 +149,7 @@ namespace aristos{
         for (const auto& group : groups) {
             if (group != myGroup) {
                 std::ranges::fill(scratch, scratch + world, 0U);
-                const auto ePw = subsets(dTg, pTs, group);
+                const auto ePw = subsets(dTg, pTs, world, group);
                 epWorld = cute::max(epWorld, ePw);
                 for (uint i = 0; i < ePw; ++i) {
                     const auto wRank = pTs[i];
@@ -169,8 +159,8 @@ namespace aristos{
                         wG[wRank].memoryCapacity
                     };
                 }
-                assign(ePwG, epWorld, experts, iC.numExperts, ePsX);
-                for (uint16_t i = 0; i < iC.numExperts; ++i) {
+                assign(ePwG, epWorld, experts, E, ePsX);
+                for (uint16_t i = 0; i < E; ++i) {
                     const auto wIdx = ePsX[i];
                     const uint16_t tally = scratch[wIdx] + 1U;
                     scratch[wIdx] = tally;
@@ -179,7 +169,7 @@ namespace aristos{
             }
         }
         // The global maximum of the below values is necessary for allocating a uniformly sized symmetric heap
-        // across all PGAS PEs.
+        // across all PEs.
         ePg->expertSlots = expertSlots;
         ePg->epWorld = epWorld;
     }
@@ -188,7 +178,6 @@ namespace aristos{
     void internalInitialize() {
         using GPUType = Hardware<ARISTOS_ARCH, 255>;
         using Element = ACC::Element;
-        using Activation = ACC::ActivationOp;
         // initialize communication backend
         nvshmem_init();
         const uint devId = nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE);
@@ -197,20 +186,21 @@ namespace aristos{
         const auto rank = nvshmem_my_pe();
 
         constexpr uint E = ACC::E::value;
-        constexpr uint S = ACC::S::value;
-        constexpr uint P = ACC::P::value;
-        constexpr uint H = ACC::H::value;
-        constexpr uint EC = ACC::EC::value;
 
         // Pointer to adjacency matrix and throughput of all devices
         const auto aD = globalWorld * globalWorld;
-        const auto dZ = sizeof(EPG) + 2 * sizeof(Worker) * globalWorld + sizeof(Expert) * E;
-        const auto sZ = sizeof(EDT) * E + sizeof(uint) * (2 * globalWorld +
-            2 * E + 1) + sizeof(uint16_t) * globalWorld + sizeof(bool) * E;
-        const auto cZ = dZ + aD * sizeof(floatPair) + globalWorld * sizeof(WorkerAttribute) + sZ;
+        const auto dZ = sizeof(EPG) +
+                2 * sizeof(Worker) * globalWorld +
+                sizeof(Expert) * E +
+                aD * sizeof(floatPair) +
+                globalWorld * sizeof(WorkerAttribute) +
+                sizeof(uint) * globalWorld;
+        const auto aXz = (sizeof(ELI) + sizeof(PEL)) * E + sizeof(PLI) * globalWorld;
+        const auto pZ = umax(dZ, aXz);
+        const auto sZ = sizeof(uint) * (globalWorld + 2 * E) + sizeof(uint16_t) * globalWorld;
 
         // allocate all memory in one go
-        auto* mP = static_cast<cuda::std::byte*>(std::calloc(cZ, sizeof(cuda::std::byte)));
+        auto* mP = static_cast<cuda::std::byte*>(std::calloc(pZ + sZ, sizeof(cuda::std::byte)));
 
         // Pointer salami slicing
         auto* ePg = CAST_TO(EPG, mP);
@@ -224,14 +214,13 @@ namespace aristos{
         static_assert(alignof(floatPair) % alignof(WorkerAttribute) == 0);
         auto* wAp = CAST_TO(WorkerAttribute, aP + aD);
         static_assert(alignof(WorkerAttribute) % alignof(EDT) == 0);
-        auto* __restrict__ eDr = CAST_TO(EDT, wAp + globalWorld);
-        static_assert(alignof(EDT) == 0 % alignof(BookType) == 0);
-        auto* pT = CAST_TO(uint, eDr + E);
+        auto* dTg = CAST_TO(uint, wAp + E);
+
+        // Result buffers
+        auto* pT = CAST_TO(uint, mP + pZ);
         auto* ePs = pT + globalWorld;
         auto* ePsX = ePs + E; // scratch
-        auto* nRXp = ePsX + E;
-        auto* scratch = CAST_TO(uint16_t, nRXp + 1);
-        auto* __restrict__ eRs = CAST_TO(bool, scratch + globalWorld);
+        auto* scratch = CAST_TO(uint16_t, ePsX + 1);
 
         estimateMemory(&wAp[rank]);
         mT(wAp + rank);
@@ -239,55 +228,42 @@ namespace aristos{
         discoverTopology(aP, globalWorld, globalWorld, wAp[rank]);
 
         // The topology adjacency matrix is ready, let's map devices to optimal cooperative process groups
-        runDecider(iC, ePg, experts, workers, ePWorkers, pT, ePs, ePsX,
+        runDecider(ePg, experts, workers, ePWorkers, dTg, pT, ePs, ePsX,
             scratch, aP, wAp, rank, globalWorld);
         const auto ePgD = *ePg;
         // Now allocate memory
         /// Symmetric memory
-        const auto eCap = iC.shouldDrop ? iC.expertCapacity(ePgD.epWorld) : iC.seqLen;
-        const auto heapBytes = STAGES * CELLS * ePgD.epWorld * ePgD.expertSlots * eCap *
-            iC.embedDim * sizeof(Element);
-        const auto tMc = Bookkeeping::tiles<BLOCK_M>(eCap);
-        const auto tN = Bookkeeping::tiles<BLOCK_N>(iC.embedDim);
-        const auto flagBytes = (ePgD.epWorld * ePgD.expertSlots + iC.numExperts * tMc * tN) *
+        const auto heapBytes = STAGES * CELLS * ePgD.epWorld * ePgD.expertSlots * ACC::EC::value *
+            ACC::H::value * sizeof(Element);
+        const auto syncArrayBytes = sizeof(flagsType) * ePgD.epWorld;
+        const auto flagBytes = (ePgD.epWorld * ePgD.expertSlots + E * ACC::TCM::value * ACC::TNx::value) *
             sizeof(flagsType);
         // Note this allocation's size has to be identical across all PEs
-        auto* sHeap = nvshmem_calloc(flagBytes + heapBytes, sizeof(cuda::std::byte));
+        auto* sHeap = nvshmem_calloc(syncArrayBytes + flagBytes + heapBytes, sizeof(cuda::std::byte));
         
         auto* sHb = static_cast<cuda::std::byte*>(sHeap);
 
         // local bookkeeping memory
         constexpr auto blocks = GPUType::blocks::value - 1U;
-        const auto bookSize = Bookkeeping::bookLength(iC.seqLen,
-            iC.numExperts, ePgD.nLx, iC.hiddenProjDim,
-            iC.embedDim, eCap, blocks, ePgD.epWorld, sizeof(Element));
+        const auto bookSize = Bookkeeping::bookLength(ePgD.nLx, ePgD.epWorld);
 
         cuda::std::byte* book;
         CHECK_ERROR_EXIT(cudaMallocAsync(&book, bookSize, aristosStream));
         CHECK_ERROR_EXIT(cudaMemsetAsync(&book, 0, bookSize, aristosStream));
         // Initialize bookkeeping
+        auto* __restrict__ sA = static_cast<flagsType*>(sHeap);
+        auto* __restrict__ flags = CAST_TO(flagsType, sHb + syncArrayBytes);
+        auto* __restrict__ wSHeap = sHb + flagBytes + syncArrayBytes;
         hostBookkeeping = Bookkeeping{
-            sHb + flagBytes,
-            static_cast<flagsType *>(sHeap),
+            sA,
+            flags,
+            wSHeap,
             book,
-            iC.seqLen * iC.miniBatch,
-            iC.numExperts,
-            iC.k,
             ePgD.nLx,
-            ePgD.expertSlots,
             ePgD.epRank,
-            iC.hiddenProjDim,
-            iC.embedDim,
-            eCap,
-            blocks,
-            ePgD.epWorld,
-            sizeof(Element)
+            ePgD.expertSlots,
+            ePgD.epWorld
         };
-        // copy peer translation and parallelism spec to device memory
-        CHECK_ERROR_EXIT(cudaMemcpyAsync(hostBookkeeping.pT(), pT,
-            sizeof(BookType) * ePgD.epWorld, cudaMemcpyHostToDevice, aristosStream));
-        CHECK_ERROR_EXIT(cudaMemcpyAsync(hostBookkeeping.ePs(), ePs,
-            sizeof(BookType) * iC.numExperts, cudaMemcpyHostToDevice, aristosStream));
         // copy device-wide barrier
         const auto hB = new cuda::barrier<cuda::thread_scope_device>{blocks};
         CHECK_ERROR_EXIT(cudaMemcpyAsync(hostBookkeeping.dB(), hB,
@@ -295,42 +271,59 @@ namespace aristos{
             cudaMemcpyHostToDevice, aristosStream));
         CHECK_ERROR_EXIT(cudaMemcpyToSymbolAsync(bookkeeping, &hostBookkeeping, sizeof(Bookkeeping), 0,
             cudaMemcpyHostToDevice, aristosStream));
-        // Construct eD and eLs and compute nRx
-        // eLs, reusing ePsX
-        auto* __restrict__ eLs = ePsX;
+
+        // reuse pre-allocated memory for device data structures
+        auto* __restrict__ pEL = CAST_TO(PEL, mP);
+        static_assert(alignof(PEL) % alignof(ELI) == 0);
+        auto* __restrict__ eLI = CAST_TO(ELI, pEL + E);
+        static_assert(alignof(ELI) % alignof(PLI) == 0);
+        auto* __restrict__ pLI = CAST_TO(PLI, eLI + E);
+
         auto nRx = 0U;
+        auto pel = PEL{};
+        auto eli = ELI{};
+        auto pli = PLI{};
         std::ranges::fill(scratch, scratch + ePgD.epWorld, 0U);
-        for (uint i = 0; i < iC.numExperts; ++i) {
+        for (uint i = 0; i < E; ++i) {
             const auto ePrank = ePs[i];
             const auto gRank = pT[ePrank];
-            eLs[i] = scratch[ePrank]++;
-            if (nvshmem_ptr(sHeap, gRank) == nullptr) {
+            auto* rSHeap = CAST_TO(cuda::std::byte, nvshmem_ptr(wSHeap, gRank));
+            auto* rFlags = CAST_TO(cuda::std::byte, nvshmem_ptr(flags, gRank));
+            const auto xLi = scratch[ePrank]++;
+            const auto isRemote = rSHeap == nullptr;
+            if (isRemote) {
                 ++nRx;
-                // This expert is hosted on a remote device
-                eRs[i] = true;
             }
-        }
-        *nRXp = nRx;
-        // Copy eLs and nRx
-        CHECK_ERROR_EXIT(cudaMemcpyAsync(hostBookkeeping.eLs(), eLs,
-            sizeof(BookType) * (iC.numExperts + 1), cudaMemcpyHostToDevice, aristosStream));
+            // PEL
+            pel.isRemote = isRemote;
+            pel.expertLocalIdx = xLi;
+            pel.pe = gRank;
+            pel.remoteSFlags = rFlags;
+            pel.remoteSHeap = rSHeap;
+            pel.peer = ePrank;
 
-        // eD
-        auto* __restrict__ eDp = eDr + nRx;
-        auto rI = 0U;
-        auto pI = 0U;
-        for (uint i = 0; i < iC.numExperts; ++i) {
-            if (eRs[i]) {
-                // remote expert
-                eDr[rI++] = {i, eLs[i], ePs[i]};
-            }
-            else {
-                // p2p expert
-                eDp[pI++] = {i, eLs[i], ePs[i]};
-            }
+            // ELI
+            eli.epRank = ePrank;
+            eli.isRemote = isRemote;
+            eli.localExpertIndex = xLi;
+
+            // PLI
+            pli.isRemote = isRemote;
+            pli.pe = gRank;
+
+            pEL[i] = pel;
+            eLI[i] = eli;
+            pLI[ePrank] = pli;
         }
-        CHECK_ERROR_EXIT(cudaMemcpyAsync(hostBookkeeping.eD(), eDr,
-            sizeof(EDT) * iC.numExperts, cudaMemcpyHostToDevice, aristosStream));
+
+        CHECK_ERROR_EXIT(cudaMemcpyAsync(hostBookkeeping.pEL(), pEL, sizeof(PEL) * E,
+            cudaMemcpyHostToDevice, aristosStream));
+        // Copy eLI and pLI in one fell sweep
+        CHECK_ERROR_EXIT(cudaMemcpyAsync(hostBookkeeping.eL(), eLI,
+            sizeof(ELI) * E + sizeof(PLI) * ePgD.epWorld,
+            cudaMemcpyHostToDevice, aristosStream));
+        CHECK_ERROR_EXIT(cudaMemcpyAsync(hostBookkeeping.nRx(), &nRx,
+            sizeof(BookType), cudaMemcpyHostToDevice, aristosStream));
         CHECK_ERROR_EXIT(cudaPeekAtLastError());
         CHECK_ERROR_EXIT(cudaStreamSynchronize(aristosStream));
         delete hB;
@@ -345,8 +338,8 @@ namespace aristos{
         constexpr auto blocks = GPUType::OS::processorBlocks::value;
         static_assert(ARISTOS_ARCH >= 700, "Volta and above is required!");
         isInitialized = true;
-        static_assert(SEQ_LEN % BLOCK_M == 0 && SEQ_LEN < BLOCK_M * blocks * 128 &&
-        I_SIZE % BLOCK_N == 0 && HIDDEN_SIZE % BLOCK_N == 0);
+        static_assert(ACC::S::value % BLOCK_M == 0 && ACC::S::value < BLOCK_M * blocks * ACC::TMU::value &&
+        ACC::P::value % BLOCK_N == 0 && ACC::H::value % BLOCK_N == 0);
         static_assert(NUM_EXPERTS <= cuda::std::numeric_limits<uint16_t>::max(),
             "For performance, we assume number of experts <= UINT16_MAX");
         int cudaDevAttribute = 0;

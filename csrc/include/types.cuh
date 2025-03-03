@@ -354,12 +354,20 @@ namespace aristos{
         using P = cute::C<I_SIZE>;
         using H = cute::C<HIDDEN_SIZE>;
         using E = cute::C<NUM_EXPERTS>;
+        // padded expert dimension
+        using PX = cute::C<cute::ceil_div(E::value, BLOCK_N) * BLOCK_N>;
         using L = cute::C<NUM_LAYERS>;
         using F = cute::C<MOE_FREQ>;
+        using GB = cute::C<GLOBAL_BATCH>;
+        using MB = cute::C<MINI_BATCH>;
+        // Global MoE Stages
+        using GMS = cute::C<(JT::value == JobType::training ? 3 : 1) *
+                (GB::value / MB::value) * (L::value / F::value)>;
         using BPP = cute::C<JT::value == JobType::training ? 2 * sizeof(Element) + 12 : sizeof(Element)>;
         // parameter count
         // source: https://arxiv.org/abs/2401.14489
         using PC = cute::C<H::value * (L::value * (12UL * H::value + 13U) + (VOCAB_SIZE + H::value))>;
+        using GRB = cute::C<cute::ceil_div(PC::value, 1024 * 1024)>;
         using P2PB = cute::C<cute::ceil_div(S::value * MINI_BATCH * H::value, 1024 * 1024)>;
         using EC = cute::C<DTK::value == DropTokens::no ? S::value : cute::ceil_div(S::value, E::value)>;
         using SZ = cute::C<EC::value * H::value>;
@@ -367,6 +375,10 @@ namespace aristos{
         using TN = cute::C<P::value / BLOCK_N>;
         using TNx = cute::C<H::value / BLOCK_N>;
         using TCM = cute::C<EC::value / BLOCK_M>;
+        using TPX = cute::C<PX::value / BLOCK_N>;
+
+        // Scheduling state upper bound inside GEMM
+        using TMU = cute::C<128>;
     };
 
     /// A more apropos name would be "static storage" rather than registers.
@@ -386,97 +398,6 @@ namespace aristos{
 
     template <class T>
     constexpr bool isRegisterV = isRegister<T>::value;
-
-    struct __align__(16) InitialConfig {
-        const uint vocabSize;
-        const uint numLayers;
-        const uint globalBatch;
-        const uint miniBatch;
-        const uint moeFrequency;
-        const uint seqLen;
-        const uint embedDim;
-        const uint hiddenProjDim;
-        const uint16_t k;
-        const uint capacityFactor;
-        const ulong numParameters;
-        // logical elements
-        const uint p2pBuffer; // in MB
-        const uint gradBuffer; // in MB
-        const uint16_t numExperts;
-        const uint16_t redAmount;
-        const bool shouldDrop;
-        const ActivationFunction actF;
-        const JobType jobType;
-
-        __host__
-        InitialConfig(const uint& _vocabSize,
-            const uint& _numLayers,
-            const uint& _globalBatch,
-            const uint& _miniBatch,
-            const uint& _moeFreq,
-            const uint& _seqLen,
-            const uint& _embedDim,
-            const uint& _hiddenProjDim,
-            const uint16_t& _k,
-            const uint& _capacityFactor,
-            const uint16_t& _numExperts,
-            const bool& _shouldDrop,
-            const ActivationFunction& _actF,
-            const bool& _isTraining,
-            const uint16_t& _redAmount = 1):
-        vocabSize(_vocabSize),
-        numLayers(_numLayers),
-        globalBatch(_globalBatch),
-        miniBatch(_miniBatch),
-        moeFrequency(_moeFreq),
-        seqLen(_seqLen * miniBatch), // s * b
-        embedDim(_embedDim), // h
-        hiddenProjDim(_hiddenProjDim),
-        k(_k), capacityFactor(_capacityFactor),
-        numParameters(embedDim * (numLayers * (12U * embedDim + 13U) + (vocabSize + embedDim))),
-        p2pBuffer(cute::ceil_div(seqLen * miniBatch * embedDim, 1024U * 1024U)),
-        gradBuffer(cute::ceil_div(numParameters, 1024U * 1024U)),
-        numExperts(_numExperts), redAmount(_redAmount),
-        shouldDrop(_shouldDrop), actF(_actF), jobType(_isTraining ? JobType::training : JobType::inference)
-        {}
-
-        // formula for total number of parameters
-        // source: https://arxiv.org/abs/2401.14489
-        __forceinline__
-        static auto parameterCount(const uint& embedDim, const uint& numLayers, const uint& vocabSize) {
-            return embedDim * (numLayers * (12U * embedDim + 13U) + (vocabSize + embedDim));
-        }
-
-        // source: https://arxiv.org/pdf/2201.11990
-        template<typename Element>
-        __forceinline__
-        auto bytesPerParameter() const {
-            return jobType == JobType::training ? 2 * sizeof(Element) + 12 : sizeof(Element);
-        }
-
-        __forceinline__
-        auto expertCapacity(const uint& epWorld) const {
-            return cute::ceil_div(seqLen * miniBatch * capacityFactor, epWorld);
-        }
-    };
-    // Needed for decider
-    struct __align__(16) ModelConfig{
-        const unsigned int numLayers;
-        const unsigned int globalBatch;
-        const unsigned int redAmount;
-        const unsigned int miniBatch;
-        const unsigned int moeFreq;
-        const unsigned int p2pBuffer;
-        const unsigned int gradBuffer;
-        __host__
-        ModelConfig(const unsigned int& numLayers, const unsigned int& redAmount,
-                    const unsigned int& globalBatch,
-                    const unsigned int& miniBatch, const unsigned int& moeFreq,
-                    const unsigned int& p2PBuffer, const unsigned int& gradBuffer) :
-                    numLayers(numLayers), globalBatch(globalBatch),
-                    redAmount(redAmount), miniBatch(miniBatch), moeFreq(moeFreq),
-                    p2pBuffer(p2PBuffer), gradBuffer(gradBuffer) {}
-    };
 
     // Index and gate combine weight
     using TokenIdxTuple = cuda::std::pair<unsigned int, mp_t>;
@@ -551,146 +472,97 @@ namespace aristos{
     using BookType = unsigned int;
     using EDT = cuda::std::tuple<uint, uint, uint>;
     struct __align__(16) Bookkeeping {
-        cuda::std::byte* sHeap = nullptr;
+        flagsType* syncArray = nullptr;
         flagsType* flags = nullptr;
+        cuda::std::byte* sHeap = nullptr;
         /// default type for bookkeeping data structures
         cuda::std::byte *book = nullptr;
-        /// Note the below lengths are cumulative sums.
-        unsigned long int eDsA = 0UL;
-        /// Scheduler buffers and flag checkpoints in bytes
-        unsigned long int sBfC = 0UL;
         /// gRl + gB + eDsA + sBfC + brs
         unsigned long int bookSize = 0UL;
-        unsigned int tQXt = 0UL;
-        /// length of gTQHeads
-        unsigned int gtQCl = 0U;
-        /// Block Ring Softmax flags in bytes, non-cumulative
-        unsigned int brs = 0UL;
-        /// gate routing and loss vectors in bytes
-        unsigned int gRl = 0U;
-        /// Task Q length per producer
-        unsigned int tPs = 0U;
-        /// Task Q maximum length
-        unsigned int tQml = 0U;
-        /// Task Q length
-        unsigned int tQl = 0U;
-        /// sequence length
-        unsigned int sl = 0U;
-        /// embedding dimension
-        unsigned int ed = 0U;
-        /// hidden projection dimension
-        unsigned int pd = 0U;
-        /// tiles spanning sequence length
-        unsigned int tM = 0U;
-        /// tiles spanning embedding dimension
-        unsigned int tN = 0U;
-        /// tiles spanning capacity
-        unsigned int tCM = 0U;
-        /// expert capacity
-        unsigned int eCap = 0U;
         /// EP rank
         uint16_t rank = 0U;
         /// EP world
         uint16_t world = 0U;
-        /// number of experts
-        uint16_t nx = 0U;
-        /// top k
-        uint16_t k = 0U;
-        /// padded number of experts
-        uint16_t px = 0U;
         /// number of local experts
         uint16_t nLx = 0U;
         /// expert slots
         uint16_t xs = 0U;
-        /// processors
-        uint16_t blocks = 0U;
 
-        __device__ __forceinline__
+        __host__ __device__ __forceinline__
         Bookkeeping() = default;
 
         __host__ __forceinline__
-        explicit Bookkeeping(
-            cuda::std::byte* _sHeap,
+        explicit Bookkeeping(flagsType* _sA,
             flagsType* _flags,
+            cuda::std::byte* _sHeap,
             cuda::std::byte* const& _book,
-            const unsigned int& _sl,
-            const uint16_t& _nx,
-            const uint16_t& _k,
-            const uint16_t& _nLx,
-            const uint16_t& _xS,
+            const uint16_t& _nLx, // dynamically decided by an optimization algorithm
             const uint16_t& _rank,
-            const unsigned int& _pd,
-            const unsigned int& _embedDim,
-            const unsigned int& _eCapacity,
-            const uint16_t& _blocks,
             const uint16_t& _world,
-            const unsigned int& _eNb // number of bytes for the matrix element type
-            ) :
-        sHeap(_sHeap), flags(_flags),
-        book(_book),
-        sl(_sl), ed(_embedDim), pd(_pd),
-        tM(tiles<BLOCK_M>(_sl)),
-        tN(tiles<BLOCK_N>(_embedDim)),
-        tCM(tiles<BLOCK_M>(_eCapacity)),
-        eCap(_eCapacity), rank(_rank), world(_world), nx(_nx), k(_k),
-        px(pad<BLOCK_N>(_nx)), nLx(_nLx), xs(_xS), blocks(_blocks){
-            if (_nx > 1)[[likely]] {
+            const uint16_t& _xS) : syncArray(_sA), flags(_flags), sHeap(_sHeap), book(_book), rank(_rank),
+            world(_world), nLx(_nLx), xs(_xS){
+            constexpr auto TCM = ACC::TCM::value;
+            constexpr auto TN = ACC::TN::value;
+            constexpr auto blocks = ACC::PeakHardware::OS::processorBlocks::value;
+            constexpr auto E = ACC::E::value;
+            constexpr auto PX = ACC::PX::value;
+            constexpr auto S = ACC::S::value;
+            constexpr auto EC = ACC::EC::value;
+            constexpr auto P = ACC::P::value;
+            constexpr auto TPX = ACC::TPX::value;
+            if constexpr (E > 1) {
                 // maximum gemm tiles/tasks scheduled by processors
-                const auto prT = world * nLx * tCM * tiles<BLOCK_N>(pd);
+                const auto prT = world * nLx * TCM * tiles<BLOCK_N>(P);
                 // maximum gemm tiles/tasks scheduled by subscriber threads
-                auto sT = world * nLx * tCM * tN + tCM * tN * nx;
-                tPs = cute::ceil_div(sT, SUBSCRIBERS);
+                auto sT = world * nLx * TCM * TN + TCM * TN * E;
+                const auto tPs = cute::ceil_div(sT, SUBSCRIBERS);
                 sT = tPs * SUBSCRIBERS;
                 tQl = sizeof(Task) * (sT + prT);
-                tQml = tQl + blocks * sizeof(TQSignal) + nx * sizeof(PEL); // processor doorbells
-                brs = tQml + (ACC::GRL::value == GateReductionLevel::singleBlock ? 0U : sl * tiles<BLOCK_N>(px) *
+                tQml = tQl + blocks * sizeof(TQSignal) + E * sizeof(PEL); // processor doorbells
+                brs = tQml + (ACC::GRL::value == GateReductionLevel::singleBlock ? 0U : S * TPX *
                     (sizeof(RingSoftmaxPayload) + 2 * sizeof(RingTopKPayload)));
-                tQXt = brs + sizeof(ELI) * nx + sizeof(cuda::barrier<cuda::thread_scope_device>) + sizeof(PLI) * world;
-                gRl = tQXt + sizeof(TokenIdxTuple) * (px * _eCapacity) + (ACC::JT::value == JobType::training ?
-                    sizeof(mp_t) * (2 * nx + 1) : 0U);
-                eDsA = gRl + sizeof(BookType) * (2 * nx + 1);
-                sBfC = eDsA + sizeof(BookType) * 2 * (world * nLx * tCM) + blocks + (tCM * tN * nx);
+                tQXt = brs + sizeof(ELI) * E + sizeof(cuda::barrier<cuda::thread_scope_device>) + sizeof(PLI) * world;
+                gRl = tQXt + sizeof(TokenIdxTuple) * (PX * EC) + (ACC::JT::value == JobType::inference ? 0U :
+                    sizeof(mp_t) * (2 * E + 1));
+                eDsA = gRl + sizeof(BookType) * (2 * E + 1);
+                sBfC = eDsA + sizeof(BookType) * 2 * (world * nLx * TCM) + blocks + TCM * TN * E;
             }
-            gtQCl = world * nLx * tCM;
-            bookSize = sBfC + _eNb * (_world * _nLx * tCM * tN);
+            gtQCl = world * nLx * TCM;
+            bookSize = sBfC + sizeof(ACC::Element) * (_world * _nLx * TCM * TN);
         }
 
         /// Needed for malloc
         __host__ __forceinline__
-        static unsigned long int bookLength(
-            const unsigned int& _sl,
-            const unsigned int& _nx,
-            const unsigned int& _nLx,
-            const unsigned int& _pd,
-            const unsigned int& _embedDim,
-            const unsigned int& _eCap,
-            const unsigned int& _blocks,
-            const unsigned int& _world,
-            const unsigned int& _eNb // number of bytes for the matrix element type
-            ){
-            const bool isSingleBlockGate = _nx <= BLOCK_N;
-            const auto tCM = tiles<BLOCK_M>(_eCap);
-            const auto tN = tiles<BLOCK_N>(_embedDim);
+        static unsigned long int bookLength(const unsigned int& _nLx, const unsigned int& _world) {
             auto sBfC = 0UL;
-            const auto _px = pad<BLOCK_N>(_nx);
-            if (_nx > 1)[[likely]] {
+            constexpr auto TCM = ACC::TCM::value;
+            constexpr auto TN = ACC::TN::value;
+            constexpr auto blocks = ACC::PeakHardware::OS::processorBlocks::value;
+            constexpr auto E = ACC::E::value;
+            constexpr auto PX = ACC::PX::value;
+            constexpr auto S = ACC::S::value;
+            constexpr auto EC = ACC::EC::value;
+            constexpr auto P = ACC::P::value;
+            constexpr auto TPX = ACC::TPX::value;
+            if constexpr (E > 1) {
                 // maximum gemm tiles/tasks scheduled by processors
-                const auto prT = _world * _nLx * tCM * tiles<BLOCK_N>(_pd);
+                const auto prT = _world * _nLx * TCM * tiles<BLOCK_N>(P);
                 // maximum gemm tiles/tasks scheduled by subscriber threads
-                auto sT = _world * _nLx * tCM * tN + tCM * tN * _nx;
+                auto sT = _world * _nLx * TCM * TN + TCM * TN * E;
                 const auto tPs = cute::ceil_div(sT, SUBSCRIBERS);
                 sT = tPs * SUBSCRIBERS;
                 const auto tQl = sizeof(Task) * (sT + prT);
-                const auto tQml = tQl + _blocks * sizeof(TQSignal) + _nx * sizeof(PEL); // interrupt tasks
-                const auto brs = tQml + (isSingleBlockGate ? 0U : _sl * tiles<BLOCK_N>(_px) *
-                                    (sizeof(RingSoftmaxPayload) + 2 * sizeof(RingTopKPayload)));
-                const auto tQXt = brs + sizeof(EDT) * _nx + sizeof(TokenIdxTuple) * (_px * _eCap) +
-                    sizeof(cuda::barrier<cuda::thread_scope_device>);
-                const auto gRl = tQXt + sizeof(mp_t) * (2 * _nx + 1);
-                const auto eDsA = gRl + sizeof(BookType) * (2 * _nx + 1);
-                sBfC = eDsA + sizeof(BookType) * 2 * (_blocks + _world * _nLx * tCM) + (tCM * tN * _nx);
+                const auto tQml = tQl + blocks * sizeof(TQSignal) + E * sizeof(PEL); // processor doorbells
+                const auto brs = tQml + (ACC::GRL::value == GateReductionLevel::singleBlock ? 0U :
+                    S * TPX * (sizeof(RingSoftmaxPayload) + 2 * sizeof(RingTopKPayload)));
+                const auto tQXt = brs + sizeof(ELI) * E + sizeof(cuda::barrier<cuda::thread_scope_device>) +
+                    sizeof(PLI) * _world;
+                const auto gRl = tQXt + sizeof(TokenIdxTuple) * (PX * EC) +
+                    (ACC::JT::value == JobType::inference ? 0U : sizeof(mp_t) * (2 * E + 1));
+                const auto eDsA = gRl + sizeof(BookType) * (2 * E + 1);
+                sBfC = eDsA + sizeof(BookType) * 2 * (_world * _nLx * TCM) + blocks + TCM * TN * E;
             }
-            return sBfC + _eNb * (_world * _nLx * tCM * tN);
+            return sBfC + sizeof(ACC::Element) * (_world * _nLx * TCM * TN);
         }
 
         template<unsigned int tileDimension>
@@ -722,7 +594,7 @@ namespace aristos{
         /// processors' doorbell
         __device__ __forceinline__
         auto* pDB() const {
-            return CAST_TO(TQSignal, book + tQl + sizeof(PEL) * nx);
+            return CAST_TO(TQSignal, book + tQl + sizeof(PEL) * ACC::E::value);
         }
 
         static_assert(alignof(ull_t) % alignof(RingSoftmaxPayload) == 0
@@ -742,7 +614,7 @@ namespace aristos{
         /// Two sets for pipelining termination phase of round i and initial phase of round i + 1
         __device__ __forceinline__
         auto* rTp() const {
-            return CAST_TO(RingTopKPayload, bRsP() + sl * tiles<BLOCK_N>(px));
+            return CAST_TO(RingTopKPayload, bRsP() + ACC::S::value * ACC::TPX::value);
         }
         /***********CONTIGUOUS**************/
 
@@ -763,7 +635,7 @@ namespace aristos{
         static_assert(alignof(ELI) % alignof(PLI) == 0);
         __host__ __device__ __forceinline__
         auto* pLI() const {
-            return CAST_TO(PLI, eL() + nx);
+            return CAST_TO(PLI, eL() + ACC::E::value);
         }
 
         static_assert(alignof(PLI) % alignof(TokenIdxTuple) == 0);
@@ -776,17 +648,17 @@ namespace aristos{
         /// Gate mean logits
         __device__ __forceinline__
         auto* gML() const {
-            return CAST_TO(mp_t, tP() + px * eCap);
+            return CAST_TO(mp_t, tP() + ACC::PX::value * ACC::EC::value);
         }
         /// Gate mean expert counts
         __device__ __forceinline__
         auto* gMeC() const {
-            return gML() + nx;
+            return gML() + ACC::E::value;
         }
         /// Gate loss
         __device__ __forceinline__
         auto* gL() const {
-            return gMeC() + nx;
+            return gMeC() + ACC::E::value;
         }
 
         static_assert(alignof(mp_t) % alignof(BookType) == 0);
@@ -798,13 +670,13 @@ namespace aristos{
         /// number of remote experts
         __host__ __device__ __forceinline__
         auto* nRx() const {
-            return eC() + nx;
+            return eC() + ACC::E::value;
         }
 
         /// Packet Sync array
         __device__ __forceinline__
         auto* pSA() const {
-            return eC() + nx + 1;
+            return eC() + ACC::E::value + 1;
         }
 
         /// Scheduler buffers and flag checkpoints
@@ -814,16 +686,16 @@ namespace aristos{
         }
         __device__ __forceinline__
         auto* tQH() const {
-            return sQ() + blocks;
+            return sQ() + ACC::PeakHardware::OS::processorBlocks::value;
         }
         /// tQ sync array
         __device__ __forceinline__
         auto* tQS() const {
-            return tQH() + world * nLx * tCM;
+            return tQH() + world * nLx * ACC::TCM::value;
         }
         __device__ __forceinline__
         auto* tIx() const {
-            return CAST_TO(BookType, tQS() + world * nLx * tCM);
+            return CAST_TO(BookType, tQS() + world * nLx * ACC::TCM::value);
         }
 
         // Intermediate buffer
@@ -832,6 +704,23 @@ namespace aristos{
         auto* xM() const {
             return book + sBfC;
         }
+
+        private:
+            /// Note the below lengths are cumulative sums.
+            unsigned long int eDsA = 0UL;
+            /// Scheduler buffers and flag checkpoints in bytes
+            unsigned long int sBfC = 0UL;
+            unsigned long int tQXt = 0UL;
+            /// gate routing and loss vectors in bytes
+            unsigned long int gRl = 0U;
+            /// length of gTQHeads
+            unsigned int gtQCl = 0U;
+            /// Block Ring Softmax flags in bytes, non-cumulative
+            unsigned int brs = 0UL;
+            /// Task Q maximum length
+            unsigned int tQml = 0U;
+            /// Task Q length
+            unsigned int tQl = 0U;
     };
 
     // monotonically increasing integer
@@ -843,18 +732,9 @@ namespace aristos{
     __inline__ auto aristosStream = cudaStreamPerThread;
 
     namespace heap {
-        // The symmetric heap is a 6-D tensor (P, S, C, E, EC, H)
-        /// where P, S, C, E, M, and H  denote dimensions for peers, communication stages,
-        /// cells, experts, expert capacity, and token hidden dimension, respectively.
-        template<unsigned int stage = 0, unsigned cell = 0, unsigned long int nBytes = 1>
-        requires (stage < STAGES && cell < CELLS)
-        __device__ __forceinline__
-        auto* advance(cuda::std::byte* __restrict__ const& sHeap, const uint& cellSize, const uint& expertSlots,
-            const uint& tokenDim, const uint& peer, const uint& expert, const uint& token = 0){
-            return sHeap + (cellSize * (expertSlots * (CELLS * (peer * STAGES + stage) + cell) + expert) +
-                token * tokenDim) * nBytes;
-        }
-        /// Clean API for accessing the heap
+        // The symmetric heap is a 6-D tensor (P, S, C, E, EC) of tokens,
+        /// where P, S, C, E, EC denote dimensions for peers, communication stages,
+        /// cells, experts, expert capacity, respectively.
         template<
             unsigned int stage = 0,
             unsigned int cell = 0,

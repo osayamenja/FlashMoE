@@ -174,10 +174,9 @@ namespace aristos {
         constexpr unsigned int blocks = ACC::PeakHardware::OS::processorBlocks::value;
         constexpr unsigned int sharedSize = ACC::PeakHardware::sharedMemory::value;
         constexpr unsigned int elems = ACC::PeakHardware::rScratch::value;
-        constexpr auto tMu = 128;
 
         __shared__ __align__(16) Element workspace[sharedSize / sizeof(Element)];
-        __shared__ __align__(16) uint16_t tQ[tMu];
+        __shared__ __align__(16) uint16_t tQ[ACC::TMU::value];
         using Operation = BlockMM<ACC::ActivationOp, Element>;
         using OperationX = BlockMM<ACC::ActivationOpX, Element>;
         constexpr auto preGEMM = processor::FGT<TaskType::preGEMM, Operation, N, K>{};
@@ -262,7 +261,7 @@ namespace aristos {
             // Below, is a more sophisticated method for scheduling the next GEMM task.
             // Not necessarily more performant than the barrier.
             using BlockScan = cub::BlockScan<uint16_t, threads>;
-            constexpr auto tSlice = tMu / threads;
+            constexpr auto tSlice = ACC::TMU::value / threads;
             // Register allocations
             uint16_t predicates[tSlice];
             FlagState flagState[tSlice];

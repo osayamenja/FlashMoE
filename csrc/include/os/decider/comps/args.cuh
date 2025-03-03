@@ -4,20 +4,20 @@
 
 #ifndef CSRC_ARGS_CUH
 #define CSRC_ARGS_CUH
+#include "../../types.cuh"
 namespace aristos{
-    /// eta in the paper
-    constexpr unsigned int p2pFreq = 4;
     struct ARArgs{
+        // units is MB
+        constexpr static unsigned int gradBuffer = ACC::GRB::value;
         /// 𝛼* from the paper
         float ringAlpha;
         /// β* from the paper
         float ringBeta;
         float bottleneckTime{};
-        const unsigned int bufferSize;
         unsigned int numGroups;
 
         ARArgs(const float& _alpha, const float& _beta,
-               const unsigned int& _n, const unsigned int& gradBuffer): bufferSize(gradBuffer){
+               const unsigned int& _n){
             ringAlpha = _alpha;
             ringBeta = _beta;
             numGroups = _n;
@@ -26,7 +26,7 @@ namespace aristos{
 
         __forceinline__
         void setBottleneckTime(){
-            bottleneckTime = (numGroups == 0 )? 0 : ringAlpha + (ringBeta * (static_cast<float>(bufferSize) / numGroups));
+            bottleneckTime = (numGroups == 0 )? 0 : ringAlpha + (ringBeta * (static_cast<float>(gradBuffer) / numGroups));
         }
 
         __forceinline__
@@ -45,40 +45,31 @@ namespace aristos{
     };
 
     struct ObjArgs{
+        constexpr static unsigned int globalMoEStages = ACC::GMS::value;
+        /// eta in the paper
+        constexpr static unsigned int commFreq = 4U;
+        /// Units is MB
+        constexpr static unsigned int p2pBuffer = ACC::P2PB::value;
         float totalDeviceRate{};
         unsigned int totalExpertCost;
-        unsigned int globalMoEStages;
         unsigned int totalExpertMemoryDemand;
         float allReduceTime;
-        unsigned int commFreq;
         unsigned int groupMemCapacity{};
         float intraCommunicationCost;
         unsigned int effectiveWorld;
-        unsigned int p2pBuffer;
 
         ObjArgs(const unsigned int& _totalCost,
-                const unsigned int& _effW, const unsigned int& _totalMem,
-                const ModelConfig& m) :
+                const unsigned int& _effW, const unsigned int& _totalMem) :
                 totalExpertCost(_totalCost),
                 totalExpertMemoryDemand(_totalMem), effectiveWorld(_effW){
             allReduceTime = 0.0f; // default, in case of inference where this is indeed 0
-            globalMoEStages = getGlobalMoEStages(m);
             intraCommunicationCost = 0.0;
-            p2pBuffer = m.p2pBuffer;
-            commFreq = p2pFreq;
         }
 
         __forceinline__ static float p2pTransferTime(const float& alpha,
                                                       const float& beta,
                                                       const float& bufferSize){
             return alpha + (beta * bufferSize);
-        }
-
-        __forceinline__
-        static unsigned int getGlobalMoEStages(const ModelConfig& m){
-            return (2 + m.redAmount) *
-            (m.globalBatch/m.miniBatch)
-            * (m.numLayers/m.moeFreq);
         }
 
         /// 𝜸 from the paper

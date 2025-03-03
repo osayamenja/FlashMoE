@@ -39,8 +39,7 @@ namespace aristos{
             const Worker* __restrict__ const& workers,
             const unsigned int& totalExpertCost,
             const unsigned int& totalExpertMem,
-            const ModelConfig& modelConfig,
-            uint* __restrict__ deviceToGroups) {
+            uint* __restrict__ deviceToGroups) const {
             const auto world = cute::size<0>(adjMatrix);
             auto infeasibleGroups = std::unordered_set<unsigned int>{};
             for(uint i = 0; i < world; ++i){
@@ -63,9 +62,9 @@ namespace aristos{
                         const auto beta = adjMatrix(i, j).beta;
                         candidateEdges[current++] = {i, j,
                                                  ObjArgs::p2pTransferTime(alpha, beta,
-                                                                          modelConfig.p2pBuffer)};
+                                                                            ObjArgs::p2pBuffer)};
                         externalEdges.emplace(i, j, ARArgs::bottleneck(alpha, beta,
-                                                                         modelConfig.gradBuffer, 2));
+                                                                         ARArgs::gradBuffer, 2));
                         /// Invert the edge for the dp table
                         dp[j] = adjMatrix(j, i);
                     }
@@ -74,13 +73,13 @@ namespace aristos{
                                            workers[i].memoryCapacity,
                                            workers[i].processingRate,
                                            world,
-                                           ObjArgs(totalExpertCost, effectiveWorld, totalExpertMem, modelConfig),
+                                           ObjArgs(totalExpertCost, effectiveWorld, totalExpertMem),
                                            dp)});
             }
             auto extEdge = externalEdges.top();
             auto arArgs = ARArgs(adjMatrix(extEdge.node1, extEdge.node2).alpha,
                                    adjMatrix(extEdge.node1, extEdge.node2).beta,
-                                   effectiveWorld, modelConfig.gradBuffer);
+                                   effectiveWorld, ARArgs::gradBuffer);
             const auto art = allReduceT(arArgs);
             /// Second-pass group construction
             for(auto& g : std::views::values(groupInfo)){
@@ -180,8 +179,7 @@ namespace aristos{
             const Worker* __restrict__ const& workers,
             const unsigned int& totalExpertCost,
             const unsigned int& totalExpertMem,
-            const ModelConfig& modelConfig,
-            uint* __restrict__ deviceToGroups) {
+            uint* __restrict__ deviceToGroups) const {
             const auto world = cute::size<0>(adjMatrix);
             auto infeasibleGroups = std::unordered_set<unsigned int>{};
             for(uint i = 0; i < world; ++i){
@@ -203,7 +201,7 @@ namespace aristos{
                         const auto beta = adjMatrix(i, j).beta;
                         candidateEdges[current++] = {i, j,
                                                  ObjArgs::p2pTransferTime(alpha, beta,
-                                                                          modelConfig.p2pBuffer)};
+                                                                          ObjArgs::p2pBuffer)};
                         /// Invert the edge for the dp table
                         dp[j] = adjMatrix(j, i);
                     }
@@ -212,7 +210,7 @@ namespace aristos{
                                            workers[i].memoryCapacity,
                                            workers[i].processingRate,
                                            world,
-                                           ObjArgs(totalExpertCost, effectiveWorld, totalExpertMem, modelConfig),
+                                           ObjArgs(totalExpertCost, effectiveWorld, totalExpertMem),
                                            dp)});
             }
             current = 0U;
@@ -280,8 +278,7 @@ namespace aristos{
     std::vector<size_t> decide(const AdjMatrix& adjMatrix,
                                const Worker* __restrict__ const& workers,
                                const unsigned int& totalExpertCost,
-                               const unsigned int& totalExpertMem,
-                               const ModelConfig& modelConfig){
+                               const unsigned int& totalExpertMem){
         const auto world = cute::size<0>(adjMatrix);
         auto infeasibleGroups = std::unordered_set<unsigned int>{};
         for(uint i = 0; i < world; ++i){
@@ -303,9 +300,9 @@ namespace aristos{
                     const auto beta = adjMatrix(i, j).beta;
                     candidateEdges.emplace(i, j,
                                              ObjArgs::p2pTransferTime(alpha, beta,
-                                                                      modelConfig.p2pBuffer));
+                                                                      ObjArgs::p2pBuffer));
                     externalEdges.emplace(i, j, ARArgs::bottleneck(alpha, beta,
-                                                                     modelConfig.gradBuffer, 2));
+                                                                     ARArgs::gradBuffer, 2));
                     /// Invert the edge for the dp table
                     dp[j] = adjMatrix(j, i);
                 }
@@ -314,13 +311,12 @@ namespace aristos{
                                        workers[i].memoryCapacity,
                                        workers[i].processingRate,
                                        world,
-                                       ObjArgs(totalExpertCost, effectiveWorld, totalExpertMem, modelConfig),
+                                       ObjArgs(totalExpertCost, effectiveWorld, totalExpertMem),
                                        dp)});
         }
         auto extEdge = externalEdges.top();
         auto arArgs = ARArgs(adjMatrix(extEdge.node1, extEdge.node2).alpha,
-                               adjMatrix(extEdge.node1, extEdge.node2).beta,
-                               effectiveWorld, modelConfig.gradBuffer);
+                               adjMatrix(extEdge.node1, extEdge.node2).beta, effectiveWorld);
         const auto art = allReduceT(arArgs);
         /// Second-pass group construction
         for(auto& g : std::views::values(groupInfo)){

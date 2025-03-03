@@ -182,16 +182,14 @@ namespace aristos {
         for(uint i = 0; i < nExp; ++i){
             experts[i] = Expert{i, expertGigaFlops};
         }
-        // GPT-3 350M MoE
-        const auto m = ModelConfig(24, 1, 256, 4, 24, 16, 512);
 
         auto start = clk::now();
         constexpr Decider<JobType::training> judge{};
 
-        decide(adj, wG, nExp*expertGigaFlops, nExp, m);
+        decide(adj, wG, nExp*expertGigaFlops, nExp);
         end = clk::now() - start;
         const auto spec = decide(adj, wG,
-            nExp*expertGigaFlops, nExp, m);
+            nExp*expertGigaFlops, nExp);
         fmt::println("Measured time for the Decider is {}s", end.count());
         fmt::println("Device to Groups: {}", spec);
 

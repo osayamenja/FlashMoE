@@ -9,11 +9,12 @@ namespace aristos{
     template<typename  Element>
     requires(std::is_integral_v<Element>)
     __host__ __forceinline__
-    auto subsets(const std::vector<size_t>& parents,
+    auto subsets(uint* __restrict__ const& parents,
         Element* __restrict__ const& platoon,
+        const unsigned int& world,
         const unsigned int& myRank){
         uint16_t gSize = 0U;
-        for(unsigned int i = 0; i < parents.size(); ++i){
+        for(unsigned int i = 0; i < world; ++i){
             if (parents[i] == parents[myRank]) {
                 platoon[i] = i;
                 ++gSize;
