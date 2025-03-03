@@ -174,8 +174,24 @@ namespace aristos{
         ePg->epWorld = epWorld;
     }
 
+    // Should be called before loading the model
     __host__ __forceinline__
-    void internalInitialize() {
+    void initialize() {
+        reportError(!isInitialized, "Already Initialized");
+        using GPUType = aristos::Hardware<ARISTOS_ARCH, 255>;
+        constexpr auto blocks = GPUType::OS::processorBlocks::value;
+        static_assert(ARISTOS_ARCH >= 700, "Volta and above is required!");
+        isInitialized = true;
+        static_assert(ACC::S::value % BLOCK_M == 0 && ACC::S::value < BLOCK_M * blocks * ACC::TMU::value &&
+        ACC::P::value % BLOCK_N == 0 && ACC::H::value % BLOCK_N == 0);
+        static_assert(NUM_EXPERTS <= cuda::std::numeric_limits<uint16_t>::max(),
+            "For performance, we assume number of experts <= UINT16_MAX");
+        int cudaDevAttribute = 0;
+        int dev = 0;
+        CHECK_ERROR_EXIT(cudaGetDevice(&dev));
+        CHECK_ERROR_EXIT(cudaDeviceGetAttribute(&cudaDevAttribute, cudaDevAttrMemoryPoolsSupported, dev));
+        reportError(cudaDevAttribute, "Memory Pools support required");
+
         using GPUType = Hardware<ARISTOS_ARCH, 255>;
         using Element = ACC::Element;
         // initialize communication backend
@@ -235,7 +251,7 @@ namespace aristos{
         /// Symmetric memory
         const auto heapBytes = STAGES * CELLS * ePgD.epWorld * ePgD.expertSlots * ACC::EC::value *
             ACC::H::value * sizeof(Element);
-        const auto syncArrayBytes = sizeof(flagsType) * ePgD.epWorld;
+        const auto syncArrayBytes = sizeof(flagsType) * (ePgD.epWorld + 1);
         const auto flagBytes = (ePgD.epWorld * ePgD.expertSlots + E * ACC::TCM::value * ACC::TNx::value) *
             sizeof(flagsType);
         // Note this allocation's size has to be identical across all PEs
@@ -244,7 +260,6 @@ namespace aristos{
         auto* sHb = static_cast<cuda::std::byte*>(sHeap);
 
         // local bookkeeping memory
-        constexpr auto blocks = GPUType::blocks::value - 1U;
         const auto bookSize = Bookkeeping::bookLength(ePgD.nLx, ePgD.epWorld);
 
         cuda::std::byte* book;
@@ -255,6 +270,7 @@ namespace aristos{
         auto* __restrict__ flags = CAST_TO(flagsType, sHb + syncArrayBytes);
         auto* __restrict__ wSHeap = sHb + flagBytes + syncArrayBytes;
         hostBookkeeping = Bookkeeping{
+            sHb,
             sA,
             flags,
             wSHeap,
@@ -330,33 +346,13 @@ namespace aristos{
         std::free(mP);
     }
 
-    // Should be called before loading the model
-    __host__ __forceinline__
-    void initialize() {
-        reportError(!isInitialized, "Already Initialized");
-        using GPUType = aristos::Hardware<ARISTOS_ARCH, 255>;
-        constexpr auto blocks = GPUType::OS::processorBlocks::value;
-        static_assert(ARISTOS_ARCH >= 700, "Volta and above is required!");
-        isInitialized = true;
-        static_assert(ACC::S::value % BLOCK_M == 0 && ACC::S::value < BLOCK_M * blocks * ACC::TMU::value &&
-        ACC::P::value % BLOCK_N == 0 && ACC::H::value % BLOCK_N == 0);
-        static_assert(NUM_EXPERTS <= cuda::std::numeric_limits<uint16_t>::max(),
-            "For performance, we assume number of experts <= UINT16_MAX");
-        int cudaDevAttribute = 0;
-        int dev = 0;
-        CHECK_ERROR_EXIT(cudaGetDevice(&dev));
-        CHECK_ERROR_EXIT(cudaDeviceGetAttribute(&cudaDevAttribute, cudaDevAttrMemoryPoolsSupported, dev));
-        reportError(cudaDevAttribute, "Memory Pools support required");
-        internalInitialize();
-    }
-
     __host__ __forceinline__
     void finalize(){
         reportError(isInitialized, "Not initialized!");
         isInitialized = false;
         CHECK_ERROR_EXIT(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
         CHECK_ERROR_EXIT(cudaFreeAsync(hostBookkeeping.book, aristosStream));
-        nvshmem_free(hostBookkeeping.sHeap);
+        nvshmem_free(hostBookkeeping.symHeap);
         nvshmem_finalize();
         CHECK_ERROR_EXIT(cudaPeekAtLastError());
         CHECK_ERROR_EXIT(cudaStreamSynchronize(aristosStream));

@@ -340,6 +340,7 @@ namespace aristos{
 
     /// Aristos Compile-time Config
     struct ACC {
+        using SYB = cute::C<1>;
         using GRL = cute::C<NUM_EXPERTS <= BLOCK_N ? GateReductionLevel::singleBlock :
             GateReductionLevel::multiBlock>;
         using TK = cute::C<E_TOP_K>;
@@ -472,13 +473,19 @@ namespace aristos{
     using BookType = unsigned int;
     using EDT = cuda::std::tuple<uint, uint, uint>;
     struct __align__(16) Bookkeeping {
+        /// needed for free
+        cuda::std::byte* symHeap;
         flagsType* syncArray = nullptr;
+        flagsType* syncCount = nullptr;
         flagsType* flags = nullptr;
         cuda::std::byte* sHeap = nullptr;
         /// default type for bookkeeping data structures
         cuda::std::byte *book = nullptr;
         /// gRl + gB + eDsA + sBfC + brs
         unsigned long int bookSize = 0UL;
+        /// length of gTQHeads
+        unsigned int gtQCl = 0U;
+        unsigned int tPs = 0U;
         /// EP rank
         uint16_t rank = 0U;
         /// EP world
@@ -492,14 +499,16 @@ namespace aristos{
         Bookkeeping() = default;
 
         __host__ __forceinline__
-        explicit Bookkeeping(flagsType* _sA,
-            flagsType* _flags,
-            cuda::std::byte* _sHeap,
+        explicit Bookkeeping(cuda::std::byte* const& _symHeap,
+            flagsType* const& _sA,
+            flagsType* const& _flags,
+            cuda::std::byte* const& _sHeap,
             cuda::std::byte* const& _book,
             const uint16_t& _nLx, // dynamically decided by an optimization algorithm
             const uint16_t& _rank,
             const uint16_t& _world,
-            const uint16_t& _xS) : syncArray(_sA), flags(_flags), sHeap(_sHeap), book(_book), rank(_rank),
+            const uint16_t& _xS) : symHeap(_symHeap),
+            syncArray(_sA), syncCount(_sA + _world), flags(_flags), sHeap(_sHeap), book(_book), rank(_rank),
             world(_world), nLx(_nLx), xs(_xS){
             constexpr auto TCM = ACC::TCM::value;
             constexpr auto TN = ACC::TN::value;
@@ -515,7 +524,7 @@ namespace aristos{
                 const auto prT = world * nLx * TCM * tiles<BLOCK_N>(P);
                 // maximum gemm tiles/tasks scheduled by subscriber threads
                 auto sT = world * nLx * TCM * TN + TCM * TN * E;
-                const auto tPs = cute::ceil_div(sT, SUBSCRIBERS);
+                tPs = cute::ceil_div(sT, SUBSCRIBERS);
                 sT = tPs * SUBSCRIBERS;
                 tQl = sizeof(Task) * (sT + prT);
                 tQml = tQl + blocks * sizeof(TQSignal) + E * sizeof(PEL); // processor doorbells
@@ -713,8 +722,6 @@ namespace aristos{
             unsigned long int tQXt = 0UL;
             /// gate routing and loss vectors in bytes
             unsigned long int gRl = 0U;
-            /// length of gTQHeads
-            unsigned int gtQCl = 0U;
             /// Block Ring Softmax flags in bytes, non-cumulative
             unsigned int brs = 0UL;
             /// Task Q maximum length

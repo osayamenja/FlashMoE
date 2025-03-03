@@ -9,6 +9,7 @@
 #include "../debug.cuh"
 #include "../os/os.cuh"
 #include "../os/processor/processor.cuh"
+#include "../os/sync.cuh"
 #include "gate.cuh"
 
 namespace aristos::moe{
@@ -125,9 +126,11 @@ namespace aristos::moe{
         // Call forward pass
         moe::forward<<<blocks, threads, 0, aristosStream>>>(iP, oP, seqBit);
         if (seqBit == cuda::std::numeric_limits<decltype(seqBit)>::max()) {
-            // TODO sequence bit sync logic
+            syncAll<<<ACC::SYB::value, ACC::PeakHardware::OS::threads::value, 0, aristosStream>>>(
+                hostBookkeeping.pLI(), hostBookkeeping.rank, hostBookkeeping.world);
+            CHECK_ERROR_EXIT(cudaStreamSynchronize(aristosStream));
         }
-        // The below wrapping around to zero is fine
+        // The below wrapping around to zero is fine due to the sync above
         seqBit++;
     }
 }

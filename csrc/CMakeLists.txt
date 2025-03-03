@@ -77,6 +77,7 @@ add_executable(csrc main.cu
         include/moe/expert.cuh
         include/throughput.cuh
         correctness.cuh
+        include/os/sync.cuh
 )
 set_target_properties(csrc PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
