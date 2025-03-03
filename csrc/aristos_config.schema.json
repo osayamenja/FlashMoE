@@ -17,6 +17,11 @@
       "description": "Top k selected experts",
       "minimum": 1
     },
+    "global_batch": {
+      "type": "integer",
+      "description": "Global input batch",
+      "multipleOf": 2
+    },
     "is_training": {
       "enum": [0, 1],
       "description": "Indicates whether this a training ot inference job"
@@ -35,6 +40,11 @@
       "type": "integer",
       "description": "Intermediate dimension for the FFN/expert",
       "multipleOf": 64
+    },
+    "moe_frequency": {
+      "type": "integer",
+      "description": "MoE frequency",
+      "minimum": 1
     },
     "mini_batch": {
       "type": "integer",
@@ -55,6 +65,10 @@
       "enum": [0, 1, 2, 3],
       "$comment": "0: float, 1: tf32, 2: bf16, 3: fp16",
       "description": "Data type"
+    },
+    "vocab_size": {
+      "type": "integer",
+      "description": "Vocabulary size"
     }
   },
   "required": [
@@ -65,10 +79,12 @@
     "hidden_act",
     "hidden_size",
     "intermediate_size",
+    "moe_frequency",
     "mini_batch",
     "num_experts",
     "num_layers",
     "sequence_len",
     "torch_dtype",
+    "vocab_size"
   ]
 }

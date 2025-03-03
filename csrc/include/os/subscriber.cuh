@@ -37,9 +37,8 @@ namespace aristos::subscriber{
             BiasUp const& biasUp,
             BiasDown const& biasDown,
             cuda::std::byte* __restrict__ pGB, /*post GEMM buffer*/
-            /// Data Structures
-            const uint* __restrict__ const& peerTranslation,
-            const uint* __restrict__ const& peerRemote,
+            /// Lookup Table
+            const PLI* __restrict__ const& pL,
             /// State
             uint* __restrict__ const& status,
             uint *__restrict__ const&taskCount,
@@ -66,8 +65,7 @@ namespace aristos::subscriber{
                     // decode the received packet
                     const auto expertIdx = flagIdx % nLx;
                     const auto peerIdx = flagIdx / nLx;
-                    const auto gPeer = peerTranslation[peerIdx];
-                    const auto isRemote = peerRemote[peerIdx];
+                    const auto pLI = pL[peerIdx];
                     cuda::std::array weights{
                         CONST_CAST_TO(cuda::std::byte, &expertsUp(expertIdx)),
                         CONST_CAST_TO(cuda::std::byte, &expertsDown(expertIdx))
@@ -77,12 +75,12 @@ namespace aristos::subscriber{
                         CONST_CAST_TO(cuda::std::byte, &biasDown(expertIdx))
                     };
                     const auto* packet = heap::cAdvance<0, 1>(dA.sHeap, peerIdx, expertIdx);
-                    if (!isRemote) {
+                    if (!pLI.isRemote) {
                         // P2P peer
                         // Enforce consistency
                         __threadfence_system();
                         fPd(dA, packet, status, taskCount, sP->routedTokens, sP->totalTilesM,
-                            expertIdx, pGB, weights, bias, peerIdx, gPeer, lTQHead, tQHead);
+                            expertIdx, pGB, weights, bias, peerIdx, pLI.pe, lTQHead, tQHead);
                     }
                     else {
                         // Remote peer
@@ -91,7 +89,7 @@ namespace aristos::subscriber{
                         // as the memory ordering mechanism is internal.
                         nvshmem_ushort_test(&sP->seqBit, NVSHMEM_CMP_EQ, localSeqBit);
                         fRd(dA, packet, status, taskCount, sP->routedTokens, sP->totalTilesM,
-                            expertIdx, pGB, weights, bias, peerIdx, gPeer, lTQHead, tQHead);
+                            expertIdx, pGB, weights, bias, peerIdx, pLI.pe, lTQHead, tQHead);
                     }
                 }
             }
@@ -242,8 +240,7 @@ namespace aristos::subscriber{
     __device__ __forceinline__
     void start(cuda::std::byte* __restrict__ const& workspace,
         unsigned int* __restrict__ const& interrupt,
-        const unsigned int* __restrict__ const& peerTranslation, // shared
-        const unsigned int* __restrict__ const& peerRemote, // shared
+        const PLI* __restrict__ const& pL,
         const ELI* __restrict__ const& eL,
         const unsigned int& rE, // number of remote experts
         unsigned int* __restrict__ const& status, // shared
@@ -286,7 +283,6 @@ namespace aristos::subscriber{
 
         // first stage
         const auto fSfC = bookkeeping.world * nLx; // first stage flag count
-        const auto fSafC = bookkeeping.world * bookkeeping.xs; // first stage flag count
         const auto fSl = fSfC / subscriberCount + (tIdx < fSfC % subscriberCount);
         auto fSp = fSl; // first stage pending
 
@@ -310,8 +306,7 @@ namespace aristos::subscriber{
                     biasUp,
                     biasDown,
                     pGB,
-                    peerTranslation,
-                    peerRemote,
+                    pL,
                     status,
                     taskCount,
                     flags,
@@ -324,7 +319,7 @@ namespace aristos::subscriber{
                     lSeqBit
                 );
             }
-            flags += fSafC;
+            flags += fSfC;
             finalSubscriber(rWSet,
                 dA,
                 tokenIds,

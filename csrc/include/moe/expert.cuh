@@ -18,6 +18,7 @@
 namespace aristos {
     template<
         typename BlockGEMM,
+        unsigned int N,
         CombineMode c,
         unsigned int elems,
         typename Activations,
@@ -34,8 +35,8 @@ namespace aristos {
         const Output& mC,
         const typename BlockGEMM::MatrixDType* __restrict__ const& scaleWeights,
         const typename BlockGEMM::MatrixDType* __restrict__ const& combineWeights,
-        const unsigned int& tileIdx) {
-        const auto [M, N] = mC.shape();
+        const unsigned int& tileIdx,
+        const unsigned int& M) {
         auto accumulator = cute::partition_fragment_C(typename BlockGEMM::MMA{}, typename BlockGEMM::TilerOut{});
         static_assert(cute::size(accumulator) % elems == 0);
         cuda::std::array<typename BlockGEMM::MatrixDType, elems> rScratch{};
@@ -155,41 +156,36 @@ namespace aristos {
     };
     // Fused FFN
     template<
-        typename GPUType,
-        typename ActivationOp,
-        CombineMode c,
-        typename ElementC,
         UseBarrier u = UseBarrier::no,
-        typename Element,
-        typename ProblemShape_MNK,
-        unsigned int blocks = GPUType::OS::processorBlocks::value,
-        unsigned int sharedSize = GPUType::sharedMemory::value,
-        unsigned int elems = GPUType::rScratch::value
+        unsigned int N,
+        unsigned int K,
+        typename Element
     >
-    requires(cute::is_tuple_v<ProblemShape_MNK> && rank(ProblemShape_MNK{}) == 3 &&
-        aristos::TensorValueType<ElementC> &&
-        (c != CombineMode::multithreaded || !cuda::std::is_same_v<Element, cute::tfloat32_t>)
-        && aristos::TensorValueType<Element>)
     /// D = A * B1 + C1
     /// A = D * B2 + C2
-    __global__ __maxnreg__(GPUType::registers::value) void expert(ProblemShape_MNK pShape,
+    __global__ __maxnreg__(ACC::PeakHardware::registers::value) void expert(
+        const __grid_constant__ unsigned int M,
         cuda::barrier<cuda::thread_scope_device>* dB,
         float* deviceThroughput, uint* tileSync,
         const Element* __restrict__ iP /* A, B, D, S, W*/,
         Element* __restrict__ oP /*C*/,
         const bool skip = true) {
-        constexpr auto tMu = 128; // upper bound of tiles per block for this exercise
+        constexpr auto c = ACC::CM::value;
+        constexpr unsigned int blocks = ACC::PeakHardware::OS::processorBlocks::value;
+        constexpr unsigned int sharedSize = ACC::PeakHardware::sharedMemory::value;
+        constexpr unsigned int elems = ACC::PeakHardware::rScratch::value;
+        constexpr auto tMu = 128;
+
         __shared__ __align__(16) Element workspace[sharedSize / sizeof(Element)];
         __shared__ __align__(16) uint16_t tQ[tMu];
-        const auto [M, N, K] = pShape;
-        using Operation = BlockMM<GPUType, Element, Element, ElementC, ActivationOp>;
-        using OperationX = BlockMM<GPUType, Element, Element, ElementC>;
-        constexpr auto preGEMM = processor::FGT<TaskType::preGEMM, Operation, GPUType>{};
+        using Operation = BlockMM<ACC::ActivationOp, Element>;
+        using OperationX = BlockMM<ACC::ActivationOpX, Element>;
+        constexpr auto preGEMM = processor::FGT<TaskType::preGEMM, Operation, N, K>{};
         constexpr auto threads = Operation::GEMM::block_dim.x;
         // we require M, N, K to be evenly divisible by corresponding block tiling dimensions
         const auto tilesM = M / cute::get<0>(typename Operation::TilerOut{});
-        const auto tilesN = N / cute::get<1>(typename Operation::TilerOut{});
-        const auto tilesK = K / cute::get<1>(typename Operation::TilerOut{});
+        constexpr auto tilesN = N / cute::get<1>(typename Operation::TilerOut{});
+        constexpr auto tilesK = K / cute::get<1>(typename Operation::TilerOut{});
         const auto tiles = tilesM * tilesN;
         const auto tiles2 = tilesM * tilesK;
 
@@ -203,9 +199,10 @@ namespace aristos {
         auto* __restrict__ pC1 = oP;
         auto* __restrict__ pC2 = pC1 + M * N;
 
-        const auto tSCl = umin(tilesK, blocks);
+        constexpr auto tSCl = umin(tilesK, blocks);
         // transposed layout to enable coalescing during polling,
         // tradeoffs by disabling coalescing in one-shot propagation.
+
         const auto tSync = make_tensor(cute::make_gmem_ptr(tileSync),
             make_layout(cute::make_shape(tSCl, tilesM), cute::LayoutRight{}));
 #if TIME_EXPERT
@@ -213,7 +210,7 @@ namespace aristos {
         asm volatile("mov.u64 %0, %%globaltimer;": "=l"(start)::);
 #endif
         for (uint i = blockIdx.x; i < tiles; i += blocks) {
-            preGEMM(workspace, pA, pB1, pC1, pD1, M, N, K, i);
+            preGEMM(workspace, pA, pB1, pC1, pD1, M, i);
             // Pick warp 0
             if constexpr (u == UseBarrier::no) {
                 __syncthreads();
@@ -229,6 +226,7 @@ namespace aristos {
                     propagate = __shfl_sync(0xffffffff, propagate, 0);
                     if (propagate) {
                         // We were the last, let's propagate this information down
+                        #pragma unroll
                         for (uint j = threadIdx.x + 1; j < tSCl; j += wS) {
                             atomicExch(&tSync(j, tM), tilesN);
                         }
@@ -256,9 +254,8 @@ namespace aristos {
                 dB->arrive_and_wait();
             }
             __syncthreads();
-            #pragma unroll 2
             for (uint i = blockIdx.x; i < tiles2; i += blocks) {
-                fGST<OperationX, c, elems>(workspace, mA, mB, mD, mC, pS, pCw, i);
+                fGST<OperationX, c, elems>(workspace, mA, mB, mD, mC, pS, pCw, i, M);
             }
         }
         else {
@@ -317,7 +314,7 @@ namespace aristos {
                     const auto endTile = (rowIdx + 1) * tilesK;
                     // do gemm
                     for (uint j = blockIdx.x + startIdx * blocks; j < endTile; j += blocks) {
-                        fGST<OperationX, c, elems>(workspace, mA, mB, mD, mC, pS, pCw, j);
+                        fGST<OperationX, c, elems>(workspace, mA, mB, mD, mC, pS, pCw, j, M);
                         processed++;
                     }
                 }

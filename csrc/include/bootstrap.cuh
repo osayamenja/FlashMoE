@@ -9,7 +9,6 @@
 #include <cute/layout.hpp>
 #include <cute/tensor.hpp>
 #include <cutlass/epilogue/thread/activation.h>
-#include <torch/torch.h>
 
 #include "throughput.cuh"
 #include "topo.cuh"
@@ -37,17 +36,15 @@ namespace aristos{
         epRank(_epR), expertSlots(_eS), nLx(_nLx), epWorld(_epW) {}
     };
 
-    template<typename Element>
     __host__ __forceinline__
-    void estimateMemory(const InitialConfig& iC, WorkerAttribute* __restrict__ const& dWa) {
+    void estimateMemory(WorkerAttribute* __restrict__ const& dWa) {
         // estimate available device memory
         size_t free = 0, total = 0;
         CHECK_ERROR_EXIT(cudaMemGetInfo(&free, &total));
         // Deduct cost for the dense case, assuming at least one expert per device
-        const auto bP = iC.bytesPerParameter<Element>();
-        free -= bP * (iC.numParameters + iC.p2pBuffer);
-        const size_t mX = cute::ceil_div(iC.numLayers, iC.moeFrequency) * bP * 2UL *
-            (iC.hiddenProjDim * iC.embedDim);
+        free -= ACC::BPP::value * (ACC::PC::value + ACC::P2PB::value);
+        constexpr size_t mX = cute::ceil_div(ACC::L::value, ACC::F::value) * ACC::BPP::value * 2UL *
+            (ACC::P::value * ACC::H::value);
         dWa->memoryCapacity = free / mX;
     }
 
@@ -188,22 +185,28 @@ namespace aristos{
     }
 
     __host__ __forceinline__
-    void specificInit(const InitialConfig& iC) {
+    void internalInitialize() {
         using GPUType = Hardware<ARISTOS_ARCH, 255>;
         using Element = ACC::Element;
         using Activation = ACC::ActivationOp;
         // initialize communication backend
         nvshmem_init();
         const uint devId = nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE);
-        CUTE_CHECK_ERROR(cudaSetDevice(devId));
+        CHECK_ERROR_EXIT(cudaSetDevice(devId));
         const auto globalWorld = nvshmem_n_pes();
         const auto rank = nvshmem_my_pe();
 
+        constexpr uint E = ACC::E::value;
+        constexpr uint S = ACC::S::value;
+        constexpr uint P = ACC::P::value;
+        constexpr uint H = ACC::H::value;
+        constexpr uint EC = ACC::EC::value;
+
         // Pointer to adjacency matrix and throughput of all devices
         const auto aD = globalWorld * globalWorld;
-        const auto dZ = sizeof(EPG) + 2 * sizeof(Worker) * globalWorld + sizeof(Expert) * iC.numExperts;
-        const auto sZ = sizeof(EDT) * iC.numExperts + sizeof(uint) * (2 * globalWorld +
-            2 * iC.numExperts + 1) + sizeof(uint16_t) * globalWorld + sizeof(bool) * iC.numExperts;
+        const auto dZ = sizeof(EPG) + 2 * sizeof(Worker) * globalWorld + sizeof(Expert) * E;
+        const auto sZ = sizeof(EDT) * E + sizeof(uint) * (2 * globalWorld +
+            2 * E + 1) + sizeof(uint16_t) * globalWorld + sizeof(bool) * E;
         const auto cZ = dZ + aD * sizeof(floatPair) + globalWorld * sizeof(WorkerAttribute) + sZ;
 
         // allocate all memory in one go
@@ -223,16 +226,15 @@ namespace aristos{
         static_assert(alignof(WorkerAttribute) % alignof(EDT) == 0);
         auto* __restrict__ eDr = CAST_TO(EDT, wAp + globalWorld);
         static_assert(alignof(EDT) == 0 % alignof(BookType) == 0);
-        auto* pT = CAST_TO(uint, eDr + iC.numExperts);
+        auto* pT = CAST_TO(uint, eDr + E);
         auto* ePs = pT + globalWorld;
-        auto* ePsX = ePs + iC.numExperts; // scratch
-        auto* nRXp = ePsX + iC.numExperts;
+        auto* ePsX = ePs + E; // scratch
+        auto* nRXp = ePsX + E;
         auto* scratch = CAST_TO(uint16_t, nRXp + 1);
         auto* __restrict__ eRs = CAST_TO(bool, scratch + globalWorld);
 
-        estimateMemory<Element>(iC, &wAp[rank]);
-        mT<GPUType, Element, ACC::CM::value, Activation>(wAp + rank, iC.seqLen, iC.hiddenProjDim,
-                iC.embedDim, devId);
+        estimateMemory(&wAp[rank]);
+        mT(wAp + rank);
 
         discoverTopology(aP, globalWorld, globalWorld, wAp[rank]);
 
@@ -337,7 +339,7 @@ namespace aristos{
 
     // Should be called before loading the model
     __host__ __forceinline__
-    void initialize(const InitialConfig& iC) {
+    void initialize() {
         reportError(!isInitialized, "Already Initialized");
         using GPUType = aristos::Hardware<ARISTOS_ARCH, 255>;
         constexpr auto blocks = GPUType::OS::processorBlocks::value;
@@ -352,7 +354,7 @@ namespace aristos{
         CHECK_ERROR_EXIT(cudaGetDevice(&dev));
         CHECK_ERROR_EXIT(cudaDeviceGetAttribute(&cudaDevAttribute, cudaDevAttrMemoryPoolsSupported, dev));
         reportError(cudaDevAttribute, "Memory Pools support required");
-        specificInit(iC);
+        internalInitialize();
     }
 
     __host__ __forceinline__

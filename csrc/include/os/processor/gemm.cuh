@@ -128,15 +128,14 @@ namespace aristos {
     struct isFAA<FAA<Element, ActivationFunction>> : cuda::std::true_type {};
 
     template<
-        typename GPUType,
+        typename ActivationOp = cute::identity,
         typename ElementA,
         typename ElementB = ElementA,
-        typename ElementC = float,
-        typename ActivationOp = cute::identity,
-        unsigned int sizeK = GPUType::bKBase::value * sizeof(mp_t) / sizeof(ElementA),
-        unsigned int Arch = GPUType::arch::value,
-        unsigned int threads = GPUType::OS::threads::value,
-        unsigned int pipeStages = GPUType::pipeStages::value
+        typename ElementC = ACC::ElementC,
+        unsigned int sizeK = ACC::PeakHardware::bKBase::value * sizeof(mp_t) / sizeof(ElementA),
+        unsigned int Arch = ACC::PeakHardware::arch::value,
+        unsigned int threads = ACC::PeakHardware::OS::threads::value,
+        unsigned int pipeStages = ACC::PeakHardware::pipeStages::value
     >
     struct BlockMM {
         // will clamp at Ampere for now, until we implement Hopper specific GEMM

@@ -40,8 +40,7 @@ namespace aristos::packet {
         auto* __restrict__ pSA = bookkeeping.pSA();
         auto* __restrict__ sHeap = bookkeeping.sHeap;
         auto* __restrict__ flags = bookkeeping.flags;
-        const auto expertSlots = bookkeeping.xs;
-        const auto rank = bookkeeping.rank; // ep rank
+        const auto fpO = bookkeeping.rank * bookkeeping.xs;
 
         const auto tokenIds = make_tensor(cute::make_gmem_ptr(tP),
             cute::Layout<cute::Shape<cute::Int<E>, cute::Int<EC>>,
@@ -50,15 +49,13 @@ namespace aristos::packet {
         /// Populate Data Structures
         const auto* __restrict__ enL = CAST_TO(PEL, workspace);
         const auto* __restrict__ eC = bookkeeping.eC();
-        const auto* __restrict__ eL = CAST_TO(ulonglong4, bookkeeping.pEL());
-        static_assert(sizeof(ulonglong4) == sizeof(PEL) &&
-            alignof(ulonglong4) == alignof(PEL));
+        const auto* __restrict__ eL = bookkeeping.pEL();
         constexpr auto oT = E * sizeof(PEL);
         const auto* __restrict__ seC = CAST_TO(uint, workspace + oT);
 
         #pragma unroll
         for (uint i = threadIdx.x; i < E; i += threads) {
-            CAST_TO(ulonglong4, workspace)[i] = eL[i];
+            CAST_TO(PEL, workspace)[i] = eL[i];
             CAST_TO(uint, workspace + oT)[i] = eC[i];
         }
         constexpr auto oT2 = oT + E * sizeof(uint);
@@ -73,21 +70,16 @@ namespace aristos::packet {
         // Update encoding lookup table
         #pragma unroll
         for (uint i = threadIdx.x; i < E; i += threads) {
-            auto* __restrict__ eLI = CAST_TO(PEL, workspace) + i;
-            const auto peer = eLI->peer;
-            const auto isRemote = eLI->isRemote;
-            const auto xLIdx = eLI->expertLocalIdx;
-            eLI->eC = seC[i];
-            eLI->pTT = sPTT[peer];
-            if (!isRemote) {
-                eLI->remoteSFlags += rank * expertSlots + xLIdx;
-            }
+            auto* __restrict__ peL = CAST_TO(PEL, workspace) + i;
+            const auto peer = peL->peer;
+            peL->eC = seC[i];
+            peL->pTT = sPTT[peer];
         }
         __syncthreads();
         #pragma unroll
         for (uint expertIdx = superBlockIdx; expertIdx < E; expertIdx += numSuperBlocks) {
             const auto lI = enL[expertIdx];
-            const auto flagOffset = rank * expertSlots + lI.expertLocalIdx;
+            const auto flagOffset = fpO + lI.expertLocalIdx;
             const auto routedTokens = d == DropTokens::yes ?
                 cute::min(lI.eC, EC) : lI.eC;
             auto* __restrict__ peerHeap = lI.isRemote ?
@@ -100,8 +92,8 @@ namespace aristos::packet {
                     // Pack payload into single signal word
                     const auto sigPayload = SignalPayload{
                         routedTokens,
-                        rSeqBit,
-                        static_cast<uint16_t>(Bookkeeping::tiles<BLOCK_M>(lI.pTT)) // this should be safe
+                        static_cast<uint16_t>(Bookkeeping::tiles<BLOCK_M>(lI.pTT)), // this should be safe
+                        rSeqBit
                     };
                     if (lI.isRemote) {
                         // transmit signal
@@ -110,8 +102,7 @@ namespace aristos::packet {
                     }
                     else {
                         // Better to use below than the volatile write operation used in the public-facing API
-                        atomicExch_system(CAST_TO(ull_t, lI.remoteSFlags),
-                            *CONST_CAST_TO(ull_t, sigPayload));
+                        atomicExch_system(CAST_TO(ull_t, lI.remoteSFlags), *CONST_CAST_TO(ull_t, sigPayload));
                     }
                 }
                 continue;
@@ -147,8 +138,8 @@ namespace aristos::packet {
                     // I am the last block, let's finalize this transfer.
                     const auto sigPayload = SignalPayload{
                         routedTokens,
-                        rSeqBit,
-                        static_cast<uint16_t>(Bookkeeping::tiles<BLOCK_M>(lI.pTT)) // this should be safe
+                        static_cast<uint16_t>(Bookkeeping::tiles<BLOCK_M>(lI.pTT)), // this should be safe
+                        rSeqBit
                     };
                     if (lI.isRemote) {
                         // do RDMA transfer + signal
@@ -163,8 +154,7 @@ namespace aristos::packet {
                     }
                     else {
                         // we've done the DMA transfer already, so we set the signal instead
-                        atomicExch_system(CAST_TO(ull_t, lI.remoteSFlags),
-                            *CONST_CAST_TO(ull_t, sigPayload));
+                        atomicExch_system(CAST_TO(ull_t, lI.remoteSFlags), *CONST_CAST_TO(ull_t, sigPayload));
                     }
                 }
             }

@@ -13,7 +13,6 @@
 
 namespace aristos::processor{
     template<
-        typename GPUType,
         CombineMode c = CombineMode::single
     >
     struct Combine {
@@ -21,8 +20,8 @@ namespace aristos::processor{
             unsigned int N = ACC::H::value,
             class ScaleWeights,
             typename Element,
-            unsigned int Arch = GPUType::arch::value,
-            unsigned int elems = GPUType::rScratch::value
+            unsigned int Arch = ACC::PeakHardware::arch::value,
+            unsigned int elems = ACC::PeakHardware::rScratch::value
         >
         requires(TensorValueType<Element> &&
             aristos::isMatrix<ScaleWeights> &&
@@ -114,15 +113,14 @@ namespace aristos::processor{
     template<
         TaskType t,
         typename BlockGEMM,
-        typename GPUType
+        unsigned int N = ACC::P::value,
+        unsigned int K = ACC::H::value
     >
     struct FGT {
         static_assert(t == TaskType::preGEMM);
         template<
-            unsigned int N = ACC::P::value,
-            unsigned int K = ACC::H::value,
-            unsigned int elems = GPUType::rScratch::value,
-            unsigned int threads = GPUType::OS::threads::value
+            unsigned int elems = ACC::PeakHardware::rScratch::value,
+            unsigned int threads = ACC::PeakHardware::OS::threads::value
         >
         __forceinline__ __device__
         void operator()(typename BlockGEMM::MatrixDType* __restrict__ const& workspace,
@@ -242,15 +240,14 @@ namespace aristos::processor{
     };
 
     template<
-        typename BlockGEMM,
-        typename GPUType
+        typename BlockGEMM
     >
-    struct FGT<TaskType::postGEMM, BlockGEMM, GPUType> {
+    struct FGT<TaskType::postGEMM, BlockGEMM> {
         template<
             unsigned int N = ACC::H::value,
             unsigned int K = ACC::P::value,
-            unsigned int elems = GPUType::rScratch::value,
-            unsigned int threads = GPUType::OS::threads::value
+            unsigned int elems = ACC::PeakHardware::rScratch::value,
+            unsigned int threads = ACC::PeakHardware::OS::threads::value
         >
         __forceinline__ __device__
         void operator()(typename BlockGEMM::MatrixDType* __restrict__ const& workspace,
@@ -390,18 +387,12 @@ namespace aristos::processor{
     };
 
     template<
-        typename GPUType,
-        CombineMode c,
-        typename ActivationOp = cute::identity,
-        typename ActivationOpX = cute::identity,
-        typename ElementC = float,
-        typename ElementA,
-        typename ElementB = ElementA,
         typename ScaleWeights
     >
     __device__ __forceinline__
     void start(cuda::std::byte* const& workspace,
         ScaleWeights const& sW, const uint16_t& _seqBit){
+        using Element = ACC::Element;
         static_assert(sizeof(SignalPayload<PacketStage::last>) == sizeof(flagsType)
             && alignof(SignalPayload<PacketStage::last>) == alignof(flagsType));
 
@@ -429,16 +420,15 @@ namespace aristos::processor{
             };
         }
 
-        using Operation = BlockMM<GPUType, ElementA, ElementB, ElementC, ActivationOp>;
-        using OperationX = BlockMM<GPUType, ElementA, ElementB, ElementC, ActivationOpX>;
-        constexpr auto preGEMM = FGT<TaskType::preGEMM, Operation, GPUType>{};
-        constexpr auto postGEMM = FGT<TaskType::postGEMM, OperationX, GPUType>{};
-        constexpr auto combineOp = Combine<GPUType, c>{};
+        using Operation = BlockMM<ACC::ActivationOp, Element>;
+        using OperationX = BlockMM<ACC::ActivationOpX, Element>;
+        constexpr auto preGEMM = FGT<TaskType::preGEMM, Operation>{};
+        constexpr auto postGEMM = FGT<TaskType::postGEMM, OperationX>{};
+        constexpr auto combineOp = Combine<ACC::CM::value>{};
         constexpr uint H = ACC::H::value;
-        constexpr uint P = ACC::P::value;
         constexpr auto bN = cute::get<1>(typename Operation::BlockTiler{});
-        constexpr auto tN = P / bN;
-        constexpr auto tNx = H / bN;
+        constexpr auto tN = ACC::TN::value;
+        constexpr auto tNx = ACC::TNx::value;
         __syncthreads();
 
         while (!interrupt) {
@@ -453,8 +443,6 @@ namespace aristos::processor{
                     __threadfence();
                     // global -> shared
                     currentTask = gtQ[tqs.signal - 1];
-                    // shared -> register
-                    rCurrentTask = currentTask;
                     // Eagerly indicate readiness for the next task
                     atomicExch(pA.sQ, ready);
                 }
@@ -536,8 +524,8 @@ namespace aristos::processor{
                             // Pack payload into single signal word of 8 bytes
                             const auto flagSignal = SignalPayload<PacketStage::last>{
                                 rCurrentTask.batchIdx,
+                                rCurrentTask.tileSize,
                                 rSeqBit,
-                                rCurrentTask.tileSize
                             };
                             if (rCurrentTask.isPeerRemote) {
                                 // Remote; check if we need to do the transfer
@@ -545,7 +533,7 @@ namespace aristos::processor{
                                 if (atomicIncrement(pA.tQS + rCurrentTask.syncIdx) == tN + tNx) {
                                     // Batch remote network transfer to avoid overwhelming the NIC
                                     nvshmem_putmem_signal_nbi(rCurrentTask.cData[postIndex], rCurrentTask.cData[postIndex],
-                                        rCurrentTask.tileSize * H * sizeof(ElementA),
+                                        rCurrentTask.tileSize * H * sizeof(Element),
                                         pA.flags + rCurrentTask.flagIdx,
                                         *CONST_CAST_TO(flagsType, &flagSignal), NVSHMEM_SIGNAL_SET,
                                         rCurrentTask.peerIdx);
@@ -556,7 +544,8 @@ namespace aristos::processor{
                                 // Already did the network transfer,
                                 // so set signal only
                                 __threadfence_system();
-                                atomicExch_system(CAST_TO(ull_t, cachedFlags), *CONST_CAST_TO(ull_t, &flagSignal));
+                                atomicExch_system(CAST_TO(ull_t, cachedFlags) + rCurrentTask.flagIdx,
+                                    *CONST_CAST_TO(ull_t, &flagSignal));
                             }
                         }
                     }

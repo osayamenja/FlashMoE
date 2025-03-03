@@ -195,6 +195,9 @@ message(STATUS "drop_tokens: ${DROP_TOKENS_V}")
 string(JSON E_TOP_K_V GET ${ARISTOS_CONFIG} "expert_top_k")
 message(STATUS "expert_top_k: ${E_TOP_K_V}")
 
+string(JSON GLOBAL_BATCH_V GET ${ARISTOS_CONFIG} "global_batch")
+message(STATUS "global_batch: ${GLOBAL_BATCH_V}")
+
 string(JSON IS_TRAINING_V GET ${ARISTOS_CONFIG} "is_training")
 message(STATUS "is_training: ${IS_TRAINING_V}")
 
@@ -210,11 +213,14 @@ message(STATUS "intermediate_size: ${I_SIZE_V}")
 string(JSON MINI_BATCH_V GET ${ARISTOS_CONFIG} "mini_batch")
 message(STATUS "mini_batch: ${MU_BATCH_V}")
 
+string(JSON MOE_FREQ_V GET ${ARISTOS_CONFIG} "moe_frequency")
+message(STATUS "moe_frequency: ${MOE_FREQ_V}")
+
 string(JSON NUM_EXPERTS_V GET ${ARISTOS_CONFIG} "num_experts")
 message(STATUS "num_experts: ${NUM_EXPERTS_V}")
 
 string(JSON NUM_LAYERS_V GET ${ARISTOS_CONFIG} "num_layers")
-message(STATUS "num_experts: ${NUM_EXPERTS_V}")
+message(STATUS "num_layers: ${NUM_LAYERS_V}")
 
 string(JSON SEQ_LEN_V GET ${ARISTOS_CONFIG} "sequence_len")
 message(STATUS "sequence_len: ${SEQ_LEN_V}")
@@ -222,12 +228,16 @@ message(STATUS "sequence_len: ${SEQ_LEN_V}")
 string(JSON DTYPE_V GET ${ARISTOS_CONFIG} "torch_dtype")
 message(STATUS "torch_dtype: ${DTYPE_V}")
 
+string(JSON VOCAB_SIZE_V GET ${ARISTOS_CONFIG} "vocab_size")
+message(STATUS "vocab_size: ${VOCAB_SIZE_V}")
+
 target_compile_definitions(csrc
         PRIVATE
         ARISTOS_ARCH=${GPU_ARCH}
         CAP_FACTOR=${CAP_FACTOR_V}
         DROP_TOKENS=${DROP_TOKENS_V}
         E_TOP_K=${E_TOP_K_V}
+        GLOBAL_BATCH=${GLOBAL_BATCH_V}
         IS_TRAINING=${IS_TRAINING_V}
         HIDDEN_ACT=${HIDDEN_ACT_V}
         HIDDEN_SIZE=${HIDDEN_SIZE_V}
@@ -235,8 +245,10 @@ target_compile_definitions(csrc
         MOE_FREQ=${MOE_FREQ_V}
         MINI_BATCH=${MINI_BATCH_V}
         NUM_EXPERTS=${NUM_EXPERTS_V}
+        NUM_LAYERS=${NUM_LAYERS_V}
         SEQ_LEN=${SEQ_LEN_V}
         DTYPE=${DTYPE_V}
+        VOCAB_SIZE=${VOCAB_SIZE_V}
 )
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_compile_options(csrc PRIVATE

@@ -38,9 +38,6 @@ namespace aristos {
         // set expert weights to identity and bias to zero to avoid accumulation errors for this test
         expert->to(device, sT);
 
-        using ElementAccum = float;
-        using Activation = cutlass::epilogue::thread::ReLU<ElementAccum>;
-        using Element = cute::half_t;
         constexpr auto aZ =  M * K;
         constexpr auto bZ =  aZ + N * K;
         constexpr auto b2Z =  bZ + N * K;
@@ -75,7 +72,6 @@ namespace aristos {
         hT.index({0, torch::indexing::Slice(cZ, hZ)}) = torch::zeros({M * K}, options).contiguous();
         const auto combineWeights = hT.index({0, torch::indexing::Slice(sZ, cWz)}).view({M, 1});
         // gemm 1 -> ReLU -> gemm 2 -> scale
-        constexpr auto trials = 128U;
         const auto start = clk::now();
         const auto result = mul(expert->forward(activations), scaleWeights);
         CHECK_ERROR_EXIT(cudaDeviceSynchronize());
@@ -83,11 +79,7 @@ namespace aristos {
         printf("Torch takes %fms\n", end.count() * 1000);
 
         // Get a copy of the reference result
-        aristos::WorkerAttribute wA{};
         // compute & measure fused expert
-        aristos::mFT<GPUType, trials, aristos::CombineMode::single, Activation, aristos::UseBarrier::no>(&wA, M, N, K,
-            CAST_TO(Element, hT.mutable_data_ptr()),
-            CAST_TO(Element, hT.mutable_data_ptr()) + cWz);
         // verify and compare
         std::cout << "Passed? " << (result.view({M * K})
             .allclose(hT.index({0, torch::indexing::Slice(cZ, hZ)}),
