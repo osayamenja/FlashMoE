@@ -147,13 +147,6 @@ namespace aristos {
         }
         __syncthreads();
     }
-
-    __device__
-    enum class FlagState : uint8_t {
-        unidentified,
-        identified,
-        completed
-    };
     // Fused FFN
     template<
         UseBarrier u = UseBarrier::no,
@@ -179,7 +172,6 @@ namespace aristos {
         __shared__ __align__(16) uint16_t tQ[ACC::TMU::value];
         using Operation = BlockMM<ACC::ActivationOp, Element>;
         using OperationX = BlockMM<ACC::ActivationOpX, Element>;
-        constexpr auto preGEMM = processor::FGT<TaskType::preGEMM, Operation, N, K>{};
         constexpr auto threads = Operation::GEMM::block_dim.x;
         // we require M, N, K to be evenly divisible by corresponding block tiling dimensions
         const auto tilesM = M / cute::get<0>(typename Operation::TilerOut{});
@@ -209,7 +201,7 @@ namespace aristos {
         asm volatile("mov.u64 %0, %%globaltimer;": "=l"(start)::);
 #endif
         for (uint i = blockIdx.x; i < tiles; i += blocks) {
-            preGEMM(workspace, pA, pB1, pC1, pD1, M, i);
+            processor::fGET<Operation>(workspace, pA, pB1, pC1, pD1, M, i);
             // Pick warp 0
             if constexpr (u == UseBarrier::no) {
                 __syncthreads();

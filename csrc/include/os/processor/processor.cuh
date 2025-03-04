@@ -13,21 +13,18 @@
 
 namespace aristos::processor{
     template<
-        CombineMode c = CombineMode::single
+        CombineMode c = CombineMode::single,
+        unsigned int N = ACC::H::value,
+        class ScaleWeights,
+        typename Element,
+        unsigned int Arch = ACC::PeakHardware::arch::value,
+        unsigned int elems = ACC::PeakHardware::rScratch::value
     >
-    struct Combine {
-        template<
-            unsigned int N = ACC::H::value,
-            class ScaleWeights,
-            typename Element,
-            unsigned int Arch = ACC::PeakHardware::arch::value,
-            unsigned int elems = ACC::PeakHardware::rScratch::value
-        >
-        requires(TensorValueType<Element> &&
+    requires(TensorValueType<Element> &&
             aristos::isMatrix<ScaleWeights> &&
             cuda::std::is_same_v<typename ScaleWeights::value_type, Element>)
-        __device__ __forceinline__
-        void operator()(Element* __restrict__ const& workspace,
+    __device__ __forceinline__
+    void combine(Element* __restrict__ const& workspace,
             const TokenIdxTuple* __restrict__ const& tokenIndices,
             const Element* __restrict__ const& inputs,
             Element* __restrict__ const& moeOutput,
@@ -35,334 +32,329 @@ namespace aristos::processor{
             const unsigned int& M,
             const unsigned int& tileIdx,
             const uint16_t& tileSize,
-            const uint16_t& expertIdx) const {
-            using BlockTiler = cute::Shape<cute::Int<BLOCK_M>, cute::Int<BLOCK_N>>;
-            constexpr BlockTiler tiler{};
-            constexpr auto bM = cute::get<0>(tiler);
-            constexpr auto bN = cute::get<1>(tiler);
-            cutlass::AlignedArray<Element, bN> registers{};
-            // Eagerly issue gmem read.
-            auto [tokenIdx, combineWeight] = TokenIdxTuple{};
-            auto scaleWeight = Element(0);
-            constexpr auto mTe = cutlass::NumericConverter<Element, TokenIdxTuple::second_type>{};
-            if (threadIdx.x < tileSize) {
-                const auto t = tokenIndices[threadIdx.x];
-                tokenIdx = t.first;
-                combineWeight = t.second;
-                scaleWeight = scale(tokenIdx, expertIdx) / mTe(combineWeight);
-            }
-            // Row-major
-            const auto mA = make_tensor(cute::make_gmem_ptr(inputs),
-                make_layout(cute::make_shape(M, N), cute::LayoutRight{}));
+            const uint16_t& expertIdx) {
+        using BlockTiler = cute::Shape<cute::Int<BLOCK_M>, cute::Int<BLOCK_N>>;
+        constexpr BlockTiler tiler{};
+        constexpr auto bM = cute::get<0>(tiler);
+        constexpr auto bN = cute::get<1>(tiler);
+        cutlass::AlignedArray<Element, bN> registers{};
+        // Eagerly issue gmem read.
+        auto [tokenIdx, combineWeight] = TokenIdxTuple{};
+        auto scaleWeight = Element(0);
+        constexpr auto mTe = cutlass::NumericConverter<Element, TokenIdxTuple::second_type>{};
+        if (threadIdx.x < tileSize) {
+            const auto t = tokenIndices[threadIdx.x];
+            tokenIdx = t.first;
+            combineWeight = t.second;
+            scaleWeight = scale(tokenIdx, expertIdx) / mTe(combineWeight);
+        }
+        // Row-major
+        const auto mA = make_tensor(cute::make_gmem_ptr(inputs),
+            make_layout(cute::make_shape(M, N), cute::LayoutRight{}));
 
-            const auto tilesM = M / bM;
-            // We assert the below prior to this point
-            const auto tilesN = N / bN;
+        const auto tilesM = M / bM;
+        // We assert the below prior to this point
+        const auto tilesN = N / bN;
 
-            const auto tileCoord = idx2crd(tileIdx, cute::Shape(tilesM, tilesN), cute::Stride(tilesN ,1));
-            const auto ctaCoord = cute::make_coord(cute::get<0>(tileCoord), cute::get<1>(tileCoord));
-            const auto gA = cute::local_tile(mA, tiler, ctaCoord);
-            static_assert(bN % elems == 0);
-            constexpr auto trips = bN / elems;
+        const auto tileCoord = idx2crd(tileIdx, cute::Shape(tilesM, tilesN), cute::Stride(tilesN ,1));
+        const auto ctaCoord = cute::make_coord(cute::get<0>(tileCoord), cute::get<1>(tileCoord));
+        const auto gA = cute::local_tile(mA, tiler, ctaCoord);
+        static_assert(bN % elems == 0);
+        constexpr auto trips = bN / elems;
 
-            // Transposed layout
-            constexpr auto sCLay = cute::make_layout(cute::Shape<cute::Int<bM>, cute::Int<elems>>{}, cute::LayoutRight{});
-            const auto sC = cute::make_tensor(cute::make_smem_ptr(workspace), sCLay);
+        // Transposed layout
+        constexpr auto sCLay = cute::make_layout(cute::Shape<cute::Int<bM>, cute::Int<elems>>{}, cute::LayoutRight{});
+        const auto sC = cute::make_tensor(cute::make_smem_ptr(workspace), sCLay);
 
+        #pragma unroll
+        for (uint i = 0; i < trips; ++i) {
+            // global -> shared
             #pragma unroll
-            for (uint i = 0; i < trips; ++i) {
-                // global -> shared
-                #pragma unroll
-                for (uint j = 0; j < elems; ++j) {
-                    const auto rIdx = j + threadIdx.x / elems * elems;
-                    const auto cIdx =  threadIdx.x % elems + i * elems;
-                    sC(rIdx, cIdx) = gA(rIdx, cIdx);
-                }
-                __syncthreads();
-                #pragma unroll
-                for (uint j = 0; j < elems; ++j) {
-                    registers[j + i * elems] = sC(threadIdx.x, j);
-                }
+            for (uint j = 0; j < elems; ++j) {
+                const auto rIdx = j + threadIdx.x / elems * elems;
+                const auto cIdx =  threadIdx.x % elems + i * elems;
+                sC(rIdx, cIdx) = gA(rIdx, cIdx);
             }
+            __syncthreads();
+            #pragma unroll
+            for (uint j = 0; j < elems; ++j) {
+                registers[j + i * elems] = sC(threadIdx.x, j);
+            }
+        }
 
-            constexpr VAA<Arch, Element> vaa{};
-            if (threadIdx.x < tileSize) {
-                // do scale
-                if constexpr (c == CombineMode::multithreaded) {
-                    #pragma unroll
-                    for (uint i = 0; i < bN; ++i) {
-                        registers[i] = registers[i] * scaleWeight;
-                    }
-                    vaa(moeOutput + tokenIdx * N, registers);
+        constexpr VAA<Arch, Element> vaa{};
+        if (threadIdx.x < tileSize) {
+            // do scale
+            if constexpr (c == CombineMode::multithreaded) {
+                #pragma unroll
+                for (uint i = 0; i < bN; ++i) {
+                    registers[i] = registers[i] * scaleWeight;
                 }
-                else {
-                    // vector copy from registers to global directly
-                    constexpr auto vL = bN * sizeof(Element) / sizeof(uint4);
-                    auto* __restrict__ aP = CAST_TO(uint4, moeOutput + tokenIdx * N);
-                    const auto* __restrict__ rD = CAST_TO(uint4, registers.data());
-                    #pragma unroll
-                    for (uint i = 0; i < vL; ++i) {
-                        aP[i] = rD[i];
-                    }
+                vaa(moeOutput + tokenIdx * N, registers);
+            }
+            else {
+                // vector copy from registers to global directly
+                constexpr auto vL = bN * sizeof(Element) / sizeof(uint4);
+                auto* __restrict__ aP = CAST_TO(uint4, moeOutput + tokenIdx * N);
+                const auto* __restrict__ rD = CAST_TO(uint4, registers.data());
+                #pragma unroll
+                for (uint i = 0; i < vL; ++i) {
+                    aP[i] = rD[i];
                 }
             }
         }
-    };
+    }
 
-    // Fused GEMM, Epilogue and data Transfer
+    // fused GEMM, epilogue and data transfer, with static M, N and K
     template<
-        TaskType t,
         typename BlockGEMM,
-        unsigned int N = ACC::P::value,
-        unsigned int K = ACC::H::value
+        unsigned int M = ACC::S::value,
+        unsigned int N = ACC::H::value,
+        unsigned int K = ACC::P::value,
+        unsigned int elems = ACC::PeakHardware::rScratch::value,
+        unsigned int threads = ACC::PeakHardware::OS::threads::value
     >
-    struct FGT {
-        static_assert(t == TaskType::preGEMM);
-        template<
-            unsigned int elems = ACC::PeakHardware::rScratch::value,
-            unsigned int threads = ACC::PeakHardware::OS::threads::value
-        >
-        __forceinline__ __device__
-        void operator()(typename BlockGEMM::MatrixDType* __restrict__ const& workspace,
+    __forceinline__ __device__
+    void sfGET(typename BlockGEMM::MatrixDType* __restrict__ const& workspace,
         const typename BlockGEMM::MatrixAType* __restrict__ const& inputs,
         const typename BlockGEMM::MatrixBType* __restrict__ const& weights,
-        typename BlockGEMM::MatrixDType* __restrict__ const&output,
+        typename BlockGEMM::MatrixDType* __restrict__ const& output,
         const typename BlockGEMM::MatrixDType* __restrict__ const& bias,
-        const unsigned int& M,
-        const unsigned int& tileIdx) const {
-            auto accumulator = cute::partition_fragment_C(typename BlockGEMM::MMA{}, typename BlockGEMM::TilerOut{});
-            static_assert(cute::size(accumulator) % elems == 0);
-            cutlass::AlignedArray<typename BlockGEMM::MatrixDType, elems> rScratch{};
-            constexpr auto bM = cute::get<0>(typename BlockGEMM::BlockTiler{});
-            constexpr auto bN = cute::get<1>(typename BlockGEMM::BlockTiler{});
-            constexpr auto bK = cute::get<2>(typename BlockGEMM::BlockTiler{});
-            // Instantiate mainloop
-            typename BlockGEMM::CollectiveMainloop mainLoop{};
-            cute::clear(accumulator);
+        const unsigned int& tileIdx) {
+        auto accumulator = cute::partition_fragment_C(typename BlockGEMM::MMA{}, typename BlockGEMM::TilerOut{});
+        static_assert(cute::size(accumulator) % elems == 0);
+        cutlass::AlignedArray<typename BlockGEMM::MatrixDType, elems> rScratch{};
+        constexpr auto bM = cute::get<0>(typename BlockGEMM::BlockTiler{});
+        constexpr auto bN = cute::get<1>(typename BlockGEMM::BlockTiler{});
+        constexpr auto bK = cute::get<2>(typename BlockGEMM::BlockTiler{});
+        // Instantiate mainloop
+        typename BlockGEMM::CollectiveMainloop mainLoop{};
+        cute::clear(accumulator);
 
-            // Row-major
-            const auto mA = make_tensor(cute::make_gmem_ptr(inputs),
-                make_layout(cute::make_shape(M, K), cute::Stride<cute::Int<K>, cute::_1>{}));
-            // Row-major, transposed
-            const auto mB = make_tensor(cute::make_gmem_ptr(weights),
-                cute::Layout<cute::Shape<cute::Int<N>, cute::Int<K>>,
-                    cute::Stride<cute::Int<K>, cute::_1>>{});
-            // Row-major
-            const auto mC = make_tensor(cute::make_gmem_ptr(output),
-                make_layout(cute::make_shape(M, N), cute::Stride<cute::Int<N>, cute::_1>{}));
-            const auto mD = make_tensor(cute::make_gmem_ptr(bias),
-                make_layout(cute::make_shape(M, N), cute::Stride<cute::_0, cute::_1>{}));
+        // Row-major
+        const auto mA = make_tensor(cute::make_gmem_ptr(inputs),
+        cute::Layout<cute::Shape<cute::Int<M>, cute::Int<K>>,
+            cute::Stride<cute::Int<K>, cute::_1>>{});
+        // Row-major, transposed
+        const auto mB = make_tensor(cute::make_gmem_ptr(weights),
+        cute::Layout<cute::Shape<cute::Int<N>, cute::Int<K>>,
+            cute::Stride<cute::Int<K>, cute::_1>>{});
+        // Row-major
+        const auto mC = make_tensor(cute::make_gmem_ptr(output),
+        cute::Layout<cute::Shape<cute::Int<M>, cute::Int<N>>,
+            cute::Stride<cute::Int<N>, cute::_1>>{});
+        const auto mD = make_tensor(cute::make_gmem_ptr(bias),
+        cute::Layout<cute::Shape<cute::Int<M>, cute::Int<N>>,
+            cute::Stride<cute::_0, cute::_1>>{});
 
-            // M is padded, such that the below is correct
-            const auto tilesM = M / bM;
-            // We assert the below prior to this point
-            constexpr auto tilesN = N / bN;
-            constexpr auto tilesK = K / bK;
+        // M is padded, such that the below is correct
+        constexpr auto tilesM = M / bM;
+        // We assert the below prior to this point
+        constexpr auto tilesN = N / bN;
+        constexpr auto tilesK = K / bK;
 
-            const auto tileCoord = idx2crd(tileIdx, cute::Shape(tilesM, tilesN),
-                cute::Stride<cute::Int<tilesN>, cute::_1>{});
-            const auto ctaCoord = make_coord(cute::get<0>(tileCoord), cute::get<1>(tileCoord), cute::_);
-            const auto gA = cute::local_tile(mA, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1, cute::X,cute::_1>{});
-            const auto gB = cute::local_tile(mB, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step< cute::X,cute::_1,cute::_1>{});
-            const auto gC = cute::local_tile(mC, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1,cute::_1, cute::X>{});
-            const auto gD = cute::local_tile(mD, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1,cute::_1, cute::X>{});
+        const auto tileCoord = idx2crd(tileIdx, cute::Shape<cute::Int<tilesM>, cute::Int<tilesN>>{},
+            cute::Stride<cute::Int<tilesN>, cute::_1>{});
+        const auto ctaCoord = make_coord(cute::get<0>(tileCoord), cute::get<1>(tileCoord), cute::_);
+        const auto gA = cute::local_tile(mA, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1, cute::X,cute::_1>{});
+        const auto gB = cute::local_tile(mB, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step< cute::X,cute::_1,cute::_1>{});
+        const auto gC = cute::local_tile(mC, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1,cute::_1, cute::X>{});
+        const auto gD = cute::local_tile(mD, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1,cute::_1, cute::X>{});
 
-            auto k_tile_iter = cute::make_coord_iterator(tilesK);
+        auto k_tile_iter = cute::make_coord_iterator(tilesK);
 
-            using ElementD = typename BlockGEMM::MatrixDType;
-            mainLoop(
-                accumulator,
-                gA,
-                gB,
-                accumulator,
-                k_tile_iter, tilesK,
-                cute::Underscore{},
-                threadIdx.x,
-                CAST_TO(char, workspace));
-            /// There is a block-wide barrier at the end of the above ^
+        using ElementD = typename BlockGEMM::MatrixDType;
+        mainLoop(
+            accumulator,
+            gA,
+            gB,
+            accumulator,
+            k_tile_iter, tilesK,
+            cute::Underscore{},
+            threadIdx.x,
+            CAST_TO(char, workspace));
+        /// There is a block-wide barrier at the end of the above ^
 
-            // Epilogue
-            typename BlockGEMM::MMA tiledMMA{};
-            const auto tDgD = tiledMMA.get_slice(threadIdx.x).partition_C(gD);
+        // Epilogue
+        typename BlockGEMM::MMA tiledMMA{};
+        const auto tDgD = tiledMMA.get_slice(threadIdx.x).partition_C(gD);
 
-            constexpr auto gCStoreOp = cutlass::NumericConverter<typename decltype(gC)::value_type,
-                                                        typename decltype(accumulator)::value_type>{};
-            constexpr auto gDLoadOp = cutlass::NumericConverter<typename decltype(accumulator)::value_type,
-                                                        ElementD>{};
+        constexpr auto gCStoreOp = cutlass::NumericConverter<typename decltype(gC)::value_type,
+                                                    typename decltype(accumulator)::value_type>{};
+        constexpr auto gDLoadOp = cutlass::NumericConverter<typename decltype(accumulator)::value_type,
+                                                    ElementD>{};
 
-            // Assume elementwise operator
-            typename BlockGEMM::FusedEpilogue epilogueOp{};
-            constexpr auto trips = size(accumulator) / rScratch.size();
+        // Assume elementwise operator
+        typename BlockGEMM::FusedEpilogue epilogueOp{};
+        constexpr auto trips = size(accumulator) / rScratch.size();
 
-            // Prefetch from global to shared memory
+        // Prefetch from global to shared memory
+        #pragma unroll
+        for (int j = 0; j < elems; ++j) {
+            workspace[threadIdx.x + j * threads] = tDgD(j);
+        }
+
+        #pragma unroll
+        for (unsigned int i = 0; i < trips; ++i) {
+            #pragma unroll
+            for (unsigned int j = 0; j < elems; ++j) {
+                rScratch[j] = workspace[threadIdx.x + j * threads];
+                if (i + 1 < trips) {
+                    // Eagerly start loads for the next batch, if needed
+                    workspace[threadIdx.x + j * threads] = tDgD(j + (i + 1) * elems);
+                }
+            }
+            // Fused Bias Add and Activation Function on register fragment
             #pragma unroll
             for (int j = 0; j < elems; ++j) {
-                workspace[threadIdx.x + j * threads] = tDgD(j);
-            }
-
-            #pragma unroll
-            for (unsigned int i = 0; i < trips; ++i) {
-                #pragma unroll
-                for (unsigned int j = 0; j < elems; ++j) {
-                    rScratch[j] = workspace[threadIdx.x + j * threads];
-                    if (i + 1 < trips) {
-                        // Eagerly start loads for the next batch, if needed
-                        workspace[threadIdx.x + j * threads] = tDgD(j + (i + 1) * elems);
-                    }
-                }
-                // Fused Bias Add and Activation Function on register fragment
-                #pragma unroll
-                for (int j = 0; j < elems; ++j) {
-                    accumulator(j + i * elems) = epilogueOp(accumulator(j + i * elems), gDLoadOp(rScratch[j]));
-                }
-            }
-
-            __syncthreads();
-            constexpr auto sCLay = cute::make_layout(cute::Shape<cute::Int<bM>, cute::Int<elems>>{},
-                cute::LayoutRight{});
-            const auto sC = cute::make_tensor(cute::make_smem_ptr(workspace), sCLay);
-            const auto tCsC = tiledMMA.get_slice(threadIdx.x).partition_C(sC);
-            const auto rIdx = threadIdx.x / elems * elems;
-            const auto cIdx = threadIdx.x % elems;
-            #pragma unroll
-            for (unsigned int i = 0; i < trips; ++i) {
-                #pragma unroll
-                for (unsigned int j = 0; j < elems; ++j) {
-                    tCsC(j) = gCStoreOp(accumulator(j + i * elems));
-                }
-                __syncthreads();
-                #pragma unroll
-                for (unsigned int j = 0; j < elems; ++j) {
-                    gC(rIdx + j, cIdx + i * elems) = sC(rIdx + j, cIdx);
-                }
+                accumulator(j + i * elems) = epilogueOp(accumulator(j + i * elems), gDLoadOp(rScratch[j]));
             }
         }
-    };
 
+        __syncthreads();
+        constexpr auto sCLay = cute::make_layout(cute::Shape<cute::Int<bM>, cute::Int<elems>>{},
+            cute::LayoutRight{});
+        const auto sC = cute::make_tensor(cute::make_smem_ptr(workspace), sCLay);
+        const auto tCsC = tiledMMA.get_slice(threadIdx.x).partition_C(sC);
+        const auto rIdx = threadIdx.x / elems * elems;
+        const auto cIdx = threadIdx.x % elems;
+        #pragma unroll
+        for (unsigned int i = 0; i < trips; ++i) {
+            #pragma unroll
+            for (unsigned int j = 0; j < elems; ++j) {
+                tCsC(j) = gCStoreOp(accumulator(j + i * elems));
+            }
+            __syncthreads();
+            #pragma unroll
+            for (unsigned int j = 0; j < elems; ++j) {
+                gC(rIdx + j, cIdx + i * elems) = sC(rIdx + j, cIdx);
+            }
+        }
+    }
+
+    // fused GEMM, epilogue and data transfer, with dynamic M and static N and K
     template<
-        typename BlockGEMM
+        typename BlockGEMM,
+        unsigned int N = ACC::H::value,
+        unsigned int K = ACC::P::value,
+        unsigned int elems = ACC::PeakHardware::rScratch::value,
+        unsigned int threads = ACC::PeakHardware::OS::threads::value
     >
-    struct FGT<TaskType::postGEMM, BlockGEMM> {
-        template<
-            unsigned int N = ACC::H::value,
-            unsigned int K = ACC::P::value,
-            unsigned int elems = ACC::PeakHardware::rScratch::value,
-            unsigned int threads = ACC::PeakHardware::OS::threads::value
-        >
-        __forceinline__ __device__
-        void operator()(typename BlockGEMM::MatrixDType* __restrict__ const& workspace,
+    __forceinline__ __device__
+    void fGET(typename BlockGEMM::MatrixDType* __restrict__ const& workspace,
         const typename BlockGEMM::MatrixAType* __restrict__ const& inputs,
         const typename BlockGEMM::MatrixBType* __restrict__ const& weights,
         typename BlockGEMM::MatrixDType* __restrict__ const& output,
         const typename BlockGEMM::MatrixDType* __restrict__ const& bias,
         const unsigned int& M,
-        const unsigned int& tileIdx) const {
-            auto accumulator = cute::partition_fragment_C(typename BlockGEMM::MMA{}, typename BlockGEMM::TilerOut{});
-            static_assert(cute::size(accumulator) % elems == 0);
-            cutlass::AlignedArray<typename BlockGEMM::MatrixDType, elems> rScratch{};
-            constexpr auto bM = cute::get<0>(typename BlockGEMM::BlockTiler{});
-            static_assert(size(accumulator) % rScratch.size() == 0);
-            // Instantiate mainloop
-            typename BlockGEMM::CollectiveMainloop mainLoop{};
-            cute::clear(accumulator);
+        const unsigned int& tileIdx) {
+        auto accumulator = cute::partition_fragment_C(typename BlockGEMM::MMA{}, typename BlockGEMM::TilerOut{});
+        static_assert(cute::size(accumulator) % elems == 0);
+        cutlass::AlignedArray<typename BlockGEMM::MatrixDType, elems> rScratch{};
+        constexpr auto bM = cute::get<0>(typename BlockGEMM::BlockTiler{});
+        constexpr auto bN = cute::get<1>(typename BlockGEMM::BlockTiler{});
+        constexpr auto bK = cute::get<2>(typename BlockGEMM::BlockTiler{});
+        // Instantiate mainloop
+        typename BlockGEMM::CollectiveMainloop mainLoop{};
+        cute::clear(accumulator);
 
-            // Row-major
-            const auto mA = make_tensor(cute::make_gmem_ptr(inputs),
-                make_layout(cute::make_shape(M, K), cute::Stride<cute::Int<K>, cute::_1>{}));
-            // Row-major, transposed
-            const auto mB = make_tensor(cute::make_gmem_ptr(weights),
-                cute::Layout<cute::Shape<cute::Int<N>, cute::Int<K>>, cute::Stride<cute::Int<K>, cute::_1>>{});
-            // Row-major
-            const auto mC = make_tensor(cute::make_gmem_ptr(output),
-                make_layout(cute::make_shape(M, N), cute::Stride<cute::Int<N>, cute::_1>{}));
-            const auto mD = make_tensor(cute::make_gmem_ptr(bias),
-                make_layout(cute::make_shape(M, N), cute::Stride<cute::_0, cute::_1>{}));
+        // Row-major
+        const auto mA = make_tensor(cute::make_gmem_ptr(inputs),
+            make_layout(cute::make_shape(M, K), cute::Stride<cute::Int<K>, cute::_1>{}));
+        // Row-major, transposed
+        const auto mB = make_tensor(cute::make_gmem_ptr(weights),
+            cute::Layout<cute::Shape<cute::Int<N>, cute::Int<K>>,
+                cute::Stride<cute::Int<K>, cute::_1>>{});
+        // Row-major
+        const auto mC = make_tensor(cute::make_gmem_ptr(output),
+            make_layout(cute::make_shape(M, N), cute::Stride<cute::Int<N>, cute::_1>{}));
+        const auto mD = make_tensor(cute::make_gmem_ptr(bias),
+            make_layout(cute::make_shape(M, N), cute::Stride<cute::_0, cute::_1>{}));
 
-            // M is padded, such that the below is correct
-            const auto tilesM = M / bM;
-            // We assert the below prior to this point
-            constexpr auto tilesN = N / cute::get<1>(typename BlockGEMM::BlockTiler{});
-            constexpr auto tilesK = K / cute::get<2>(typename BlockGEMM::BlockTiler{});
+        // M is padded, such that the below is correct
+        const auto tilesM = M / bM;
+        // We assert the below prior to this point
+        constexpr auto tilesN = N / bN;
+        constexpr auto tilesK = K / bK;
 
-            const auto tileCoord = idx2crd(tileIdx, cute::Shape(tilesM, tilesN),
-                cute::Stride<cute::Int<tilesN>, cute::_1>{});
-            const auto ctaCoord = make_coord(cute::get<0>(tileCoord), cute::get<1>(tileCoord), cute::_);
-            const auto gA = cute::local_tile(mA, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1, cute::X,cute::_1>{});
-            const auto gB = cute::local_tile(mB, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step< cute::X,cute::_1,cute::_1>{});
-            const auto gC = cute::local_tile(mC, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1,cute::_1, cute::X>{});
-            const auto gD = cute::local_tile(mD, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1,cute::_1, cute::X>{});
+        const auto tileCoord = idx2crd(tileIdx, cute::Shape(tilesM, tilesN),
+            cute::Stride<cute::Int<tilesN>, cute::_1>{});
+        const auto ctaCoord = make_coord(cute::get<0>(tileCoord), cute::get<1>(tileCoord), cute::_);
+        const auto gA = cute::local_tile(mA, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1, cute::X,cute::_1>{});
+        const auto gB = cute::local_tile(mB, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step< cute::X,cute::_1,cute::_1>{});
+        const auto gC = cute::local_tile(mC, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1,cute::_1, cute::X>{});
+        const auto gD = cute::local_tile(mD, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1,cute::_1, cute::X>{});
 
-            constexpr auto k_tile_iter = cute::make_coord_iterator(tilesK);
+        auto k_tile_iter = cute::make_coord_iterator(tilesK);
 
-            using ElementD = typename BlockGEMM::MatrixDType;
-            mainLoop(
-                accumulator,
-                gA,
-                gB,
-                accumulator,
-                k_tile_iter, tilesK,
-                cute::Underscore{},
-                threadIdx.x,
-                CAST_TO(char, workspace));
-            /// There is a block-wide barrier at the end of the above ^
+        using ElementD = typename BlockGEMM::MatrixDType;
+        mainLoop(
+            accumulator,
+            gA,
+            gB,
+            accumulator,
+            k_tile_iter, tilesK,
+            cute::Underscore{},
+            threadIdx.x,
+            CAST_TO(char, workspace));
+        /// There is a block-wide barrier at the end of the above ^
 
-            // Epilogue
-            constexpr typename BlockGEMM::MMA tiledMMA{};
-            const auto tDgD = tiledMMA.get_slice(threadIdx.x).partition_C(gD);
+        // Epilogue
+        typename BlockGEMM::MMA tiledMMA{};
+        const auto tDgD = tiledMMA.get_slice(threadIdx.x).partition_C(gD);
 
-            constexpr auto gCStoreOp = cutlass::NumericConverter<typename decltype(gC)::value_type,
-                                                        typename decltype(accumulator)::value_type>{};
-            constexpr auto gDLoadOp = cutlass::NumericConverter<typename decltype(accumulator)::value_type,
-                                                        ElementD>{};
+        constexpr auto gCStoreOp = cutlass::NumericConverter<typename decltype(gC)::value_type,
+                                                    typename decltype(accumulator)::value_type>{};
+        constexpr auto gDLoadOp = cutlass::NumericConverter<typename decltype(accumulator)::value_type,
+                                                    ElementD>{};
 
-            // Assume elementwise operator
-            constexpr typename BlockGEMM::FusedEpilogue epilogueOp{};
-            constexpr auto trips = size(accumulator) / rScratch.size();
+        // Assume elementwise operator
+        typename BlockGEMM::FusedEpilogue epilogueOp{};
+        constexpr auto trips = size(accumulator) / rScratch.size();
 
-            // Prefetch from global to shared memory
+        // Prefetch from global to shared memory
+        #pragma unroll
+        for (int j = 0; j < elems; ++j) {
+            workspace[threadIdx.x + j * threads] = tDgD(j);
+        }
+
+        #pragma unroll
+        for (unsigned int i = 0; i < trips; ++i) {
+            #pragma unroll
+            for (unsigned int j = 0; j < elems; ++j) {
+                rScratch[j] = workspace[threadIdx.x + j * threads];
+                if (i + 1 < trips) {
+                    // Eagerly start loads for the next batch, if needed
+                    workspace[threadIdx.x + j * threads] = tDgD(j + (i + 1) * elems);
+                }
+            }
+            // Fused Bias Add and Activation Function on register fragment
             #pragma unroll
             for (int j = 0; j < elems; ++j) {
-                workspace[threadIdx.x + j * threads] = tDgD(j);
-            }
-
-            #pragma unroll
-            for (unsigned int i = 0; i < trips; ++i) {
-                #pragma unroll
-                for (unsigned int j = 0; j < elems; ++j) {
-                    rScratch[j] = workspace[threadIdx.x + j * threads];
-                    if (i + 1 < trips) {
-                        // Eagerly start loads for the next batch, if needed
-                        workspace[threadIdx.x + j * threads] = tDgD(j + (i + 1) * elems);
-                    }
-                }
-
-                #pragma unroll
-                for (int j = 0; j < elems; ++j) {
-                    accumulator(j + i * elems) = epilogueOp(accumulator(j + i * elems), gDLoadOp(rScratch[j]));
-                }
-            }
-
-            __syncthreads();
-            constexpr auto sCLay = cute::make_layout(cute::Shape<cute::Int<bM>, cute::Int<elems>>{},
-                cute::LayoutRight{});
-            const auto sC = cute::make_tensor(cute::make_smem_ptr(workspace), sCLay);
-            const auto tCsC = tiledMMA.get_slice(threadIdx.x).partition_C(sC);
-            const auto rIdx = threadIdx.x / elems * elems;
-            const auto cIdx = threadIdx.x % elems;
-            #pragma unroll
-            for (unsigned int i = 0; i < trips; ++i) {
-                #pragma unroll
-                for (unsigned int j = 0; j < elems; ++j) {
-                    tCsC(j) = gCStoreOp(accumulator(j + i * elems));
-                }
-                __syncthreads();
-                #pragma unroll
-                for (unsigned int j = 0; j < elems; ++j) {
-                    gC(rIdx + j, cIdx + i * elems) = sC(rIdx + j, cIdx);
-                }
+                accumulator(j + i * elems) = epilogueOp(accumulator(j + i * elems), gDLoadOp(rScratch[j]));
             }
         }
-    };
+
+        __syncthreads();
+        constexpr auto sCLay = cute::make_layout(cute::Shape<cute::Int<bM>, cute::Int<elems>>{},
+            cute::LayoutRight{});
+        const auto sC = cute::make_tensor(cute::make_smem_ptr(workspace), sCLay);
+        const auto tCsC = tiledMMA.get_slice(threadIdx.x).partition_C(sC);
+        const auto rIdx = threadIdx.x / elems * elems;
+        const auto cIdx = threadIdx.x % elems;
+        #pragma unroll
+        for (unsigned int i = 0; i < trips; ++i) {
+            #pragma unroll
+            for (unsigned int j = 0; j < elems; ++j) {
+                tCsC(j) = gCStoreOp(accumulator(j + i * elems));
+            }
+            __syncthreads();
+            #pragma unroll
+            for (unsigned int j = 0; j < elems; ++j) {
+                gC(rIdx + j, cIdx + i * elems) = sC(rIdx + j, cIdx);
+            }
+        }
+    }
 
     struct ProcessorArgs{
         // sensible sentinel values
@@ -416,17 +408,14 @@ namespace aristos::processor{
                 bookkeeping.flags,
                 bookkeeping.tQ(),
                 bookkeeping.tQ() + bookkeeping.tPs * SUBSCRIBERS, // should be the external Q
-                bookkeeping.tQS()
+                bookkeeping.tSA()
             };
         }
 
-        using Operation = BlockMM<ACC::ActivationOp, Element>;
-        using OperationX = BlockMM<ACC::ActivationOpX, Element>;
-        constexpr auto preGEMM = FGT<TaskType::preGEMM, Operation>{};
-        constexpr auto postGEMM = FGT<TaskType::postGEMM, OperationX>{};
-        constexpr auto combineOp = Combine<ACC::CM::value>{};
+        using PreGEMM = BlockMM<ACC::ActivationOp, Element>;
+        using PostGEMM = BlockMM<ACC::ActivationOpX, Element>;
         constexpr uint H = ACC::H::value;
-        constexpr auto bN = cute::get<1>(typename Operation::BlockTiler{});
+        constexpr auto bN = cute::get<1>(typename PreGEMM::BlockTiler{});
         constexpr auto tN = ACC::TN::value;
         constexpr auto tNx = ACC::TNx::value;
         __syncthreads();
@@ -456,11 +445,11 @@ namespace aristos::processor{
                 switch (rCurrentTask.taskType) {
                     case TaskType::preGEMM: {
                         constexpr unsigned int preIndex = 0;
-                        preGEMM(CAST_TO(typename Operation::MatrixDType, workspace),
-                            CONST_CAST_TO(typename Operation::MatrixAType, rCurrentTask.aData),
-                            CONST_CAST_TO(typename Operation::MatrixBType, rCurrentTask.bData[preIndex]),
-                            CAST_TO(typename Operation::MatrixDType, rCurrentTask.cData[preIndex]),
-                            CONST_CAST_TO(typename Operation::MatrixDType, rCurrentTask.dData[preIndex]),
+                        fGET<PreGEMM>(CAST_TO(typename PreGEMM::MatrixDType, workspace),
+                            CONST_CAST_TO(typename PreGEMM::MatrixAType, rCurrentTask.aData),
+                            CONST_CAST_TO(typename PreGEMM::MatrixBType, rCurrentTask.bData[preIndex]),
+                            CAST_TO(typename PreGEMM::MatrixDType, rCurrentTask.cData[preIndex]),
+                            CONST_CAST_TO(typename PreGEMM::MatrixDType, rCurrentTask.dData[preIndex]),
                             rCurrentTask.M,
                             rCurrentTask.tileIdx);
                         __syncthreads();
@@ -512,11 +501,11 @@ namespace aristos::processor{
                             cachedFlags = nvshmem_ptr(pA.flags, rCurrentTask.peerIdx);
                         }
                         constexpr unsigned int postIndex = 0;
-                        postGEMM(CAST_TO(typename Operation::MatrixDType, workspace),
-                            CONST_CAST_TO(typename Operation::MatrixAType, rCurrentTask.aData),
-                            CONST_CAST_TO(typename Operation::MatrixBType, rCurrentTask.bData[postIndex]),
-                            CAST_TO(typename Operation::MatrixDType, rCurrentTask.cData[postIndex]),
-                            CONST_CAST_TO(typename Operation::MatrixDType, rCurrentTask.dData[postIndex]),
+                        fGET<PostGEMM>(CAST_TO(typename PostGEMM::MatrixDType, workspace),
+                            CONST_CAST_TO(typename PostGEMM::MatrixAType, rCurrentTask.aData),
+                            CONST_CAST_TO(typename PostGEMM::MatrixBType, rCurrentTask.bData[postIndex]),
+                            CAST_TO(typename PostGEMM::MatrixDType, rCurrentTask.cData[postIndex]),
+                            CONST_CAST_TO(typename PostGEMM::MatrixDType, rCurrentTask.dData[postIndex]),
                             rCurrentTask.M,
                             currentTask.tileIdx);
                         __syncthreads();
@@ -531,7 +520,7 @@ namespace aristos::processor{
                                 // Remote; check if we need to do the transfer
                                 __threadfence();
                                 if (atomicIncrement(pA.tQS + rCurrentTask.syncIdx) == tN + tNx) {
-                                    // Batch remote network transfer to avoid overwhelming the NIC
+                                    // Batched remote network transfer to avoid overwhelming the NIC
                                     nvshmem_putmem_signal_nbi(rCurrentTask.cData[postIndex], rCurrentTask.cData[postIndex],
                                         rCurrentTask.tileSize * H * sizeof(Element),
                                         pA.flags + rCurrentTask.flagIdx,
@@ -551,10 +540,10 @@ namespace aristos::processor{
                     }
                     break;
                     case TaskType::combine: {
-                        combineOp(CAST_TO(typename Operation::MatrixDType, workspace),
+                        combine<ACC::CM::value>(CAST_TO(typename PostGEMM::MatrixDType, workspace),
                             CONST_CAST_TO(TokenIdxTuple, rCurrentTask.aData),
-                            CONST_CAST_TO(typename Operation::MatrixAType, rCurrentTask.bData[0]),
-                            CAST_TO(typename Operation::MatrixDType, rCurrentTask.cData[0]),
+                            CONST_CAST_TO(typename PostGEMM::MatrixAType, rCurrentTask.bData[0]),
+                            CAST_TO(typename PostGEMM::MatrixDType, rCurrentTask.cData[0]),
                             sW,
                             rCurrentTask.M,
                             rCurrentTask.tileIdx,

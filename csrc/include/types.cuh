@@ -377,6 +377,7 @@ namespace aristos{
         using TNx = cute::C<H::value / BLOCK_N>;
         using TCM = cute::C<EC::value / BLOCK_M>;
         using TPX = cute::C<PX::value / BLOCK_N>;
+        using TSZ = cute::C<TM::value * cute::min(TNx::value, PeakHardware::blocks::value)>;
 
         // Scheduling state upper bound inside GEMM
         using TMU = cute::C<128>;
@@ -407,6 +408,13 @@ namespace aristos{
         preGEMM,
         postGEMM,
         combine
+    };
+
+    __device__
+    enum class FlagState : uint8_t {
+        unidentified,
+        identified,
+        completed
     };
 
     struct __align__(16) Task {
@@ -534,10 +542,11 @@ namespace aristos{
                 gRl = tQXt + sizeof(TokenIdxTuple) * (PX * EC) + (ACC::JT::value == JobType::inference ? 0U :
                     sizeof(mp_t) * (2 * E + 1));
                 eDsA = gRl + sizeof(BookType) * (2 * E + 1);
-                sBfC = eDsA + sizeof(BookType) * 2 * (world * nLx * TCM) + blocks + TCM * TN * E;
+                sBfC = eDsA + sizeof(BookType) * (world * nLx * TCM) + blocks + TCM * TN * E;
+                gtQCl = world * nLx * TCM;
             }
-            gtQCl = world * nLx * TCM;
-            bookSize = sBfC + sizeof(ACC::Element) * (_world * _nLx * TCM * TN);
+            bookSize = sBfC + sizeof(ACC::Element) * (_world * _nLx * TCM * TN) + sizeof(BookType) *
+                (E > 1 ? world * nLx * TCM : ACC::TSZ::value);
         }
 
         /// Needed for malloc
@@ -569,9 +578,10 @@ namespace aristos{
                 const auto gRl = tQXt + sizeof(TokenIdxTuple) * (PX * EC) +
                     (ACC::JT::value == JobType::inference ? 0U : sizeof(mp_t) * (2 * E + 1));
                 const auto eDsA = gRl + sizeof(BookType) * (2 * E + 1);
-                sBfC = eDsA + sizeof(BookType) * 2 * (_world * _nLx * TCM) + blocks + TCM * TN * E;
+                sBfC = eDsA + sizeof(BookType) * (_world * _nLx * TCM) + blocks + TCM * TN * E;
             }
-            return sBfC + sizeof(ACC::Element) * (_world * _nLx * TCM * TN);
+            return sBfC + sizeof(ACC::Element) * (_world * _nLx * TCM * TN) + sizeof(BookType) *
+                (E > 1 ? _world * _nLx * TCM : ACC::TSZ::value);
         }
 
         template<unsigned int tileDimension>
@@ -697,14 +707,15 @@ namespace aristos{
         auto* tQH() const {
             return sQ() + ACC::PeakHardware::OS::processorBlocks::value;
         }
-        /// tQ sync array
+        /// tile sync array
         __device__ __forceinline__
-        auto* tQS() const {
+        auto* tSA() const {
             return tQH() + world * nLx * ACC::TCM::value;
         }
         __device__ __forceinline__
         auto* tIx() const {
-            return CAST_TO(BookType, tQS() + world * nLx * ACC::TCM::value);
+            return CAST_TO(BookType, tSA() + (ACC::E::value > 1 ? world * nLx * ACC::TCM::value :
+                ACC::TSZ::value));
         }
 
         // Intermediate buffer

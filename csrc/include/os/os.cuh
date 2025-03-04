@@ -98,7 +98,7 @@ namespace aristos::os {
             const auto gtQCl = bookkeeping.gtQCl;
             const auto tQRl = cute::ceil_div(gtQCl * ACC::TN::value, subscriberCount);
             auto* __restrict__ gtQHeads = bookkeeping.tQH();
-            auto* __restrict__ sQ = bookkeeping.tQS();
+            auto* __restrict__ sQ = bookkeeping.tSA();
             auto* __restrict__ pDB = bookkeeping.pDB();
             scheduler::start<processors>(schedulerScratch,tQRl, gtQCl, interrupt, tQHeads,
                 gtQHeads, taskBound, rQ, sQ, pDB);

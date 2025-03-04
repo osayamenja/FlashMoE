@@ -72,7 +72,7 @@ namespace aristos {
         cuda::std::byte* p;
         constexpr unsigned int blocks = ACC::PeakHardware::OS::processorBlocks::value;
         // Scheduling state
-        constexpr auto tSz = sizeof(uint) * (M / BLOCK_M) * cute::min(K / BLOCK_N, blocks);
+        constexpr auto tSz = sizeof(uint) * ACC::TM::value * cute::min(ACC::TNx::value, blocks);
         constexpr auto stateSize = sizeof(cuda::barrier<cuda::thread_scope_device>) + sizeof(float) + tSz;
         CHECK_ERROR_EXIT(cudaMallocAsync(&p, hZ + stateSize, aristosStream));
         CHECK_ERROR_EXIT(cudaMemsetAsync(p, 0, stateSize, aristosStream));
