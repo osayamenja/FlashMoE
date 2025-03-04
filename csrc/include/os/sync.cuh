@@ -14,7 +14,7 @@ namespace aristos {
     template<
         unsigned int threads = ACC::PeakHardware::OS::threads::value
     >
-    __global__ void syncAll(PLI* __restrict__ __grid_constant__ peers,
+    __global__ void syncAll(PLI* __restrict__ const __grid_constant__ peers,
         const __grid_constant__ uint rank,
         const __grid_constant__ uint world) {
         // Use 𝛼 synchronization algorithm

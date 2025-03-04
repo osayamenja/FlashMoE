@@ -415,7 +415,6 @@ namespace aristos::processor{
         using PreGEMM = BlockMM<ACC::ActivationOp, Element>;
         using PostGEMM = BlockMM<ACC::ActivationOpX, Element>;
         constexpr uint H = ACC::H::value;
-        constexpr auto bN = cute::get<1>(typename PreGEMM::BlockTiler{});
         constexpr auto tN = ACC::TN::value;
         constexpr auto tNx = ACC::TNx::value;
         __syncthreads();

@@ -32,7 +32,7 @@ namespace aristos {
         unsigned int sharedSlice,
         UseSharedBound u
     >
-    requires(blocksPerSM <= MAX_THREADS_PER_SM / THREADS && blocksPerSM > 0
+    requires(blocksPerSM <= MAX_THREADS_PER_SM / 128U && blocksPerSM > 0
         && sharedSlice == BASE_SHARED_SIZE || sharedSlice == BASE_SHARED_SIZE * 2)
     struct ArchShared {
         static_assert(Arch == 700 || Arch == 800 || Arch == 900, "Unregistered Config!");

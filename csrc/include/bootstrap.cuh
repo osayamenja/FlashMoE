@@ -139,8 +139,8 @@ namespace aristos{
         }
         // Get other group ids
         std::unordered_set<uint> groups{};
-        for (const auto& i: dTg) {
-            groups.emplace(i);
+        for (uint i = 0; i < world; ++i) {
+            groups.emplace(dTg[i]);
         }
         const auto myGroup = dTg[rank];
 
@@ -251,9 +251,9 @@ namespace aristos{
         CHECK_ERROR_EXIT(cudaMallocAsync(&book, bookSize, aristosStream));
         CHECK_ERROR_EXIT(cudaMemsetAsync(&book, 0, bookSize, aristosStream));
         // Initialize bookkeeping
-        auto* __restrict__ sA = static_cast<flagsType*>(sHeap);
-        auto* __restrict__ flags = CAST_TO(flagsType, sHb + syncArrayBytes);
-        auto* __restrict__ wSHeap = sHb + flagBytes + syncArrayBytes;
+        auto* sA = static_cast<flagsType*>(sHeap);
+        auto* flags = CAST_TO(flagsType, sHb + syncArrayBytes);
+        auto* wSHeap = sHb + flagBytes + syncArrayBytes;
         hostBookkeeping = Bookkeeping{
             sHb,
             sA,
@@ -262,8 +262,8 @@ namespace aristos{
             book,
             ePgD.nLx,
             ePgD.epRank,
+            ePgD.epWorld,
             ePgD.expertSlots,
-            ePgD.epWorld
         };
         // copy device-wide barrier
         const auto hB = new cuda::barrier<cuda::thread_scope_device>{blocks};

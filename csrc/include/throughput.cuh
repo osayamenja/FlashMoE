@@ -31,7 +31,7 @@ namespace aristos {
         cuda::barrier<cuda::thread_scope_device>* dB,
         float* deviceThroughput, uint* tileSync,
         const Element* __restrict__ iP /* A, B, D, S, W*/, Element* __restrict__ oP /*C*/) {
-        constexpr auto tSz = sizeof(uint) * (M / BLOCK_M) * cute::min(K / BLOCK_N, blocks);
+        const auto tSz = sizeof(uint) * (M / BLOCK_M) * cute::min(K / BLOCK_N, blocks);
         #pragma unroll
         for (uint i = 0; i < trials; ++i) {
             expert<u, N, K><<<blocks, threads, 0, aristosStream>>>(M, dB, deviceThroughput, tileSync, iP, oP);
@@ -44,7 +44,7 @@ namespace aristos {
                     aristosStream));
             }
         }
-        expert<u><<<blocks, threads, 0, aristosStream>>>(M, dB, deviceThroughput, tileSync, iP, oP, false);
+        expert<u, N, K><<<blocks, threads, 0, aristosStream>>>(M, dB, deviceThroughput, tileSync, iP, oP, false);
         CHECK_ERROR_EXIT(cudaPeekAtLastError());
     }
     template<

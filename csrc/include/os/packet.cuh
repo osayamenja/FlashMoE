@@ -98,11 +98,11 @@ namespace aristos::packet {
                     if (lI.isRemote) {
                         // transmit signal
                         nvshmemx_signal_op(flags + flagOffset,
-                            *CAST_TO(flagsType, &sigPayload), NVSHMEM_SIGNAL_SET, lI.pe);
+                            *CONST_CAST_TO(flagsType, &sigPayload), NVSHMEM_SIGNAL_SET, lI.pe);
                     }
                     else {
                         // Better to use below than the volatile write operation used in the public-facing API
-                        atomicExch_system(CAST_TO(ull_t, lI.remoteSFlags), *CONST_CAST_TO(ull_t, sigPayload));
+                        atomicExch_system(CAST_TO(ull_t, lI.remoteSFlags), *CONST_CAST_TO(ull_t, &sigPayload));
                     }
                 }
                 continue;
@@ -148,13 +148,13 @@ namespace aristos::packet {
                             peerHeap,
                             sizeof(Element) * routedTokens * H,
                             flags + flagOffset,
-                            *CAST_TO(flagsType, &sigPayload),
+                            *CONST_CAST_TO(flagsType, &sigPayload),
                             NVSHMEM_SIGNAL_SET,
                             lI.pe);
                     }
                     else {
                         // we've done the DMA transfer already, so we set the signal instead
-                        atomicExch_system(CAST_TO(ull_t, lI.remoteSFlags), *CONST_CAST_TO(ull_t, sigPayload));
+                        atomicExch_system(CAST_TO(ull_t, lI.remoteSFlags), *CONST_CAST_TO(ull_t, &sigPayload));
                     }
                 }
             }
@@ -196,7 +196,7 @@ namespace aristos::packet {
             unsigned int const& peer, // relative to the EP group
             unsigned int const& gPeer, // relative to the global group, needed for network operations
             unsigned int& lTQHead,
-            unsigned int* const& tQHead) const {
+            unsigned int* __restrict__ const& tQHead) const {
 
             constexpr auto tN = ACC::TN::value;
             constexpr auto tNx = ACC::TNx::value;
@@ -286,10 +286,10 @@ namespace aristos::packet {
         void operator()(Task* __restrict__ tQ,
             const cuda::std::byte* const& packet,
             const cuda::std::byte* const& tokenIndices,
-            cuda::std::byte* __restrict__ const& moeOutput,
+            cuda::std::byte* const& moeOutput,
             const unsigned int& nTokens,
             const unsigned int& tileIdx,
-            unsigned int* const& tQHead,
+            unsigned int* __restrict__ const& tQHead,
             const unsigned int& expertIdx) const {
             // now let's decode this single tile
             *tQ = Task{
@@ -314,10 +314,10 @@ namespace aristos::packet {
         void operator()(const DecoderArg& dA,
             const cuda::std::byte* const& packet,
             const cuda::std::byte* const& tokenIndices,
-            cuda::std::byte* __restrict__ const& moeOutput,
+            cuda::std::byte* const& moeOutput,
             const unsigned int& nTokens,
             unsigned int& lTQHead,
-            unsigned int* const& tQHead,
+            unsigned int* __restrict__ const& tQHead,
             const unsigned int& expertIdx) const {
             auto* __restrict__ tQ = dA.tQ + (threadIdx.x * dA.tPs + lTQHead);
             constexpr auto tN = ACC::TN::value;

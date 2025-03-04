@@ -17,7 +17,7 @@ namespace aristos::subscriber{
     };
 
     template<
-        SubscriberStage s = SubscriberStage::initial,
+        SubscriberStage s,
         unsigned int subscriberCount
     >
     struct Subscribe {
@@ -50,7 +50,7 @@ namespace aristos::subscriber{
             const uint& stageLength,
             const uint &nLx,
             const uint &tIdx,
-            const uint16_t& localSeqBit) {
+            const uint16_t& localSeqBit) const {
             /// Flags has dimension [W, L], where W is expert parallel world and L is number of local experts
             constexpr packet::Decoder<PacketStage::initial, PeerConnectivity::p2p, Element> fPd{};
             constexpr packet::Decoder<PacketStage::initial, PeerConnectivity::remote, Element> fRd{};
@@ -126,7 +126,7 @@ namespace aristos::subscriber{
             const uint& stageTrips,
             const uint& tIdx,
             const uint16_t& localSeqBit
-            ) {
+            ) const {
             constexpr packet::Decoder<PacketStage::last, PeerConnectivity::p2p> lPd{};
             constexpr packet::Decoder<PacketStage::last, PeerConnectivity::remote> lRd{};
             // prefetch
@@ -175,7 +175,8 @@ namespace aristos::subscriber{
                             const auto* packet = heap::advance<1, 1>(dA.sHeap, lookup.epRank,
                                 lookup.localExpertIndex, sP->batchIdx * BLOCK_M);
                             lPd(dA.tQ + (tIdx * dA.tPs + lTQHead++), packet,
-                                tI, mO, sP->tokensM, flagIdx % TN, tQHead, expertIdx);
+                                CONST_CAST_TO(cuda::std::byte, tI),
+                                mO, sP->tokensM, flagIdx % TN, tQHead, expertIdx);
                         }
                     }
                 }
@@ -218,7 +219,8 @@ namespace aristos::subscriber{
                                 const auto* packet = heap::advance<1, 1>(dA.sHeap, lookup.epRank,
                                     lookup.localExpertIndex, sP->batchIdx * BLOCK_M);
                                 lPd(dA.tQ + (tIdx * dA.tPs + lTQHead++), packet,
-                                    tI, mO, sP->tokensM, flagIdx % TN, tQHead, expertIdx);
+                                    CONST_CAST_TO(cuda::std::byte, tI),
+                                    mO, sP->tokensM, flagIdx % TN, tQHead, expertIdx);
                             }
                         }
                     }

@@ -207,7 +207,7 @@ namespace aristos::gate {
             auto mI = -cuda::std::numeric_limits<ElementC>::infinity();
             // Begin Block-Ring softmax
             if (cute::get<1>(tileCoord) > 0) {
-                awaitPayload(CAST_TO(ull_t, brsMailbox), &rSp, 1U);
+                awaitPayload(brsMailbox, &rSp, 1U);
                 // We quantize dI from mp_t to half, and this yields no loss in precision.
                 // We leave as an exercise to the reader to determine why this conversion is lossless.
                 dI = deQuantize(rSp.dI);
@@ -225,7 +225,7 @@ namespace aristos::gate {
             if (cute::get<1>(tileCoord) + 1 < tilesN) {
                 const auto sP = RingSoftmaxPayload{mI, quantize(dI), 1U};
                 signalPayload(brsXMailbox, &sP);
-                awaitPayload(CAST_TO(ull_t, brsMailbox), &rSp, 2U);
+                awaitPayload(brsMailbox, &rSp, 2U);
                 dI = deQuantize(rSp.dI);
                 mI = rSp.mI;
             }
@@ -334,7 +334,7 @@ namespace aristos::gate {
                     shouldSweep = false;
                 }
                 if (cute::get<1>(tileCoord) > 0) {
-                    awaitPayload(CAST_TO(ull_t, tkMailbox + flagPrefix), &rTp, bPf);
+                    awaitPayload(tkMailbox + flagPrefix, &rTp, bPf);
                     sV = rTp.sV;
                     sIdx = rTp.sIdx;
                     if (lSV > sV) {
@@ -351,7 +351,7 @@ namespace aristos::gate {
                     const auto sP = RingTopKPayload{sV, sIdx, bPf};
                     signalPayload(tkXMailbox + flagPrefix, &sP);
                     // Now we await the results to return
-                    awaitPayload(CAST_TO(ull_t, tkMailbox + flagPrefix), &rTp, bPs);
+                    awaitPayload(tkMailbox + flagPrefix, &rTp, bPs);
                     sV = rTp.sV;
                     sIdx = rTp.sIdx;
                 }
@@ -543,9 +543,9 @@ namespace aristos::gate {
             }
 
             // Begin loss computation and global token ordering construction
-            constexpr auto wS = 32U; // warpSize
-            constexpr auto S = ACC::S::value;
             if constexpr (jT == JobType::training) {
+                constexpr auto wS = 32U; // warpSize
+                constexpr auto S = ACC::S::value;
                 auto* __restrict__ gML = gArg.gML;
                 static_assert(bN % wS == 0);
                 ElementC cache[bN / wS];
@@ -639,6 +639,7 @@ namespace aristos::gate {
             if (threadIdx.x < bN) {
                 startIndices[threadIdx.x] = atomicAdd(gArg.eC + threadIdx.x, cachedSelected);
                 if constexpr (jT == JobType::training) {
+                    constexpr auto S = ACC::S::value;
                     auto* __restrict__ gMeC = gArg.gMeC;
                     atomicAdd(gMeC + threadIdx.x, __fdividef(static_cast<ElementC>(cachedSelected),
                     static_cast<ElementC>(S)));
@@ -682,15 +683,14 @@ namespace aristos::gate {
         static_assert(cuda::std::is_same_v<mp_t, ElementC>);
         using ElementA = typename MatrixA::value_type;
         using ElementB = typename MatrixB::value_type;
-        using Operation = BlockMM<GPUType, ElementA, ElementB, ElementC>;
+        using Operation = BlockMM<ACC::ActivationOp, ElementA, ElementB, ElementC>;
         using ctaTiler = typename Operation::BlockTiler; // (BLK_M, BLK_N, BLK_K)
         constexpr auto threads = Operation::GEMM::block_dim.x;
         constexpr auto bM = cute::get<0>(ctaTiler{});
         constexpr auto bN = cute::get<1>(ctaTiler{});
-        constexpr uint nx = ACC::E::value;
         FusedGate<g, Operation, GPUType> fusedGate{};
 
-        constexpr auto nT = (ACC::S::value / bM) * (ACC::E::value / bN);
+        constexpr auto nT = ACC::TN::value * ACC::TPX::value;
         #pragma unroll
         for (unsigned int i = blockIdx.x; i < nT; i += blocks) {
             fusedGate(activations, weights, routing, i, gArg, scratch);
@@ -708,10 +708,10 @@ namespace aristos::gate {
             auto* __restrict__ gMeC = bookkeeping.gMeC();
             // Compute Gate loss
             auto* __restrict__ gL = bookkeeping.gL();
-            for (unsigned int i = threads * blockIdx.x + threadIdx.x; i < nx; i+= threads * blocks) {
+            for (unsigned int i = threads * blockIdx.x + threadIdx.x; i < ACC::E::value; i+= threads * blocks) {
                 const auto me = gML[i];
                 const auto ce = gMeC[i];
-                atomicAdd(gL, __fdividef(me * ce, static_cast<mp_t>(nx)));
+                atomicAdd(gL, __fdividef(me * ce, static_cast<mp_t>(ACC::E::value)));
             }
         }
 

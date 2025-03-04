@@ -19,6 +19,7 @@ namespace aristos {
     template<
         typename BlockGEMM,
         unsigned int N,
+        unsigned int K,
         CombineMode c,
         unsigned int elems,
         typename Activations,
@@ -47,7 +48,8 @@ namespace aristos {
         typename BlockGEMM::CollectiveMainloop mainLoop{};
         cute::clear(accumulator);
         const auto tilesM = M / cute::get<0>(typename BlockGEMM::BlockTiler{});
-        const auto tilesN = N / cute::get<1>(typename BlockGEMM::BlockTiler{});
+        constexpr auto tilesN = N / cute::get<1>(typename BlockGEMM::BlockTiler{});
+        constexpr auto tilesK = K / cute::get<2>(typename BlockGEMM::BlockTiler{});
         const auto tileCoord = idx2crd(tileIdx, cute::Shape(tilesM, tilesN), cute::Stride(tilesN ,1));
         const auto ctaCoord = make_coord(cute::get<0>(tileCoord), cute::get<1>(tileCoord), cute::_);
         using BlockTiler = cute::Shape<cute::Int<bM>, cute::Int<bN>>;
@@ -61,8 +63,7 @@ namespace aristos {
         auto sW = scaleWeights[rowIdx + threadIdx.x];
         auto cW = combineWeights[rowIdx + threadIdx.x];
 
-        auto k_tile_iter = cute::make_coord_iterator(size<2>(gA));
-        int k_tile_count = size<2>(gA);
+        auto k_tile_iter = cute::make_coord_iterator(tilesK);
 
         using ElementD = typename BlockGEMM::MatrixDType;
         mainLoop(
@@ -70,7 +71,7 @@ namespace aristos {
             gA,
             gB,
             accumulator,
-            k_tile_iter, k_tile_count,
+            k_tile_iter, tilesK,
             cute::Underscore{},
             threadIdx.x,
             CAST_TO(char, workspace));
@@ -190,7 +191,7 @@ namespace aristos {
         auto* __restrict__ pC1 = oP;
         auto* __restrict__ pC2 = pC1 + M * N;
 
-        constexpr auto tSCl = umin(tilesK, blocks);
+        constexpr auto tSCl = cute::min(tilesK, blocks);
         // transposed layout to enable coalescing during polling,
         // tradeoffs by disabling coalescing in one-shot propagation.
 
@@ -305,7 +306,7 @@ namespace aristos {
                     const auto endTile = (rowIdx + 1) * tilesK;
                     // do gemm
                     for (uint j = blockIdx.x + startIdx * blocks; j < endTile; j += blocks) {
-                        fGST<OperationX, c, elems>(workspace, mA, mB, mD, mC, pS, pCw, j, M);
+                        fGST<OperationX, N, K, c, elems>(workspace, mA, mB, mD, mC, pS, pCw, j, M);
                         processed++;
                     }
                 }

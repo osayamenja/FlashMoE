@@ -345,6 +345,7 @@ namespace aristos{
             GateReductionLevel::multiBlock>;
         using TK = cute::C<E_TOP_K>;
         using CM = cute::C<(E_TOP_K > 1) ? CombineMode::multithreaded : CombineMode::single>;
+        using ElementC = float;
         using Element = VCT<CM::value, DType<DTYPE>::DT>::Element;
         using DTK = cute::C<DROP_TOKENS? DropTokens::yes : DropTokens::no>;
         using ActivationOp = AFunction<HIDDEN_ACT, GEA>::DT;
@@ -500,6 +501,8 @@ namespace aristos{
         /// length of gTQHeads
         unsigned int gtQCl = 0U;
         unsigned int tPs = 0U;
+        /// Block Ring Softmax flags in bytes, non-cumulative
+        unsigned int brs = 0UL;
         /// EP rank
         uint16_t rank = 0U;
         /// EP world
@@ -740,8 +743,6 @@ namespace aristos{
             unsigned long int tQXt = 0UL;
             /// gate routing and loss vectors in bytes
             unsigned long int gRl = 0U;
-            /// Block Ring Softmax flags in bytes, non-cumulative
-            unsigned int brs = 0UL;
             /// Task Q maximum length
             unsigned int tQml = 0U;
             /// Task Q length

@@ -2,7 +2,9 @@
  * Copyright (c) 2024, Osayamen Jonathan Aimuyo.
  ******************************************************************************/
 
-#include "eval.cuh"
+#include "include/bootstrap.cuh"
+#include "include/moe/moe.cuh"
 int main() {
-    aristos::testDecider();
+    aristos::initialize();
+    aristos::finalize();
 }

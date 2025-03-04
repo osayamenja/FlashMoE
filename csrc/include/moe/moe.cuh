@@ -102,13 +102,7 @@ namespace aristos::moe{
             if (blockIdx.x < cutoff) {
                 packet::encode<cutoff, d, ARISTOS_SUPER_BLOCK_SIZE>(activations, workspace, sb);
             }
-            processor::start<
-                GPUType,
-                c,
-                ActivationOp,
-                ActivationOpX,
-                ElementC,
-                Element>(workspace, gateOutput, sb);
+            processor::start(workspace, gateOutput, sb);
         }
         else {
             os::start<processors, d>(workspace, moeOutput, expertsUp, expertsDown, biasUp, biasDown, sb);

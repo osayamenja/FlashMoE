@@ -57,7 +57,7 @@ namespace aristos::os {
         auto* __restrict__ scratch = CAST_TO(uint, sWorkspace + SUBSCRIBERS * wSet * sizeof(uint));
         // shared memory arrays
         // Upper bound for expectant tasks
-        auto*  taskBound = scratch;
+        auto* __restrict__ taskBound = scratch;
         const auto* __restrict__ eCs = taskBound + 1;
         scratch += 1;
         #pragma unroll
@@ -90,7 +90,7 @@ namespace aristos::os {
             interrupt[i] = 0U;
         }
         auto* __restrict__ status = interrupt + SUBSCRIBERS;
-        auto* schedulerScratch = status + world;
+        auto* __restrict__ schedulerScratch = CAST_TO(cuda::std::byte, status + world);
         __syncthreads();
         // build arguments for scheduler and subscriber
         if (threadIdx.x / WARP_SIZE == 0) {
@@ -100,7 +100,7 @@ namespace aristos::os {
             auto* __restrict__ gtQHeads = bookkeeping.tQH();
             auto* __restrict__ sQ = bookkeeping.tSA();
             auto* __restrict__ pDB = bookkeeping.pDB();
-            scheduler::start<processors>(schedulerScratch,tQRl, gtQCl, interrupt, tQHeads,
+            scheduler::start<processors>(schedulerScratch, tQRl, gtQCl, interrupt, tQHeads,
                 gtQHeads, taskBound, rQ, sQ, pDB);
         }
         else {

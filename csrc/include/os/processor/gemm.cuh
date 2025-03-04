@@ -128,7 +128,7 @@ namespace aristos {
     struct isFAA<FAA<Element, ActivationFunction>> : cuda::std::true_type {};
 
     template<
-        typename ActivationOp = cute::identity,
+        typename ActivationOp,
         typename ElementA,
         typename ElementB = ElementA,
         typename ElementC = ACC::ElementC,
