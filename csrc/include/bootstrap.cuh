@@ -174,34 +174,19 @@ namespace aristos{
         ePg->epWorld = epWorld;
     }
 
-    // Should be called before loading the model
+    template<EP e = EP::yes>
     __host__ __forceinline__
-    void initialize() {
-        reportError(!isInitialized, "Already Initialized");
-        using GPUType = aristos::Hardware<ARISTOS_ARCH, 255>;
-        constexpr auto blocks = GPUType::OS::processorBlocks::value;
-        static_assert(ARISTOS_ARCH >= 700, "Volta and above is required!");
-        isInitialized = true;
-        static_assert(ACC::S::value % BLOCK_M == 0 && ACC::S::value < BLOCK_M * blocks * ACC::TMU::value &&
-        ACC::P::value % BLOCK_N == 0 && ACC::H::value % BLOCK_N == 0);
-        static_assert(NUM_EXPERTS <= cuda::std::numeric_limits<uint16_t>::max(),
-            "For performance, we assume number of experts <= UINT16_MAX");
-        int cudaDevAttribute = 0;
-        int dev = 0;
-        CHECK_ERROR_EXIT(cudaGetDevice(&dev));
-        CHECK_ERROR_EXIT(cudaDeviceGetAttribute(&cudaDevAttribute, cudaDevAttrMemoryPoolsSupported, dev));
-        reportError(cudaDevAttribute, "Memory Pools support required");
-
-        using GPUType = Hardware<ARISTOS_ARCH, 255>;
+    void distributedInit() {
+        static_assert(e == EP::yes);
+        constexpr auto blocks = ACC::PeakHardware::blocks::value;
         using Element = ACC::Element;
+        constexpr uint E = ACC::E::value;
         // initialize communication backend
         nvshmem_init();
         const uint devId = nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE);
         CHECK_ERROR_EXIT(cudaSetDevice(devId));
         const auto globalWorld = nvshmem_n_pes();
         const auto rank = nvshmem_my_pe();
-
-        constexpr uint E = ACC::E::value;
 
         // Pointer to adjacency matrix and throughput of all devices
         const auto aD = globalWorld * globalWorld;
@@ -256,7 +241,7 @@ namespace aristos{
             sizeof(flagsType);
         // Note this allocation's size has to be identical across all PEs
         auto* sHeap = nvshmem_calloc(syncArrayBytes + flagBytes + heapBytes, sizeof(cuda::std::byte));
-        
+
         auto* sHb = static_cast<cuda::std::byte*>(sHeap);
 
         // local bookkeeping memory
@@ -344,6 +329,42 @@ namespace aristos{
         CHECK_ERROR_EXIT(cudaStreamSynchronize(aristosStream));
         delete hB;
         std::free(mP);
+    }
+
+    template<>
+    __host__ __forceinline__
+    void distributedInit<EP::no>() {
+        constexpr auto bookSize = Bookkeeping::bookLength();
+
+        cuda::std::byte* book;
+        CHECK_ERROR_EXIT(cudaMallocAsync(&book, bookSize, aristosStream));
+        CHECK_ERROR_EXIT(cudaMemsetAsync(&book, 0, bookSize, aristosStream));
+        hostBookkeeping = Bookkeeping{};
+        CHECK_ERROR_EXIT(cudaMemcpyToSymbolAsync(bookkeeping, &hostBookkeeping,
+            sizeof(Bookkeeping), 0,
+            cudaMemcpyHostToDevice, aristosStream));
+        CHECK_ERROR_EXIT(cudaPeekAtLastError());
+        CHECK_ERROR_EXIT(cudaStreamSynchronize(aristosStream));
+    }
+
+    // Should be called before loading the model
+    __host__ __forceinline__
+    void initialize() {
+        reportError(!isInitialized, "Already Initialized");
+        using GPUType = aristos::Hardware<ARISTOS_ARCH, 255>;
+        constexpr auto blocks = GPUType::OS::processorBlocks::value;
+        static_assert(ARISTOS_ARCH >= 700, "Volta and above is required!");
+        isInitialized = true;
+        static_assert(ACC::S::value % BLOCK_M == 0 && ACC::S::value < BLOCK_M * blocks * ACC::TMU::value &&
+        ACC::P::value % BLOCK_N == 0 && ACC::H::value % BLOCK_N == 0);
+        static_assert(NUM_EXPERTS <= cuda::std::numeric_limits<uint16_t>::max(),
+            "For performance, we assume number of experts <= UINT16_MAX");
+        int cudaDevAttribute = 0;
+        int dev = 0;
+        CHECK_ERROR_EXIT(cudaGetDevice(&dev));
+        CHECK_ERROR_EXIT(cudaDeviceGetAttribute(&cudaDevAttribute, cudaDevAttrMemoryPoolsSupported, dev));
+        reportError(cudaDevAttribute, "Memory Pools support required");
+        distributedInit<(ACC::E::value > 1) ? EP::yes : EP::no>();
     }
 
     __host__ __forceinline__

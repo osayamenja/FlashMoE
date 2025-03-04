@@ -410,6 +410,11 @@ namespace aristos{
         combine
     };
 
+    enum class EP {
+        yes,
+        no
+    };
+
     __device__
     enum class FlagState : uint8_t {
         unidentified,
@@ -482,7 +487,7 @@ namespace aristos{
     using EDT = cuda::std::tuple<uint, uint, uint>;
     struct __align__(16) Bookkeeping {
         /// needed for free
-        cuda::std::byte* symHeap;
+        cuda::std::byte* symHeap = nullptr;
         flagsType* syncArray = nullptr;
         flagsType* syncCount = nullptr;
         flagsType* flags = nullptr;
@@ -504,7 +509,12 @@ namespace aristos{
         uint16_t xs = 0U;
 
         __host__ __device__ __forceinline__
-        Bookkeeping() = default;
+        Bookkeeping() {
+            // default for ffn with no experts
+            sBfC = ACC::TSZ::value * sizeof(BookType) +
+                sizeof(ACC::Element) * (ACC::S::value * ACC::P::value);
+            bookSize = sBfC;
+        }
 
         __host__ __forceinline__
         explicit Bookkeeping(cuda::std::byte* const& _symHeap,
@@ -527,32 +537,29 @@ namespace aristos{
             constexpr auto EC = ACC::EC::value;
             constexpr auto P = ACC::P::value;
             constexpr auto TPX = ACC::TPX::value;
-            if constexpr (E > 1) {
-                // maximum gemm tiles/tasks scheduled by processors
-                const auto prT = world * nLx * TCM * tiles<BLOCK_N>(P);
-                // maximum gemm tiles/tasks scheduled by subscriber threads
-                auto sT = world * nLx * TCM * TN + TCM * TN * E;
-                tPs = cute::ceil_div(sT, SUBSCRIBERS);
-                sT = tPs * SUBSCRIBERS;
-                tQl = sizeof(Task) * (sT + prT);
-                tQml = tQl + blocks * sizeof(TQSignal) + E * sizeof(PEL); // processor doorbells
-                brs = tQml + (ACC::GRL::value == GateReductionLevel::singleBlock ? 0U : S * TPX *
-                    (sizeof(RingSoftmaxPayload) + 2 * sizeof(RingTopKPayload)));
-                tQXt = brs + sizeof(ELI) * E + sizeof(cuda::barrier<cuda::thread_scope_device>) + sizeof(PLI) * world;
-                gRl = tQXt + sizeof(TokenIdxTuple) * (PX * EC) + (ACC::JT::value == JobType::inference ? 0U :
-                    sizeof(mp_t) * (2 * E + 1));
-                eDsA = gRl + sizeof(BookType) * (2 * E + 1);
-                sBfC = eDsA + sizeof(BookType) * (world * nLx * TCM) + blocks + TCM * TN * E;
-                gtQCl = world * nLx * TCM;
-            }
-            bookSize = sBfC + sizeof(ACC::Element) * (_world * _nLx * TCM * TN) + sizeof(BookType) *
-                (E > 1 ? world * nLx * TCM : ACC::TSZ::value);
+            static_assert(E > 1);
+            gtQCl = world * nLx * TCM;
+            // maximum gemm tiles/tasks scheduled by processors
+            const auto prT = world * nLx * TCM * tiles<BLOCK_N>(P);
+            // maximum gemm tiles/tasks scheduled by subscriber threads
+            auto sT = world * nLx * TCM * TN + TCM * TN * E;
+            tPs = cute::ceil_div(sT, SUBSCRIBERS);
+            sT = tPs * SUBSCRIBERS;
+            tQl = sizeof(Task) * (sT + prT);
+            tQml = tQl + blocks * sizeof(TQSignal) + E * sizeof(PEL); // processor doorbells
+            brs = tQml + (ACC::GRL::value == GateReductionLevel::singleBlock ? 0U : S * TPX *
+                (sizeof(RingSoftmaxPayload) + 2 * sizeof(RingTopKPayload)));
+            tQXt = brs + sizeof(ELI) * E + sizeof(cuda::barrier<cuda::thread_scope_device>) + sizeof(PLI) * world;
+            gRl = tQXt + sizeof(TokenIdxTuple) * (PX * EC) + (ACC::JT::value == JobType::inference ? 0U :
+                sizeof(mp_t) * (2 * E + 1));
+            eDsA = gRl + sizeof(BookType) * (2 * E + 1);
+            sBfC = eDsA + sizeof(BookType) * 2 * (world * nLx * TCM) + blocks + TCM * TN * E;
+            bookSize = sBfC + sizeof(ACC::Element) * (_world * _nLx * TCM * TN);
         }
 
         /// Needed for malloc
         __host__ __forceinline__
-        static unsigned long int bookLength(const unsigned int& _nLx, const unsigned int& _world) {
-            auto sBfC = 0UL;
+        constexpr static unsigned long int bookLength(const unsigned int& _nLx, const unsigned int& _world) {
             constexpr auto TCM = ACC::TCM::value;
             constexpr auto TN = ACC::TN::value;
             constexpr auto blocks = ACC::PeakHardware::OS::processorBlocks::value;
@@ -562,26 +569,29 @@ namespace aristos{
             constexpr auto EC = ACC::EC::value;
             constexpr auto P = ACC::P::value;
             constexpr auto TPX = ACC::TPX::value;
-            if constexpr (E > 1) {
-                // maximum gemm tiles/tasks scheduled by processors
-                const auto prT = _world * _nLx * TCM * tiles<BLOCK_N>(P);
-                // maximum gemm tiles/tasks scheduled by subscriber threads
-                auto sT = _world * _nLx * TCM * TN + TCM * TN * E;
-                const auto tPs = cute::ceil_div(sT, SUBSCRIBERS);
-                sT = tPs * SUBSCRIBERS;
-                const auto tQl = sizeof(Task) * (sT + prT);
-                const auto tQml = tQl + blocks * sizeof(TQSignal) + E * sizeof(PEL); // processor doorbells
-                const auto brs = tQml + (ACC::GRL::value == GateReductionLevel::singleBlock ? 0U :
-                    S * TPX * (sizeof(RingSoftmaxPayload) + 2 * sizeof(RingTopKPayload)));
-                const auto tQXt = brs + sizeof(ELI) * E + sizeof(cuda::barrier<cuda::thread_scope_device>) +
-                    sizeof(PLI) * _world;
-                const auto gRl = tQXt + sizeof(TokenIdxTuple) * (PX * EC) +
-                    (ACC::JT::value == JobType::inference ? 0U : sizeof(mp_t) * (2 * E + 1));
-                const auto eDsA = gRl + sizeof(BookType) * (2 * E + 1);
-                sBfC = eDsA + sizeof(BookType) * (_world * _nLx * TCM) + blocks + TCM * TN * E;
-            }
-            return sBfC + sizeof(ACC::Element) * (_world * _nLx * TCM * TN) + sizeof(BookType) *
-                (E > 1 ? _world * _nLx * TCM : ACC::TSZ::value);
+            // maximum gemm tiles/tasks scheduled by processors
+            const auto prT = _world * _nLx * TCM * tiles<BLOCK_N>(P);
+            // maximum gemm tiles/tasks scheduled by subscriber threads
+            auto sT = _world * _nLx * TCM * TN + TCM * TN * E;
+            const auto tPs = cute::ceil_div(sT, SUBSCRIBERS);
+            sT = tPs * SUBSCRIBERS;
+            const auto tQl = sizeof(Task) * (sT + prT);
+            const auto tQml = tQl + blocks * sizeof(TQSignal) + E * sizeof(PEL); // processor doorbells
+            const auto brs = tQml + (ACC::GRL::value == GateReductionLevel::singleBlock ? 0U :
+                S * TPX * (sizeof(RingSoftmaxPayload) + 2 * sizeof(RingTopKPayload)));
+            const auto tQXt = brs + sizeof(ELI) * E + sizeof(cuda::barrier<cuda::thread_scope_device>) +
+                sizeof(PLI) * _world;
+            const auto gRl = tQXt + sizeof(TokenIdxTuple) * (PX * EC) +
+                (ACC::JT::value == JobType::inference ? 0U : sizeof(mp_t) * (2 * E + 1));
+            const auto eDsA = gRl + sizeof(BookType) * (2 * E + 1);
+            const auto sBfC = eDsA +
+                sizeof(BookType) * 2 * (_world * _nLx * TCM) + blocks + TCM * TN * E;
+            return sBfC + sizeof(ACC::Element) * (_world * _nLx * TCM * TN);
+        }
+
+        __host__ __forceinline__
+        constexpr static unsigned long int bookLength() {
+            return ACC::TSZ::value * sizeof(BookType) + sizeof(ACC::Element) * (ACC::S::value * ACC::P::value);
         }
 
         template<unsigned int tileDimension>
@@ -728,7 +738,7 @@ namespace aristos{
         private:
             /// Note the below lengths are cumulative sums.
             unsigned long int eDsA = 0UL;
-            /// Scheduler buffers and flag checkpoints in bytes
+            /// Scheduler buffers in bytes
             unsigned long int sBfC = 0UL;
             unsigned long int tQXt = 0UL;
             /// gate routing and loss vectors in bytes

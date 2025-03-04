@@ -10,6 +10,7 @@
 #include "../os/os.cuh"
 #include "../os/processor/processor.cuh"
 #include "../os/sync.cuh"
+#include "fffn.cuh"
 #include "gate.cuh"
 
 namespace aristos::moe{
@@ -124,7 +125,13 @@ namespace aristos::moe{
         constexpr auto threads = ACC::PeakHardware::OS::threads::value;
 
         // Call forward pass
-        moe::forward<<<blocks, threads, 0, aristosStream>>>(iP, oP, seqBit);
+        if constexpr (ACC::E::value > 1) {
+            moe::forward<<<blocks, threads, 0, aristosStream>>>(iP, oP, seqBit);
+        }
+        else {
+            // regular FFN forward
+            fffn<<<blocks, threads, 0, aristosStream>>>(iP, oP);
+        }
         if (seqBit == cuda::std::numeric_limits<decltype(seqBit)>::max()) {
             syncAll<<<ACC::SYB::value, ACC::PeakHardware::OS::threads::value, 0, aristosStream>>>(
                 hostBookkeeping.pLI(), hostBookkeeping.rank, hostBookkeeping.world);
