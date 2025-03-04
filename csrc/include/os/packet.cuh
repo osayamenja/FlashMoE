@@ -83,8 +83,8 @@ namespace aristos::packet {
             const auto routedTokens = d == DropTokens::yes ?
                 cute::min(lI.eC, EC) : lI.eC;
             auto* __restrict__ peerHeap = lI.isRemote ?
-                heap::cAdvance<0, 0>(sHeap, lI.peer, lI.expertLocalIdx) :
-            heap::cAdvance<0, 1>(lI.remoteSHeap, lI.peer, lI.expertLocalIdx);
+                heap::advance<0, 0>(sHeap, lI.peer, lI.expertLocalIdx) :
+            heap::advance<0, 1>(lI.remoteSHeap, lI.peer, lI.expertLocalIdx);
 
             if (!routedTokens) {
                 if (isLeader && !lI.pTT) {
@@ -144,7 +144,7 @@ namespace aristos::packet {
                     if (lI.isRemote) {
                         // do RDMA transfer + signal
                         nvshmem_putmem_signal_nbi(
-                            heap::cAdvance<0, 1>(sHeap, lI.peer, lI.expertLocalIdx),
+                            heap::advance<0, 1>(sHeap, lI.peer, lI.expertLocalIdx),
                             peerHeap,
                             sizeof(Element) * routedTokens * H,
                             flags + flagOffset,
@@ -222,8 +222,8 @@ namespace aristos::packet {
             taskResults[0] = pGB + pXo * H * sizeof(Element);
             // Egress packet buffer
             taskResults[1] = p == PeerConnectivity::remote ?
-                heap::cAdvance<1, 0>(dA.sHeap, peer, localExpertIdx) :
-            heap::cAdvance<1, 1>(dA.sHeap, peer, localExpertIdx);
+                heap::advance<1, 0>(dA.sHeap, peer, localExpertIdx) :
+            heap::advance<1, 1>(dA.sHeap, peer, localExpertIdx);
             for (uint i = 0; i < fTilesM; ++i) {
                 #pragma unroll
                 for (uint j = 0; j < tN; ++j) {

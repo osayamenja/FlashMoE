@@ -379,8 +379,9 @@ namespace aristos{
         using TPX = cute::C<PX::value / BLOCK_N>;
         using TSZ = cute::C<TM::value * cute::min(TNx::value, PeakHardware::blocks::value)>;
 
-        // Scheduling state upper bound inside GEMM
+        // Scheduling state upper bound inside FFN
         using TMU = cute::C<128>;
+        using FZ = cute::C<TSZ::value * sizeof(uint) + sizeof(Element) * (S::value * P::value)>;
     };
 
     /// A more apropos name would be "static storage" rather than registers.
@@ -495,7 +496,7 @@ namespace aristos{
         /// default type for bookkeeping data structures
         cuda::std::byte *book = nullptr;
         /// gRl + gB + eDsA + sBfC + brs
-        unsigned long int bookSize = 0UL;
+        unsigned long int bookSize = ACC::FZ::value;
         /// length of gTQHeads
         unsigned int gtQCl = 0U;
         unsigned int tPs = 0U;
@@ -509,12 +510,7 @@ namespace aristos{
         uint16_t xs = 0U;
 
         __host__ __device__ __forceinline__
-        Bookkeeping() {
-            // default for ffn with no experts
-            sBfC = ACC::TSZ::value * sizeof(BookType) +
-                sizeof(ACC::Element) * (ACC::S::value * ACC::P::value);
-            bookSize = sBfC;
-        }
+        Bookkeeping() = default;
 
         __host__ __forceinline__
         explicit Bookkeeping(cuda::std::byte* const& _symHeap,
@@ -537,24 +533,25 @@ namespace aristos{
             constexpr auto EC = ACC::EC::value;
             constexpr auto P = ACC::P::value;
             constexpr auto TPX = ACC::TPX::value;
-            static_assert(E > 1);
-            gtQCl = world * nLx * TCM;
-            // maximum gemm tiles/tasks scheduled by processors
-            const auto prT = world * nLx * TCM * tiles<BLOCK_N>(P);
-            // maximum gemm tiles/tasks scheduled by subscriber threads
-            auto sT = world * nLx * TCM * TN + TCM * TN * E;
-            tPs = cute::ceil_div(sT, SUBSCRIBERS);
-            sT = tPs * SUBSCRIBERS;
-            tQl = sizeof(Task) * (sT + prT);
-            tQml = tQl + blocks * sizeof(TQSignal) + E * sizeof(PEL); // processor doorbells
-            brs = tQml + (ACC::GRL::value == GateReductionLevel::singleBlock ? 0U : S * TPX *
-                (sizeof(RingSoftmaxPayload) + 2 * sizeof(RingTopKPayload)));
-            tQXt = brs + sizeof(ELI) * E + sizeof(cuda::barrier<cuda::thread_scope_device>) + sizeof(PLI) * world;
-            gRl = tQXt + sizeof(TokenIdxTuple) * (PX * EC) + (ACC::JT::value == JobType::inference ? 0U :
-                sizeof(mp_t) * (2 * E + 1));
-            eDsA = gRl + sizeof(BookType) * (2 * E + 1);
-            sBfC = eDsA + sizeof(BookType) * 2 * (world * nLx * TCM) + blocks + TCM * TN * E;
-            bookSize = sBfC + sizeof(ACC::Element) * (_world * _nLx * TCM * TN);
+            if constexpr (E > 1) {
+                gtQCl = world * nLx * TCM;
+                // maximum gemm tiles/tasks scheduled by processors
+                const auto prT = world * nLx * TCM * tiles<BLOCK_N>(P);
+                // maximum gemm tiles/tasks scheduled by subscriber threads
+                auto sT = world * nLx * TCM * TN + TCM * TN * E;
+                tPs = cute::ceil_div(sT, SUBSCRIBERS);
+                sT = tPs * SUBSCRIBERS;
+                tQl = sizeof(Task) * (sT + prT);
+                tQml = tQl + blocks * sizeof(TQSignal) + E * sizeof(PEL); // processor doorbells
+                brs = tQml + (ACC::GRL::value == GateReductionLevel::singleBlock ? 0U : S * TPX *
+                    (sizeof(RingSoftmaxPayload) + 2 * sizeof(RingTopKPayload)));
+                tQXt = brs + sizeof(ELI) * E + sizeof(cuda::barrier<cuda::thread_scope_device>) + sizeof(PLI) * world;
+                gRl = tQXt + sizeof(TokenIdxTuple) * (PX * EC) + (ACC::JT::value == JobType::inference ? 0U :
+                    sizeof(mp_t) * (2 * E + 1));
+                eDsA = gRl + sizeof(BookType) * (2 * E + 1);
+                sBfC = eDsA + sizeof(BookType) * 2 * (world * nLx * TCM) + blocks + TCM * TN * E;
+                bookSize = sBfC + sizeof(ACC::Element) * (_world * _nLx * TCM * TN);
+            }
         }
 
         /// Needed for malloc
@@ -699,7 +696,7 @@ namespace aristos{
         /// number of remote experts
         __host__ __device__ __forceinline__
         auto* nRx() const {
-            return eC() + ACC::E::value;
+            return CAST_TO(BookType, book + gRl) + ACC::E::value;
         }
 
         /// Packet Sync array
@@ -739,7 +736,7 @@ namespace aristos{
             /// Note the below lengths are cumulative sums.
             unsigned long int eDsA = 0UL;
             /// Scheduler buffers in bytes
-            unsigned long int sBfC = 0UL;
+            unsigned long int sBfC = ACC::FZ::value;
             unsigned long int tQXt = 0UL;
             /// gate routing and loss vectors in bytes
             unsigned long int gRl = 0U;
@@ -773,7 +770,7 @@ namespace aristos{
         >
         requires (stage < STAGES && cell < CELLS)
         __device__ __forceinline__
-        auto* cAdvance(cuda::std::byte* __restrict__ const& sHeap, const uint& peer,
+        auto* advance(cuda::std::byte* __restrict__ const& sHeap, const uint& peer,
             const uint& expert, const uint& token = 0){
             return sHeap + (slotSize * (bookkeeping.xs * (CELLS * (peer * STAGES + stage) + cell) + expert) +
                 token * tokenDim) * nBytes;

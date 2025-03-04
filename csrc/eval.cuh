@@ -143,7 +143,7 @@ namespace aristos {
 
         constexpr auto hPz = 2 * sizeof(Worker) * dim +
             sizeof (Expert) * nExp + sizeof(floatPair) * dim * dim +
-                sizeof(uint) * (dim + nExp);
+                sizeof(uint) * (2 * dim + nExp);
         auto* hP = std::calloc(hPz, sizeof(cuda::std::byte));
         // Pointer salami slicing
         auto* __restrict__ ePwG = CAST_TO(Worker, hP);
@@ -152,8 +152,10 @@ namespace aristos {
         auto* __restrict experts = CAST_TO(Expert, wG + dim);
         static_assert(alignof(Expert) % alignof(floatPair) == 0);
         auto* __restrict__ aP = CAST_TO(floatPair, experts + nExp);
+        static_assert(alignof(floatPair) % alignof(uint) == 0);
         auto* __restrict__ pT = CAST_TO(uint, aP + dim * dim);
-        auto* __restrict__ ePs = pT + dim;
+        auto* __restrict__ dTg = pT + dim;
+        auto* __restrict__ ePs = dTg + dim;
         const auto adj = make_tensor(aP,
             cute::Layout<cute::Shape<cute::Int<dim>, cute::Int<dim>>,
                         cute::Stride<cute::Int<dim>, cute::_1>>{});
@@ -185,15 +187,18 @@ namespace aristos {
 
         auto start = clk::now();
         constexpr Decider<JobType::training> judge{};
-
-        decide(adj, wG, nExp*expertGigaFlops, nExp);
+        judge(adj, wG, nExp*expertGigaFlops, nExp, dTg);
         end = clk::now() - start;
-        const auto spec = decide(adj, wG,
-            nExp*expertGigaFlops, nExp);
+        std::array<uint, dim> spec{};
+        std::memcpy(spec.data(), dTg, sizeof(uint) * dim);
+        //judge(adj, wG, nExp*expertGigaFlops, nExp, dTg);
         fmt::println("Measured time for the Decider is {}s", end.count());
         fmt::println("Device to Groups: {}", spec);
 
-        const auto epWorld = subsets(spec, pT, 0);
+        for (uint i = 0 ; i < spec.size(); ++i) {
+            dTg[i] = spec[i];
+        }
+        const auto epWorld = subsets(dTg, pT, dim, 0);
         std::vector<uint> pS (epWorld);
         for (uint i = 0; i < epWorld; ++i) {
             pS[i] = pT[i];

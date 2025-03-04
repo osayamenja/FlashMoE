@@ -20,6 +20,7 @@ namespace aristos{
         unsigned int node2;
         float weight;
 
+        Edge() = default;
         /// Order is important!
         Edge(const unsigned int& _node1, const unsigned int& _node2, const float& _weight):
         node1(_node1), node2(_node2), weight(_weight){}

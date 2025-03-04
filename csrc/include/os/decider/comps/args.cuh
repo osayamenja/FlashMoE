@@ -4,7 +4,7 @@
 
 #ifndef CSRC_ARGS_CUH
 #define CSRC_ARGS_CUH
-#include "../../types.cuh"
+#include "../../../types.cuh"
 namespace aristos{
     struct ARArgs{
         // units is MB

@@ -213,7 +213,7 @@ string(JSON I_SIZE_V GET ${ARISTOS_CONFIG} "intermediate_size")
 message(STATUS "intermediate_size: ${I_SIZE_V}")
 
 string(JSON MINI_BATCH_V GET ${ARISTOS_CONFIG} "mini_batch")
-message(STATUS "mini_batch: ${MU_BATCH_V}")
+message(STATUS "mini_batch: ${MINI_BATCH_V}")
 
 string(JSON MOE_FREQ_V GET ${ARISTOS_CONFIG} "moe_frequency")
 message(STATUS "moe_frequency: ${MOE_FREQ_V}")
