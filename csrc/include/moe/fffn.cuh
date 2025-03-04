@@ -24,7 +24,6 @@ namespace aristos {
         const Element* __restrict__ iP /* A, B, D*/, Element* __restrict__ oP /*C*/) {
         constexpr unsigned int blocks = ACC::PeakHardware::OS::processorBlocks::value;
         constexpr unsigned int sharedSize = ACC::PeakHardware::sharedMemory::value;
-        constexpr unsigned int elems = ACC::PeakHardware::rScratch::value;
         __shared__ __align__(16) Element workspace[sharedSize / sizeof(Element)];
         __shared__ __align__(16) uint16_t tQ[ACC::TMU::value];
         using Operation = BlockMM<ACC::ActivationOp, Element>;
@@ -74,23 +73,6 @@ namespace aristos {
                 }
             }
         }
-
-        // Make tensors for below
-        // Row-major
-        const auto mA = make_tensor(cute::make_gmem_ptr(pC1),
-        cute::Layout<cute::Shape<cute::Int<M>, cute::Int<N>>,
-            cute::Stride<cute::Int<N>, cute::_1>>{});
-        // Row-major, transposed
-        const auto mB = make_tensor(cute::make_gmem_ptr(pB2),
-        cute::Layout<cute::Shape<cute::Int<K>, cute::Int<N>>,
-            cute::Stride<cute::Int<N>, cute::_1>>{});
-        // Row-major
-        const auto mC = make_tensor(cute::make_gmem_ptr(pC2),
-        cute::Layout<cute::Shape<cute::Int<M>, cute::Int<K>>,
-            cute::Stride<cute::Int<K>, cute::_1>>{});
-        const auto mD = make_tensor(cute::make_gmem_ptr(pD2),
-        cute::Layout<cute::Shape<cute::Int<M>, cute::Int<K>>,
-            cute::Stride<cute::_0, cute::_1>>{});
 
         using BlockScan = cub::BlockScan<uint16_t, threads>;
         constexpr auto tSlice = ACC::TMU::value / threads;
