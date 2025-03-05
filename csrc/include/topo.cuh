@@ -17,8 +17,7 @@ namespace aristos::topology{
 
     // Only a single block executes the below
     __device__ __forceinline__
-    void awaitResponses(uint64_t* __restrict__ const& flags,
-        uint* __restrict__ const& syncArray, WorkerAttribute* __restrict__ const& workerAttributes,
+    void awaitResponses(uint64_t* __restrict__ const& flags, WorkerAttribute* __restrict__ const& workerAttributes,
         const uint& rank, const uint& n, const uint& seqNo, const WorkerAttribute& self) {
         using Payload = TopologySignal;
         auto result = Payload{};
@@ -27,14 +26,11 @@ namespace aristos::topology{
         }
         for (int i = threadIdx.x; i < n; i += ARISTOS_BLOCK_SIZE) {
             if (i != rank) {
-                awaitPayload<cuda::thread_scope_system>(CAST_TO(Payload, flags + i), &result, seqNo);
+                awaitBarrier<cuda::thread_scope_system>(CAST_TO(Payload, flags + i), &result, seqNo);
                 workerAttributes[i] = result.wA;
                 // Enforce consistency
-                nvshmem_uint_test(&CAST_TO(Payload, flags + i)->signal, NVSHMEM_CMP_EQ, seqNo);
+                nvshmem_uint_test(&CAST_TO(Payload, flags + i)->signal, NVSHMEM_CMP_GE, seqNo);
             }
-        }
-        if (!threadIdx.x) {
-            *syncArray = seqNo;
         }
     }
 
@@ -87,8 +83,7 @@ namespace aristos::topology{
         const unsigned int& rank,
         cuda::std::byte* __restrict__ const& sHeap, floatPair* __restrict__ const& results,
         uint64_t* __restrict__ const& flags, uint* __restrict__ const& syncArray,
-        WorkerAttribute* __restrict__ const& workerAttributes, const WorkerAttribute& self) {
-        const auto seqNo = (__ldg(syncArray) + 1) % 2; // Equivalent to a bit flip
+        WorkerAttribute* __restrict__ const& workerAttributes, const WorkerAttribute& self, const uint seqNo) {
         for (unsigned int i = 1U; i < n; ++i) {
             const auto peer = (rank + i) % n;
             measureTransfer(rank, sHeap, scratchpad, peer, threadIdx.x, nvshmemx_putmem_block, peer);
@@ -108,7 +103,7 @@ namespace aristos::topology{
         }
 
         // await responses from other GPUs
-        awaitResponses(flags, syncArray, workerAttributes, rank, n, seqNo, self);
+        awaitResponses(flags, workerAttributes, rank, n, seqNo, self);
     }
 
     __device__ __forceinline__
@@ -116,9 +111,8 @@ namespace aristos::topology{
         const unsigned int& n, const unsigned int& rank,
         const unsigned int numPeers, cuda::std::byte* __restrict__ const& sHeap,
         floatPair* __restrict__ const& results, uint64_t* __restrict__ const& flags,
-        uint* __restrict__ const& syncArray, const WorkerAttribute& self) {
-        const auto seqNo = (__ldg(syncArray) + 1) % 2; // Equivalent to a bit flip
-        auto* blockade = syncArray + 1;
+        uint* __restrict__ const& syncArray, const WorkerAttribute& self, const uint seqNo) {
+        auto* __restrict__ blockade = syncArray;
         for (unsigned int i = 0U; i < numPeers; ++i) {
             const auto idx = (i + rank) % numPeers;
             measureTransfer(rank, sHeap, scratchpad, peers[idx], threadIdx.x, nvshmemx_putmem_block, idx);
@@ -150,16 +144,15 @@ namespace aristos::topology{
 
     __device__ __forceinline__
     void pluralP2PBuilder(floatPair* __restrict__ const& scratchpad, const unsigned int* __restrict__ peers,
-        const unsigned int& n, const unsigned int& rank, const unsigned int numPeers, const bool& remotePresent,
+        const unsigned int& n, const unsigned int& rank, const unsigned int& numPeers, const bool& remotePresent,
         cuda::std::byte* __restrict__ const& sHeap, floatPair* __restrict__ const& results,
         uint64_t* __restrict__ const& flags, uint* __restrict__ const& syncArray,
-        WorkerAttribute* __restrict__ const& workerAttributes, const WorkerAttribute& self) {
-        const auto seqNo = (__ldg(syncArray) + 1) % 2; // Equivalent to a bit flip
-        auto* blockade = syncArray + 1; // barrier
+        WorkerAttribute* __restrict__ const& workerAttributes, const WorkerAttribute& self, const uint seqNo) {
+        auto* __restrict__ blockade = syncArray; // barrier
         // If num of other P2P peers == 0, then we adjourn early after conditional subscription
         if (numPeers <= 1)[[unlikely]] {
             if (blockIdx.x == gridDim.x - 1) {
-                awaitResponses(flags, syncArray, workerAttributes, rank, n, seqNo, self);
+                awaitResponses(flags, workerAttributes, rank, n, seqNo, self);
             }
             return;
         }
@@ -207,20 +200,20 @@ namespace aristos::topology{
         // Most likely this block will not partake in the above thus, they would do the below in parallel
         // Could potentially enlist more blocks if n > THREADS, but that's unlikely
         if (blockIdx.x == gridDim.x - 1) {
-            awaitResponses(flags, syncArray, workerAttributes, rank, n, seqNo, self);
+            awaitResponses(flags, workerAttributes, rank, n, seqNo, self);
         }
     }
 
     /// Build Adjacency Matrix
-    /// TODO parallelize across all device blocks and deprecate singular/plural specializations
+    template<unsigned int blocks = ARISTOS_SUPER_BLOCK_SIZE> requires(blocks > 0)
     __global__ void discover(__grid_constant__ const int n, __grid_constant__ const int rank,
         __grid_constant__ const bool remotePresent, __grid_constant__ const WorkerAttribute self,
         cuda::std::byte* __restrict__ sHeap, uint64_t* flags,
         floatPair* __restrict__ results, uint* __restrict__ syncArray,
-        WorkerAttribute* __restrict__ workerAttributes) {
+        WorkerAttribute* __restrict__ workerAttributes, const __grid_constant__ uint seqNo) {
         assert(blockDim.x == ARISTOS_BLOCK_SIZE);
         assert(blockDim.y * blockDim.z == 1);
-        assert(gridDim.x <= ARISTOS_SUPER_BLOCK_SIZE + remotePresent);
+        assert(gridDim.x <= blocks + remotePresent);
         assert(gridDim.y * gridDim.z == 1);
 
         // Align to 16 bytes for optimal copy performance.
@@ -230,9 +223,10 @@ namespace aristos::topology{
         for (uint i = threadIdx.x; i < n; i += ARISTOS_BLOCK_SIZE) {
             scratchpad[i] = floatPair{0, 0};
         }
+        __syncthreads();
         if(gridDim.x == 1){
             /// number of blocks is insufficient for remote specialization
-            singularBuilder(scratchpad, n, rank, sHeap, results, flags, syncArray, workerAttributes, self);
+            singularBuilder(scratchpad, n, rank, sHeap, results, flags, syncArray, workerAttributes, self, seqNo);
         }
         else{
             // Specialization
@@ -258,12 +252,12 @@ namespace aristos::topology{
             if(!blockIdx.x && remotePresent){
                 /// remote publisher
                 pluralRemoteBuilder(scratchpad, peers, n, rank, nP, sHeap, results, flags,
-                    syncArray, self);
+                    syncArray, self, seqNo);
             }
             else{
                 /// P2P publisher only at most one super block
                 pluralP2PBuilder(scratchpad, peers, n, rank, nP, remotePresent, sHeap,
-                    results, flags, syncArray, workerAttributes, self);
+                    results, flags, syncArray, workerAttributes, self, seqNo);
             }
         }
     }

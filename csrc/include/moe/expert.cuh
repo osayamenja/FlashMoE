@@ -14,7 +14,6 @@
 #include "../types.cuh"
 #include "../os/processor/gemm.cuh"
 #include "../os/processor/processor.cuh"
-#define TIME_EXPERT 1
 namespace aristos {
     template<
         typename BlockGEMM,
@@ -159,8 +158,8 @@ namespace aristos {
     /// A = D * B2 + C2
     __global__ __maxnreg__(ACC::PeakHardware::registers::value) void expert(
         const __grid_constant__ unsigned int M,
-        cuda::barrier<cuda::thread_scope_device>* dB,
-        float* deviceThroughput, uint* tileSync,
+        cuda::barrier<cuda::thread_scope_device>* __restrict__ dB,
+        float* __restrict__ deviceThroughput, uint* __restrict__ tileSync,
         const Element* __restrict__ iP /* A, B, D, S, W*/,
         Element* __restrict__ oP /*C*/,
         const bool skip = true) {
@@ -170,7 +169,7 @@ namespace aristos {
         constexpr unsigned int elems = ACC::PeakHardware::rScratch::value;
 
         __shared__ __align__(16) Element workspace[sharedSize / sizeof(Element)];
-        __shared__ __align__(16) uint16_t tQ[ACC::TMU::value];
+        __shared__ __align__(16) uint tQ[ACC::TMU::value];
         using Operation = BlockMM<ACC::ActivationOp, Element>;
         using OperationX = BlockMM<ACC::ActivationOpX, Element>;
         constexpr auto threads = Operation::GEMM::block_dim.x;
@@ -197,10 +196,8 @@ namespace aristos {
 
         const auto tSync = make_tensor(cute::make_gmem_ptr(tileSync),
             make_layout(cute::make_shape(tSCl, tilesM), cute::LayoutRight{}));
-#if TIME_EXPERT
         uint64_t start = 0, end = 0;
         asm volatile("mov.u64 %0, %%globaltimer;": "=l"(start)::);
-#endif
         for (uint i = blockIdx.x; i < tiles; i += blocks) {
             processor::fGET<Operation>(workspace, pA, pB1, pC1, pD1, M, i);
             // Pick warp 0
@@ -312,7 +309,6 @@ namespace aristos {
                 }
             }
         }
-#if TIME_EXPERT
         asm volatile("mov.u64 %0, %%globaltimer;": "=l"(end)::);
         if (!skip) {
             auto tDt = (end - start) / 1e6f; // convert nano to milliseconds
@@ -326,7 +322,6 @@ namespace aristos {
                 cuda::atomic_ref{*deviceThroughput}.fetch_max(bT);
             }
         }
-#endif
     }
 }
 #endif //EXPERT_CUH

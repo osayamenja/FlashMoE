@@ -114,6 +114,21 @@ namespace aristos{
         *dest = *payload;
     }
 
+    template<cuda::thread_scope scope = cuda::thread_scope_device, typename Notification, typename T>
+    requires(sizeof(Notification) == sizeof(ull_t) && alignof(Notification) == alignof(ull_t))
+    __device__ __forceinline__
+    void awaitBarrier(Notification* __restrict__ const& addr, Notification* __restrict__ const& dest,
+        const T& token) {
+        static_assert(cuda::std::is_same_v<decltype(addr->signal), T>, "Signal types should be the same!");
+        auto mail = atomicLoad<scope>(CAST_TO(ull_t, addr));
+        auto* __restrict__ payload = CAST_TO(Notification, &mail);
+        while (payload->signal < token) {
+            mail = atomicLoad<scope>(CAST_TO(ull_t, addr));
+            payload = CAST_TO(Notification, &mail);
+        }
+        *dest = *payload;
+    }
+
     template<
         cuda::thread_scope scope = cuda::thread_scope_device,
         typename Payload

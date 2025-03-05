@@ -34,7 +34,7 @@ namespace aristos {
         }
         __syncthreads();
         if (!threadIdx.x) {
-            bookkeeping.syncCount += 1;
+            *bookkeeping.syncCount = sC + 1;
         }
     }
 }

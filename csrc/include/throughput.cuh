@@ -14,7 +14,7 @@
 #include "debug.cuh"
 #include "moe/expert.cuh"
 #include "types.cuh"
-
+#define TIME_EXPERT 0
 namespace aristos {
     template<
         UseBarrier u = UseBarrier::no,
@@ -27,10 +27,10 @@ namespace aristos {
         typename Element
     >
     __host__ __forceinline__
-    void mFT(unsigned int M,
-        cuda::barrier<cuda::thread_scope_device>* dB,
-        float* deviceThroughput, uint* tileSync,
-        const Element* __restrict__ iP /* A, B, D, S, W*/, Element* __restrict__ oP /*C*/) {
+    void mFT(unsigned int const& M,
+        cuda::barrier<cuda::thread_scope_device>* __restrict__ const& dB,
+        float* __restrict__ const& deviceThroughput, uint* __restrict__ const& tileSync,
+        const Element* __restrict__ const& iP /* A, B, D, S, W*/, Element* __restrict__ const& oP /*C*/) {
         const auto tSz = sizeof(uint) * (M / BLOCK_M) * cute::min(K / BLOCK_N, blocks);
         #pragma unroll
         for (uint i = 0; i < trials; ++i) {
@@ -74,7 +74,8 @@ namespace aristos {
         // Scheduling state
         constexpr auto tSz = sizeof(uint) * ACC::TM::value * cute::min(ACC::TNx::value, blocks);
         constexpr auto stateSize = sizeof(cuda::barrier<cuda::thread_scope_device>) + sizeof(float) + tSz;
-        CHECK_ERROR_EXIT(cudaMallocAsync(&p, hZ + stateSize, aristosStream));
+        constexpr auto dMz = stateSize + hZ * sizeof(Element);
+        CHECK_ERROR_EXIT(cudaMallocAsync(&p, dMz, aristosStream));
         CHECK_ERROR_EXIT(cudaMemsetAsync(p, 0, stateSize, aristosStream));
         const auto hB = new cuda::barrier<cuda::thread_scope_device>{blocks};
         CHECK_ERROR_EXIT(cudaMemcpyAsync(p, hB,
@@ -93,16 +94,15 @@ namespace aristos {
         }
         CHECK_ERROR_EXIT(cudaMemcpyAsync(p + stateSize, hVd, cWz, cudaMemcpyHostToDevice, aristosStream));
 
-        auto* dB = CAST_TO(cuda::barrier<cuda::thread_scope_device>, p);
+        auto* __restrict__ dB = CAST_TO(cuda::barrier<cuda::thread_scope_device>, p);
         static_assert(alignof(cuda::barrier<cuda::thread_scope_device>) % alignof(float) == 0);
-        auto* deviceThroughput = CAST_TO(float, dB + 1);
+        auto* __restrict__ deviceThroughput = CAST_TO(float, dB + 1);
         static_assert(alignof(float) % alignof(uint) == 0);
-        auto* tileSync = CAST_TO(uint, deviceThroughput + 1);
+        auto* __restrict__ tileSync = CAST_TO(uint, deviceThroughput + 1);
         static_assert(alignof(uint) % alignof(Element) == 0);
-        auto* iP = CAST_TO(Element, p + stateSize);
-        auto* oP = iP + cWz;
+        const auto* __restrict__ iP = CAST_TO(Element, p + stateSize);
+        auto* __restrict__ oP = CAST_TO(Element, p + stateSize) + cWz;
         mFT<u, trials>(M, dB, deviceThroughput, tileSync, iP, oP);
-        CHECK_ERROR_EXIT(cudaPeekAtLastError());
         float latency = 0;
         CHECK_ERROR_EXIT(cudaMemcpyAsync(&latency, deviceThroughput, sizeof(float),
             cudaMemcpyDeviceToHost, aristosStream));
@@ -110,7 +110,8 @@ namespace aristos {
 #if TIME_EXPERT
         printf("Kernel took %fms\n", latency);
 #endif
-        dWa->throughput = cute::half_t(1 / latency); // latency should be > 0
+        latency = 1.0f / latency;
+        dWa->throughput = cute::half_t(latency); // latency should be > 0
         CHECK_ERROR_EXIT(cudaFreeAsync(p, aristosStream));
         delete hB;
     }

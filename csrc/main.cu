@@ -3,7 +3,6 @@
  ******************************************************************************/
 
 #include "include/bootstrap.cuh"
-#include "include/moe/moe.cuh"
 int main() {
     aristos::initialize();
     aristos::finalize();

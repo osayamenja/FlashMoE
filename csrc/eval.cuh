@@ -75,15 +75,17 @@ namespace aristos {
         cudaEventCreate(&stop);
         float duration;
 
+        auto seqNo = 1U;
         #pragma unroll
         for (uint i = 0; i < skip; ++i) {
             topology::discover<<<blocks, threads, sharedSize, aristosStream>>>(n, globalRank, isRemotePresent,
-            self, sHeap, flags, results, syncArray, workerAttributes);
+            self, sHeap, flags, results, syncArray, workerAttributes, seqNo);
+            seqNo++;
         }
         CHECK_ERROR_EXIT(cudaMemsetAsync(results, 0, sizeof(floatPair) * n, aristosStream));
         CHECK_ERROR_EXIT(cudaEventRecord(start, aristos::aristosStream));
         topology::discover<<<blocks, threads, sharedSize, aristosStream>>>(n, globalRank, isRemotePresent,
-            self, sHeap, flags, results, syncArray, workerAttributes);
+            self, sHeap, flags, results, syncArray, workerAttributes, seqNo);
         CHECK_ERROR_EXIT(cudaEventRecord(stop, aristos::aristosStream));
         CHECK_ERROR_EXIT(cudaPeekAtLastError());
         CHECK_ERROR_EXIT(cudaStreamSynchronize(aristosStream));

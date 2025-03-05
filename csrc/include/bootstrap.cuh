@@ -72,8 +72,9 @@ namespace aristos{
         };
         const auto isRemotePresent = remotePresent();
         const auto sharedSize = n * (sizeof(floatPair) + sizeof(unsigned int));
+        constexpr auto seqNo = 1U;
         topology::discover<<<ARISTOS_SUPER_BLOCK_SIZE, ARISTOS_BLOCK_SIZE, sharedSize, aristosStream>>>(n, globalRank,
-            isRemotePresent, lWa, sHeap, flags, results, syncArray, attributes);
+            isRemotePresent, lWa, sHeap, flags, results, syncArray, attributes, seqNo);
         CHECK_ERROR_EXIT(cudaMemcpyAsync(hAp, adj, aD * sizeof(floatPair) + n * sizeof(uint),
             cudaMemcpyDeviceToHost, aristosStream));
         CHECK_ERROR_EXIT(cudaPeekAtLastError());
@@ -98,7 +99,7 @@ namespace aristos{
 
         for (uint16_t i = 0; i < world; ++i) {
             const auto [t, m] = attributes[i];
-            wG[i] = Worker{i, t, m};
+            wG[i] = Worker{i, __half2float(t.to_half()), m};
         }
         const auto adj = make_tensor(aP, make_layout(cute::make_shape(world, world), cute::LayoutRight{}));
         constexpr Decider<ACC::JT::value> decider{};
@@ -209,13 +210,13 @@ namespace aristos{
         auto* workers = CAST_TO(Worker, mP + sizeof(EPG));
         auto* ePWorkers = workers + globalWorld;
         static_assert(alignof(Worker) % alignof(Expert) == 0);
-        auto* experts = CAST_TO(Expert, mP + sizeof(Worker) + globalWorld);
+        auto* experts = CAST_TO(Expert, ePWorkers + globalWorld);
         static_assert(alignof(Expert) % alignof(floatPair) == 0);
-        auto* aP = CAST_TO(floatPair, mP + dZ);
+        auto* aP = CAST_TO(floatPair, experts + E);
         static_assert(alignof(floatPair) % alignof(WorkerAttribute) == 0);
         auto* wAp = CAST_TO(WorkerAttribute, aP + aD);
         static_assert(alignof(WorkerAttribute) % alignof(EDT) == 0);
-        auto* dTg = CAST_TO(uint, wAp + E);
+        auto* dTg = CAST_TO(uint, wAp + globalWorld);
 
         // Result buffers
         auto* pT = CAST_TO(uint, mP + pZ);
@@ -226,7 +227,7 @@ namespace aristos{
         estimateMemory(&wAp[rank]);
         mT(wAp + rank);
 
-        discoverTopology(aP, globalWorld, globalWorld, wAp[rank]);
+        discoverTopology(aP, globalWorld, rank, wAp[rank]);
 
         // The topology adjacency matrix is ready, let's map devices to optimal cooperative process groups
         runDecider(ePg, experts, workers, ePWorkers, dTg, pT, ePs, ePsX,
@@ -246,10 +247,10 @@ namespace aristos{
 
         // local bookkeeping memory
         const auto bookSize = Bookkeeping::bookLength(ePgD.nLx, ePgD.epWorld);
-
+        printf("booksize is %lu, nLx is %u, xs is %u\n", bookSize, ePgD.nLx, ePgD.expertSlots);
         cuda::std::byte* book;
         CHECK_ERROR_EXIT(cudaMallocAsync(&book, bookSize, aristosStream));
-        CHECK_ERROR_EXIT(cudaMemsetAsync(&book, 0, bookSize, aristosStream));
+        CHECK_ERROR_EXIT(cudaMemsetAsync(book, 0, bookSize, aristosStream));
         // Initialize bookkeeping
         auto* sA = static_cast<flagsType*>(sHeap);
         auto* flags = CAST_TO(flagsType, sHb + syncArrayBytes);
