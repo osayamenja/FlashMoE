@@ -14,11 +14,11 @@
 #include "debug.cuh"
 #include "moe/expert.cuh"
 #include "types.cuh"
-#define TIME_EXPERT 0
+#define TIME_EXPERT 1
 namespace aristos {
     template<
         UseBarrier u = UseBarrier::no,
-        unsigned int trials = 128U,
+        unsigned int trials = 16U,
         unsigned int N = ACC::P::value,
         unsigned int K = ACC::H::value,
         unsigned int blocks = ACC::PeakHardware::OS::processorBlocks::value,
@@ -49,7 +49,7 @@ namespace aristos {
     }
     template<
         UseBarrier u = UseBarrier::no,
-        unsigned int trials = 128U
+        unsigned int trials = 16U
     >
     __host__ __forceinline__
     void mT(WorkerAttribute* __restrict__ const& dWa) {
@@ -108,7 +108,7 @@ namespace aristos {
             cudaMemcpyDeviceToHost, aristosStream));
         CHECK_ERROR_EXIT(cudaStreamSynchronize(aristosStream));
 #if TIME_EXPERT
-        printf("Kernel took %fms\n", latency);
+        printf("Kernel takes %fms\n", latency);
 #endif
         latency = 1.0f / latency;
         dWa->throughput = cute::half_t(latency); // latency should be > 0

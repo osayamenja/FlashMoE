@@ -6,12 +6,12 @@
   "is_training": 0,
   "hidden_act": 0,
   "hidden_size": 1024,
-  "intermediate_size": 4096,
+  "intermediate_size": 2048,
   "mini_batch": 4,
   "moe_frequency": 1,
   "num_experts": 2,
   "num_layers": 20,
   "sequence_len": 2048,
-  "torch_dtype": 1,
+  "torch_dtype": 3,
   "vocab_size": 32000
 }

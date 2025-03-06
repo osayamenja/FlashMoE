@@ -40,6 +40,7 @@ namespace aristos::subscriber{
             /// Lookup Table
             const PLI* __restrict__ const& pL,
             /// State
+            uint* __restrict__ const& bitSet,
             uint* __restrict__ const& status,
             uint *__restrict__ const&taskCount,
             flagsType* __restrict__ const& flags,
@@ -54,14 +55,21 @@ namespace aristos::subscriber{
             /// Flags has dimension [W, L], where W is expert parallel world and L is number of local experts
             constexpr packet::Decoder<PacketStage::initial, PeerConnectivity::p2p, Element> fPd{};
             constexpr packet::Decoder<PacketStage::initial, PeerConnectivity::remote, Element> fRd{};
+            constexpr auto bSw = sizeof(uint) * 8U;
             for (uint i = 0; i < stageLength; ++i) {
+                const auto vSIdx = i / bSw;
+                const auto vIdx = i % bSw;
+                // no need to batch reads from shared memory here as stageLength is very small, most likely <= 1
+                auto visitedSet = bitSet[vSIdx];
                 const auto flagIdx = tIdx + i * subscriberCount;
                 auto signal = atomicLoad<cuda::thread_scope_system>(
                     CAST_TO(ull_t, flags + flagIdx));
                 const auto sP = CAST_TO(SignalPayload<>, &signal);
                 const auto received = sP->seqBit == localSeqBit;
                 stagePending -= received;
-                if (received) {
+                if (const uint hasVisited = visitedSet >> vIdx & 1; !hasVisited && received) {
+                    // set visited bit
+                    visitedSet |= 1 << vIdx;
                     // decode the received packet
                     const auto expertIdx = flagIdx % nLx;
                     const auto peerIdx = flagIdx / nLx;
@@ -92,6 +100,8 @@ namespace aristos::subscriber{
                             expertIdx, pGB, weights, bias, peerIdx, pLI.pe, lTQHead, tQHead);
                     }
                 }
+                // update state
+                bitSet[vSIdx] = visitedSet;
             }
         }
     };
@@ -100,14 +110,17 @@ namespace aristos::subscriber{
     struct Subscribe<SubscriberStage::final, subscriberCount> {
         template<
             typename WorkSet,
+            typename RBitSet,
             unsigned int EC = ACC::EC::value,
             unsigned int TN = ACC::TNx::value,
             unsigned int CS = ACC::TCM::value * TN
         >
-        requires(isRegisterV<WorkSet>)
+        requires(isRegisterV<WorkSet> && isRegisterV<RBitSet>)
         __device__ __forceinline__
         void operator()(
             WorkSet& workSet,
+            RBitSet& rBitSet,
+            uint* __restrict__ bitSet,
             const packet::DecoderArg& dA,
             /// Task Arguments
             const TokenIdxTuple* const& tokenIds,
@@ -127,6 +140,8 @@ namespace aristos::subscriber{
             const uint& tIdx,
             const uint16_t& localSeqBit
             ) const {
+            constexpr auto bSw = sizeof(uint) * 8U;
+            static_assert(WorkSet::kElements == 16 || WorkSet::kElements % bSw == 0);
             constexpr packet::Decoder<PacketStage::last, PeerConnectivity::p2p> lPd{};
             constexpr packet::Decoder<PacketStage::last, PeerConnectivity::remote> lRd{};
             // prefetch
@@ -138,6 +153,10 @@ namespace aristos::subscriber{
                 }
             }
             for (uint i = 0; i < stageTrips; ++i) {
+                #pragma unroll
+                for (uint j = 0; j < RBitSet::kElements; ++j) {
+                    rBitSet[j] = bitSet[tIdx + (j + (i * WorkSet::kElements) / bSw) * subscriberCount];
+                }
                 // shared -> registers
                 #pragma unroll
                 for (uint j = 0; j < WorkSet::kElements; ++j) {
@@ -148,18 +167,22 @@ namespace aristos::subscriber{
                             tileIndices[tIdx + (j + (i + 1) * WorkSet::kElements) * subscriberCount];
                     }
                 }
-
                 #pragma unroll
                 for (uint j = 0; j < WorkSet::kElements; ++j) {
+                    const auto vSIdx = j / bSw;
+                    const auto vIdx = j % bSw;
+                    auto visitedSet = rBitSet[vSIdx];
                     const auto flagIdx = workSet[j];
                     auto signal = atomicLoad<cuda::thread_scope_system>(
                         CAST_TO(ull_t, flags + flagIdx));
                     const auto sP = CAST_TO(SignalPayload<PacketStage::last>, &signal);
-                    if (sP->seqBit == localSeqBit) {
+                    if (const uint hasVisited = visitedSet >> vIdx & 1; !hasVisited && sP->seqBit == localSeqBit) {
                         // let's decode this packet
+                        // set visited bit
+                        visitedSet |= 1 << vIdx;
                         const auto expertIdx = flagIdx / CS;
                         const ELI lookup = eL[expertIdx];
-                        const auto* tI = tokenIds + (expertIdx * EC + (sP->batchIdx * BLOCK_M));
+                        const auto* tI = tokenIds + (expertIdx * EC + sP->batchIdx * BLOCK_M);
                         if (lookup.isRemote) {
                             // enforce memory consistency
                             nvshmem_ushort_test(&sP->seqBit, NVSHMEM_CMP_EQ, localSeqBit);
@@ -179,6 +202,12 @@ namespace aristos::subscriber{
                                 mO, sP->tokensM, flagIdx % TN, tQHead, expertIdx);
                         }
                     }
+                    rBitSet[vSIdx] = visitedSet;
+                }
+                // update checkpoint state
+                #pragma unroll
+                for (uint j = 0; j < RBitSet::kElements; ++j) {
+                    bitSet[tIdx + (j + (i * WorkSet::kElements) / bSw) * subscriberCount] = rBitSet[j];
                 }
             }
             if (const auto residue = stageLength - stageTrips * WorkSet::kElements; residue) {
@@ -193,13 +222,24 @@ namespace aristos::subscriber{
                     }
                 }
                 #pragma unroll
+                for (uint j = 0; j < RBitSet::kElements; ++j) {
+                    if (j < residue) {
+                        rBitSet[j] = bitSet[tIdx + (j + (stageTrips * WorkSet::kElements) / bSw) * subscriberCount];
+                    }
+                }
+                #pragma unroll
                 for (uint j = 0; j < WorkSet::kElements; ++j) {
                     if (j < residue) {
+                        const auto vSIdx = j / bSw;
+                        const auto vIdx = j % bSw;
+                        auto visitedSet = rBitSet[vSIdx];
                         const auto flagIdx = workSet[j];
                         auto signal = atomicLoad<cuda::thread_scope_system>(
                             CAST_TO(ull_t, flags + flagIdx));
                         const auto sP = CAST_TO(SignalPayload<PacketStage::last>, &signal);
-                        if (sP->seqBit == localSeqBit) {
+                        if (const uint hasVisited = visitedSet >> vIdx & 1; !hasVisited && sP->seqBit == localSeqBit) {
+                            // set visited bit
+                            visitedSet |= 1 << vIdx;
                             // let's decode this packet
                             const auto expertIdx = flagIdx / CS;
                             const ELI lookup = eL[expertIdx];
@@ -223,13 +263,21 @@ namespace aristos::subscriber{
                                     mO, sP->tokensM, flagIdx % TN, tQHead, expertIdx);
                             }
                         }
+                        rBitSet[vSIdx] = visitedSet;
                     }
+                }
+
+                // update checkpoint state
+                #pragma unroll
+                for (uint j = 0; j < RBitSet::kElements; ++j) {
+                    bitSet[tIdx + (j + (stageTrips * WorkSet::kElements) / bSw) * subscriberCount] = rBitSet[j];
                 }
             }
         }
     };
     /// Decode packets deposited
     template<
+        unsigned int bSzPs,
         unsigned int wSet = 16U,
         unsigned int subscriberCount = SUBSCRIBERS,
         typename Output,
@@ -238,9 +286,10 @@ namespace aristos::subscriber{
         typename BiasUp,
         typename BiasDown
     >
-    requires(cutlass::ispow2(wSet) && wSet > 1 && wSet <= 32)
+    requires(wSet == 16 || wSet % 32 == 0)
     __device__ __forceinline__
-    void start(cuda::std::byte* __restrict__ const& workspace,
+    void start(uint* __restrict__ const& bitSet,
+        cuda::std::byte* __restrict__ const& workspace,
         unsigned int* __restrict__ const& interrupt,
         const PLI* __restrict__ const& pL,
         const ELI* __restrict__ const& eL,
@@ -265,7 +314,8 @@ namespace aristos::subscriber{
             bookkeeping.tPs,
         };
 
-        cutlass::AlignedArray<unsigned int, wSet> rWSet{};
+        cutlass::AlignedArray<uint, wSet> rWSet{};
+        cutlass::AlignedArray<uint, bSzPs> rBitSet{};
 
         // lookup tables
         const auto* tokenIds = bookkeeping.tP();
@@ -296,6 +346,8 @@ namespace aristos::subscriber{
         constexpr Subscribe<SubscriberStage::initial, subscriberCount> initialSubscriber{};
         constexpr Subscribe<SubscriberStage::final, subscriberCount> finalSubscriber{};
 
+        const auto pSI = nSI<subscriberCount>(ssfC);
+
         while (!atomicLoad<cuda::thread_scope_block>(interrupt)) {
             auto* __restrict__ flags = sFlags;
             // sweep through flags by stages
@@ -309,6 +361,7 @@ namespace aristos::subscriber{
                     biasDown,
                     pGB,
                     pL,
+                    bitSet + pSI,
                     status,
                     taskCount,
                     flags,
@@ -323,6 +376,8 @@ namespace aristos::subscriber{
             }
             flags += fSfC;
             finalSubscriber(rWSet,
+                rBitSet,
+                bitSet,
                 dA,
                 tokenIds,
                 CAST_TO(cuda::std::byte, moeOutput.data().get()),

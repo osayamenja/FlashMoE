@@ -19,7 +19,8 @@ namespace aristos::os {
         typename ExpertsUp,
         typename ExpertsDown,
         typename BiasUp,
-        typename BiasDown
+        typename BiasDown,
+        unsigned int threads = ACC::PeakHardware::OS::threads::value
     >
     __device__ __forceinline__
     void start(cuda::std::byte* __restrict__ const& workspace,
@@ -32,10 +33,14 @@ namespace aristos::os {
         const auto nRx = __ldg(bookkeeping.nRx());
         const auto* __restrict__ eC = bookkeeping.eC();
         const auto world = bookkeeping.world;
+        constexpr auto subscriberCount = threads - WARP_SIZE;
 
         // each subscriber thread gets wSet * sizeof(uint) bytes of workspace
         constexpr auto wSet = 16U; // working set size
-        constexpr auto subscriberCount = THREADS - 32;
+        constexpr auto bitSetSizePs = cute::ceil_div(wSet, sizeof(uint) * 8U);
+        const auto ssfC = ACC::TCM::value * (ACC::TNx::value * (ACC::E::value - nRx) + nRx);
+        const auto bitSetSize = bookkeeping.nLx * bookkeeping.world + ssfC;
+        const auto bSSI = nSI<subscriberCount>(bitSetSize);
         constexpr auto E = ACC::E::value;
         constexpr auto TNx = ACC::TNx::value;
         constexpr auto TN = ACC::TNx::value;
@@ -43,31 +48,41 @@ namespace aristos::os {
 
         // subscriber shared memory allocation
         auto* __restrict__ eL = CAST_TO(ELI, workspace);
+        static_assert(alignof(ELI) % alignof(PLI) == 0);
         auto* __restrict__ pL = CAST_TO(PLI, eL + E);
+        static_assert(alignof(PLI) % alignof(uint) == 0);
+        const auto dZ = sizeof(ELI) * E + sizeof(PLI) * world;
+        auto* __restrict__ bitSet = CAST_TO(uint, workspace + roundToCacheLine(dZ));
         const auto* __restrict__ geL = bookkeeping.eL();
         const auto* __restrict__ gpL = bookkeeping.pLI();
-        const auto z = sizeof(ELI) * E + sizeof(PLI) * world;
-        // Below is to minimize bank conflicts for the subscriber threads
-        auto* __restrict__ sWorkspace = workspace + cute::ceil_div(z, 128U) * 128U;
+        const auto z = dZ + bSSI + SUBSCRIBERS * wSet * sizeof(uint);
+        for (uint i = threadIdx.x; i < bSSI; i += threads) {
+            bitSet[i] = 0U;
+        }
         #pragma unroll
         for (uint i = threadIdx.x; i < E; ++i) {
             eL[i] = geL[i];
             pL[i] = gpL[i];
         }
-        auto* __restrict__ scratch = CAST_TO(uint, sWorkspace + SUBSCRIBERS * wSet * sizeof(uint));
+        auto* __restrict__ scratch = CAST_TO(uint, workspace + roundToCacheLine(z));
+        auto* __restrict__ tQHeads = scratch;
+        auto* __restrict__ interrupt = tQHeads + subscriberCount;
+        auto* __restrict__ rQ = interrupt + subscriberCount;
+        auto* __restrict__ status = rQ + processors;
+        auto* __restrict__ schedulerScratch = CAST_TO(cuda::std::byte, status + world);
         // shared memory arrays
         // Upper bound for expectant tasks
         auto* __restrict__ taskBound = scratch;
         const auto* __restrict__ eCs = taskBound + 1;
         scratch += 1;
         #pragma unroll
-        for (uint i = threadIdx.x; i < E; i += THREADS) {
+        for (uint i = threadIdx.x; i < E; i += threads) {
             scratch[i] = __ldg(eC + i);
         }
         __syncthreads();
         // compute taskBound
         #pragma unroll
-        for (uint i = threadIdx.x; i < E; i += THREADS) {
+        for (uint i = threadIdx.x; i < E; i += threads) {
             const auto eCt = Bookkeeping::tiles<BLOCK_M>(d == DropTokens::yes ? cute::min(eCs[i], EC)
                 : eCs[i]);
             atomicAdd_block(taskBound, eCt * TN);
@@ -77,20 +92,15 @@ namespace aristos::os {
             }
         }
         __syncthreads();
-        auto* __restrict__ tQHeads = taskBound + 1;
-        auto* __restrict__ rQ = tQHeads + subscriberCount;
         #pragma unroll
-        for (uint i = threadIdx.x; i < processors; i += THREADS) {
+        for (uint i = threadIdx.x; i < processors; i += threads) {
             rQ[i] = i; // initially, all processors are ready
         }
-        auto* interrupt = rQ + processors;
         #pragma unroll
-        for (uint i = threadIdx.x; i < SUBSCRIBERS; i += THREADS) {
+        for (uint i = threadIdx.x; i < SUBSCRIBERS; i += threads) {
             tQHeads[i] = 0U;
             interrupt[i] = 0U;
         }
-        auto* __restrict__ status = interrupt + SUBSCRIBERS;
-        auto* __restrict__ schedulerScratch = CAST_TO(cuda::std::byte, status + world);
         __syncthreads();
         // build arguments for scheduler and subscriber
         if (threadIdx.x / WARP_SIZE == 0) {
@@ -105,7 +115,7 @@ namespace aristos::os {
         }
         else {
             // subscriber
-            subscriber::start<wSet>(sWorkspace, interrupt, pL, eL, nRx,
+            subscriber::start<bitSetSizePs, wSet>(bitSet, CAST_TO(cuda::std::byte,bitSet + bSSI), interrupt, pL, eL, nRx,
                 status, taskBound, moeOutput, expertsUp, expertsDown, biasUp, biasDown, lSeqBit);
         }
     }

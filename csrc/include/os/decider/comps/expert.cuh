@@ -4,6 +4,8 @@
 
 #ifndef CSRC_EXPERT_CUH
 #define CSRC_EXPERT_CUH
+#include <ostream>
+
 namespace aristos{
     struct __align__(8) Expert{
         unsigned int id;
@@ -54,6 +56,10 @@ namespace aristos{
             return "{\"id\": " + std::to_string(id)
                    + ", \"ComputeCost\": " + std::to_string(cost)
                    + ", \"MemoryDemand\": " + std::to_string(memoryDemand) + "}";
+        }
+
+        friend std::ostream & operator<<(std::ostream &os, const Expert &obj) {
+            return os << obj.toString();
         }
 
         __forceinline__

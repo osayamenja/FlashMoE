@@ -338,6 +338,17 @@ namespace aristos{
         uint16_t isRemote;
     };
 
+    /// Computes precise number of integers needed to represent a consecutive set of bits of size,
+    /// where
+    /// each of T threads has stride ownership of a single bit
+    /// and requires an integer to store 32 of such bits.
+    template<unsigned int T, unsigned int integerBitWidth = 32U>
+    __host__ __device__ __forceinline__
+    constexpr uint nSI(const unsigned int& numBits) {
+        return (cute::ceil_div(numBits / T, integerBitWidth) * T) +
+            (cute::ceil_div(cute::ceil_div(numBits, T), integerBitWidth) * (numBits % T));
+    }
+
     /// Aristos Compile-time Config
     struct ACC {
         using SYB = cute::C<1>;
@@ -352,7 +363,7 @@ namespace aristos{
         using ActivationOpX = cute::identity;
         using PeakHardware = aristos::Hardware<ARISTOS_ARCH, 255>;
         using JT = cute::C<IS_TRAINING? JobType::training : JobType::inference>;
-        using S = cute::C<SEQ_LEN>;
+        using S = cute::C<SEQ_LEN * MINI_BATCH>;
         using P = cute::C<I_SIZE>;
         using H = cute::C<HIDDEN_SIZE>;
         using E = cute::C<NUM_EXPERTS>;
@@ -379,6 +390,8 @@ namespace aristos{
         using TCM = cute::C<EC::value / BLOCK_M>;
         using TPX = cute::C<PX::value / BLOCK_N>;
         using TSZ = cute::C<TM::value * cute::min(TNx::value, PeakHardware::blocks::value)>;
+        using BSZ = cute::C<cute::ceil_div(E::value * ((E::value - 1) + cute::ceil_div(TCM::value * TNx::value, SUBSCRIBERS)),
+            sizeof(uint) * 8U) * SUBSCRIBERS>;
 
         // Scheduling state upper bound inside FFN
         using TMU = cute::C<128>;
@@ -418,11 +431,17 @@ namespace aristos{
     };
 
     __device__
-    enum class FlagState : uint8_t {
+    enum class FlagState {
         unidentified,
         identified,
         completed
     };
+
+    // Also applies to shared memory banks
+    __device__ __forceinline__
+    constexpr auto roundToCacheLine(uint const& z) {
+        return cute::ceil_div(z, 128U) * 128U;
+    }
 
     struct __align__(16) Task {
         using TST = uint16_t;

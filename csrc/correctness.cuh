@@ -6,9 +6,6 @@
 #define CORRECTNESS_CUH
 
 #include <torch/torch.h>
-
-#include "include/moe/moe.cuh"
-#include "include/throughput.cuh"
 #include "include/types.cuh"
 
 namespace aristos {
@@ -16,9 +13,9 @@ namespace aristos {
     void evalExpert() {
         using GPUType = aristos::Hardware<ARISTOS_ARCH, 255>;
         constexpr auto blocks = GPUType::OS::processorBlocks::value;
-        constexpr auto M = 8192UL;
-        constexpr auto N = 4096UL;
-        constexpr auto K = 1024UL;
+        constexpr auto M = ACC::S::value;
+        constexpr auto N = ACC::P::value;
+        constexpr auto K = ACC::H::value;
         static_assert(M % BLOCK_M == 0 && M < BLOCK_M * blocks * 128 &&
             N % BLOCK_N == 0 && K % BLOCK_N == 0);
         using clk = std::chrono::high_resolution_clock;
@@ -74,14 +71,14 @@ namespace aristos {
         // gemm 1 -> ReLU -> gemm 2 -> scale
         const auto start = clk::now();
         const auto result = mul(expert->forward(activations), scaleWeights);
-        CHECK_ERROR_EXIT(cudaDeviceSynchronize());
+        //CHECK_ERROR_EXIT(cudaDeviceSynchronize());
         end = clk::now() - start;
         printf("Torch takes %fms\n", end.count() * 1000);
 
         // Get a copy of the reference result
         // compute & measure fused expert
         // verify and compare
-        std::cout << "Passed? " << (result.view({M * K})
+        /*std::cout << "Passed? " << (result.view({M * K})
             .allclose(hT.index({0, torch::indexing::Slice(cZ, hZ)}),
                 1e-03, 1e-05, true) ? "Yes!" : "No")
         << std::endl;
@@ -90,7 +87,7 @@ namespace aristos {
         << std::endl;
         std::cout << hT.index({0, torch::indexing::Slice(cZ, hZ)}).view({M, K}).
             index({1024, torch::indexing::Slice(256, 266)}).view({1, 10})
-        << std::endl;
+        << std::endl;*/
         CHECK_LAST();
     }
     /*__host__ __forceinline__

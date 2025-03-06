@@ -244,16 +244,16 @@ namespace aristos {
             }
             __syncthreads();
             for (uint i = blockIdx.x; i < tiles2; i += blocks) {
-                fGST<OperationX, c, elems>(workspace, mA, mB, mD, mC, pS, pCw, i, M);
+                fGST<OperationX, K, N, c, elems>(workspace, mA, mB, mD, mC, pS, pCw, i, M);
             }
         }
         else {
             // Below, is a more sophisticated method for scheduling the next GEMM task.
             // Not necessarily more performant than the barrier.
-            using BlockScan = cub::BlockScan<uint16_t, threads>;
+            using BlockScan = cub::BlockScan<uint, threads>;
             constexpr auto tSlice = ACC::TMU::value / threads;
             // Register allocations
-            uint16_t predicates[tSlice];
+            uint predicates[tSlice];
             FlagState flagState[tSlice];
             #pragma unroll
             for (uint i = 0; i < tSlice; ++i) {
@@ -265,8 +265,8 @@ namespace aristos {
             const auto nT = tiles2 / blocks + (blockIdx.x < (tiles2 % blocks));
             static_assert(sizeof(BlockScan::TempStorage) <= sharedSize);
             auto* __restrict__ bTs = CAST_TO(typename BlockScan::TempStorage, workspace);
-            const auto underSubscribed = tilesK > blocks;
-            const auto fStride = underSubscribed ? blocks * (tilesK / blocks) : blocks;
+            constexpr auto underSubscribed = tilesK > blocks;
+            constexpr auto fStride = underSubscribed ? blocks * (tilesK / blocks) : blocks;
             while (processed < nT) {
                 // concurrently sweep pending flags
                 #pragma unroll
@@ -281,7 +281,7 @@ namespace aristos {
                         flagState[i] = predicates[i] ? FlagState::identified : FlagState::unidentified;
                     }
                 }
-                uint16_t identifiedFlags = 0U;
+                uint identifiedFlags = 0U;
                 // Perform block-wide Aggregation
                 BlockScan(*bTs).InclusiveSum(predicates, predicates, identifiedFlags);
                 // Populate task queue with identified flag indices
@@ -303,7 +303,7 @@ namespace aristos {
                     const auto endTile = (rowIdx + 1) * tilesK;
                     // do gemm
                     for (uint j = blockIdx.x + startIdx * blocks; j < endTile; j += blocks) {
-                        fGST<OperationX, N, K, c, elems>(workspace, mA, mB, mD, mC, pS, pCw, j, M);
+                        fGST<OperationX, K, N, c, elems>(workspace, mA, mB, mD, mC, pS, pCw, j, M);
                         processed++;
                     }
                 }

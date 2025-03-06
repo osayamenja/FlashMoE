@@ -247,7 +247,6 @@ namespace aristos{
 
         // local bookkeeping memory
         const auto bookSize = Bookkeeping::bookLength(ePgD.nLx, ePgD.epWorld);
-        printf("booksize is %lu, nLx is %u, xs is %u\n", bookSize, ePgD.nLx, ePgD.expertSlots);
         cuda::std::byte* book;
         CHECK_ERROR_EXIT(cudaMallocAsync(&book, bookSize, aristosStream));
         CHECK_ERROR_EXIT(cudaMemsetAsync(book, 0, bookSize, aristosStream));
@@ -336,7 +335,6 @@ namespace aristos{
     __host__ __forceinline__
     void distributedInit<EP::no>() {
         constexpr auto bookSize = Bookkeeping::bookLength();
-
         cuda::std::byte* book;
         CHECK_ERROR_EXIT(cudaMallocAsync(&book, bookSize, aristosStream));
         CHECK_ERROR_EXIT(cudaMemsetAsync(&book, 0, bookSize, aristosStream));
