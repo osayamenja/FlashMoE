@@ -304,7 +304,7 @@ namespace aristos{
 
         auto j = 0U;
         while(!t.empty()){
-            auto budget = static_cast<int>(std::floor(wG[j].processingRate * totalCost / totalRate));
+            auto budget = static_cast<int>(std::ceil(wG[j].processingRate * totalCost / totalRate));
             const auto allocated = budget;
             while(budget > 0 && wG[j].memoryCapacity > 0 && !t.empty()){
                 auto expertBudget = Expert(budget);
@@ -317,7 +317,6 @@ namespace aristos{
                 else if (lower != t.cend()){
                     bestMatch = Expert::closest(*lower, *t.upper_bound(expertBudget), budget);
                 }
-                printf("bM.id: %u\n", bestMatch.id);
                 assignment[bestMatch.id] = wG[j].id;
                 t.erase(bestMatch);
                 wG[j].memoryCapacity -= 1;

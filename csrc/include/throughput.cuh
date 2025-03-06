@@ -8,7 +8,6 @@
 #include <thrust/device_vector.h>
 #include <thrust/generate.h>
 #include <thrust/host_vector.h>
-#include <thrust/sort.h>
 #include <thrust/random.h>
 
 #include "debug.cuh"
@@ -49,7 +48,7 @@ namespace aristos {
     }
     template<
         UseBarrier u = UseBarrier::no,
-        unsigned int trials = 16U
+        unsigned int trials = 1U
     >
     __host__ __forceinline__
     void mT(WorkerAttribute* __restrict__ const& dWa) {

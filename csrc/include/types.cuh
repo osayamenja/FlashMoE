@@ -390,8 +390,6 @@ namespace aristos{
         using TCM = cute::C<EC::value / BLOCK_M>;
         using TPX = cute::C<PX::value / BLOCK_N>;
         using TSZ = cute::C<TM::value * cute::min(TNx::value, PeakHardware::blocks::value)>;
-        using BSZ = cute::C<cute::ceil_div(E::value * ((E::value - 1) + cute::ceil_div(TCM::value * TNx::value, SUBSCRIBERS)),
-            sizeof(uint) * 8U) * SUBSCRIBERS>;
 
         // Scheduling state upper bound inside FFN
         using TMU = cute::C<128>;
@@ -777,7 +775,7 @@ namespace aristos{
     __inline__ auto aristosStream = cudaStreamPerThread;
 
     namespace heap {
-        // The symmetric heap is a 6-D tensor (P, S, C, E, EC) of tokens,
+        // The symmetric heap is a 5-D tensor (P, S, C, E, EC) of tokens,
         /// where P, S, C, E, EC denote dimensions for peers, communication stages,
         /// cells, experts, expert capacity, respectively.
         template<

@@ -32,9 +32,7 @@ namespace aristos::moe{
         constexpr auto d = Config::DTK::value;
         constexpr auto c = Config::CM::value;
         using Element = Config::Element;
-        using ActivationOp = Config::ActivationOp;
-        using ActivationOpX = Config::ActivationOpX;
-        using ElementC = GEA;
+        using ElementC = Config::ElementC;
 
         // Salami slice pointers
         const auto lE = bookkeeping.nLx;

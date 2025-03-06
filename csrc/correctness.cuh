@@ -7,6 +7,7 @@
 
 #include <torch/torch.h>
 #include "include/types.cuh"
+#include "include/debug.cuh"
 
 namespace aristos {
     __host__ __forceinline__
