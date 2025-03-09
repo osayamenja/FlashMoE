@@ -18,7 +18,8 @@ namespace aristos::moe{
         unsigned S = ACC::S::value,
         unsigned int P = ACC::P::value,
         unsigned int H = ACC::H::value,
-        unsigned int E = ACC::E::value
+        unsigned int E = ACC::E::value,
+        unsigned int PX = ACC::PX::value
     >
     __global__ __maxnreg__(ACC::PeakHardware::registers::value) void forward(
         const void* __restrict__ iP, /* A, G, B, D*/ void* __restrict__ oP /*G, O*/,
@@ -37,12 +38,12 @@ namespace aristos::moe{
         // Salami slice pointers
         const auto lE = bookkeeping.nLx;
         const auto* __restrict__ gP = CONST_CAST_TO(Element, iP) + S * H;
-        const auto* __restrict__ ePu = gP + H * E;
+        const auto* __restrict__ ePu = gP + H * PX;
         const auto* __restrict__ ePd = ePu + lE * P * H;
         const auto* __restrict__ bU = ePd + lE * H * P;
         const auto* __restrict__ bd = bU + lE * P;
         auto* __restrict__ gOp = CAST_TO(Element, oP);
-        auto* __restrict__ mOp = gOp + S * E;
+        auto* __restrict__ mOp = gOp + S * PX;
         __shared__ __align__(16) cuda::std::byte workspace[sharedSize];
         // wipe buffers before the grid-wide barrier
         const auto gtQCl = bookkeeping.gtQCl;
@@ -68,7 +69,7 @@ namespace aristos::moe{
                     cute::Layout<cute::Shape<cute::Int<S>, cute::Int<H>>,
                             cute::Stride<cute::Int<H>, cute::_1>>{});
         const auto gateWeights = make_tensor(cute::make_gmem_ptr(gP),
-            cute::Layout<cute::Shape<cute::Int<E>, cute::Int<H>>,
+            cute::Layout<cute::Shape<cute::Int<PX>, cute::Int<H>>,
                 cute::Stride<cute::Int<H>, cute::_1>>{});
         // Experts Weights
         const auto expertsUp = make_tensor(cute::make_gmem_ptr(ePu),
@@ -88,8 +89,8 @@ namespace aristos::moe{
 
         // Output
         const auto gateOutput = make_tensor(cute::make_gmem_ptr(gOp),
-            cute::Layout<cute::Shape<cute::Int<S>, cute::Int<E>>,
-                cute::Stride<cute::Int<E>, cute::_1>>{});
+            cute::Layout<cute::Shape<cute::Int<S>, cute::Int<PX>>,
+                cute::Stride<cute::Int<PX>, cute::_1>>{});
         const auto moeOutput = make_tensor(cute::make_gmem_ptr(mOp),
             cute::Layout<cute::Shape<cute::Int<S>, cute::Int<H>>,
                 cute::Stride<cute::Int<H>, cute::_1>>{});

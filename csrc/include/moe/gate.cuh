@@ -103,6 +103,7 @@ namespace aristos::gate {
             constexpr uint S = ACC::S::value;
             constexpr auto M = ACC::S::value;
             constexpr auto E = ACC::E::value;
+            constexpr auto H = ACC::H::value;
             constexpr auto jT = ACC::JT::value;
 
             static_assert(cuda::std::is_same_v<ElementC, mp_t>);
@@ -117,6 +118,7 @@ namespace aristos::gate {
             constexpr auto tilesM = M / bM;
             // padded to fill bN
             constexpr auto tilesN = cute::ceil_div(E, bN);
+            constexpr auto tilesK = H / bK;
 
             const auto tileCoord = idx2crd(tileIdx,
                 cute::Shape<cute::Int<tilesM>, cute::Int<tilesN>>{},
@@ -145,15 +147,14 @@ namespace aristos::gate {
             auto* __restrict__ tkXMailbox = gArg.rTp + nextTileOffset;
             RingTopKPayload rTp{};
 
-            auto k_tile_iter = cute::make_coord_iterator(size<2>(gA));
-            int k_tile_count = size<2>(gA);
+            auto k_tile_iter = cute::make_coord_iterator(tilesK);
 
             mainLoop(
                 accumulator,
                 gA,
                 gB,
                 accumulator,
-                k_tile_iter, k_tile_count,
+                k_tile_iter, tilesK,
                 cute::Underscore{},
                 threadIdx.x,
                 static_cast<char*>(static_cast<void*>(gateScratch)));
@@ -438,7 +439,6 @@ namespace aristos::gate {
             // Matrix dimensions
             constexpr auto M = ACC::S::value;
             constexpr auto K = ACC::H::value;
-            constexpr auto E = ACC::E::value;
             constexpr auto k = ACC::TK::value;
             constexpr auto jT = ACC::JT::value;
             static_assert(cuda::std::is_same_v<ElementC, float> && cuda::std::is_same_v<ElementC, mp_t>);
@@ -448,12 +448,12 @@ namespace aristos::gate {
             constexpr auto bM = cute::get<0>(typename BlockGEMM::BlockTiler{});
             constexpr auto bN = cute::get<1>(typename BlockGEMM::BlockTiler{});
             constexpr auto bK = cute::get<2>(typename BlockGEMM::BlockTiler{});
-            static_assert(E <= bN);
+            static_assert(ACC::E::value <= bN);
             static_assert(cute::size(accumulator) == bN);
             constexpr auto threads = BlockGEMM::GEMM::block_dim.x;
 
             constexpr auto tilesM = M / bM;
-            constexpr auto tilesN = cute::ceil_div(E, bN);
+            constexpr auto tilesN = 1U;
             constexpr auto tilesK = K / bK;
 
             const auto tileCoord = idx2crd(tileIdx,
@@ -467,14 +467,13 @@ namespace aristos::gate {
             static_assert(cuda::std::numeric_limits<ElementC>::is_iec559, "IEEE 754 required");
             static_assert(cuda::std::numeric_limits<ElementC>::has_infinity);
             auto k_tile_iter = cute::make_coord_iterator(tilesK);
-            int k_tile_count = tilesK;
 
             mainLoop(
                 accumulator,
                 gA,
                 gB,
                 accumulator,
-                k_tile_iter, k_tile_count,
+                k_tile_iter, tilesK,
                 cute::Underscore{},
                 threadIdx.x,
                 CAST_TO(char, gateScratch));
@@ -489,6 +488,7 @@ namespace aristos::gate {
             const auto sC = cute::make_tensor(cute::make_smem_ptr(gateScratch), sCLay{});
             typename BlockGEMM::MMA tiledMMA{};
             const auto tCsC = tiledMMA.get_slice(threadIdx.x).partition_C(sC);
+            constexpr auto abN = cute::min(bN, ACC::E::value);
 
             // Begin softmax
             // using notation from https://courses.cs.washington.edu/courses/cse599m/23sp/notes/flashattn.pdf
@@ -511,31 +511,22 @@ namespace aristos::gate {
                 }
             }
 
-            // Handle padding before softmax
-            #pragma unroll
-            for (uint i = E; i < bN; ++i) {
-                accumulator(i) = -cuda::std::numeric_limits<ElementC>::infinity();
-            }
-
             /// Softmax Reduction
             #pragma unroll
-            for (uint i = 0; i < bN; ++i) {
+            for (uint i = 0; i < abN; ++i) {
                 const auto pM = mI;
                 mI = max(mI, accumulator(i));
                 dI = fmaf(dI, __expf(pM - mI),__expf(accumulator(i) - mI));
             }
-
             #pragma unroll
-            for (uint i = 0; i < bN; ++i) {
-                accumulator(i) = __expf(accumulator(i) - mI) / dI;
+            for (uint i = 0; i < abN; ++i) {
+                accumulator(i) = __fdividef(__expf(accumulator(i) - mI), dI);
             }
 
-            // Online softmax is complete
-            // Eagerly write gate logits to global memory
             constexpr auto gCStoreOp = cutlass::NumericConverter<typename decltype(gC)::value_type,
                                                         typename decltype(accumulator)::value_type>{};
             #pragma unroll
-            for (unsigned int j = 0; j < bN; ++j) {
+            for (unsigned int j = 0; j < abN; ++j) {
                 gC(threadIdx.x, j) = gCStoreOp(accumulator(j));
             }
 
@@ -575,14 +566,14 @@ namespace aristos::gate {
             // Prep shared memory view tensors
             static_assert(sharedSize >= 16 * 1024);
             using TKT = cuda::std::conditional_t<sharedSize < threads * bN, uint16_t, uint>;
-            using CSL = cute::Layout<cute::Shape<cute::Int<bN>, cute::Int<threads>>>;
+            using CSL = cute::Layout<cute::Shape<cute::Int<abN>, cute::Int<threads>>>;
             const auto topK = cute::make_tensor(cute::make_smem_ptr(CAST_TO(TKT, gateScratch)), CSL{})
                 (cute::_, threadIdx.x);
-            cutlass::AlignedArray<uint, bN> rTopK{};
+            cutlass::AlignedArray<uint, abN> rTopK{};
             // Prior to reusing shared memory
             __syncthreads();
             #pragma unroll
-            for (uint i = 0; i < bN; ++i) {
+            for (uint i = 0; i < abN; ++i) {
                 topK[i] = 0U;
             }
             #pragma unroll
@@ -590,11 +581,11 @@ namespace aristos::gate {
                 auto sV = -cuda::std::numeric_limits<ElementC>::infinity();
                 uint sIdx = 0U;
                 #pragma unroll
-                for(uint j = 0; j < bN; ++j) {
+                for(uint j = 0; j < abN; ++j) {
                     rTopK[j] = topK[j];
                 }
                 #pragma unroll
-                for (uint j = 0; j < bN; ++j) {
+                for (uint j = 0; j < abN; ++j) {
                     if (accumulator(j) > sV && !rTopK[j]) {
                         sIdx = j;
                         sV = accumulator(j);
@@ -605,7 +596,7 @@ namespace aristos::gate {
             }
             // prefetch topK to registers, one last time :)
             #pragma unroll
-            for(uint j = 0; j < bN; ++j) {
+            for(uint j = 0; j < abN; ++j) {
                 rTopK[j] = topK[j];
             }
             // needed for reusing shared memory
@@ -616,12 +607,12 @@ namespace aristos::gate {
             static_assert(bM <= cuda::std::numeric_limits<uint>::max());
 
             uint cachedSelected = 0U;
-            cuda::std::array<uint, bN> myIndices{};
+            cuda::std::array<uint, abN> myIndices{};
             constexpr auto syncLimit = sharedSize / 1024;
             static_assert(sizeof(typename BlockScan::TempStorage) * syncLimit <= sharedSize);
             // scan down the column
             #pragma unroll
-            for (uint i = 0; i < bN; ++i) {
+            for (uint i = 0; i < abN; ++i) {
                 uint selected = 0U;
                 BlockScan(scanTempStorage[i % syncLimit]).InclusiveSum(rTopK[i], myIndices[i], selected);
                 cachedSelected = threadIdx.x == i ? selected : cachedSelected;
@@ -630,7 +621,7 @@ namespace aristos::gate {
                 }
             }
 
-            if (threadIdx.x < bN) {
+            if (threadIdx.x < abN) {
                 startIndices[threadIdx.x] = atomicAdd(gArg.eC + threadIdx.x, cachedSelected);
                 if constexpr (jT == JobType::training) {
                     constexpr auto S = ACC::S::value;
@@ -641,7 +632,7 @@ namespace aristos::gate {
             }
             __syncthreads();
             #pragma unroll
-            for (uint i = 0; i < bN; ++i) {
+            for (uint i = 0; i < abN; ++i) {
                 if (rTopK[i]) {
                     gArg.tP[startIndices[i] + myIndices[i] - 1] =
                         TokenIdxTuple{bM * cute::get<0>(tileCoord) + threadIdx.x, mCw};

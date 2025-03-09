@@ -37,9 +37,10 @@ void runOS() {
     constexpr auto H = aristos::ACC::H::value;
     constexpr auto E = aristos::ACC::E::value;
     constexpr auto P = aristos::ACC::P::value;
+    constexpr auto PX = aristos::ACC::PX::value;
 
     constexpr unsigned long aZ =  S * H;
-    constexpr auto gwZ = aZ + E * H;
+    constexpr auto gwZ = aZ + aristos::ACC::PX::value * H;
     constexpr auto bZ =  gwZ + P * H;
     constexpr auto b2Z =  bZ + P * H;
     constexpr auto dZ =  b2Z + cute::max(P, H);
@@ -49,12 +50,12 @@ void runOS() {
     CHECK_ERROR_EXIT(cudaMallocAsync(&p, cZ * sizeof(float), aristos::aristosStream));
     auto* hP = std::calloc(dZ, sizeof(float));
     auto* fHp = static_cast<float*>(hP);
-    using Element = cute::tfloat32_t;
+    using Element = aristos::ACC::Element;
     auto* __restrict__ eHp = static_cast<Element*>(hP);
     // Activations
     std::ranges::fill(fHp, fHp + aZ, 1.0f);
     // gate weights
-    std::ranges::fill(fHp + aZ, fHp + gwZ, 1.0f);
+    std::ranges::fill(fHp + aZ, fHp + aZ + E * H, 1.0f);
     // Expert weights
     makeIdentity<P, H>(fHp + gwZ);
     makeIdentity<P, H>(fHp + bZ);
@@ -81,8 +82,10 @@ void runOS() {
         cudaMemcpyDeviceToHost, aristos::aristosStream));
     CHECK_ERROR_EXIT(cudaFreeAsync(p, aristos::aristosStream));
     aristos::finalize();
-    const auto o = torch::from_blob(eHp, {S, E}, options);
-    std::cout << o << std::endl;
+    const auto o = make_tensor(eHp,
+        cute::Layout<cute::Shape<cute::Int<S>, cute::Int<aristos::ACC::PX::value>>,
+            cute::Stride<cute::Int<aristos::ACC::PX::value>, cute::_1>>{});
+    print_tensor(o);
 
     /*using clk = std::chrono::high_resolution_clock;
     std::chrono::duration<float> end {};
