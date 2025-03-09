@@ -52,7 +52,7 @@ namespace aristos{
         if (!predicate) {
             fprintf(stderr, "<%s:%d>: %s", __FILE__, __LINE__, msg.c_str());
             fflush(stderr);
-            exit(1);
+            std::quick_exit(EXIT_FAILURE);
         }
     }
 

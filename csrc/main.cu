@@ -2,10 +2,10 @@
  * Copyright (c) 2024, Osayamen Jonathan Aimuyo.
  ******************************************************************************/
 #include <thrust/host_vector.h>
+#include <torch/torch.h>
 
 #include "include/bootstrap.cuh"
 #include "include/moe/moe.cuh"
-#include "correctness.cuh"
 template<unsigned int M, unsigned int N = M>
 requires(M > 0 && cutlass::is_pow2<M>::value && M == N)
 __host__ __forceinline__
@@ -37,28 +37,62 @@ void runOS() {
     constexpr auto H = aristos::ACC::H::value;
     constexpr auto E = aristos::ACC::E::value;
     constexpr auto P = aristos::ACC::P::value;
-    constexpr auto dZ = S * H + P * H + cute::max(P, H) + E * H + S * E + S * H;
-    void* p;
-    CHECK_ERROR_EXIT(cudaMallocAsync(&p, dZ * sizeof(float), aristos::aristosStream));
 
-    thrust::host_vector<float> activations(S * aristos::ACC::H::value);
-    fill(activations.begin(), activations.end(), 1.0f);
-    thrust::host_vector<float> expertWeights(2 * aristos::ACC::P::value * aristos::ACC::H::value);
-    makeIdentity<aristos::ACC::P::value, aristos::ACC::H::value>(expertWeights.data());
-    thrust::host_vector<float> bias(cute::max(aristos::ACC::P::value, aristos::ACC::H::value));
-    fill(bias.begin(), bias.end(), 0.0f);
-    thrust::host_vector<float> gateWeights(aristos::ACC::H::value * aristos::ACC::E::value);
-    fill(gateWeights.begin(), gateWeights.end(), 1.0f);
+    constexpr unsigned long aZ =  S * H;
+    constexpr auto gwZ = aZ + E * H;
+    constexpr auto bZ =  gwZ + P * H;
+    constexpr auto b2Z =  bZ + P * H;
+    constexpr auto dZ =  b2Z + cute::max(P, H);
+    constexpr auto gZ = dZ + S * aristos::ACC::PX::value;
+    constexpr auto cZ = gZ + S * H;
+    cuda::std::byte* p;
+    CHECK_ERROR_EXIT(cudaMallocAsync(&p, cZ * sizeof(float), aristos::aristosStream));
+    auto* hP = std::calloc(dZ, sizeof(float));
+    auto* fHp = static_cast<float*>(hP);
+    using Element = cute::tfloat32_t;
+    auto* __restrict__ eHp = static_cast<Element*>(hP);
+    // Activations
+    std::ranges::fill(fHp, fHp + aZ, 1.0f);
+    // gate weights
+    std::ranges::fill(fHp + aZ, fHp + gwZ, 1.0f);
+    // Expert weights
+    makeIdentity<P, H>(fHp + gwZ);
+    makeIdentity<P, H>(fHp + bZ);
+    // bias
+    std::ranges::fill(fHp + b2Z, fHp + dZ, 0.0f);
+    const auto options = torch::TensorOptions().dtype(torch::kFloat32).
+    layout(torch::kStrided).device(torch::kCPU);
+    const auto a = torch::from_blob(fHp, {S, H}, options);
+    const auto g = torch::from_blob(fHp + aZ, {H, E}, options);
+    // torch reference of the gate function
+    std::cout << softmax(matmul(a, g), 1) << std::endl;
 
-    using clk = std::chrono::high_resolution_clock;
+    constexpr cutlass::NumericConverter<Element, float> conv{};
+    for (uint i = 0; i < dZ; ++i) {
+        eHp[i] = conv(fHp[i]);
+    }
+    CHECK_ERROR_EXIT(cudaMemcpyAsync(p, eHp, sizeof(Element) * dZ, cudaMemcpyHostToDevice,
+        aristos::aristosStream));
+    aristos::initialize();
+    aristos::moe::forwardHost(p, p + dZ * sizeof(Element));
+    CHECK_ERROR_EXIT(cudaPeekAtLastError());
+    CHECK_ERROR_EXIT(cudaMemcpyAsync(eHp, p + dZ * sizeof(Element),
+        sizeof(Element) * (S * aristos::ACC::PX::value),
+        cudaMemcpyDeviceToHost, aristos::aristosStream));
+    CHECK_ERROR_EXIT(cudaFreeAsync(p, aristos::aristosStream));
+    aristos::finalize();
+    const auto o = torch::from_blob(eHp, {S, E}, options);
+    std::cout << o << std::endl;
+
+    /*using clk = std::chrono::high_resolution_clock;
     std::chrono::duration<float> end {};
     const auto start = clk::now();
     aristos::initialize();
     printf("Number of local experts is %u\n", aristos::hostBookkeeping.nLx);
     end = clk::now() - start;
     printf("Initialize takes %fms\n", end.count() * 1000);
-    aristos::finalize();
-    CHECK_ERROR_EXIT(cudaFreeAsync(p, aristos::aristosStream));
+    aristos::finalize();*/
+    std::free(hP);
 }
 
 int main() {

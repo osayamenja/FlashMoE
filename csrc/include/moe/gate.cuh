@@ -80,8 +80,7 @@ namespace aristos::gate {
     /// Supporting the latter is trivial; the former requires a completely new algorithm
     template<
         GateReductionLevel g,
-        typename BlockGEMM,
-        typename GPUType
+        typename BlockGEMM
     >
     struct FusedGate {
         static_assert(g == GateReductionLevel::multiBlock);
@@ -91,8 +90,8 @@ namespace aristos::gate {
             typename MatrixC,
             typename GArg,
             typename ElementC,
-            unsigned int elems = GPUType::rScratch::value,
-            unsigned int sharedSize = GPUType::sharedMemory::value
+            unsigned int elems = ACC::PeakHardware::rScratch::value,
+            unsigned int sharedSize = ACC::PeakHardware::sharedMemory::value
         >
         __device__ __forceinline__
         void operator()(
@@ -280,17 +279,12 @@ namespace aristos::gate {
 
             // Now do online top-k mask
             // Prep shared memory view tensors
-            constexpr auto tkTiler = cute::Shape<cute::_2, cute::Int<bN>>{};
-            // Ensures enough bytes per thread
-            static_assert(sharedSize / threads >= cute::size(tkTiler));
-            static_assert(cute::get<1>(sC.shape()) * (sizeof(typename decltype(sC)::value_type) / sizeof(uint8_t))
-                >= cute::size(tkTiler));
-            const auto tK = cute::make_tensor(cute::make_smem_ptr(CAST_TO(uint8_t, gateScratch)),
-                cute::Layout<cute::Shape<cute::Int<bM>, cute::Int<cute::size(tkTiler)>>>{});
-            // Get thread-owned slices: first for topK
-            const auto topK = cute::local_tile(tK, tkTiler,
-                cute::crd2idx(cute::make_coord(threadIdx.x, 0), tK.layout()));
-            cuda::std::array<uint8_t, bN> rTopK{};
+            static_assert(sharedSize >= 16 * 1024);
+            using TKT = cuda::std::conditional_t<sharedSize < threads * bN, uint16_t, uint>;
+            using CSL = cute::Layout<cute::Shape<cute::Int<bN>, cute::Int<threads>>>;
+            const auto topK = cute::make_tensor(cute::make_smem_ptr(CAST_TO(TKT, gateScratch)), CSL{})
+                (cute::_, threadIdx.x);
+            cuda::std::array<uint, bN> rTopK{};
             __syncthreads();
             #pragma unroll
             for (uint i = 0; i < bN; ++i) {
@@ -382,21 +376,25 @@ namespace aristos::gate {
 
             // needed for reusing shared memory
             __syncthreads();
-            using BlockScan = cub::BlockScan<uint8_t, threads>;
-            static_assert(sizeof(typename BlockScan::TempStorage) * bN <= sharedSize);
+            using BlockScan = cub::BlockScan<uint, threads>;
             auto* __restrict__ scanTempStorage = CAST_TO(typename BlockScan::TempStorage, gateScratch);
             auto* __restrict__ startIndices = CAST_TO(uint, scanTempStorage + bN);
-            // Ensures we can safely use uint8_t without any concern for overflow
-            static_assert(bM <= cuda::std::numeric_limits<uint8_t>::max());
+            // Ensures we can safely use without any concern for overflow
+            static_assert(bM <= cuda::std::numeric_limits<uint>::max());
 
-            uint8_t cachedSelected = 0U;
-            cuda::std::array<uint8_t, bN> myIndices{};
+            constexpr auto syncLimit = sharedSize / 1024;
+            static_assert(sizeof(typename BlockScan::TempStorage) * syncLimit <= sharedSize);
+            uint cachedSelected = 0U;
+            cuda::std::array<uint, bN> myIndices{};
             // scan down the column
             #pragma unroll
             for (uint i = 0; i < bN; ++i) {
-                uint8_t selected = 0U;
-                BlockScan(scanTempStorage[i]).InclusiveSum(rTopK[i], myIndices[i], selected);
+                uint selected = 0U;
+                BlockScan(scanTempStorage[i % syncLimit]).InclusiveSum(rTopK[i], myIndices[i], selected);
                 cachedSelected = threadIdx.x == i ? selected : cachedSelected;
+                if (i > 0 && i % syncLimit == 0) {
+                    __syncthreads();
+                }
             }
 
             if (threadIdx.x < bN) {
@@ -419,18 +417,17 @@ namespace aristos::gate {
 
     // Special, nice case where N <= BLOCK_N
     template<
-        typename BlockGEMM,
-        typename GPUType
+        typename BlockGEMM
     >
-    struct FusedGate<GateReductionLevel::singleBlock, BlockGEMM, GPUType> {
+    struct FusedGate<GateReductionLevel::singleBlock, BlockGEMM> {
         template<
             typename MatrixA,
             typename MatrixB,
             typename MatrixC,
             typename GArg,
             typename ElementC,
-            unsigned int elems = GPUType::rScratch::value,
-            unsigned int sharedSize = GPUType::sharedMemory::value
+            unsigned int elems = ACC::PeakHardware::rScratch::value,
+            unsigned int sharedSize = ACC::PeakHardware::sharedMemory::value
         >
         __device__ __forceinline__
         void operator()(const MatrixA& activations,
@@ -488,8 +485,8 @@ namespace aristos::gate {
             constexpr auto trips = bN / elems;
 
             // Transposed layout in shared memory to minimize bank conflicts
-            constexpr auto sCLay = cute::make_layout(cute::Shape<cute::Int<bM>, cute::Int<elems>>{});
-            const auto sC = cute::make_tensor(cute::make_smem_ptr(gateScratch), sCLay);
+            using sCLay = cute::Layout<cute::Shape<cute::Int<bM>, cute::Int<elems>>>;
+            const auto sC = cute::make_tensor(cute::make_smem_ptr(gateScratch), sCLay{});
             typename BlockGEMM::MMA tiledMMA{};
             const auto tCsC = tiledMMA.get_slice(threadIdx.x).partition_C(sC);
 
@@ -530,7 +527,7 @@ namespace aristos::gate {
 
             #pragma unroll
             for (uint i = 0; i < bN; ++i) {
-                accumulator(i) = __fdividef(__expf(accumulator(i) - mI), dI);
+                accumulator(i) = __expf(accumulator(i) - mI) / dI;
             }
 
             // Online softmax is complete
@@ -576,18 +573,12 @@ namespace aristos::gate {
             auto mCw = ElementC(0);
             // Now do online top-k mask
             // Prep shared memory view tensors
-            constexpr auto tkTiler = cute::Shape<cute::_2, cute::Int<bN>>{};
-            // Ensures enough bytes per thread
-            static_assert(sharedSize / threads >= cute::size(tkTiler));
-            static_assert(cute::get<1>(sC.shape()) * (sizeof(typename decltype(sC)::value_type) / sizeof(uint8_t))
-                >= cute::size(tkTiler));
-            const auto tK = cute::make_tensor(cute::make_smem_ptr(CAST_TO(uint8_t, gateScratch)),
-                cute::Layout<cute::Shape<cute::Int<bM>, cute::Int<cute::size(tkTiler)>>>{});
-
-            // Get thread-owned slices: first for topK
-            const auto topK = cute::local_tile(tK, tkTiler,
-                cute::crd2idx(cute::make_coord(threadIdx.x, 0), tK.layout()));
-            cuda::std::array<uint8_t, bN> rTopK{};
+            static_assert(sharedSize >= 16 * 1024);
+            using TKT = cuda::std::conditional_t<sharedSize < threads * bN, uint16_t, uint>;
+            using CSL = cute::Layout<cute::Shape<cute::Int<bN>, cute::Int<threads>>>;
+            const auto topK = cute::make_tensor(cute::make_smem_ptr(CAST_TO(TKT, gateScratch)), CSL{})
+                (cute::_, threadIdx.x);
+            cutlass::AlignedArray<uint, bN> rTopK{};
             // Prior to reusing shared memory
             __syncthreads();
             #pragma unroll
@@ -595,7 +586,7 @@ namespace aristos::gate {
                 topK[i] = 0U;
             }
             #pragma unroll
-            for (uint16_t i = 0; i < k; ++i) {
+            for (uint i = 0; i < k; ++i) {
                 auto sV = -cuda::std::numeric_limits<ElementC>::infinity();
                 uint sIdx = 0U;
                 #pragma unroll
@@ -619,21 +610,24 @@ namespace aristos::gate {
             }
             // needed for reusing shared memory
             __syncthreads();
-            using BlockScan = cub::BlockScan<uint8_t, threads>;
-            static_assert(sizeof(typename BlockScan::TempStorage) * bN <= sharedSize);
-            auto* __restrict__ scanTempStorage = CAST_TO(typename BlockScan::TempStorage, gateScratch);
-            auto* __restrict__ startIndices = CAST_TO(uint, scanTempStorage + bN);
-            // Ensures we can safely use uint8_t without any concern for overflow
-            static_assert(bM <= cuda::std::numeric_limits<uint8_t>::max());
+            using BlockScan = cub::BlockScan<uint, threads>;
+            auto* __restrict__ startIndices = CAST_TO(uint, gateScratch);
+            auto* __restrict__ scanTempStorage = CAST_TO(typename BlockScan::TempStorage, startIndices + bN);
+            static_assert(bM <= cuda::std::numeric_limits<uint>::max());
 
-            uint8_t cachedSelected = 0U;
-            cuda::std::array<uint8_t, bN> myIndices{};
+            uint cachedSelected = 0U;
+            cuda::std::array<uint, bN> myIndices{};
+            constexpr auto syncLimit = sharedSize / 1024;
+            static_assert(sizeof(typename BlockScan::TempStorage) * syncLimit <= sharedSize);
             // scan down the column
             #pragma unroll
             for (uint i = 0; i < bN; ++i) {
-                uint8_t selected = 0U;
-                BlockScan(scanTempStorage[i]).InclusiveSum(rTopK[i], myIndices[i], selected);
+                uint selected = 0U;
+                BlockScan(scanTempStorage[i % syncLimit]).InclusiveSum(rTopK[i], myIndices[i], selected);
                 cachedSelected = threadIdx.x == i ? selected : cachedSelected;
+                if (i > 0 && i % syncLimit == 0) {
+                    __syncthreads();
+                }
             }
 
             if (threadIdx.x < bN) {
@@ -688,7 +682,7 @@ namespace aristos::gate {
         constexpr auto threads = Operation::GEMM::block_dim.x;
         constexpr auto bM = cute::get<0>(ctaTiler{});
         constexpr auto bN = cute::get<1>(ctaTiler{});
-        FusedGate<g, Operation, GPUType> fusedGate{};
+        FusedGate<g, Operation> fusedGate{};
 
         constexpr auto nT = ACC::TN::value * ACC::TPX::value;
         #pragma unroll

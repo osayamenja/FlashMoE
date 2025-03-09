@@ -95,7 +95,7 @@ namespace aristos::moe{
                 cute::Stride<cute::Int<H>, cute::_1>>{});
 
         gate::forward(activations, gateWeights, gateOutput, CAST_TO(ElementC, workspace));
-        if (blockIdx.x + 1 < blocks) {
+        /*if (blockIdx.x + 1 < blocks) {
             constexpr auto cutoff = processors / ARISTOS_SUPER_BLOCK_SIZE * ARISTOS_SUPER_BLOCK_SIZE;
             if (blockIdx.x < cutoff) {
                 packet::encode<cutoff, d, ARISTOS_SUPER_BLOCK_SIZE>(activations, workspace, sb);
@@ -104,18 +104,17 @@ namespace aristos::moe{
         }
         else {
             os::start<processors, d>(workspace, moeOutput, expertsUp, expertsDown, biasUp, biasDown, sb);
-        }
+        }*/
     }
 
     __host__ __forceinline__
     void forwardHost(const void* __restrict__ iP, void* __restrict__ oP){
-        //reportError(isInitialized, "Not initialized");
+        reportError(isInitialized, "Not initialized!");
         CHECK_ERROR_EXIT(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
 
         /// Consume precompiled macros
-        constexpr auto blocks = ACC::PeakHardware::OS::processorBlocks::value;
+        constexpr auto blocks = ACC::PeakHardware::blocks::value;
         constexpr auto threads = ACC::PeakHardware::OS::threads::value;
-
         // Call forward pass
         if constexpr (ACC::E::value > 1) {
             moe::forward<<<blocks, threads, 0, aristosStream>>>(iP, oP, seqBit);
@@ -127,7 +126,6 @@ namespace aristos::moe{
         if (seqBit == cuda::std::numeric_limits<decltype(seqBit)>::max()) {
             syncAll<<<ACC::SYB::value, ACC::PeakHardware::OS::threads::value, 0, aristosStream>>>(
                 hostBookkeeping.pLI(), hostBookkeeping.rank, hostBookkeeping.world);
-            CHECK_ERROR_EXIT(cudaStreamSynchronize(aristosStream));
         }
         // The below wrapping around to zero is fine due to the sync above
         seqBit++;

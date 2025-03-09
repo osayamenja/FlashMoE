@@ -13,7 +13,7 @@
 #include "debug.cuh"
 #include "moe/expert.cuh"
 #include "types.cuh"
-#define TIME_EXPERT 1
+#define TIME_EXPERT 0
 namespace aristos {
     template<
         UseBarrier u = UseBarrier::no,

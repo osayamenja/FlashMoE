@@ -30,7 +30,7 @@ namespace aristos {
         using OperationX = BlockMM<ACC::ActivationOpX, Element>;
 
         // we require M, N, K to be evenly divisible by corresponding block tiling dimensions
-        const auto tilesM = M / cute::get<0>(typename Operation::TilerOut{});
+        constexpr auto tilesM = M / cute::get<0>(typename Operation::TilerOut{});
         constexpr auto tilesN = N / cute::get<1>(typename Operation::TilerOut{});
         constexpr auto tilesK = K / cute::get<1>(typename Operation::TilerOut{});
         constexpr auto tiles = tilesM * tilesN;

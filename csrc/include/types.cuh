@@ -388,6 +388,7 @@ namespace aristos{
         using TN = cute::C<P::value / BLOCK_N>;
         using TNx = cute::C<H::value / BLOCK_N>;
         using TCM = cute::C<EC::value / BLOCK_M>;
+        static_assert(TCM::value <= cuda::std::numeric_limits<uint16_t>::max());
         using TPX = cute::C<PX::value / BLOCK_N>;
         using TSZ = cute::C<TM::value * cute::min(TNx::value, PeakHardware::blocks::value)>;
 
