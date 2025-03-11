@@ -215,7 +215,7 @@ namespace aristos{
         auto* aP = CAST_TO(floatPair, experts + E);
         static_assert(alignof(floatPair) % alignof(WorkerAttribute) == 0);
         auto* wAp = CAST_TO(WorkerAttribute, aP + aD);
-        static_assert(alignof(WorkerAttribute) % alignof(EDT) == 0);
+        static_assert(alignof(WorkerAttribute) % alignof(uint) == 0);
         auto* dTg = CAST_TO(uint, wAp + globalWorld);
 
         // Result buffers

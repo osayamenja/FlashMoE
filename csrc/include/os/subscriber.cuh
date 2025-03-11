@@ -123,7 +123,7 @@ namespace aristos::subscriber{
             uint* __restrict__ bitSet,
             const packet::DecoderArg& dA,
             /// Task Arguments
-            const TokenIdxTuple* const& tokenIds,
+            const TPS* const& tokenIds,
             cuda::std::byte* const& mO,
             /// Data Structures
             const uint* __restrict__ const& tileIndices,

@@ -38,14 +38,13 @@ void runOS() {
     constexpr auto E = aristos::ACC::E::value;
     constexpr auto P = aristos::ACC::P::value;
     constexpr auto PX = aristos::ACC::PX::value;
-
     constexpr unsigned long aZ =  S * H;
-    constexpr auto gwZ = aZ + aristos::ACC::PX::value * H;
+    constexpr auto gwZ = aZ + PX * H;
     // scale this to number of experts
     constexpr auto bZ =  gwZ + P * H;
     constexpr auto b2Z =  bZ + P * H;
     constexpr auto dZ =  b2Z + cute::max(P, H);
-    constexpr auto gZ = dZ + S * aristos::ACC::PX::value;
+    constexpr auto gZ = dZ + S * PX;
     constexpr auto cZ = gZ + S * H;
     cuda::std::byte* p;
     CHECK_ERROR_EXIT(cudaMallocAsync(&p, cZ * sizeof(float), aristos::aristosStream));
@@ -63,12 +62,12 @@ void runOS() {
     makeIdentity<P, H>(fHp + bZ);
     // bias
     std::ranges::fill(fHp + b2Z, fHp + dZ, 0.0f);
-    const auto options = torch::TensorOptions().dtype(torch::kFloat32).
+    /*const auto options = torch::TensorOptions().dtype(torch::kFloat32).
     layout(torch::kStrided).device(torch::kCPU);
     const auto a = torch::from_blob(fHp, {S, H}, options);
     const auto g = torch::from_blob(fHp + aZ, {H, E}, options);
     // torch reference of the gate function
-    std::cout << softmax(matmul(a, g), 1) << std::endl;
+    std::cout << softmax(matmul(a, g), 1) << std::endl;*/
 
     constexpr cutlass::NumericConverter<Element, float> conv{};
     for (uint i = 0; i < dZ; ++i) {
@@ -79,15 +78,20 @@ void runOS() {
     aristos::initialize();
     aristos::moe::forwardHost(p, p + dZ * sizeof(Element));
     CHECK_ERROR_EXIT(cudaPeekAtLastError());
-    CHECK_ERROR_EXIT(cudaMemcpyAsync(eHp, p + dZ * sizeof(Element),
-        sizeof(Element) * (S * aristos::ACC::PX::value),
+    CHECK_ERROR_EXIT(cudaMemcpyAsync(eHp, p + dZ * sizeof(Element), sizeof(Element) * (S * PX),
         cudaMemcpyDeviceToHost, aristos::aristosStream));
+    cuda::std::array<aristos::TPS, aristos::ACC::S::value> b{};
+    CHECK_ERROR_EXIT(cudaMemcpyAsync(b.data(), aristos::hostBookkeeping.tP(),
+        sizeof(aristos::TPS) * b.size(), cudaMemcpyDeviceToHost,
+        aristos::aristosStream));
     CHECK_ERROR_EXIT(cudaFreeAsync(p, aristos::aristosStream));
     aristos::finalize();
-    const auto o = make_tensor(eHp,
-        cute::Layout<cute::Shape<cute::Int<S>, cute::Int<aristos::ACC::PX::value>>,
-            cute::Stride<cute::Int<aristos::ACC::PX::value>, cute::_1>>{});
+    /*const auto o = make_tensor(eHp,
+        cute::Layout<cute::Shape<cute::Int<S>, cute::Int<PX>>, cute::Stride<cute::Int<PX>, cute::_1>>{});
     print_tensor(o);
+    for (const auto &[idx, p] : b) {
+        printf("{idx: %u, p: %f}\n", idx, p);
+    }*/
 
     /*using clk = std::chrono::high_resolution_clock;
     std::chrono::duration<float> end {};

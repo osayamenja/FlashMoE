@@ -91,29 +91,5 @@ namespace aristos {
         << std::endl;*/
         CHECK_LAST();
     }
-    /*__host__ __forceinline__
-    void startAristos() {
-        using Element = cute::tfloat32_t;
-        // GPT3-MoE 1.3B
-        const auto iC = aristos::InitialConfig{
-            50 * 1024,
-            24,
-            512,
-            4,
-            2,
-            2048,
-            2048,
-            2048 * 4,
-            1,
-            1,
-            16,
-            true,
-            aristos::ActivationFunction::ReLu,
-            true,
-        };
-        aristos::initialize(iC, torch::kFloat32);
-        //aristos::moe::forwardHost();
-        aristos::finalize();
-    }*/
 }
 #endif //CORRECTNESS_CUH

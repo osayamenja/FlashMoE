@@ -416,7 +416,10 @@ namespace aristos{
     constexpr bool isRegisterV = isRegister<T>::value;
 
     // Index and gate combine weight
-    using TokenIdxTuple = cuda::std::pair<unsigned int, mp_t>;
+    struct __align__(8) TPS {
+        uint tokenIdx;
+        mp_t probability;
+    };
 
     enum class TaskType : uint8_t {
         preGEMM,
@@ -504,7 +507,6 @@ namespace aristos{
     /// Information about auxiliary data structures comprising bookkeeping state
     /// Includes length of data structures (arrays) and pointer arithmetic functions
     using BookType = unsigned int;
-    using EDT = cuda::std::tuple<uint, uint, uint>;
     struct __align__(16) Bookkeeping {
         /// needed for free
         cuda::std::byte* symHeap = nullptr;
@@ -522,13 +524,13 @@ namespace aristos{
         /// Block Ring Softmax flags in bytes, non-cumulative
         unsigned int brs = 0UL;
         /// EP rank
-        uint16_t rank = 0U;
+        uint rank = 0U;
         /// EP world
-        uint16_t world = 0U;
+        uint world = 0U;
         /// number of local experts
-        uint16_t nLx = 0U;
+        uint nLx = 0U;
         /// expert slots
-        uint16_t xs = 0U;
+        uint xs = 0U;
 
         __host__ __device__ __forceinline__
         Bookkeeping() = default;
@@ -539,10 +541,10 @@ namespace aristos{
             flagsType* const& _flags,
             cuda::std::byte* const& _sHeap,
             cuda::std::byte* const& _book,
-            const uint16_t& _nLx, // dynamically decided by an optimization algorithm
-            const uint16_t& _rank,
-            const uint16_t& _world,
-            const uint16_t& _xS) : symHeap(_symHeap),
+            const uint& _nLx, // dynamically decided by an optimization algorithm
+            const uint& _rank,
+            const uint& _world,
+            const uint& _xS) : symHeap(_symHeap),
             syncArray(_sA), syncCount(_sA + _world), flags(_flags), sHeap(_sHeap), book(_book), rank(_rank),
             world(_world), nLx(_nLx), xs(_xS){
             constexpr auto TCM = ACC::TCM::value;
@@ -563,11 +565,11 @@ namespace aristos{
                 tPs = cute::ceil_div(sT, SUBSCRIBERS);
                 sT = tPs * SUBSCRIBERS;
                 tQl = sizeof(Task) * (sT + prT);
-                tQml = tQl + blocks * sizeof(TQSignal) + E * sizeof(PEL); // processor doorbells
+                tQml = tQl + blocks * sizeof(TQSignal) + E * sizeof(PEL) + sizeof(TPS) * (PX * EC);
                 brs = tQml + (ACC::GRL::value == GateReductionLevel::singleBlock ? 0U : S * TPX *
                     (sizeof(RingSoftmaxPayload) + 2 * sizeof(RingTopKPayload)));
                 tQXt = brs + sizeof(ELI) * E + sizeof(cuda::barrier<cuda::thread_scope_device>) + sizeof(PLI) * world;
-                gRl = tQXt + sizeof(TokenIdxTuple) * (PX * EC) + (ACC::JT::value == JobType::inference ? 0U :
+                gRl = tQXt + (ACC::JT::value == JobType::inference ? 0U :
                     sizeof(mp_t) * (2 * E + 1));
                 eDsA = gRl + sizeof(BookType) * (2 * E + 1);
                 sBfC = eDsA + sizeof(BookType) * 2 * (world * nLx * TCM) + blocks + TCM * TN * E;
@@ -594,12 +596,12 @@ namespace aristos{
             const auto tPs = cute::ceil_div(sT, SUBSCRIBERS);
             sT = tPs * SUBSCRIBERS;
             const auto tQl = sizeof(Task) * (sT + prT);
-            const auto tQml = tQl + blocks * sizeof(TQSignal) + E * sizeof(PEL); // processor doorbells
+            const auto tQml = tQl + blocks * sizeof(TQSignal) + E * sizeof(PEL) + sizeof(TPS) * (PX * EC);
             const auto brs = tQml + (ACC::GRL::value == GateReductionLevel::singleBlock ? 0U :
                 S * TPX * (sizeof(RingSoftmaxPayload) + 2 * sizeof(RingTopKPayload)));
             const auto tQXt = brs + sizeof(ELI) * E + sizeof(cuda::barrier<cuda::thread_scope_device>) +
                 sizeof(PLI) * _world;
-            const auto gRl = tQXt + sizeof(TokenIdxTuple) * (PX * EC) +
+            const auto gRl = tQXt +
                 (ACC::JT::value == JobType::inference ? 0U : sizeof(mp_t) * (2 * E + 1));
             const auto eDsA = gRl + sizeof(BookType) * (2 * E + 1);
             const auto sBfC = eDsA +
@@ -637,11 +639,17 @@ namespace aristos{
         auto* pEL() const {
             return CAST_TO(PEL, book + tQl);
         }
-        static_assert(alignof(PEL) % alignof(TQSignal) == 0);
+        static_assert(alignof(PEL) % alignof(TPS) == 0);
+        __host__ __device__ __forceinline__
+        auto* tP() const {
+            return CAST_TO(TPS, pEL() + ACC::E::value);
+        }
+        static_assert(alignof(TPS) % alignof(TQSignal) == 0);
         /// processors' doorbell
         __device__ __forceinline__
         auto* pDB() const {
-            return CAST_TO(TQSignal, book + tQl + sizeof(PEL) * ACC::E::value);
+            return CAST_TO(TQSignal, book + (tQl + sizeof(PEL) * ACC::E::value
+                + ACC::PX::value * ACC::EC::value));
         }
 
         static_assert(alignof(ull_t) % alignof(RingSoftmaxPayload) == 0
@@ -685,17 +693,11 @@ namespace aristos{
             return CAST_TO(PLI, eL() + ACC::E::value);
         }
 
-        static_assert(alignof(PLI) % alignof(TokenIdxTuple) == 0);
-        __device__ __forceinline__
-        auto* tP() const {
-            return CAST_TO(TokenIdxTuple, book + tQXt);
-        }
-
-        static_assert(alignof(TokenIdxTuple) % alignof(mp_t) == 0);
+        static_assert(alignof(PLI) % alignof(mp_t) == 0);
         /// Gate mean logits
         __device__ __forceinline__
         auto* gML() const {
-            return CAST_TO(mp_t, tP() + ACC::PX::value * ACC::EC::value);
+            return CAST_TO(mp_t, book + tQXt);
         }
         /// Gate mean expert counts
         __device__ __forceinline__

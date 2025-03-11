@@ -25,7 +25,7 @@ namespace aristos::processor{
             cuda::std::is_same_v<typename ScaleWeights::value_type, Element>)
     __device__ __forceinline__
     void combine(Element* __restrict__ const& workspace,
-            const TokenIdxTuple* __restrict__ const& tokenIndices,
+            const TPS* __restrict__ const& tokenIndices,
             const Element* __restrict__ const& inputs,
             Element* __restrict__ const& moeOutput,
             ScaleWeights const& scale,
@@ -39,15 +39,7 @@ namespace aristos::processor{
         constexpr auto bN = cute::get<1>(tiler);
         cutlass::AlignedArray<Element, bN> registers{};
         // Eagerly issue gmem read.
-        auto [tokenIdx, combineWeight] = TokenIdxTuple{};
-        auto scaleWeight = Element(0);
-        constexpr auto mTe = cutlass::NumericConverter<Element, TokenIdxTuple::second_type>{};
-        if (threadIdx.x < tileSize) {
-            const auto t = tokenIndices[threadIdx.x];
-            tokenIdx = t.first;
-            combineWeight = t.second;
-            scaleWeight = scale(tokenIdx, expertIdx) / mTe(combineWeight);
-        }
+        constexpr auto mTe = cutlass::NumericConverter<Element, mp_t>{};
         // Row-major
         const auto mA = make_tensor(cute::make_gmem_ptr(inputs),
             make_layout(cute::make_shape(M, N), cute::LayoutRight{}));
@@ -84,6 +76,8 @@ namespace aristos::processor{
 
         constexpr VAA<Arch, Element> vaa{};
         if (threadIdx.x < tileSize) {
+            const auto [tokenIdx, combineWeight] = tokenIndices[threadIdx.x];
+            const auto scaleWeight = scale(tokenIdx, expertIdx) / mTe(combineWeight);
             // do scale
             if constexpr (c == CombineMode::multithreaded) {
                 #pragma unroll
@@ -540,7 +534,7 @@ namespace aristos::processor{
                     break;
                     case TaskType::combine: {
                         combine<ACC::CM::value>(CAST_TO(typename PostGEMM::MatrixDType, workspace),
-                            CONST_CAST_TO(TokenIdxTuple, rCurrentTask.aData),
+                            CONST_CAST_TO(TPS, rCurrentTask.aData),
                             CONST_CAST_TO(typename PostGEMM::MatrixAType, rCurrentTask.bData[0]),
                             CAST_TO(typename PostGEMM::MatrixDType, rCurrentTask.cData[0]),
                             sW,

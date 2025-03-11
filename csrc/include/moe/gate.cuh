@@ -19,10 +19,10 @@ namespace aristos::gate {
     >
     struct GateArgs {
         static_assert(g == GateReductionLevel::singleBlock && j == JobType::inference);
-        TokenIdxTuple* __restrict__ tP;
+        TPS* __restrict__ tP;
         BookType* __restrict__ eC;
         __device__
-        GateArgs(TokenIdxTuple* const& _tP,
+        GateArgs(TPS* const& _tP,
             BookType* const& _eC,
             mp_t* const&,
             mp_t* const&,
@@ -31,12 +31,12 @@ namespace aristos::gate {
     };
     template<>
     struct GateArgs<GateReductionLevel::singleBlock, JobType::training> {
-        TokenIdxTuple* __restrict__ tP;
+        TPS* __restrict__ tP;
         BookType* __restrict__ eC;
         mp_t* __restrict__ gMeC;
         mp_t* __restrict__ gML;
         __device__
-        GateArgs(TokenIdxTuple* const& _tP,
+        GateArgs(TPS* const& _tP,
             BookType* const& _eC,
             mp_t* const& _gMeC,
             mp_t* const& _gML,
@@ -46,12 +46,12 @@ namespace aristos::gate {
     };
     template<>
     struct GateArgs<GateReductionLevel::multiBlock, JobType::inference> {
-        TokenIdxTuple* __restrict__ tP;
+        TPS* __restrict__ tP;
         BookType* __restrict__ eC;
         RingSoftmaxPayload* __restrict__ bRsP;
         RingTopKPayload* __restrict__ rTp;
         __device__
-        GateArgs(TokenIdxTuple* const& _tP,
+        GateArgs(TPS* const& _tP,
             BookType* const& _eC,
             mp_t* const&,
             mp_t* const&,
@@ -61,14 +61,14 @@ namespace aristos::gate {
     };
     template<>
     struct GateArgs<GateReductionLevel::multiBlock, JobType::training> {
-        TokenIdxTuple* __restrict__ tP;
+        TPS* __restrict__ tP;
         BookType* __restrict__ eC;
         mp_t* __restrict__ gMeC;
         mp_t* __restrict__ gML;
         RingSoftmaxPayload* __restrict__ bRsP;
         RingTopKPayload* __restrict__ rTp;
         __device__
-        GateArgs(TokenIdxTuple* const& _tP,
+        GateArgs(TPS* const& _tP,
             BookType* const& _eC,
             mp_t* const& _gMeC,
             mp_t* const& _gML,
@@ -416,7 +416,7 @@ namespace aristos::gate {
             for (uint i = 0; i < bN; ++i) {
                 if (rTopK[i]) {
                     tokenIds(i, startIndices[i] + myIndices[i] - 1) =
-                        TokenIdxTuple{bM * cute::get<0>(tileCoord) + threadIdx.x, mCw};
+                        TPS{bM * cute::get<0>(tileCoord) + threadIdx.x, mCw};
                 }
             }
         }
@@ -520,6 +520,10 @@ namespace aristos::gate {
                 }
             }
 
+            #pragma unroll
+            for (uint i = ACC::E::value; i < bN; ++i) {
+                accumulator(i) = -cuda::std::numeric_limits<ElementC>::infinity();
+            }
             /// Softmax Reduction
             #pragma unroll
             for (uint i = 0; i < abN; ++i) {
@@ -643,7 +647,7 @@ namespace aristos::gate {
             #pragma unroll
             for (uint i = 0; i < abN; ++i) {
                 if (rTopK[i]) {
-                    tokenIds(i, startIndices[i] + myIndices[i] - 1) = TokenIdxTuple{bM * cute::get<0>(tileCoord) +
+                    tokenIds(i, startIndices[i] + myIndices[i] - 1) = TPS{bM * cute::get<0>(tileCoord) +
                         threadIdx.x, mCw};
                 }
             }
