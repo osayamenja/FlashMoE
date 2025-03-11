@@ -384,12 +384,12 @@ namespace aristos{
         using P2PB = cute::C<cute::ceil_div(S::value * MINI_BATCH * H::value, 1024 * 1024)>;
         using EC = cute::C<DTK::value == DropTokens::no ? S::value : cute::ceil_div(S::value, E::value)>;
         using SZ = cute::C<EC::value * H::value>;
-        using TM = cute::C<S::value / BLOCK_M>;
-        using TN = cute::C<P::value / BLOCK_N>;
-        using TNx = cute::C<H::value / BLOCK_N>;
-        using TCM = cute::C<EC::value / BLOCK_M>;
+        using TM = cute::C<cute::ceil_div(S::value, BLOCK_M)>;
+        using TN = cute::C<cute::ceil_div(P::value, BLOCK_N)>;
+        using TNx = cute::C<cute::ceil_div(H::value, BLOCK_N)>;
+        using TCM = cute::C<cute::ceil_div(EC::value, BLOCK_M)>;
         static_assert(TCM::value <= cuda::std::numeric_limits<uint16_t>::max());
-        using TPX = cute::C<PX::value / BLOCK_N>;
+        using TPX = cute::C<cute::ceil_div(PX::value, BLOCK_N)>;
         using TSZ = cute::C<TM::value * cute::min(TNx::value, PeakHardware::blocks::value)>;
 
         // Scheduling state upper bound inside FFN

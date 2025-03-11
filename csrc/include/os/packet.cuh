@@ -210,8 +210,7 @@ namespace aristos::packet {
 
             if (!atomicTAS<cuda::thread_scope_block>(status + peer)) {
                 // atomically reduce taskCount
-                const auto superfluous = (tN + tNx) * (Bookkeeping::tiles<BLOCK_M>(eCap) -
-                    globalTaskTiles);
+                const auto superfluous = (tN + tNx) * (ACC::TCM::value - globalTaskTiles);
                 atomicSub_block(taskCount, superfluous);
             }
 

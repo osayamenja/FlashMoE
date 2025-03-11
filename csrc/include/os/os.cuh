@@ -81,17 +81,26 @@ namespace aristos::os {
         }
         __syncthreads();
         // compute taskBound
+        // TODO fix this
         #pragma unroll
         for (uint i = threadIdx.x; i < E; i += threads) {
             const auto eCt = Bookkeeping::tiles<BLOCK_M>(d == DropTokens::yes ? cute::min(eCs[i], EC)
                 : eCs[i]);
+            printf("ec[%u] is %u\n", i, eCt);
+            // known a priori
+            // expect to receive eCt * TNx per expert for combine
             atomicAdd_block(taskBound, eCt * TN);
-            #pragma unroll 4
+            #pragma unroll 2
+            // unknown a priori
+            // expect to receive (TN + TNx) * eC tasks from everyone (including myself) for preGEMM and postGEMM per local expert
             for (uint j = 0; j < world; ++j) {
                 atomicAdd_block(taskBound, eCt * TNx);
             }
         }
         __syncthreads();
+        if (!threadIdx.x) {
+            printf("TB is %u\n", *taskBound);
+        }
         #pragma unroll
         for (uint i = threadIdx.x; i < processors; i += threads) {
             rQ[i] = i; // initially, all processors are ready

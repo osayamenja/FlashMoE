@@ -4,7 +4,6 @@
 
 #ifndef TELEMETRY_CUH
 #define TELEMETRY_CUH
-#define ARISTOS_TRACE
 #include <nvtx3/nvtx3.hpp>
 namespace aristos {
     struct aristosDomain {
