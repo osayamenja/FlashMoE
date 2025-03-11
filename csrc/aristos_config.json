@@ -1,6 +1,6 @@
 {
   "capacity_factor": 1,
-  "drop_tokens": 0,
+  "drop_tokens": 1,
   "expert_top_k": 1,
   "global_batch": 256,
   "is_training": 0,

@@ -194,6 +194,15 @@ namespace aristos{
     struct __align__(8) TQSignal{
         uint interrupt;
         uint signal; // one ahead
+
+        __device__ __forceinline__
+        void encodeSig(const uint& sig) {
+            signal = sig + 1;
+        }
+        __device__ __forceinline__
+        void decodeSig() {
+            signal -= 1;
+        }
     };
 
     // These could be much more, as supported by CUTLASS
@@ -634,6 +643,10 @@ namespace aristos{
         auto* tQ() const {
             return CAST_TO(Task, book);
         }
+        __device__ __forceinline__
+        auto* ptQ() const {
+            return tQ() + tPs * SUBSCRIBERS;
+        }
         static_assert(alignof(Task) % alignof(PEL) == 0);
         __host__ __device__ __forceinline__
         auto* pEL() const {
@@ -718,7 +731,7 @@ namespace aristos{
 
         /// number of remote experts
         __host__ __device__ __forceinline__
-        auto* nRx() const {
+        auto* ssFc() const {
             return CAST_TO(BookType, book + gRl) + ACC::E::value;
         }
 

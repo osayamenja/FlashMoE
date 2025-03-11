@@ -356,8 +356,8 @@ namespace aristos::processor{
         TQSignal* __restrict__ pDB = nullptr;
         unsigned int* __restrict__ tQH = nullptr;
         flagsType* __restrict__ flags = nullptr;
-        Task* __restrict__ gtQ = nullptr;
         Task* __restrict__ tQ = nullptr;
+        Task* __restrict__ ptQ = nullptr;
         unsigned int* __restrict__ tQS = nullptr;
 
         ProcessorArgs() = default;
@@ -366,10 +366,10 @@ namespace aristos::processor{
             TQSignal* const& _pDB,
             unsigned int* const& _tQH,
             flagsType* const& _flags,
-            Task* const& _gtQ,
             Task* const& _tQ,
+            Task* const& _ptQ,
             unsigned int* const& _tQS) :
-        sQ(_sQ), pDB(_pDB), tQH(_tQH), flags(_flags), gtQ(_gtQ), tQ(_tQ), tQS(_tQS) {}
+        sQ(_sQ), pDB(_pDB), tQH(_tQH), flags(_flags), tQ(_tQ), ptQ(_ptQ), tQS(_tQS) {}
     };
 
     template<
@@ -385,13 +385,13 @@ namespace aristos::processor{
         __shared__ Task currentTask;
         __shared__ ProcessorArgs pA;
         __shared__ uint globalInterrupt;
-        __shared__ void* cachedFlags;
 
         // Register allocations
         uint16_t interrupt = 0U;
         const auto rSeqBit = _seqBit;
         Task rCurrentTask{};
-        TQSignal tqs{};
+        TQSignal tqs{0U, 0U};
+        void* cachedFlags;
 
         if (!threadIdx.x) {
             globalInterrupt = 0U;
@@ -401,7 +401,7 @@ namespace aristos::processor{
                 bookkeeping.tQH(),
                 bookkeeping.flags,
                 bookkeeping.tQ(),
-                bookkeeping.tQ() + bookkeeping.tPs * SUBSCRIBERS, // should be the external Q
+                bookkeeping.ptQ(),
                 bookkeeping.tSA()
             };
         }
@@ -416,15 +416,16 @@ namespace aristos::processor{
         while (!interrupt) {
             if (!threadIdx.x) {
                 auto* __restrict__ tQSignal = pA.pDB;
-                const auto* __restrict__ gtQ = pA.gtQ;
+                const auto* __restrict__ gtQ = pA.tQ;
                 // Grabs next task
                 awaitNotification(tQSignal, &tqs, tqs.signal);
                 globalInterrupt = tqs.interrupt;
                 if (!tqs.interrupt) {
                     // below ensures task read happens after signal reception
                     __threadfence();
+                    tqs.decodeSig();
                     // global -> shared
-                    currentTask = gtQ[tqs.signal - 1];
+                    currentTask = gtQ[tqs.signal];
                     // Eagerly indicate readiness for the next task
                     atomicExch(pA.sQ, ready);
                 }
@@ -456,7 +457,7 @@ namespace aristos::processor{
                             // Broadcast from t0 to everyone else in the warp
                             enqueue = __shfl_sync(0xffffffff, enqueue, 0);
                             if (enqueue) {
-                                auto* __restrict__ tQ = pA.tQ + rCurrentTask.syncIdx;
+                                auto* __restrict__ tQ = pA.ptQ + rCurrentTask.syncIdx;
                                 auto* __restrict__ tQH = pA.tQH;
                                 auto nextTask = Task {
                                     TaskType::postGEMM,

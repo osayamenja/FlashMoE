@@ -30,7 +30,7 @@ namespace aristos::scheduler {
             #pragma unroll
             for (uint l = 0; l < WSet::kElements; ++l) {
                 // signal processor
-                sig.signal = taskIdx + (k * WSet::kElements + l);
+                sig.encodeSig(taskIdx + (k * WSet::kElements + l));
                 signalPayload(pDB + wSet[l], &sig);
             }
         }
@@ -45,7 +45,7 @@ namespace aristos::scheduler {
         #pragma unroll
         for (uint l = 0; l < WSet::kElements; ++l) {
             if (l < residue) {
-                sig.signal = taskIdx + (cSetB * WSet::kElements + l);
+                sig.encodeSig(taskIdx + (cSetB * WSet::kElements + l));
                 signalPayload(pDB + wSet[l], &sig);
             }
         }
@@ -184,7 +184,7 @@ namespace aristos::scheduler {
         constexpr auto sQsL = cute::ceil_div(processors, wS);
         static_assert(sQsL <= 32);
 
-        constexpr auto subscribers = 128 - wS;
+        constexpr auto subscribers = SUBSCRIBERS;
         static_assert(subscribers % wS == 0);
         constexpr auto sL = subscribers / wS;
         // initialize register buffers
@@ -209,7 +209,7 @@ namespace aristos::scheduler {
             uint lTt = 0U; // local task tally
             #pragma unroll
             for (uint i = 0; i < sL; ++i) {
-                const auto tasks = atomicLoad<cuda::thread_scope_block>(tQHeads + i * wS + threadIdx.x) -
+                const auto tasks = atomicLoad<cuda::thread_scope_block>(tQHeads + (i * wS + threadIdx.x)) -
                     tqState[i].tQTail;
                 tqState[i].tasks = tasks;
                 lTt += tasks;

@@ -30,7 +30,7 @@ namespace aristos::os {
         BiasUp const& biasUp,
         BiasDown const& biasDown,
         const uint16_t& lSeqBit) {
-        const auto nRx = __ldg(bookkeeping.nRx());
+        const auto ssfC = __ldg(bookkeeping.ssFc());
         const auto* __restrict__ eC = bookkeeping.eC();
         const auto world = bookkeeping.world;
         constexpr auto subscriberCount = threads - WARP_SIZE;
@@ -38,12 +38,10 @@ namespace aristos::os {
         // each subscriber thread gets wSet * sizeof(uint) bytes of workspace
         constexpr auto wSet = 16U; // working set size
         constexpr auto bitSetSizePs = cute::ceil_div(wSet, sizeof(uint) * 8U);
-        const auto ssfC = ACC::TCM::value * (ACC::TNx::value * (ACC::E::value - nRx) + nRx);
         const auto bitSetSize = bookkeeping.nLx * bookkeeping.world + ssfC;
         const auto bSSI = nSI<subscriberCount>(bitSetSize);
         constexpr auto E = ACC::E::value;
         constexpr auto TNx = ACC::TNx::value;
-        constexpr auto TN = ACC::TNx::value;
         constexpr auto EC = ACC::TNx::value;
 
         // subscriber shared memory allocation
@@ -76,31 +74,27 @@ namespace aristos::os {
         const auto* __restrict__ eCs = taskBound + 1;
         scratch += 1;
         #pragma unroll
+        if (!threadIdx.x) {
+            // Expert computation expectant tasks
+            // unknown a priori
+            *taskBound = bookkeeping.nLx * bookkeeping.world *
+                ACC::TCM::value * (ACC::TN::value + ACC::TNx::value);
+        }
+        #pragma unroll
         for (uint i = threadIdx.x; i < E; i += threads) {
             scratch[i] = __ldg(eC + i);
         }
         __syncthreads();
-        // compute taskBound
-        // TODO fix this
+        // Combine tasks
+        // known a priori
         #pragma unroll
         for (uint i = threadIdx.x; i < E; i += threads) {
-            const auto eCt = Bookkeeping::tiles<BLOCK_M>(d == DropTokens::yes ? cute::min(eCs[i], EC)
+            const auto eCt = Bookkeeping::tiles<BLOCK_M>(d == DropTokens::yes ?
+                cute::min(eCs[i], EC)
                 : eCs[i]);
-            printf("ec[%u] is %u\n", i, eCt);
-            // known a priori
-            // expect to receive eCt * TNx per expert for combine
-            atomicAdd_block(taskBound, eCt * TN);
-            #pragma unroll 2
-            // unknown a priori
-            // expect to receive (TN + TNx) * eC tasks from everyone (including myself) for preGEMM and postGEMM per local expert
-            for (uint j = 0; j < world; ++j) {
-                atomicAdd_block(taskBound, eCt * TNx);
-            }
+            atomicAdd_block(taskBound, eCt * TNx);
         }
         __syncthreads();
-        if (!threadIdx.x) {
-            printf("TB is %u\n", *taskBound);
-        }
         #pragma unroll
         for (uint i = threadIdx.x; i < processors; i += threads) {
             rQ[i] = i; // initially, all processors are ready
@@ -124,7 +118,7 @@ namespace aristos::os {
         }
         else {
             // subscriber
-            subscriber::start<bitSetSizePs, wSet>(bitSet, CAST_TO(cuda::std::byte,bitSet + bSSI), interrupt, pL, eL, nRx,
+            subscriber::start<bitSetSizePs, wSet>(bitSet, CAST_TO(cuda::std::byte,bitSet + bSSI), interrupt, pL, eL, ssfC,
                 status, taskBound, moeOutput, expertsUp, expertsDown, biasUp, biasDown, lSeqBit);
         }
     }

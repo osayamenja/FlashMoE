@@ -18,7 +18,6 @@ namespace aristos::moe{
         unsigned S = ACC::S::value,
         unsigned int P = ACC::P::value,
         unsigned int H = ACC::H::value,
-        unsigned int E = ACC::E::value,
         unsigned int PX = ACC::PX::value
     >
     __global__ __maxnreg__(ACC::PeakHardware::registers::value) void forward(

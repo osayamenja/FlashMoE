@@ -293,7 +293,7 @@ namespace aristos::subscriber{
         unsigned int* __restrict__ const& interrupt,
         const PLI* __restrict__ const& pL,
         const ELI* __restrict__ const& eL,
-        const unsigned int& rE, // number of remote experts
+        const unsigned int& ssfC,
         unsigned int* __restrict__ const& status, // shared
         unsigned int* __restrict__ const& taskCount,
         Output const& moeOutput,
@@ -339,7 +339,6 @@ namespace aristos::subscriber{
         auto fSp = fSl; // first stage pending
 
         // second stage
-        const auto ssfC = ACC::TCM::value * (ACC::TNx::value * (ACC::E::value - rE) + rE);
         const auto ssL = ssfC / subscriberCount + (tIdx < fSfC % subscriberCount);
         const auto ssT = ssL / wSet;
 

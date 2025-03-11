@@ -210,7 +210,8 @@ namespace aristos{
                 aD * sizeof(floatPair) +
                 globalWorld * sizeof(WorkerAttribute) +
                 sizeof(uint) * globalWorld;
-        const auto aXz = (sizeof(ELI) + sizeof(PEL)) * E + sizeof(PLI) * globalWorld;
+        const auto aXz = (sizeof(ELI) + sizeof(PEL)) * E +
+            sizeof(PLI) * globalWorld + sizeof(uint) * (E * ACC::TCM::value * ACC::TNx::value);
         const auto pZ = umax(dZ, aXz);
         const auto sZ = sizeof(uint) * (globalWorld + 2 * E) + sizeof(uint16_t) * globalWorld;
 
@@ -292,11 +293,13 @@ namespace aristos{
         auto* __restrict__ eLI = CAST_TO(ELI, pEL + E);
         static_assert(alignof(ELI) % alignof(PLI) == 0);
         auto* __restrict__ pLI = CAST_TO(PLI, eLI + E);
-
-        auto nRx = 0U;
+        static_assert(alignof(PLI) % alignof(uint) == 0);
+        auto* __restrict__ tileIndices = CAST_TO(uint, pLI + ePgD.epWorld);
+        
         auto pel = PEL{};
         auto eli = ELI{};
         auto pli = PLI{};
+        auto tileIndex = 0U;
         std::ranges::fill(scratch, scratch + ePgD.epWorld, 0U);
         for (uint i = 0; i < E; ++i) {
             const auto ePrank = ePs[i];
@@ -305,9 +308,6 @@ namespace aristos{
             auto* rFlags = CAST_TO(cuda::std::byte, nvshmem_ptr(flags, gRank));
             const auto xLi = scratch[ePrank]++;
             const auto isRemote = rSHeap == nullptr;
-            if (isRemote) {
-                ++nRx;
-            }
             // PEL
             pel.isRemote = isRemote;
             pel.expertLocalIdx = xLi;
@@ -328,6 +328,16 @@ namespace aristos{
             pEL[i] = pel;
             eLI[i] = eli;
             pLI[ePrank] = pli;
+            if (isRemote) {
+                for (uint j = 0; i < ACC::EC::value; ++j) {
+                    tileIndices[tileIndex] = tileIndex++;
+                }
+            }
+            else {
+                for (uint j = 0; i < ACC::EC::value * ACC::TNx::value; ++j) {
+                    tileIndices[tileIndex] = tileIndex++;
+                }
+            }
         }
 
         CHECK_ERROR_EXIT(cudaMemcpyAsync(hostBookkeeping.pEL(), pEL, sizeof(PEL) * E,
@@ -336,8 +346,10 @@ namespace aristos{
         CHECK_ERROR_EXIT(cudaMemcpyAsync(hostBookkeeping.eL(), eLI,
             sizeof(ELI) * E + sizeof(PLI) * ePgD.epWorld,
             cudaMemcpyHostToDevice, aristosStream));
-        CHECK_ERROR_EXIT(cudaMemcpyAsync(hostBookkeeping.nRx(), &nRx,
+        CHECK_ERROR_EXIT(cudaMemcpyAsync(hostBookkeeping.ssFc(), &tileIndex,
             sizeof(BookType), cudaMemcpyHostToDevice, aristosStream));
+        CHECK_ERROR_EXIT(cudaMemcpyAsync(hostBookkeeping.tIx(), tileIndices,
+            sizeof(BookType) * tileIndex, cudaMemcpyHostToDevice, aristosStream));
         CHECK_ERROR_EXIT(cudaPeekAtLastError());
         CHECK_ERROR_EXIT(cudaStreamSynchronize(aristosStream));
         delete hB;

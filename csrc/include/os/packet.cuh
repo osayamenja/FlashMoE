@@ -166,12 +166,14 @@ namespace aristos::packet {
         cuda::std::byte* sHeap;
         Task* tQ;
         const unsigned int tPs;
+        const unsigned int nLx;
         __device__
         DecoderArg(
             cuda::std::byte* const& _sHeap,
             Task* const& _tQ,
             unsigned int const& _tPs) :
-        sHeap(_sHeap), tQ(_tQ), tPs(_tPs) {}
+        sHeap(_sHeap), tQ(_tQ), tPs(_tPs),
+        nLx(bookkeeping.nLx) {}
     };
 
     /// Decodes a single packet from the initial stage
@@ -189,7 +191,7 @@ namespace aristos::packet {
             unsigned int* __restrict__ const& status,
             unsigned int* __restrict__ const& taskCount,
             uint const& routedTokens, uint16_t const& globalTaskTiles,
-            unsigned int const& localExpertIdx,
+            unsigned int const& localExpertIdx, unsigned int const& expertIdx,
             cuda::std::byte* __restrict__ const& pGB, //postGEMM buffer
             const cuda::std::array<const cuda::std::byte*, GEMMs>& weights,
             const cuda::std::array<const cuda::std::byte*, GEMMs>& bias,
@@ -200,9 +202,6 @@ namespace aristos::packet {
 
             constexpr auto tN = ACC::TN::value;
             constexpr auto tNx = ACC::TNx::value;
-            constexpr auto H = ACC::H::value;
-            constexpr auto eCap = ACC::EC::value;
-            constexpr auto E = ACC::E::value;
 
             auto* __restrict__ tQ = dA.tQ + (threadIdx.x * dA.tPs + lTQHead);
             const auto fTilesM = routedTokens / BLOCK_M;
@@ -215,10 +214,11 @@ namespace aristos::packet {
             }
 
             // expert, peer offset
-            const auto pXo = eCap * (peer * E + localExpertIdx);
+            const auto fo = expertIdx * (ACC::TCM::value * ACC::TNx::value);
+            const auto sO = ACC::TCM::value * (peer * dA.nLx + localExpertIdx);
             cuda::std::array<cuda::std::byte*, GEMMs> taskResults{};
             // Staging buffer for results of preGEMM
-            taskResults[0] = pGB + pXo * H * sizeof(Element);
+            taskResults[0] = pGB + peer * dA.nLx * ACC::EC::value * ACC::P::value * sizeof(Element);
             // Egress packet buffer
             taskResults[1] = p == PeerConnectivity::remote ?
                 heap::advance<1, 0>(dA.sHeap, peer, localExpertIdx) :
@@ -233,10 +233,10 @@ namespace aristos::packet {
                         weights,
                         taskResults,
                         bias,
-                        pXo + i,
+                        sO + i,
                         tileIdx,
                         padM,
-                        pXo + (p == PeerConnectivity::remote ? i : tileIdx),
+                        fo + tileIdx,
                         static_cast<uint16_t>(BLOCK_M),
                         gPeer,
                         i,
@@ -256,10 +256,10 @@ namespace aristos::packet {
                         weights,
                         taskResults,
                         bias,
-                        pXo + fTilesM,
+                        sO + fTilesM,
                         tileIdx,
                         padM,
-                        pXo + (p == PeerConnectivity::remote ? fTilesM : tileIdx),
+                        fo + tileIdx,
                         static_cast<uint16_t>(residue),
                         gPeer,
                         fTilesM,
