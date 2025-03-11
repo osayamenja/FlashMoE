@@ -12,6 +12,7 @@
 
 #include "debug.cuh"
 #include "moe/expert.cuh"
+#include "telemetry.cuh"
 #include "types.cuh"
 #define TIME_EXPERT 0
 namespace aristos {
@@ -30,6 +31,9 @@ namespace aristos {
         cuda::barrier<cuda::thread_scope_device>* __restrict__ const& dB,
         float* __restrict__ const& deviceThroughput, uint* __restrict__ const& tileSync,
         const Element* __restrict__ const& iP /* A, B, D, S, W*/, Element* __restrict__ const& oP /*C*/) {
+        #if ARISTOS_TRACE
+        aristosInitRange mFTRange{__func__};
+        #endif
         const auto tSz = sizeof(uint) * (M / BLOCK_M) * cute::min(K / BLOCK_N, blocks);
         #pragma unroll
         for (uint i = 0; i < trials; ++i) {
@@ -52,6 +56,9 @@ namespace aristos {
     >
     __host__ __forceinline__
     void mT(WorkerAttribute* __restrict__ const& dWa) {
+        #if ARISTOS_TRACE
+        aristosInitRange mTRange{__PRETTY_FUNCTION__};
+        #endif
         constexpr unsigned int M = ACC::S::value;
         constexpr unsigned int N = ACC::P::value;
         constexpr unsigned int K = ACC::H::value;

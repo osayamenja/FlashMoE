@@ -79,6 +79,7 @@ add_executable(csrc main.cu
         correctness.cuh
         include/os/sync.cuh
         include/moe/fffn.cuh
+        include/telemetry.cuh
 )
 set_target_properties(csrc PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
@@ -251,6 +252,7 @@ target_compile_definitions(csrc
         SEQ_LEN=${SEQ_LEN_V}
         DTYPE=${DTYPE_V}
         VOCAB_SIZE=${VOCAB_SIZE_V}
+        ARISTOS_TRACE=1
 )
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_compile_options(csrc PRIVATE

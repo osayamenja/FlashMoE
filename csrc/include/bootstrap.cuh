@@ -11,6 +11,7 @@
 #include "throughput.cuh"
 #include "topo.cuh"
 #include "debug.cuh"
+#include "telemetry.cuh"
 #include "types.cuh"
 #include "moe/expert.cuh"
 #include "os/decider/decider.cuh"
@@ -36,6 +37,9 @@ namespace aristos{
 
     __host__ __forceinline__
     void estimateMemory(WorkerAttribute* __restrict__ const& dWa) {
+        #if ARISTOS_TRACE
+        aristosInitRange estRange{__PRETTY_FUNCTION__};
+        #endif
         // estimate available device memory
         size_t free = 0, total = 0;
         CHECK_ERROR_EXIT(cudaMemGetInfo(&free, &total));
@@ -48,6 +52,9 @@ namespace aristos{
 
     __host__ __forceinline__
     void discoverTopology(void* hAp, const uint& n, const uint& globalRank, const WorkerAttribute& lWa) {
+        #if ARISTOS_TRACE
+        aristosInitRange discRange{__func__};
+        #endif
         const auto aD = n * n;
         const size_t heapBytes = n * sizeof(flagsType) + aD * sizeof(floatPair)
         + sizeof(uint) * (n + 2) + n * BETA_BUFFER;
@@ -95,6 +102,9 @@ namespace aristos{
         const floatPair* __restrict__ const& aP,
         const WorkerAttribute* __restrict__ const& attributes,
         const uint& rank, const uint& world) {
+        #if ARISTOS_TRACE
+        aristosInitRange decRange{__func__};
+        #endif
         constexpr auto E = ACC::E::value;
 
         for (uint16_t i = 0; i < world; ++i) {
@@ -178,6 +188,9 @@ namespace aristos{
     template<EP e = EP::yes>
     __host__ __forceinline__
     void distributedInit() {
+        #if ARISTOS_TRACE
+        aristosInitRange distRange{__PRETTY_FUNCTION__};
+        #endif
         static_assert(e == EP::yes);
         constexpr auto blocks = ACC::PeakHardware::blocks::value;
         using Element = ACC::Element;
@@ -349,6 +362,9 @@ namespace aristos{
     // Should be called before loading the model
     __host__ __forceinline__
     void initialize() {
+        #if ARISTOS_TRACE
+        aristosInitRange initRange{__PRETTY_FUNCTION__};
+        #endif
         reportError(!isInitialized, "Already Initialized");
         using GPUType = aristos::Hardware<ARISTOS_ARCH, 255>;
         constexpr auto blocks = GPUType::OS::processorBlocks::value;
@@ -368,6 +384,9 @@ namespace aristos{
 
     __host__ __forceinline__
     void finalize(){
+        #if ARISTOS_TRACE
+        aristosInitRange finalRange{__PRETTY_FUNCTION__};
+        #endif
         reportError(isInitialized, "Not initialized!");
         isInitialized = false;
         CHECK_ERROR_EXIT(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
