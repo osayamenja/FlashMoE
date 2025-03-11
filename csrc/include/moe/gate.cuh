@@ -78,17 +78,12 @@ namespace aristos::gate {
     };
     /// Fused GEMM, softmax, topKMask, and loss, assuming blocks >= tiles.N and no bias.
     /// Supporting the latter is trivial; the former requires a completely new algorithm
-    enum class PredicatedTile {
-        yes,
-        no
-    };
     template<
         GateReductionLevel g,
-        PredicatedTile p,
         typename BlockGEMM
     >
     struct FusedGate {
-        static_assert(g == GateReductionLevel::multiBlock && p == PredicatedTile::no);
+        static_assert(g == GateReductionLevel::multiBlock);
         template<
             typename MatrixA,
             typename MatrixB,
@@ -129,6 +124,9 @@ namespace aristos::gate {
             const auto tileCoord = idx2crd(tileIdx,
                 cute::Shape<cute::Int<tilesM>, cute::Int<tilesN>>{},
                     cute::Stride<cute::Int<tilesN>, cute::_1>{});
+            const auto tokenIds = make_tensor(cute::make_gmem_ptr(gArg.tP),
+                cute::Layout<cute::Shape<cute::Int<ACC::E::value>, cute::Int<ACC::EC::value>>,
+                    cute::Stride<cute::Int<ACC::EC::value>, cute::_1>>{});
             const auto ctaCoord = make_coord(cute::get<0>(tileCoord), cute::get<1>(tileCoord), cute::_);
             const auto gA = cute::local_tile(activations, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1, cute::X,cute::_1>{});
             const auto gB = cute::local_tile(weights, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step< cute::X,cute::_1,cute::_1>{});
@@ -191,6 +189,16 @@ namespace aristos::gate {
                 #pragma unroll
                 for (unsigned int j = 0; j < elems; ++j) {
                     accumulator(j + i * elems) = sC(threadIdx.x, j);
+                }
+            }
+
+            // Handle padding before softmax
+            if constexpr (E % bN != 0) {
+                if (cute::get<1>(tileCoord) + 1 == tilesN) {
+                    #pragma unroll
+                    for (uint i = E - E / bN * bN; i < bN; ++i) {
+                        accumulator(i) = -cuda::std::numeric_limits<ElementC>::infinity();
+                    }
                 }
             }
 
@@ -407,22 +415,18 @@ namespace aristos::gate {
             #pragma unroll
             for (uint i = 0; i < bN; ++i) {
                 if (rTopK[i]) {
-                    gArg.tP[startIndices[i] + myIndices[i] - 1] =
+                    tokenIds(i, startIndices[i] + myIndices[i] - 1) =
                         TokenIdxTuple{bM * cute::get<0>(tileCoord) + threadIdx.x, mCw};
                 }
             }
         }
     };
 
-    template<typename BlockGEMM>
-    struct FusedGate<GateReductionLevel::multiBlock, PredicatedTile::yes, BlockGEMM> {
-
-    };
     // Special, nice case where N <= BLOCK_N
     template<
         typename BlockGEMM
     >
-    struct FusedGate<GateReductionLevel::singleBlock, PredicatedTile::yes, BlockGEMM> {
+    struct FusedGate<GateReductionLevel::singleBlock, BlockGEMM> {
         template<
             typename MatrixA,
             typename MatrixB,
@@ -678,32 +682,12 @@ namespace aristos::gate {
         constexpr auto threads = Operation::GEMM::block_dim.x;
         constexpr auto bM = cute::get<0>(ctaTiler{});
         constexpr auto bN = cute::get<1>(ctaTiler{});
-        constexpr auto E = ACC::E::value;
-        constexpr auto tilesM = ACC::S::value / bM;
-        // padded to fill bN
-        constexpr auto tilesN = cute::ceil_div(ACC::E::value, bN);
-        FusedGate<g, PredicatedTile::yes, Operation> fusedGate{};
+        FusedGate<g, Operation> fusedGate{};
 
         constexpr auto nT = ACC::TN::value * ACC::TPX::value;
         #pragma unroll
         for (unsigned int i = blockIdx.x; i < nT; i += blocks) {
-            const auto tileCoord = idx2crd(i,
-                cute::Shape<cute::Int<tilesM>, cute::Int<tilesN>>{},
-                    cute::Stride<cute::Int<tilesN>, cute::_1>{});
-            const auto tileN = cute::get<1>(tileCoord);
-            // Given this loop is unrolled, the compiler should optimize out the below conditional
-            if constexpr (g == GateReductionLevel::singleBlock || E % tilesN == 0) {
-                fusedGate(activations, weights, routing, i, gArg, scratch);
-            }
-            else {
-                if (tileN == tilesN - 1) {
-                    FusedGate<GateReductionLevel::multiBlock, PredicatedTile::yes, Operation>::
-                    operator()(activations, weights, routing, i, gArg, scratch);
-                }
-                else {
-                    fusedGate(activations, weights, routing, i, gArg, scratch);
-                }
-            }
+            fusedGate(activations, weights, routing, i, gArg, scratch);
         }
 
         __syncthreads();

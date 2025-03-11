@@ -41,6 +41,7 @@ void runOS() {
 
     constexpr unsigned long aZ =  S * H;
     constexpr auto gwZ = aZ + aristos::ACC::PX::value * H;
+    // scale this to number of experts
     constexpr auto bZ =  gwZ + P * H;
     constexpr auto b2Z =  bZ + P * H;
     constexpr auto dZ =  b2Z + cute::max(P, H);
@@ -57,6 +58,7 @@ void runOS() {
     // gate weights
     std::ranges::fill(fHp + aZ, fHp + aZ + E * H, 1.0f);
     // Expert weights
+    // loop for number of experts
     makeIdentity<P, H>(fHp + gwZ);
     makeIdentity<P, H>(fHp + bZ);
     // bias
