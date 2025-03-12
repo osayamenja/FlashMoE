@@ -56,6 +56,7 @@ namespace aristos::subscriber{
             constexpr packet::Decoder<PacketStage::initial, PeerConnectivity::p2p, Element> fPd{};
             constexpr packet::Decoder<PacketStage::initial, PeerConnectivity::remote, Element> fRd{};
             constexpr auto bSw = sizeof(uint) * 8U;
+            #pragma unroll 2
             for (uint i = 0; i < stageLength; ++i) {
                 const auto vSIdx = i / bSw;
                 const auto vIdx = i % bSw;
@@ -88,7 +89,7 @@ namespace aristos::subscriber{
                         // Enforce consistency
                         __threadfence_system();
                         fPd(dA, packet, status, taskCount, sP->routedTokens, sP->totalTilesM,
-                            expertIdx, pGB, weights, bias, peerIdx, pLI.pe, lTQHead, tQHead);
+                            expertIdx, pLI.expertIndex, pGB, weights, bias, peerIdx, pLI.pe, lTQHead, tQHead);
                     }
                     else {
                         // Remote peer
@@ -97,7 +98,7 @@ namespace aristos::subscriber{
                         // as the memory ordering mechanism is internal.
                         nvshmem_ushort_test(&sP->seqBit, NVSHMEM_CMP_EQ, localSeqBit);
                         fRd(dA, packet, status, taskCount, sP->routedTokens, sP->totalTilesM,
-                            expertIdx, pGB, weights, bias, peerIdx, pLI.pe, lTQHead, tQHead);
+                            expertIdx, pLI.expertIndex, pGB, weights, bias, peerIdx, pLI.pe, lTQHead, tQHead);
                     }
                 }
                 // update state

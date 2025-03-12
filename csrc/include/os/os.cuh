@@ -73,7 +73,6 @@ namespace aristos::os {
         auto* __restrict__ taskBound = scratch;
         const auto* __restrict__ eCs = taskBound + 1;
         scratch += 1;
-        #pragma unroll
         if (!threadIdx.x) {
             // Expert computation expectant tasks
             // unknown a priori

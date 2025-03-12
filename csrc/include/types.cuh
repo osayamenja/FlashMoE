@@ -329,8 +329,9 @@ namespace aristos{
     /// Peer lookup info: key is ep rank
     __device__
     struct __align__(4) PLI {
-        uint16_t pe;
+        uint pe;
         uint16_t isRemote;
+        uint16_t expertIndex;
     };
 
     /// Packet Encoding Lookup info, retrievable in a single memory lookup
@@ -742,23 +743,24 @@ namespace aristos{
         }
 
         /// Scheduler buffers and flag checkpoints
-        __device__ __forceinline__
-        auto* sQ() const {
+        __host__ __device__ __forceinline__
+        auto *tIx() const {
             return CAST_TO(BookType, book + eDsA);
         }
+
         __device__ __forceinline__
-        auto* tQH() const {
+        auto *sQ() const {
+            return CAST_TO(BookType, book + (eDsA + ACC::E::value * ACC::TCM::value * ACC::TNx::value));
+        }
+
+        __device__ __forceinline__
+        auto *tQH() const {
             return sQ() + ACC::PeakHardware::OS::processorBlocks::value;
         }
         /// tile sync array
         __device__ __forceinline__
         auto* tSA() const {
             return tQH() + world * nLx * ACC::TCM::value;
-        }
-        __device__ __forceinline__
-        auto* tIx() const {
-            return CAST_TO(BookType, tSA() + (ACC::E::value > 1 ? world * nLx * ACC::TCM::value :
-                ACC::TSZ::value));
         }
 
         // Intermediate buffer

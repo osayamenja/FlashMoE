@@ -24,8 +24,8 @@ namespace aristos {
         const auto sC = __ldg(bookkeeping.syncCount);
         for (uint i = threadIdx.x; i < world; i += threads) {
             // scramble the peer id to potentially mitigate congestion
-            const auto [pe, isRemote] = peers[(i + rank) % world];
-            nvshmem_uint64_atomic_inc(bookkeeping.syncArray + rank, pe);
+            const auto pLI = peers[(i + rank) % world];
+            nvshmem_uint64_atomic_inc(bookkeeping.syncArray + rank, pLI.pe);
         }
         // Await notification
         auto* __restrict__ sA = CAST_TO(ull_t, bookkeeping.syncArray);

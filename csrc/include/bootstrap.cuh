@@ -211,8 +211,8 @@ namespace aristos{
                 globalWorld * sizeof(WorkerAttribute) +
                 sizeof(uint) * globalWorld;
         const auto aXz = (sizeof(ELI) + sizeof(PEL)) * E +
-            sizeof(PLI) * globalWorld + sizeof(uint) * (E * ACC::TCM::value * ACC::TNx::value);
-        const auto pZ = umax(dZ, aXz);
+            (sizeof(PLI) * globalWorld) + (sizeof(uint) * (E * ACC::TCM::value * ACC::TNx::value));
+        const auto pZ = cuda::std::max(dZ, aXz);
         const auto sZ = sizeof(uint) * (globalWorld + 2 * E) + sizeof(uint16_t) * globalWorld;
 
         // allocate all memory in one go
@@ -295,11 +295,12 @@ namespace aristos{
         auto* __restrict__ pLI = CAST_TO(PLI, eLI + E);
         static_assert(alignof(PLI) % alignof(uint) == 0);
         auto* __restrict__ tileIndices = CAST_TO(uint, pLI + ePgD.epWorld);
-        
+
         auto pel = PEL{};
         auto eli = ELI{};
         auto pli = PLI{};
         auto tileIndex = 0U;
+        auto current = 0U;
         std::ranges::fill(scratch, scratch + ePgD.epWorld, 0U);
         for (uint i = 0; i < E; ++i) {
             const auto ePrank = ePs[i];
@@ -324,18 +325,20 @@ namespace aristos{
             // PLI
             pli.isRemote = isRemote;
             pli.pe = gRank;
+            pli.expertIndex = i;
 
             pEL[i] = pel;
             eLI[i] = eli;
             pLI[ePrank] = pli;
             if (isRemote) {
-                for (uint j = 0; i < ACC::EC::value; ++j) {
-                    tileIndices[tileIndex] = tileIndex++;
+                for (uint j = 0; j < ACC::TCM::value; ++j) {
+                    tileIndices[current++] = tileIndex;
+                    tileIndex += ACC::TNx::value;
                 }
             }
             else {
-                for (uint j = 0; i < ACC::EC::value * ACC::TNx::value; ++j) {
-                    tileIndices[tileIndex] = tileIndex++;
+                for (uint j = 0; j < ACC::TCM::value * ACC::TNx::value; ++j) {
+                    tileIndices[current++] = tileIndex++;
                 }
             }
         }
@@ -349,7 +352,7 @@ namespace aristos{
         CHECK_ERROR_EXIT(cudaMemcpyAsync(hostBookkeeping.ssFc(), &tileIndex,
             sizeof(BookType), cudaMemcpyHostToDevice, aristosStream));
         CHECK_ERROR_EXIT(cudaMemcpyAsync(hostBookkeeping.tIx(), tileIndices,
-            sizeof(BookType) * tileIndex, cudaMemcpyHostToDevice, aristosStream));
+            sizeof(uint) * current, cudaMemcpyHostToDevice, aristosStream));
         CHECK_ERROR_EXIT(cudaPeekAtLastError());
         CHECK_ERROR_EXIT(cudaStreamSynchronize(aristosStream));
         delete hB;
