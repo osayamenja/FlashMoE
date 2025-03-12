@@ -5,7 +5,7 @@
 #include <torch/torch.h>
 
 #include "include/bootstrap.cuh"
-//#include "include/moe/moe.cuh"
+#include "include/moe/moe.cuh"
 template<unsigned int M, unsigned int N = M>
 requires(M > 0 && cutlass::is_pow2<M>::value && M == N)
 __host__ __forceinline__
@@ -76,7 +76,7 @@ void runOS() {
     CHECK_ERROR_EXIT(cudaMemcpyAsync(p, eHp, sizeof(Element) * dZ, cudaMemcpyHostToDevice,
         aristos::aristosStream));
     aristos::initialize();
-    //aristos::moe::forwardHost(p, p + dZ * sizeof(Element));
+    aristos::moe::forwardHost(p, p + dZ * sizeof(Element));
     CHECK_ERROR_EXIT(cudaPeekAtLastError());
     CHECK_ERROR_EXIT(cudaMemcpyAsync(eHp, p + dZ * sizeof(Element), sizeof(Element) * (S * PX),
         cudaMemcpyDeviceToHost, aristos::aristosStream));

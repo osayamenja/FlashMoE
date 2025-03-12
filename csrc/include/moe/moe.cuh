@@ -117,7 +117,7 @@ namespace aristos::moe{
         constexpr auto threads = ACC::PeakHardware::OS::threads::value;
         // Call forward pass
         if constexpr (ACC::E::value > 1) {
-            moe::forward<<<blocks, threads, 0, aristosStream>>>(iP, oP, seqBit);
+            forward<<<blocks, threads, 0, aristosStream>>>(iP, oP, seqBit);
         }
         else {
             // regular FFN forward

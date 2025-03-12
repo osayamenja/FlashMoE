@@ -46,7 +46,6 @@
 #define BETA_MB 1024.0f // 1GB
 
 #include <cuda/barrier>
-#include <cuda/std/tuple>
 #include <cuda/std/array>
 #include <cute/numeric/integral_constant.hpp>
 #include <cute/tensor.hpp>
@@ -328,7 +327,7 @@ namespace aristos{
 
     /// Peer lookup info: key is ep rank
     __device__
-    struct __align__(4) PLI {
+    struct __align__(8) PLI {
         uint pe;
         uint16_t isRemote;
         uint16_t expertIndex;
@@ -750,7 +749,7 @@ namespace aristos{
 
         __device__ __forceinline__
         auto *sQ() const {
-            return CAST_TO(BookType, book + (eDsA + ACC::E::value * ACC::TCM::value * ACC::TNx::value));
+            return CAST_TO(BookType, book + eDsA) + ACC::E::value * ACC::TCM::value * ACC::TNx::value;
         }
 
         __device__ __forceinline__
