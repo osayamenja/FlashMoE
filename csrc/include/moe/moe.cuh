@@ -36,6 +36,9 @@ namespace aristos::moe{
 
         // Salami slice pointers
         const auto lE = bookkeeping.nLx;
+        if (!blockIdx.x && !threadIdx.x) {
+            printf("nLx is %u\n", lE);
+        }
         const auto* __restrict__ gP = CONST_CAST_TO(Element, iP) + S * H;
         const auto* __restrict__ ePu = gP + H * PX;
         const auto* __restrict__ ePd = ePu + lE * P * H;
@@ -46,6 +49,9 @@ namespace aristos::moe{
         __shared__ __align__(16) cuda::std::byte workspace[sharedSize];
         // wipe buffers before the grid-wide barrier
         const auto gtQCl = bookkeeping.gtQCl;
+        if (!blockIdx.x && !threadIdx.x) {
+            printf("gtQCl is %u\n", gtQCl);
+        }
         auto* __restrict__ gtQHeads = bookkeeping.tQH();
         for (uint i = threads * blockIdx.x + threadIdx.x; i < gtQCl; i += blocks * threads) {
             gtQHeads[i] = 0U;
@@ -125,7 +131,7 @@ namespace aristos::moe{
         }
         if (seqBit == cuda::std::numeric_limits<decltype(seqBit)>::max()) {
             syncAll<<<ACC::SYB::value, ACC::PeakHardware::OS::threads::value, 0, aristosStream>>>(
-                hostBookkeeping.pLI(), hostBookkeeping.rank, hostBookkeeping.world);
+                hostBookkeeping.pL(), hostBookkeeping.rank, hostBookkeeping.world);
         }
         // The below wrapping around to zero is fine due to the sync above
         seqBit++;

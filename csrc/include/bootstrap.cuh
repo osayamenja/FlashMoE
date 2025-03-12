@@ -211,7 +211,8 @@ namespace aristos{
                 globalWorld * sizeof(WorkerAttribute) +
                 sizeof(uint) * globalWorld;
         const auto aXz = (sizeof(ELI) + sizeof(PEL)) * E +
-            (sizeof(PLI) * globalWorld) + (sizeof(uint) * (E * ACC::TCM::value * ACC::TNx::value));
+            (sizeof(PLI) * globalWorld) + sizeof(LXI) * E +
+                (sizeof(uint) * (E * ACC::TCM::value * ACC::TNx::value));
         const auto pZ = cuda::std::max(dZ, aXz);
         const auto sZ = sizeof(uint) * (globalWorld + 2 * E) + sizeof(uint16_t) * globalWorld;
 
@@ -293,8 +294,10 @@ namespace aristos{
         auto* __restrict__ eLI = CAST_TO(ELI, pEL + E);
         static_assert(alignof(ELI) % alignof(PLI) == 0);
         auto* __restrict__ pLI = CAST_TO(PLI, eLI + E);
-        static_assert(alignof(PLI) % alignof(uint) == 0);
-        auto* __restrict__ tileIndices = CAST_TO(uint, pLI + ePgD.epWorld);
+        static_assert(alignof(PLI) % alignof(LXI) == 0);
+        auto* __restrict__ lxI = CAST_TO(LXI, pLI + ePgD.epWorld);
+        static_assert(alignof(LXI) % alignof(uint) == 0);
+        auto* __restrict__ tileIndices = CAST_TO(uint, lxI + ePgD.nLx);
 
         auto pel = PEL{};
         auto eli = ELI{};
@@ -307,6 +310,7 @@ namespace aristos{
             const auto gRank = pT[ePrank];
             auto* rSHeap = CAST_TO(cuda::std::byte, nvshmem_ptr(wSHeap, gRank));
             auto* rFlags = CAST_TO(cuda::std::byte, nvshmem_ptr(flags, gRank));
+            rFlags = rFlags == nullptr ? flags : rFlags;
             const auto xLi = scratch[ePrank]++;
             const auto isRemote = rSHeap == nullptr;
             // PEL
@@ -325,7 +329,11 @@ namespace aristos{
             // PLI
             pli.isRemote = isRemote;
             pli.pe = gRank;
-            pli.expertIndex = i;
+
+            // LXI
+            if (gRank == rank) {
+                (lxI + xLi)->expertIndex = i;
+            }
 
             pEL[i] = pel;
             eLI[i] = eli;
@@ -341,6 +349,13 @@ namespace aristos{
                     tileIndices[current++] = tileIndex++;
                 }
             }
+        }
+
+        // Compute flags
+        for (uint i = 0; i < E; ++i) {
+            pel = pEL[i];
+            pel.nLocalExperts = scratch[pel.peer];
+            pEL[i] = pel;
         }
 
         CHECK_ERROR_EXIT(cudaMemcpyAsync(hostBookkeeping.pEL(), pEL, sizeof(PEL) * E,

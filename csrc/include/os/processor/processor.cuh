@@ -350,12 +350,11 @@ namespace aristos::processor{
         }
     }
 
-    struct ProcessorArgs{
+    struct __align__(8) ProcessorArgs{
         // sensible sentinel values
         unsigned int* __restrict__ sQ = nullptr;
         TQSignal* __restrict__ pDB = nullptr;
         unsigned int* __restrict__ tQH = nullptr;
-        flagsType* __restrict__ flags = nullptr;
         Task* __restrict__ tQ = nullptr;
         Task* __restrict__ ptQ = nullptr;
         unsigned int* __restrict__ tQS = nullptr;
@@ -365,11 +364,10 @@ namespace aristos::processor{
         ProcessorArgs(unsigned int* const& _sQ,
             TQSignal* const& _pDB,
             unsigned int* const& _tQH,
-            flagsType* const& _flags,
             Task* const& _tQ,
             Task* const& _ptQ,
             unsigned int* const& _tQS) :
-        sQ(_sQ), pDB(_pDB), tQH(_tQH), flags(_flags), tQ(_tQ), ptQ(_ptQ), tQS(_tQS) {}
+        sQ(_sQ), pDB(_pDB), tQH(_tQH), tQ(_tQ), ptQ(_ptQ), tQS(_tQS) {}
     };
 
     template<
@@ -391,7 +389,6 @@ namespace aristos::processor{
         const auto rSeqBit = _seqBit;
         Task rCurrentTask{};
         TQSignal tqs{0U, 0U};
-        void* cachedFlags;
 
         if (!threadIdx.x) {
             globalInterrupt = 0U;
@@ -399,7 +396,6 @@ namespace aristos::processor{
                 bookkeeping.sQ() + blockIdx.x,
                 bookkeeping.pDB() + blockIdx.x,
                 bookkeeping.tQH(),
-                bookkeeping.flags,
                 bookkeeping.tQ(),
                 bookkeeping.ptQ(),
                 bookkeeping.tSA()
@@ -465,17 +461,17 @@ namespace aristos::processor{
                                     rCurrentTask.bData,
                                     rCurrentTask.cData,
                                     rCurrentTask.dData,
+                                    rCurrentTask.flags,
                                     rCurrentTask.syncIdx,
                                     0,
                                     rCurrentTask.M,
-                                    rCurrentTask.flagIdx,
                                     rCurrentTask.tileSize,
                                     rCurrentTask.peerIdx,
                                     rCurrentTask.batchIdx,
                                     rCurrentTask.isPeerRemote,
                                 };
                                 #pragma unroll
-                                for (unsigned int i = threadIdx.x; i < tNx; i += wS) {
+                                for (uint i = threadIdx.x; i < tNx; i += wS) {
                                     nextTask.tileIdx = i;
                                     tQ[i] = nextTask;
                                 }
@@ -490,10 +486,6 @@ namespace aristos::processor{
                     }
                     break;
                     case TaskType::postGEMM: {
-                        if (!threadIdx.x) {
-                            // below is a ldg read so initiate it early
-                            cachedFlags = nvshmem_ptr(pA.flags, rCurrentTask.peerIdx);
-                        }
                         constexpr unsigned int postIndex = 0;
                         fGET<PostGEMM>(CAST_TO(typename PostGEMM::MatrixDType, workspace),
                             CONST_CAST_TO(typename PostGEMM::MatrixAType, rCurrentTask.aData),
@@ -517,7 +509,7 @@ namespace aristos::processor{
                                     // Batched remote network transfer to avoid overwhelming the NIC
                                     nvshmem_putmem_signal_nbi(rCurrentTask.cData[postIndex], rCurrentTask.cData[postIndex],
                                         rCurrentTask.tileSize * H * sizeof(Element),
-                                        pA.flags + rCurrentTask.flagIdx,
+                                        rCurrentTask.flags,
                                         *CONST_CAST_TO(flagsType, &flagSignal), NVSHMEM_SIGNAL_SET,
                                         rCurrentTask.peerIdx);
                                 }
@@ -527,8 +519,7 @@ namespace aristos::processor{
                                 // Already did the network transfer,
                                 // so set signal only
                                 __threadfence_system();
-                                atomicExch_system(CAST_TO(ull_t, cachedFlags) + rCurrentTask.flagIdx,
-                                    *CONST_CAST_TO(ull_t, &flagSignal));
+                                atomicExch_system(CAST_TO(ull_t, rCurrentTask.flags), *CONST_CAST_TO(ull_t, &flagSignal));
                             }
                         }
                     }

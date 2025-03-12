@@ -325,12 +325,17 @@ namespace aristos{
         uint16_t isRemote;
     };
 
+    /// Local expert lookup: key is local expert index
+    __device__
+    struct __align__(4) LXI {
+        uint expertIndex;
+    };
+
     /// Peer lookup info: key is ep rank
     __device__
-    struct __align__(8) PLI {
-        uint pe;
+    struct __align__(4) PLI {
+        uint16_t pe;
         uint16_t isRemote;
-        uint16_t expertIndex;
     };
 
     /// Packet Encoding Lookup info, retrievable in a single memory lookup
@@ -340,11 +345,12 @@ namespace aristos{
         cuda::std::byte* remoteSHeap;
         cuda::std::byte* remoteSFlags; //rank * expertSlots + xLIdx
         uint eC;
-        uint pTT;
+        uint16_t pTTt;
         uint16_t expertLocalIdx;
         uint16_t peer;
         uint16_t pe;
         uint16_t isRemote;
+        uint16_t nLocalExperts;
     };
 
     /// Computes precise number of integers needed to represent a consecutive set of bits of size,
@@ -392,6 +398,7 @@ namespace aristos{
         using GRB = cute::C<cute::ceil_div(PC::value, 1024 * 1024)>;
         using P2PB = cute::C<cute::ceil_div(S::value * MINI_BATCH * H::value, 1024 * 1024)>;
         using EC = cute::C<DTK::value == DropTokens::no ? S::value : cute::ceil_div(S::value, E::value)>;
+        static_assert(EC::value * BLOCK_M <= cuda::std::numeric_limits<uint16_t>::max());
         using SZ = cute::C<EC::value * H::value>;
         using TM = cute::C<cute::ceil_div(S::value, BLOCK_M)>;
         using TN = cute::C<cute::ceil_div(P::value, BLOCK_N)>;
@@ -430,7 +437,7 @@ namespace aristos{
         mp_t probability;
     };
 
-    enum class TaskType : uint8_t {
+    enum class TaskType {
         preGEMM,
         postGEMM,
         combine
@@ -463,18 +470,18 @@ namespace aristos{
         cuda::std::array<const cuda::std::byte*, GEMMs> bData = {};
         cuda::std::array<cuda::std::byte*, GEMMs> cData = {};
         cuda::std::array<const cuda::std::byte*, GEMMs> dData = {};
+        flagsType* flags = nullptr;
         // crd2Idx(peer, expertIdx, offset)
         unsigned int syncIdx = 0UL;
         unsigned int tileIdx = 0U;
         //padded
         unsigned int M = 0U;
-        unsigned int flagIdx = 0U;
         unsigned int batchIdx = 0U;
+        TaskType taskType;
         uint16_t peerIdx = 0U;
         uint16_t expertIdx = 0U;
         TST tileSize = 0U; // <= BLOCK_M
-        TaskType taskType;
-        bool isPeerRemote = false;
+        uint16_t isPeerRemote = 0U;
 
         __forceinline__ __device__
         Task() = default;
@@ -486,18 +493,18 @@ namespace aristos{
             const cuda::std::array<const cuda::std::byte*, GEMMs>& _bData,
             const cuda::std::array<cuda::std::byte*, GEMMs>& _cData,
             const cuda::std::array<const cuda::std::byte*, GEMMs>& _dData,
+            flagsType* const& _flags,
             const unsigned int& _syncIdx,
             const unsigned int& _tile,
             const unsigned int& _M,
-            const unsigned int& _flagIdx,
             const uint16_t& _size,
             const unsigned int& _peerIdx,
             const unsigned int& _batchIdx,
-            const bool& _isPeerRemote):
+            const uint16_t& _isPeerRemote):
         aData(_aData), bData(_bData),
-        cData(_cData), dData(_dData),
-        syncIdx(_syncIdx), tileIdx(_tile),  M(_M), flagIdx(_flagIdx),
-        batchIdx(_batchIdx), peerIdx(_peerIdx), tileSize(_size), taskType(_taskType), isPeerRemote(_isPeerRemote){}
+        cData(_cData), dData(_dData), flags(_flags),
+        syncIdx(_syncIdx), tileIdx(_tile),  M(_M),
+        batchIdx(_batchIdx), taskType(_taskType), peerIdx(_peerIdx), tileSize(_size), isPeerRemote(_isPeerRemote){}
 
         // Stage 2
         __device__ __forceinline__
@@ -577,7 +584,8 @@ namespace aristos{
                 tQml = tQl + blocks * sizeof(TQSignal) + E * sizeof(PEL) + sizeof(TPS) * (PX * EC);
                 brs = tQml + (ACC::GRL::value == GateReductionLevel::singleBlock ? 0U : S * TPX *
                     (sizeof(RingSoftmaxPayload) + 2 * sizeof(RingTopKPayload)));
-                tQXt = brs + sizeof(ELI) * E + sizeof(cuda::barrier<cuda::thread_scope_device>) + sizeof(PLI) * world;
+                tQXt = brs + sizeof(ELI) * E + sizeof(cuda::barrier<cuda::thread_scope_device>) +
+                    sizeof(PLI) * world + sizeof(LXI) * _nLx;
                 gRl = tQXt + (ACC::JT::value == JobType::inference ? 0U :
                     sizeof(mp_t) * (2 * E + 1));
                 eDsA = gRl + sizeof(BookType) * (2 * E + 1);
@@ -609,7 +617,7 @@ namespace aristos{
             const auto brs = tQml + (ACC::GRL::value == GateReductionLevel::singleBlock ? 0U :
                 S * TPX * (sizeof(RingSoftmaxPayload) + 2 * sizeof(RingTopKPayload)));
             const auto tQXt = brs + sizeof(ELI) * E + sizeof(cuda::barrier<cuda::thread_scope_device>) +
-                sizeof(PLI) * _world;
+                sizeof(PLI) * _world + sizeof(LXI) * _nLx;
             const auto gRl = tQXt +
                 (ACC::JT::value == JobType::inference ? 0U : sizeof(mp_t) * (2 * E + 1));
             const auto eDsA = gRl + sizeof(BookType) * (2 * E + 1);
@@ -653,7 +661,7 @@ namespace aristos{
             return CAST_TO(PEL, book + tQl);
         }
         static_assert(alignof(PEL) % alignof(TPS) == 0);
-        __host__ __device__ __forceinline__
+        __device__ __forceinline__
         auto* tP() const {
             return CAST_TO(TPS, pEL() + ACC::E::value);
         }
@@ -702,8 +710,14 @@ namespace aristos{
 
         static_assert(alignof(ELI) % alignof(PLI) == 0);
         __host__ __device__ __forceinline__
-        auto* pLI() const {
+        auto* pL() const {
             return CAST_TO(PLI, eL() + ACC::E::value);
+        }
+
+        static_assert(alignof(PLI) % alignof(LXI) == 0);
+        __host__ __device__ __forceinline__
+        auto* lX() const {
+            return CAST_TO(LXI, pL() + world);
         }
 
         static_assert(alignof(PLI) % alignof(mp_t) == 0);

@@ -33,12 +33,13 @@ namespace aristos::os {
         const auto ssfC = __ldg(bookkeeping.ssFc());
         const auto* __restrict__ eC = bookkeeping.eC();
         const auto world = bookkeeping.world;
+        const auto nLx = bookkeeping.nLx;
         constexpr auto subscriberCount = threads - WARP_SIZE;
 
         // each subscriber thread gets wSet * sizeof(uint) bytes of workspace
         constexpr auto wSet = 16U; // working set size
         constexpr auto bitSetSizePs = cute::ceil_div(wSet, sizeof(uint) * 8U);
-        const auto bitSetSize = bookkeeping.nLx * bookkeeping.world + ssfC;
+        const auto bitSetSize = (bookkeeping.nLx * bookkeeping.world) + ssfC;
         const auto bSSI = nSI<subscriberCount>(bitSetSize);
         constexpr auto E = ACC::E::value;
         constexpr auto TNx = ACC::TNx::value;
@@ -49,18 +50,23 @@ namespace aristos::os {
         static_assert(alignof(ELI) % alignof(PLI) == 0);
         auto* __restrict__ pL = CAST_TO(PLI, eL + E);
         static_assert(alignof(PLI) % alignof(uint) == 0);
-        const auto dZ = sizeof(ELI) * E + sizeof(PLI) * world;
+        auto* __restrict__ lX = CAST_TO(LXI, pL + world);
+        const auto dZ = sizeof(ELI) * E + sizeof(PLI) * world + sizeof(LXI) * nLx;
         auto* __restrict__ bitSet = CAST_TO(uint, workspace + roundToCacheLine(dZ));
         const auto* __restrict__ geL = bookkeeping.eL();
-        const auto* __restrict__ gpL = bookkeeping.pLI();
+        const auto* __restrict__ gpL = bookkeeping.pL();
+        const auto* __restrict__ gLx = bookkeeping.lX();
         const auto z = dZ + bSSI + SUBSCRIBERS * wSet * sizeof(uint);
         for (uint i = threadIdx.x; i < bSSI; i += threads) {
             bitSet[i] = 0U;
         }
         #pragma unroll
-        for (uint i = threadIdx.x; i < E; ++i) {
+        for (uint i = threadIdx.x; i < E; i += threads) {
             eL[i] = geL[i];
             pL[i] = gpL[i];
+        }
+        for (uint i = threadIdx.x; i < world; i += threads) {
+            lX[i] = gLx[i];
         }
         auto* __restrict__ scratch = CAST_TO(uint, workspace + roundToCacheLine(z));
         auto* __restrict__ tQHeads = scratch;
@@ -117,8 +123,8 @@ namespace aristos::os {
         }
         else {
             // subscriber
-            subscriber::start<bitSetSizePs, wSet>(bitSet, CAST_TO(cuda::std::byte,bitSet + bSSI), interrupt, pL, eL, ssfC,
-                status, taskBound, moeOutput, expertsUp, expertsDown, biasUp, biasDown, lSeqBit);
+            subscriber::start<bitSetSizePs, wSet>(bitSet, CAST_TO(cuda::std::byte,bitSet + bSSI), interrupt, pL,
+                lX, eL, ssfC, status, taskBound, moeOutput, expertsUp, expertsDown, biasUp, biasDown, lSeqBit);
         }
     }
 }

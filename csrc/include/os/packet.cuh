@@ -37,10 +37,10 @@ namespace aristos::packet {
 
         // cache
         const auto* __restrict__ tP = bookkeeping.tP();
+        const auto epRank = bookkeeping.rank;
         auto* __restrict__ pSA = bookkeeping.pSA();
         auto* __restrict__ sHeap = bookkeeping.sHeap;
         auto* __restrict__ flags = bookkeeping.flags;
-        const auto fpO = bookkeeping.rank * bookkeeping.xs;
 
         const auto tokenIds = make_tensor(cute::make_gmem_ptr(tP),
             cute::Layout<cute::Shape<cute::Int<E>, cute::Int<EC>>,
@@ -73,13 +73,13 @@ namespace aristos::packet {
             auto* __restrict__ peL = CAST_TO(PEL, workspace) + i;
             const auto peer = peL->peer;
             peL->eC = seC[i];
-            peL->pTT = sPTT[peer];
+            peL->pTTt = Bookkeeping::tiles<BLOCK_M>(sPTT[peer]);
         }
         __syncthreads();
         #pragma unroll
         for (uint expertIdx = superBlockIdx; expertIdx < E; expertIdx += numSuperBlocks) {
             const auto lI = enL[expertIdx];
-            const auto flagOffset = fpO + lI.expertLocalIdx;
+            const auto flagOffset = epRank * lI.nLocalExperts + lI.expertLocalIdx;
             const auto routedTokens = d == DropTokens::yes ?
                 cute::min(lI.eC, EC) : lI.eC;
             auto* __restrict__ peerHeap = lI.isRemote ?
@@ -87,12 +87,12 @@ namespace aristos::packet {
             heap::advance<0, 1>(lI.remoteSHeap, lI.peer, lI.expertLocalIdx);
 
             if (!routedTokens) {
-                if (isLeader && !lI.pTT) {
+                if (isLeader && !lI.pTTt) {
                     // single thread sends a noop packet to unblock the remote peer
                     // Pack payload into single signal word
                     const auto sigPayload = SignalPayload{
                         routedTokens,
-                        static_cast<uint16_t>(Bookkeeping::tiles<BLOCK_M>(lI.pTT)), // this should be safe
+                        lI.pTTt,
                         rSeqBit
                     };
                     if (lI.isRemote) {
@@ -102,12 +102,15 @@ namespace aristos::packet {
                     }
                     else {
                         // Better to use below than the volatile write operation used in the public-facing API
-                        atomicExch_system(CAST_TO(ull_t, lI.remoteSFlags), *CONST_CAST_TO(ull_t, &sigPayload));
+                        atomicExch_system(CAST_TO(ull_t, lI.remoteSFlags + flagOffset), *CONST_CAST_TO(ull_t, &sigPayload));
                     }
                 }
                 continue;
             }
             // copy tokens: not padded
+            if (isLeader) {
+                printf("routed tokens is %u\n", routedTokens);
+            }
             for (uint j = lBid; j < routedTokens; j += superBlockSize) {
                 const auto [tokenIdx, _] = tokenIds(expertIdx, j);
                 auto* __restrict__ localPH = peerHeap + j * H * sizeof(Element);
@@ -138,7 +141,7 @@ namespace aristos::packet {
                     // I am the last block, let's finalize this transfer.
                     const auto sigPayload = SignalPayload{
                         routedTokens,
-                        static_cast<uint16_t>(Bookkeeping::tiles<BLOCK_M>(lI.pTT)), // this should be safe
+                        lI.pTTt,
                         rSeqBit
                     };
                     if (lI.isRemote) {
@@ -154,7 +157,7 @@ namespace aristos::packet {
                     }
                     else {
                         // we've done the DMA transfer already, so we set the signal instead
-                        atomicExch_system(CAST_TO(ull_t, lI.remoteSFlags), *CONST_CAST_TO(ull_t, &sigPayload));
+                        atomicExch_system(CAST_TO(ull_t, lI.remoteSFlags + flagOffset), *CONST_CAST_TO(ull_t, &sigPayload));
                     }
                 }
             }
@@ -165,14 +168,16 @@ namespace aristos::packet {
     struct __align__(16) DecoderArg {
         cuda::std::byte* sHeap;
         Task* tQ;
+        flagsType* flags;
         const unsigned int tPs;
         const unsigned int nLx;
         __device__
         DecoderArg(
             cuda::std::byte* const& _sHeap,
             Task* const& _tQ,
+            flagsType* const& _flags,
             unsigned int const& _tPs) :
-        sHeap(_sHeap), tQ(_tQ), tPs(_tPs),
+        sHeap(_sHeap), tQ(_tQ), flags(_flags), tPs(_tPs),
         nLx(bookkeeping.nLx) {}
     };
 
@@ -199,10 +204,10 @@ namespace aristos::packet {
             unsigned int const& gPeer, // relative to the global group, needed for network operations
             unsigned int& lTQHead,
             unsigned int* __restrict__ const& tQHead) const {
-
             constexpr auto tN = ACC::TN::value;
             constexpr auto tNx = ACC::TNx::value;
-
+            auto* __restrict__ flags = CAST_TO(flagsType, p == PeerConnectivity::p2p ?
+                nvshmem_ptr(dA.flags, gPeer) : dA.flags);
             auto* __restrict__ tQ = dA.tQ + (threadIdx.x * dA.tPs + lTQHead);
             const auto fTilesM = routedTokens / BLOCK_M;
             const auto padM = Bookkeeping::pad<BLOCK_M>(routedTokens);
@@ -233,10 +238,10 @@ namespace aristos::packet {
                         weights,
                         taskResults,
                         bias,
+                        flags + fo + tileIdx,
                         sO + i,
                         tileIdx,
                         padM,
-                        fo + tileIdx,
                         static_cast<uint16_t>(BLOCK_M),
                         gPeer,
                         i,
@@ -256,10 +261,10 @@ namespace aristos::packet {
                         weights,
                         taskResults,
                         bias,
+                        dA.flags + fo + tileIdx,
                         sO + fTilesM,
                         tileIdx,
                         padM,
-                        fo + tileIdx,
                         static_cast<uint16_t>(residue),
                         gPeer,
                         fTilesM,

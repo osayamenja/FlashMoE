@@ -39,6 +39,7 @@ namespace aristos::subscriber{
             cuda::std::byte* __restrict__ pGB, /*post GEMM buffer*/
             /// Lookup Table
             const PLI* __restrict__ const& pL,
+            const LXI* __restrict__ const& lX,
             /// State
             uint* __restrict__ const& bitSet,
             uint* __restrict__ const& status,
@@ -72,24 +73,25 @@ namespace aristos::subscriber{
                     // set visited bit
                     visitedSet |= 1 << vIdx;
                     // decode the received packet
-                    const auto expertIdx = flagIdx % nLx;
+                    const auto myLocalExIdx = flagIdx % nLx;
                     const auto peerIdx = flagIdx / nLx;
                     const auto pLI = pL[peerIdx];
+                    const auto lXI = lX[myLocalExIdx];
                     cuda::std::array weights{
-                        CONST_CAST_TO(cuda::std::byte, &expertsUp(expertIdx)),
-                        CONST_CAST_TO(cuda::std::byte, &expertsDown(expertIdx))
+                        CONST_CAST_TO(cuda::std::byte, &expertsUp(myLocalExIdx)),
+                        CONST_CAST_TO(cuda::std::byte, &expertsDown(myLocalExIdx))
                     };
                     cuda::std::array bias{
-                        CONST_CAST_TO(cuda::std::byte, &biasUp(expertIdx)),
-                        CONST_CAST_TO(cuda::std::byte, &biasDown(expertIdx))
+                        CONST_CAST_TO(cuda::std::byte, &biasUp(myLocalExIdx)),
+                        CONST_CAST_TO(cuda::std::byte, &biasDown(myLocalExIdx))
                     };
-                    const auto* packet = heap::advance<0, 1>(dA.sHeap, peerIdx, expertIdx);
+                    const auto* packet = heap::advance<0, 1>(dA.sHeap, peerIdx, myLocalExIdx);
                     if (!pLI.isRemote) {
                         // P2P peer
                         // Enforce consistency
                         __threadfence_system();
                         fPd(dA, packet, status, taskCount, sP->routedTokens, sP->totalTilesM,
-                            expertIdx, pLI.expertIndex, pGB, weights, bias, peerIdx, pLI.pe, lTQHead, tQHead);
+                            myLocalExIdx, lXI.expertIndex, pGB, weights, bias, peerIdx, pLI.pe, lTQHead, tQHead);
                     }
                     else {
                         // Remote peer
@@ -98,7 +100,7 @@ namespace aristos::subscriber{
                         // as the memory ordering mechanism is internal.
                         nvshmem_ushort_test(&sP->seqBit, NVSHMEM_CMP_EQ, localSeqBit);
                         fRd(dA, packet, status, taskCount, sP->routedTokens, sP->totalTilesM,
-                            expertIdx, pLI.expertIndex, pGB, weights, bias, peerIdx, pLI.pe, lTQHead, tQHead);
+                            myLocalExIdx, lXI.expertIndex, pGB, weights, bias, peerIdx, pLI.pe, lTQHead, tQHead);
                     }
                 }
                 // update state
@@ -293,6 +295,7 @@ namespace aristos::subscriber{
         cuda::std::byte* __restrict__ const& workspace,
         unsigned int* __restrict__ const& interrupt,
         const PLI* __restrict__ const& pL,
+        const LXI* __restrict__ const& lX,
         const ELI* __restrict__ const& eL,
         const unsigned int& ssfC,
         unsigned int* __restrict__ const& status, // shared
@@ -308,12 +311,6 @@ namespace aristos::subscriber{
         static_assert(sizeof(unsigned long long int) == sizeof(flagsType));
         static_assert(sizeof(SignalPayload<>) == sizeof(uint64_t));
         static_assert(sizeof(SignalPayload<PacketStage::last>) == sizeof(uint64_t));
-        // Register allocation
-        const auto dA = packet::DecoderArg{
-            bookkeeping.sHeap,
-            bookkeeping.tQ(),
-            bookkeeping.tPs,
-        };
 
         cutlass::AlignedArray<uint, wSet> rWSet{};
         cutlass::AlignedArray<uint, bSzPs> rBitSet{};
@@ -348,6 +345,15 @@ namespace aristos::subscriber{
 
         const auto pSI = nSI<subscriberCount>(ssfC);
 
+        // Register allocation
+        const auto gfSfC = bookkeeping.world * bookkeeping.xs;
+        const auto dA = packet::DecoderArg{
+            bookkeeping.sHeap,
+            bookkeeping.tQ(),
+            bookkeeping.flags + gfSfC,
+            bookkeeping.tPs,
+        };
+
         while (!atomicLoad<cuda::thread_scope_block>(interrupt)) {
             auto* __restrict__ flags = sFlags;
             // sweep through flags by stages
@@ -361,6 +367,7 @@ namespace aristos::subscriber{
                     biasDown,
                     pGB,
                     pL,
+                    lX,
                     bitSet + pSI,
                     status,
                     taskCount,
@@ -374,7 +381,7 @@ namespace aristos::subscriber{
                     lSeqBit
                 );
             }
-            flags += fSfC;
+            flags += gfSfC;
             finalSubscriber(rWSet,
                 rBitSet,
                 bitSet,
