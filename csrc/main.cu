@@ -41,9 +41,9 @@ void runOS() {
     constexpr unsigned long aZ =  S * H;
     constexpr auto gwZ = aZ + PX * H;
     // scale this to number of experts
-    constexpr auto bZ =  gwZ + P * H;
-    constexpr auto b2Z =  bZ + P * H;
-    constexpr auto dZ =  b2Z + cute::max(P, H);
+    constexpr auto bZ =  gwZ + E * P * H;
+    constexpr auto b2Z =  bZ + E * P * H;
+    constexpr auto dZ =  b2Z + E * (P + H);
     constexpr auto gZ = dZ + S * PX;
     constexpr auto cZ = gZ + S * H;
     cuda::std::byte* p;
@@ -59,7 +59,10 @@ void runOS() {
     // Expert weights
     // loop for number of experts
     makeIdentity<P, H>(fHp + gwZ);
+    makeIdentity<P, H>(fHp + gwZ + P * H);
+
     makeIdentity<P, H>(fHp + bZ);
+    makeIdentity<P, H>(fHp + bZ + P * H);
     // bias
     std::ranges::fill(fHp + b2Z, fHp + dZ, 0.0f);
     /*const auto options = torch::TensorOptions().dtype(torch::kFloat32).
