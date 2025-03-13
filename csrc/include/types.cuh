@@ -516,8 +516,8 @@ namespace aristos{
         const unsigned int& _tile,
         const unsigned int& _M,
         const unsigned int& _expertIdx):
-        aData(_aData), bData(_bData), cData(_cData), tileIdx(_tile), M(_M), expertIdx(_expertIdx),
-        tileSize(_size), taskType(_taskType){}
+        aData(_aData), bData(_bData), cData(_cData), tileIdx(_tile), M(_M), taskType(_taskType), expertIdx(_expertIdx),
+        tileSize(_size){}
     };
 
     /// Information about auxiliary data structures comprising bookkeeping state
@@ -567,7 +567,6 @@ namespace aristos{
             constexpr auto TN = ACC::TN::value;
             constexpr auto blocks = ACC::PeakHardware::OS::processorBlocks::value;
             constexpr auto E = ACC::E::value;
-            constexpr auto PX = ACC::PX::value;
             constexpr auto S = ACC::S::value;
             constexpr auto EC = ACC::EC::value;
             constexpr auto P = ACC::P::value;
@@ -577,11 +576,11 @@ namespace aristos{
                 // maximum gemm tiles/tasks scheduled by processors
                 const auto prT = world * nLx * TCM * tiles<BLOCK_N>(P);
                 // maximum gemm tiles/tasks scheduled by subscriber threads
-                auto sT = world * nLx * TCM * TN + TCM * TN * E;
+                auto sT = world * nLx * TCM * TN + (TCM * ACC::TNx::value * E);
                 tPs = cute::ceil_div(sT, SUBSCRIBERS);
                 sT = tPs * SUBSCRIBERS;
                 tQl = sizeof(Task) * (sT + prT);
-                tQml = tQl + blocks * sizeof(TQSignal) + E * sizeof(PEL) + sizeof(TPS) * (PX * EC);
+                tQml = tQl + blocks * sizeof(TQSignal) + E * sizeof(PEL) + sizeof(TPS) * (E * EC);
                 brs = tQml + (ACC::GRL::value == GateReductionLevel::singleBlock ? 0U : S * TPX *
                     (sizeof(RingSoftmaxPayload) + 2 * sizeof(RingTopKPayload)));
                 tQXt = brs + sizeof(ELI) * E + sizeof(cuda::barrier<cuda::thread_scope_device>) +
@@ -590,7 +589,7 @@ namespace aristos{
                     sizeof(mp_t) * (2 * E + 1));
                 sBfC = gRl + sizeof(BookType) * (1 + (E * TCM * ACC::TNx::value) + blocks +
                     2 * (E + world * nLx * TCM));
-                bookSize = sBfC + sizeof(ACC::Element) * (_world * _nLx * TCM * TN);
+                bookSize = sBfC + sizeof(ACC::Element) * (_world * _nLx * EC * P);
             }
         }
 
@@ -601,7 +600,6 @@ namespace aristos{
             constexpr auto TN = ACC::TN::value;
             constexpr auto blocks = ACC::PeakHardware::OS::processorBlocks::value;
             constexpr auto E = ACC::E::value;
-            constexpr auto PX = ACC::PX::value;
             constexpr auto S = ACC::S::value;
             constexpr auto EC = ACC::EC::value;
             constexpr auto P = ACC::P::value;
@@ -609,11 +607,11 @@ namespace aristos{
             // maximum gemm tiles/tasks scheduled by processors
             const auto prT = _world * _nLx * TCM * tiles<BLOCK_N>(P);
             // maximum gemm tiles/tasks scheduled by subscriber threads
-            auto sT = _world * _nLx * TCM * TN + TCM * TN * E;
+            auto sT = _world * _nLx * TCM * TN + TCM * ACC::TNx::value * E;
             const auto tPs = cute::ceil_div(sT, SUBSCRIBERS);
             sT = tPs * SUBSCRIBERS;
             const auto tQl = sizeof(Task) * (sT + prT);
-            const auto tQml = tQl + blocks * sizeof(TQSignal) + E * sizeof(PEL) + sizeof(TPS) * (PX * EC);
+            const auto tQml = tQl + blocks * sizeof(TQSignal) + E * sizeof(PEL) + sizeof(TPS) * (E * EC);
             const auto brs = tQml + (ACC::GRL::value == GateReductionLevel::singleBlock ? 0U :
                 S * TPX * (sizeof(RingSoftmaxPayload) + 2 * sizeof(RingTopKPayload)));
             const auto tQXt = brs + sizeof(ELI) * E + sizeof(cuda::barrier<cuda::thread_scope_device>) +
@@ -622,7 +620,7 @@ namespace aristos{
                 (ACC::JT::value == JobType::inference ? 0U : sizeof(mp_t) * (2 * E + 1));
             const auto sBfC = gRl + sizeof(BookType) * (1 + (E * TCM * ACC::TNx::value) + blocks +
                 2 * (E + _world * _nLx * TCM));
-            return sBfC + sizeof(ACC::Element) * (_world * _nLx * TCM * TN);
+            return sBfC + sizeof(ACC::Element) * (_world * _nLx * EC * P);
         }
 
         __host__ __forceinline__
@@ -668,8 +666,7 @@ namespace aristos{
         /// processors' doorbell
         __device__ __forceinline__
         auto* pDB() const {
-            return CAST_TO(TQSignal, book + (tQl + sizeof(PEL) * ACC::E::value
-                + ACC::PX::value * ACC::EC::value));
+            return CAST_TO(TQSignal, tP() + ACC::E::value * ACC::EC::value);
         }
 
         static_assert(alignof(ull_t) % alignof(RingSoftmaxPayload) == 0
@@ -686,7 +683,7 @@ namespace aristos{
             return CAST_TO(uint2, book + tQml);
         }
         __device__ __forceinline__
-        constexpr auto gateBkz() const {
+        static constexpr auto gateBkz() {
             // Entrypoint for vectorized memory cleaning
             return 3 * ACC::S::value * ACC::TPX::value;
         }
@@ -735,7 +732,7 @@ namespace aristos{
             return CAST_TO(mp_t, book + tQXt);
         }
         __device__ __forceinline__
-        constexpr auto gBz() const {
+        static constexpr auto gBz() {
             return 2 * ACC::E::value + 1;
         }
         /***********CONTIGUOUS**************/

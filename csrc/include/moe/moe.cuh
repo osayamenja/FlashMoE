@@ -20,8 +20,7 @@ namespace aristos::moe{
         uint processors,
         CombineMode c,
         JobType jT,
-        uint S,
-        uint H,
+        uint OZ,
         typename Element
     >
     __device__ __forceinline__
@@ -31,17 +30,11 @@ namespace aristos::moe{
         const auto sBz = bookkeeping.sBz();
         auto* __restrict__ pDB = bookkeeping.pDB();
         auto* __restrict__ gBp = bookkeeping.gBp();
-        constexpr auto gBz = bookkeeping.gBz();
+        constexpr auto gBz = Bookkeeping::gBz();
         if constexpr (c == CombineMode::multithreaded) {
             // clear output buffer
-            constexpr auto sz = S * H;
-            constexpr auto vL = sz / sizeof(uint4);
-            for (uint i = threads * blockIdx.x + threadIdx.x; i < vL; i += blocks * threads) {
-                CAST_TO(uint4, outP)[i] = uint4{0U, 0U, 0U, 0U};
-            }
-            // residue
-            for (uint i = threads * blockIdx.x + threadIdx.x + vL * sizeof(uint); i < sz; i += blocks * threads) {
-                outP[i] = Element(0);
+            for (uint i = threads * blockIdx.x + threadIdx.x; i < OZ; i += blocks * threads) {
+                outP[i] = Element(0.0f);
             }
         }
         if constexpr (jT == JobType::training) {
