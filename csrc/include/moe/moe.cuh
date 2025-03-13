@@ -73,9 +73,6 @@ namespace aristos::moe{
         using ElementC = ACC::ElementC;
 
         const auto lE = bookkeeping.nLx;
-        if (!blockIdx.x && !threadIdx.x) {
-            printf("nLx is %u\n", lE);
-        }
         // Salami slice pointers
         const auto* __restrict__ gP = CONST_CAST_TO(Element, iP) + S * H;
         const auto* __restrict__ ePu = gP + H * PX;

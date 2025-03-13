@@ -88,9 +88,11 @@ namespace aristos::packet {
 
             if (routedTokens) {
                 // copy tokens: not padded
+                #if ARISTOS_DEBUG
                 if (isLeader) {
                     printf("routed tokens is %u\n", routedTokens);
                 }
+                #endif
                 for (uint j = lBid; j < routedTokens; j += superBlockSize) {
                     const auto [tokenIdx, _] = tokenIds(expertIdx, j);
                     auto* __restrict__ localPH = peerHeap + j * H * sizeof(Element);

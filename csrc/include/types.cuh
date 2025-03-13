@@ -44,6 +44,7 @@
 #define BYTE_MAX cuda::std::numeric_limits<cuda::std::underlying_type_t<cuda::std::byte>>::max()
 #define TO_MB(b) (static_cast<float>(b) / (1024.0f*1024.0f))
 #define BETA_MB 1024.0f // 1GB
+#define ARISTOS_DEBUG 0
 
 #include <cuda/barrier>
 #include <cuda/std/array>

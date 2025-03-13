@@ -46,16 +46,18 @@ namespace aristos::processor{
 
         const auto tilesM = M / bM;
         // We assert the below prior to this point
-        const auto tilesN = N / bN;
+        constexpr auto tilesN = N / bN;
 
-        const auto tileCoord = idx2crd(tileIdx, cute::Shape(tilesM, tilesN), cute::Stride(tilesN ,1));
+        const auto tileCoord = idx2crd(tileIdx, cute::Shape(tilesM, tilesN),
+            cute::Stride<cute::Int<tilesN>, cute::_1>{});
         const auto ctaCoord = cute::make_coord(cute::get<0>(tileCoord), cute::get<1>(tileCoord));
         const auto gA = cute::local_tile(mA, tiler, ctaCoord);
         static_assert(bN % elems == 0);
         constexpr auto trips = bN / elems;
 
         // Transposed layout
-        constexpr auto sCLay = cute::make_layout(cute::Shape<cute::Int<bM>, cute::Int<elems>>{}, cute::LayoutRight{});
+        constexpr auto sCLay = cute::make_layout(cute::Shape<cute::Int<bM>, cute::Int<elems>>{},
+            cute::LayoutRight{});
         const auto sC = cute::make_tensor(cute::make_smem_ptr(workspace), sCLay);
 
         #pragma unroll
@@ -150,10 +152,14 @@ namespace aristos::processor{
         const auto tileCoord = idx2crd(tileIdx, cute::Shape<cute::Int<tilesM>, cute::Int<tilesN>>{},
             cute::Stride<cute::Int<tilesN>, cute::_1>{});
         const auto ctaCoord = make_coord(cute::get<0>(tileCoord), cute::get<1>(tileCoord), cute::_);
-        const auto gA = cute::local_tile(mA, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1, cute::X,cute::_1>{});
-        const auto gB = cute::local_tile(mB, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step< cute::X,cute::_1,cute::_1>{});
-        const auto gC = cute::local_tile(mC, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1,cute::_1, cute::X>{});
-        const auto gD = cute::local_tile(mD, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1,cute::_1, cute::X>{});
+        const auto gA = cute::local_tile(mA, typename BlockGEMM::BlockTiler{}, ctaCoord,
+            cute::Step<cute::_1, cute::X,cute::_1>{});
+        const auto gB = cute::local_tile(mB, typename BlockGEMM::BlockTiler{}, ctaCoord,
+            cute::Step< cute::X,cute::_1,cute::_1>{});
+        const auto gC = cute::local_tile(mC, typename BlockGEMM::BlockTiler{}, ctaCoord,
+            cute::Step<cute::_1,cute::_1, cute::X>{});
+        const auto gD = cute::local_tile(mD, typename BlockGEMM::BlockTiler{}, ctaCoord,
+            cute::Step<cute::_1,cute::_1, cute::X>{});
 
         auto k_tile_iter = cute::make_coord_iterator(tilesK);
 
@@ -274,10 +280,14 @@ namespace aristos::processor{
         const auto tileCoord = idx2crd(tileIdx, cute::Shape(tilesM, tilesN),
             cute::Stride<cute::Int<tilesN>, cute::_1>{});
         const auto ctaCoord = make_coord(cute::get<0>(tileCoord), cute::get<1>(tileCoord), cute::_);
-        const auto gA = cute::local_tile(mA, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1, cute::X,cute::_1>{});
-        const auto gB = cute::local_tile(mB, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step< cute::X,cute::_1,cute::_1>{});
-        const auto gC = cute::local_tile(mC, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1,cute::_1, cute::X>{});
-        const auto gD = cute::local_tile(mD, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1,cute::_1, cute::X>{});
+        const auto gA = cute::local_tile(mA, typename BlockGEMM::BlockTiler{}, ctaCoord,
+            cute::Step<cute::_1, cute::X,cute::_1>{});
+        const auto gB = cute::local_tile(mB, typename BlockGEMM::BlockTiler{}, ctaCoord,
+            cute::Step< cute::X,cute::_1,cute::_1>{});
+        const auto gC = cute::local_tile(mC, typename BlockGEMM::BlockTiler{}, ctaCoord,
+            cute::Step<cute::_1,cute::_1, cute::X>{});
+        const auto gD = cute::local_tile(mD, typename BlockGEMM::BlockTiler{}, ctaCoord,
+            cute::Step<cute::_1,cute::_1, cute::X>{});
 
         auto k_tile_iter = cute::make_coord_iterator(tilesK);
 
@@ -522,7 +532,8 @@ namespace aristos::processor{
                                 // Already did the network transfer,
                                 // so set signal only
                                 __threadfence_system();
-                                atomicExch_system(CAST_TO(ull_t, rCurrentTask.flags), *CONST_CAST_TO(ull_t, &flagSignal));
+                                atomicExch_system(CAST_TO(ull_t, rCurrentTask.flags),
+                                    *CONST_CAST_TO(ull_t, &flagSignal));
                             }
                         }
                     }

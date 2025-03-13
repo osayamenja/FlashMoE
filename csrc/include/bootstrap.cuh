@@ -268,6 +268,7 @@ namespace aristos{
         // Initialize bookkeeping
         auto* sA = static_cast<flagsType*>(sHeap);
         auto* flags = CAST_TO(flagsType, sHb + syncArrayBytes);
+        static_assert(alignof(flagsType) % alignof(ACC::Element) == 0);
         auto* wSHeap = sHb + flagBytes + syncArrayBytes;
         hostBookkeeping = Bookkeeping{
             sHb,
