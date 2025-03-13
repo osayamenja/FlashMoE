@@ -87,8 +87,8 @@ namespace aristos::packet {
             heap::advance<0, 1>(lI.remoteSHeap, lI.peer, lI.expertLocalIdx);
 
             if (!routedTokens) {
-                if (isLeader && !lI.pTTt) {
-                    // single thread sends a noop packet to unblock the remote peer
+                if (isLeader) {
+                    // single thread sends a noop packet to notify the remote peer
                     // Pack payload into single signal word
                     const auto sigPayload = SignalPayload{
                         routedTokens,
@@ -102,7 +102,8 @@ namespace aristos::packet {
                     }
                     else {
                         // Better to use below than the volatile write operation used in the public-facing API
-                        atomicExch_system(CAST_TO(ull_t, lI.remoteSFlags + flagOffset), *CONST_CAST_TO(ull_t, &sigPayload));
+                        atomicExch_system(CAST_TO(ull_t, lI.remoteSFlags + flagOffset),
+                            *CONST_CAST_TO(ull_t, &sigPayload));
                     }
                 }
                 continue;
@@ -274,9 +275,9 @@ namespace aristos::packet {
             }
 
             if (routedTokens) {
-                __threadfence();
                 const auto totalTasks = Bookkeeping::tiles<BLOCK_M>(routedTokens) * tN;
                 lTQHead += totalTasks;
+                __threadfence();
                 // notifies scheduler of work
                 atomicAdd_block(tQHead, totalTasks);
             }
@@ -287,7 +288,7 @@ namespace aristos::packet {
     template<>
     struct Decoder<PacketStage::last, PeerConnectivity::p2p> {
         __device__ __forceinline__
-        void operator()(Task* __restrict__ tQ,
+        void operator()(Task* __restrict__ const& tQ,
             const cuda::std::byte* const& packet,
             const cuda::std::byte* const& tokenIndices,
             cuda::std::byte* const& moeOutput,
@@ -338,8 +339,8 @@ namespace aristos::packet {
                     expertIdx
                 };
             }
-            __threadfence();
             lTQHead += tN;
+            __threadfence();
             // notifies scheduler
             atomicAdd_block(tQHead, tN);
         }

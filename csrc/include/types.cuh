@@ -588,8 +588,8 @@ namespace aristos{
                     sizeof(PLI) * world + sizeof(LXI) * _nLx;
                 gRl = tQXt + (ACC::JT::value == JobType::inference ? 0U :
                     sizeof(mp_t) * (2 * E + 1));
-                eDsA = gRl + sizeof(BookType) * (2 * E + 1);
-                sBfC = eDsA + sizeof(BookType) * 2 * (world * nLx * TCM) + blocks + TCM * TN * E;
+                sBfC = gRl + sizeof(BookType) * (1 + (E * TCM * ACC::TNx::value) + blocks +
+                    2 * (E + world * nLx * TCM));
                 bookSize = sBfC + sizeof(ACC::Element) * (_world * _nLx * TCM * TN);
             }
         }
@@ -620,9 +620,8 @@ namespace aristos{
                 sizeof(PLI) * _world + sizeof(LXI) * _nLx;
             const auto gRl = tQXt +
                 (ACC::JT::value == JobType::inference ? 0U : sizeof(mp_t) * (2 * E + 1));
-            const auto eDsA = gRl + sizeof(BookType) * (2 * E + 1);
-            const auto sBfC = eDsA +
-                sizeof(BookType) * 2 * (_world * _nLx * TCM) + blocks + TCM * TN * E;
+            const auto sBfC = gRl + sizeof(BookType) * (1 + (E * TCM * ACC::TNx::value) + blocks +
+                2 * (E + _world * _nLx * TCM));
             return sBfC + sizeof(ACC::Element) * (_world * _nLx * TCM * TN);
         }
 
@@ -679,8 +678,17 @@ namespace aristos{
         /***********CONTIGUOUS**************/
         __device__ __forceinline__
         auto* gateBk() const {
+            static_assert(sizeof(uint2) == sizeof(RingSoftmaxPayload) &&
+                sizeof(uint2) == sizeof(RingTopKPayload) &&
+                alignof(uint2) % alignof(RingSoftmaxPayload) == 0 &&
+                sizeof(uint2) % sizeof(RingTopKPayload) == 0);
             // Entrypoint for vectorized memory cleaning
             return CAST_TO(uint2, book + tQml);
+        }
+        __device__ __forceinline__
+        constexpr auto gateBkz() const {
+            // Entrypoint for vectorized memory cleaning
+            return 3 * ACC::S::value * ACC::TPX::value;
         }
         __device__ __forceinline__
         auto* bRsP() const {
@@ -721,6 +729,16 @@ namespace aristos{
         }
 
         static_assert(alignof(PLI) % alignof(mp_t) == 0);
+        /// entrypoint for clearing
+        __device__ __forceinline__
+        auto* gBp() const {
+            return CAST_TO(mp_t, book + tQXt);
+        }
+        __device__ __forceinline__
+        constexpr auto gBz() const {
+            return 2 * ACC::E::value + 1;
+        }
+        /***********CONTIGUOUS**************/
         /// Gate mean logits
         __device__ __forceinline__
         auto* gML() const {
@@ -736,45 +754,55 @@ namespace aristos{
         auto* gL() const {
             return gMeC() + ACC::E::value;
         }
+        /***********CONTIGUOUS**************/
 
         static_assert(alignof(mp_t) % alignof(BookType) == 0);
-        __device__ __forceinline__
-        auto* eC() const {
-            return CAST_TO(BookType, book + gRl);
-        }
-
-        /// number of remote experts
+        /// second stage flag count
         __host__ __device__ __forceinline__
         auto* ssFc() const {
-            return CAST_TO(BookType, book + gRl) + ACC::E::value;
-        }
-
-        /// Packet Sync array
-        __device__ __forceinline__
-        auto* pSA() const {
-            return eC() + ACC::E::value + 1;
+            return CAST_TO(BookType, book + gRl);
         }
 
         /// Scheduler buffers and flag checkpoints
         __host__ __device__ __forceinline__
         auto *tIx() const {
-            return CAST_TO(BookType, book + eDsA);
+            return ssFc() + 1;
         }
 
         __device__ __forceinline__
         auto *sQ() const {
-            return CAST_TO(BookType, book + eDsA) + ACC::E::value * ACC::TCM::value * ACC::TNx::value;
+            return (CAST_TO(BookType, book + gRl) + 1) + ACC::E::value * ACC::TCM::value * ACC::TNx::value;
         }
 
+        /// entrypoint for clearing
+        __device__ __forceinline__
+        auto* sBp() const {
+            return sQ() + ACC::PeakHardware::OS::processorBlocks::value;
+        }
+        __device__ __forceinline__
+        constexpr auto sBz() const {
+            return 2 * (ACC::E::value + world * nLx * ACC::TCM::value);
+        }
+        /***********CONTIGUOUS**************/
+        __device__ __forceinline__
+        auto* eC() const {
+            return sQ() + ACC::PeakHardware::OS::processorBlocks::value;
+        }
         __device__ __forceinline__
         auto *tQH() const {
-            return sQ() + ACC::PeakHardware::OS::processorBlocks::value;
+            return eC() + ACC::E::value;
+        }
+        /// Packet Sync array
+        __device__ __forceinline__
+        auto* pSA() const {
+            return tQH() + world * nLx * ACC::TCM::value;
         }
         /// tile sync array
         __device__ __forceinline__
         auto* tSA() const {
-            return tQH() + world * nLx * ACC::TCM::value;
+            return pSA() + ACC::E::value;
         }
+        /***********CONTIGUOUS**************/
 
         // Intermediate buffer
         static_assert(alignof(BookType) % alignof(ACC::Element) == 0);
@@ -784,8 +812,6 @@ namespace aristos{
         }
 
         private:
-            /// Note the below lengths are cumulative sums.
-            unsigned long int eDsA = 0UL;
             /// Scheduler buffers in bytes
             unsigned long int sBfC = ACC::FZ::value;
             unsigned long int tQXt = 0UL;
@@ -806,7 +832,7 @@ namespace aristos{
     __inline__ auto aristosStream = cudaStreamPerThread;
 
     namespace heap {
-        // The symmetric heap is a 5-D tensor (P, S, C, E, EC) of tokens,
+        /// The symmetric heap is a 5-D tensor (P, S, C, E, EC) of tokens,
         /// where P, S, C, E, EC denote dimensions for peers, communication stages,
         /// cells, experts, expert capacity, respectively.
         template<
@@ -819,7 +845,7 @@ namespace aristos{
         >
         requires (stage < STAGES && cell < CELLS)
         __device__ __forceinline__
-        auto* advance(cuda::std::byte* __restrict__ const& sHeap, const uint& peer,
+        constexpr auto* advance(cuda::std::byte* __restrict__ const& sHeap, const uint& peer,
             const uint& expert, const uint& token = 0){
             return sHeap + (slotSize * (bookkeeping.xs * (CELLS * (peer * STAGES + stage) + cell) + expert) +
                 token * tokenDim) * nBytes;

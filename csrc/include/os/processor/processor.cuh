@@ -229,8 +229,8 @@ namespace aristos::processor{
     // fused GEMM, epilogue and data transfer, with dynamic M and static N and K
     template<
         typename BlockGEMM,
-        unsigned int N = ACC::H::value,
-        unsigned int K = ACC::P::value,
+        unsigned int N,
+        unsigned int K,
         unsigned int elems = ACC::PeakHardware::rScratch::value,
         unsigned int threads = ACC::PeakHardware::OS::threads::value
     >
@@ -435,7 +435,8 @@ namespace aristos::processor{
                 switch (rCurrentTask.taskType) {
                     case TaskType::preGEMM: {
                         constexpr unsigned int preIndex = 0;
-                        fGET<PreGEMM>(CAST_TO(typename PreGEMM::MatrixDType, workspace),
+                        fGET<PreGEMM, ACC::P::value, ACC::H::value>(
+                            CAST_TO(typename PreGEMM::MatrixDType, workspace),
                             CONST_CAST_TO(typename PreGEMM::MatrixAType, rCurrentTask.aData),
                             CONST_CAST_TO(typename PreGEMM::MatrixBType, rCurrentTask.bData[preIndex]),
                             CAST_TO(typename PreGEMM::MatrixDType, rCurrentTask.cData[preIndex]),
@@ -448,7 +449,7 @@ namespace aristos::processor{
                             uint enqueue = 0U;
                             if (!threadIdx.x) {
                                 __threadfence();
-                                enqueue = atomicAdd(pA.tQS + rCurrentTask.syncIdx, 1U) == tN;
+                                enqueue = atomicAdd(pA.tQS + rCurrentTask.syncIdx, 1U) + 1 == tN;
                             }
                             // Broadcast from t0 to everyone else in the warp
                             enqueue = __shfl_sync(0xffffffff, enqueue, 0);
@@ -487,7 +488,8 @@ namespace aristos::processor{
                     break;
                     case TaskType::postGEMM: {
                         constexpr unsigned int postIndex = 0;
-                        fGET<PostGEMM>(CAST_TO(typename PostGEMM::MatrixDType, workspace),
+                        fGET<PostGEMM, ACC::H::value, ACC::P::value>(
+                            CAST_TO(typename PostGEMM::MatrixDType, workspace),
                             CONST_CAST_TO(typename PostGEMM::MatrixAType, rCurrentTask.aData),
                             CONST_CAST_TO(typename PostGEMM::MatrixBType, rCurrentTask.bData[postIndex]),
                             CAST_TO(typename PostGEMM::MatrixDType, rCurrentTask.cData[postIndex]),
@@ -505,9 +507,10 @@ namespace aristos::processor{
                             if (rCurrentTask.isPeerRemote) {
                                 // Remote; check if we need to do the transfer
                                 __threadfence();
-                                if (atomicIncrement(pA.tQS + rCurrentTask.syncIdx) == tN + tNx) {
-                                    // Batched remote network transfer to avoid overwhelming the NIC
-                                    nvshmem_putmem_signal_nbi(rCurrentTask.cData[postIndex], rCurrentTask.cData[postIndex],
+                                if (atomicIncrement(pA.tQS + rCurrentTask.syncIdx) + 1 == tN + tNx) {
+                                    nvshmem_putmem_signal_nbi(rCurrentTask.cData[postIndex],
+                                        rCurrentTask.cData[postIndex],
+                                        // Batched remote network transfer to avoid overwhelming the NIC
                                         rCurrentTask.tileSize * H * sizeof(Element),
                                         rCurrentTask.flags,
                                         *CONST_CAST_TO(flagsType, &flagSignal), NVSHMEM_SIGNAL_SET,

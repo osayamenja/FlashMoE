@@ -23,7 +23,7 @@ namespace aristos{
     template<cuda::thread_scope scope = cuda::thread_scope_device, typename T>
     requires AtomicType<T> && AtomicScope<scope>
     __device__ __forceinline__
-    T atomicLoad(T* __restrict__ const& addr){
+    auto atomicLoad(T* __restrict__ const& addr){
         if constexpr (scope == cuda::thread_scope_block || scope == cuda::thread_scope_thread) {
             return atomicOr_block(addr, 0U);
         }

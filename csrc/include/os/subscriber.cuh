@@ -164,8 +164,8 @@ namespace aristos::subscriber{
                 #pragma unroll
                 for (uint j = 0; j < WorkSet::kElements; ++j) {
                     workSet[j] = scratch[tIdx + j * subscriberCount];
-                    if (i + 1 < stageLength) {
-                        // Eagerly start global memory loads
+                    if (i + 1 < stageTrips) {
+                        // Eagerly initiate global memory loads
                         scratch[tIdx + j * subscriberCount] =
                             tileIndices[tIdx + (j + (i + 1) * WorkSet::kElements) * subscriberCount];
                     }

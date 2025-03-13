@@ -713,11 +713,13 @@ namespace aristos::gate {
             }
         }
 
-        // wipe flags clean for next iteration
-        auto* __restrict__ gBK = bookkeeping.gateBk();
-        const auto fl = bookkeeping.brs;
-        for (unsigned int i = threads * blockIdx.x + threadIdx.x; i < fl; i += threads * blocks) {
-            gBK[i] = uint2{0U, 0U};
+        if constexpr (ACC::GRL::value == GateReductionLevel::multiBlock) {
+            // asynchronously wipe flags clean for the next iteration
+            auto* __restrict__ gBK = bookkeeping.gateBk();
+            constexpr auto gateBkz = bookkeeping.gateBkz();
+            for (unsigned int i = threads * blockIdx.x + threadIdx.x; i < gateBkz; i += threads * blocks) {
+                gBK[i] = uint2{0U, 0U};
+            }
         }
     }
 }

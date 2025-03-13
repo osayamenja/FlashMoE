@@ -142,6 +142,7 @@ namespace aristos {
         static_assert(BLOCK_M == THREADS && BLOCK_M == threads);
         static_assert(BLOCK_M == 128);
         static_assert(BLOCK_N == 64, "64 is a very good value for N, change it back!");
+        // TODO deprecate the below
         using GEMM = decltype(cublasdx::Size<BLOCK_M, BLOCK_N, sizeK>()
                               + cublasdx::Precision<typename ToCDx<ElementA>::T, typename ToCDx<ElementB>::T, typename ToCDx<ElementC>::T>()
                               + cublasdx::Type<cublasdx::type::real>()

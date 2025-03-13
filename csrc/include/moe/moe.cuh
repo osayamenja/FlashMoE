@@ -15,6 +15,52 @@
 
 namespace aristos::moe{
     template<
+        uint threads,
+        uint blocks,
+        uint processors,
+        CombineMode c,
+        JobType jT,
+        uint S,
+        uint H,
+        typename Element
+    >
+    __device__ __forceinline__
+    void clearState(Element* __restrict__ const& outP) {
+        // wipe buffers before the grid-wide barrier
+        auto* __restrict__ sBp = bookkeeping.sBp();
+        const auto sBz = bookkeeping.sBz();
+        auto* __restrict__ pDB = bookkeeping.pDB();
+        auto* __restrict__ gBp = bookkeeping.gBp();
+        constexpr auto gBz = bookkeeping.gBz();
+        if constexpr (c == CombineMode::multithreaded) {
+            // clear output buffer
+            constexpr auto sz = S * H;
+            constexpr auto vL = sz / sizeof(uint4);
+            for (uint i = threads * blockIdx.x + threadIdx.x; i < vL; i += blocks * threads) {
+                CAST_TO(uint4, outP)[i] = uint4{0U, 0U, 0U, 0U};
+            }
+            // residue
+            for (uint i = threads * blockIdx.x + threadIdx.x + vL * sizeof(uint); i < sz; i += blocks * threads) {
+                outP[i] = Element(0);
+            }
+        }
+        if constexpr (jT == JobType::training) {
+            // clear loss buffers
+            for (uint i = threads * blockIdx.x + threadIdx.x; i < gBz; i += blocks * threads) {
+                gBp[i] = 0.0f;
+            }
+        }
+        // clear processor doorbells
+        for (uint i = threads * blockIdx.x + threadIdx.x; i < processors; i += blocks * threads) {
+            pDB[i] = TQSignal{0U, 0U};
+        }
+
+        // clear sB
+        for (uint i = threads * blockIdx.x + threadIdx.x; i < sBz; i += blocks * threads) {
+            sBp[i] = 0U;
+        }
+    }
+    template<
         unsigned S = ACC::S::value,
         unsigned int P = ACC::P::value,
         unsigned int H = ACC::H::value,
@@ -23,22 +69,21 @@ namespace aristos::moe{
     __global__ __maxnreg__(ACC::PeakHardware::registers::value) void forward(
         const void* __restrict__ iP, /* A, G, B, D*/ void* __restrict__ oP /*G, O*/,
         const __grid_constant__ uint16_t sb) {
-        using Config = ACC;
-        using GPUType = Config::PeakHardware;
+        using GPUType = ACC::PeakHardware;
         constexpr auto blocks = GPUType::blocks::value;
         constexpr auto processors = GPUType::OS::processorBlocks::value;
         constexpr auto sharedSize = GPUType::sharedMemory::value;
         constexpr auto threads = GPUType::OS::threads::value;
-        constexpr auto d = Config::DTK::value;
-        constexpr auto c = Config::CM::value;
-        using Element = Config::Element;
-        using ElementC = Config::ElementC;
+        constexpr auto d = ACC::DTK::value;
+        constexpr auto c = ACC::CM::value;
+        using Element = ACC::Element;
+        using ElementC = ACC::ElementC;
 
-        // Salami slice pointers
         const auto lE = bookkeeping.nLx;
         if (!blockIdx.x && !threadIdx.x) {
             printf("nLx is %u\n", lE);
         }
+        // Salami slice pointers
         const auto* __restrict__ gP = CONST_CAST_TO(Element, iP) + S * H;
         const auto* __restrict__ ePu = gP + H * PX;
         const auto* __restrict__ ePd = ePu + lE * P * H;
@@ -47,28 +92,9 @@ namespace aristos::moe{
         auto* __restrict__ gOp = CAST_TO(Element, oP);
         auto* __restrict__ mOp = gOp + S * PX;
         __shared__ __align__(16) cuda::std::byte workspace[sharedSize];
-        // wipe buffers before the grid-wide barrier
-        const auto gtQCl = bookkeeping.gtQCl;
-        if (!blockIdx.x && !threadIdx.x) {
-            printf("gtQCl is %u\n", gtQCl);
-        }
-        auto* __restrict__ gtQHeads = bookkeeping.tQH();
-        for (uint i = threads * blockIdx.x + threadIdx.x; i < gtQCl; i += blocks * threads) {
-            gtQHeads[i] = 0U;
-        }
-        if constexpr (c == CombineMode::multithreaded) {
-            // clear output buffer
-            constexpr auto sz = S * H;
-            constexpr auto vL = sz / sizeof(uint4);
-            for (uint i = threads * blockIdx.x + threadIdx.x; i < vL; i += blocks * threads) {
-                CAST_TO(uint4, mOp)[i] = uint4{0U, 0U, 0U, 0U};
-            }
-            // residue
-            for (uint i = threads * blockIdx.x + threadIdx.x + vL * sizeof(uint); i < sz; i += blocks * threads) {
-                mOp[i] = Element(0);
-            }
-        }
+        clearState<threads, blocks, processors, c, ACC::JT::value, S, H>(mOp);
 
+        // prep tensors
         const auto activations = make_tensor(
             cute::make_gmem_ptr(CONST_CAST_TO(Element, iP)),
                     cute::Layout<cute::Shape<cute::Int<S>, cute::Int<H>>,
