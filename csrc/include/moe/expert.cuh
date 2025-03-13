@@ -199,7 +199,7 @@ namespace aristos {
         uint64_t start = 0, end = 0;
         asm volatile("mov.u64 %0, %%globaltimer;": "=l"(start)::);
         for (uint i = blockIdx.x; i < tiles; i += blocks) {
-            processor::fGET<Operation>(workspace, pA, pB1, pC1, pD1, M, i);
+            processor::fGET<Operation, N, K>(workspace, pA, pB1, pC1, pD1, M, i);
             // Pick warp 0
             if constexpr (u == UseBarrier::no) {
                 __syncthreads();

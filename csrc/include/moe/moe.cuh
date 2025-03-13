@@ -85,7 +85,7 @@ namespace aristos::moe{
         auto* __restrict__ gOp = CAST_TO(Element, oP);
         auto* __restrict__ mOp = gOp + S * PX;
         __shared__ __align__(16) cuda::std::byte workspace[sharedSize];
-        clearState<threads, blocks, processors, c, ACC::JT::value, S, H>(mOp);
+        clearState<threads, blocks, processors, c, ACC::JT::value, S * H>(mOp);
 
         // prep tensors
         const auto activations = make_tensor(

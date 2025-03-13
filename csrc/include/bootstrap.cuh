@@ -309,7 +309,7 @@ namespace aristos{
             const auto ePrank = ePs[i];
             const auto gRank = pT[ePrank];
             auto* rSHeap = CAST_TO(cuda::std::byte, nvshmem_ptr(wSHeap, gRank));
-            auto* rFlags = CAST_TO(cuda::std::byte, nvshmem_ptr(flags, gRank));
+            auto* rFlags = CAST_TO(flagsType, nvshmem_ptr(flags, gRank));
             rFlags = rFlags == nullptr ? flags : rFlags;
             const auto xLi = scratch[ePrank]++;
             const auto isRemote = rSHeap == nullptr;

@@ -343,7 +343,7 @@ namespace aristos{
     __device__
     struct __align__(16) PEL {
         cuda::std::byte* remoteSHeap;
-        cuda::std::byte* remoteSFlags; //rank * expertSlots + xLIdx
+        flagsType* remoteSFlags; //rank * expertSlots + xLIdx
         uint eC;
         uint16_t pTTt;
         uint16_t expertLocalIdx;
