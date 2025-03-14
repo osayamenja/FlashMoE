@@ -36,18 +36,18 @@ namespace aristos::subscriber{
             ExpertsDown const& expertsDown,
             BiasUp const& biasUp,
             BiasDown const& biasDown,
-            cuda::std::byte* __restrict__ pGB, /*post GEMM buffer*/
+            cuda::std::byte* __restrict__ const& pGB, /*post GEMM buffer*/
             /// Lookup Table
             const PLI* __restrict__ const& pL,
             const LXI* __restrict__ const& lX,
             /// State
-            uint* __restrict__ const& bitSet,
+            BitSet* __restrict__ const& bitSet,
             uint* __restrict__ const& status,
-            uint *__restrict__ const&taskCount,
+            uint* __restrict__ const& taskCount,
             flagsType* __restrict__ const& flags,
             BookType* __restrict__ tQHead,
             uint& stagePending,
-            uint& lTQHead,
+            uint& ltQHead,
             /// Constants
             const uint& stageLength,
             const uint &nLx,
@@ -69,12 +69,12 @@ namespace aristos::subscriber{
                 const auto sP = CAST_TO(SignalPayload<PacketStage::initial>, &signal);
                 const auto received = sP->seqBit == localSeqBit;
                 stagePending -= received;
-                if (const uint hasVisited = visitedSet >> vIdx & 1; !hasVisited && received) {
+                if (!visitedSet.get(vIdx) && received) {
                     // set visited bit
                     #if ARISTOS_DEBUG
                     printf("{rt: %u, ttm: %u, sb: %u}\n", sP->routedTokens, sP->totalTilesM, sP->seqBit);
                     #endif
-                    visitedSet |= 1 << vIdx;
+                    visitedSet.set(vIdx);
                     // decode the received packet
                     const auto myLocalExIdx = flagIdx % nLx;
                     const auto peerIdx = flagIdx / nLx;
@@ -98,7 +98,7 @@ namespace aristos::subscriber{
                         // Enforce consistency
                         __threadfence_system();
                         fPd(dA, packet, status, taskCount, sP->routedTokens, sP->totalTilesM,
-                            myLocalExIdx, lXI.expertIndex, pGB, weights, bias, peerIdx, pLI.pe, lTQHead, tQHead);
+                            myLocalExIdx, lXI.expertIndex, pGB, weights, bias, peerIdx, pLI.pe, ltQHead, tQHead);
                     }
                     else {
                         // Remote peer
@@ -107,7 +107,7 @@ namespace aristos::subscriber{
                         // as the memory ordering mechanism is internal.
                         nvshmem_ushort_test(&sP->seqBit, NVSHMEM_CMP_EQ, localSeqBit);
                         fRd(dA, packet, status, taskCount, sP->routedTokens, sP->totalTilesM,
-                            myLocalExIdx, lXI.expertIndex, pGB, weights, bias, peerIdx, pLI.pe, lTQHead, tQHead);
+                            myLocalExIdx, lXI.expertIndex, pGB, weights, bias, peerIdx, pLI.pe, ltQHead, tQHead);
                     }
                 }
                 // update state
@@ -130,7 +130,7 @@ namespace aristos::subscriber{
         void operator()(
             WorkSet& workSet,
             RBitSet& rBitSet,
-            uint* __restrict__ bitSet,
+            BitSet* __restrict__ const& bitSet,
             const packet::DecoderArg& dA,
             /// Task Arguments
             const TPS* const& tokenIds,
@@ -143,7 +143,7 @@ namespace aristos::subscriber{
             uint* __restrict__ const& scratch,
             flagsType* __restrict__ const& flags,
             BookType* __restrict__ tQHead,
-            uint& lTQHead,
+            uint& ltQHead,
             /// Constants
             const uint& stageLength,
             const uint& stageTrips,
@@ -186,10 +186,10 @@ namespace aristos::subscriber{
                     auto signal = atomicLoad<cuda::thread_scope_system>(
                         CAST_TO(ull_t, flags + flagIdx));
                     const auto sP = CAST_TO(SignalPayload<PacketStage::last>, &signal);
-                    if (const uint hasVisited = visitedSet >> vIdx & 1; !hasVisited && sP->seqBit == localSeqBit) {
+                    if (!visitedSet.get(vIdx) && sP->seqBit == localSeqBit) {
                         // let's decode this packet
                         // set visited bit
-                        visitedSet |= 1 << vIdx;
+                        visitedSet.set(vIdx);
                         const auto expertIdx = flagIdx / CS;
                         const ELI lookup = eL[expertIdx];
                         const auto* tI = tokenIds + (expertIdx * EC + sP->batchIdx * BLOCK_M);
@@ -200,14 +200,14 @@ namespace aristos::subscriber{
                                 lookup.localExpertIndex,sP->batchIdx * BLOCK_M);
 
                             lRd(dA, packet, CONST_CAST_TO(cuda::std::byte, tI), mO, sP->tokensM,
-                                lTQHead, tQHead, expertIdx);
+                                ltQHead, tQHead, expertIdx);
                         }
                         else {
                             // enforce memory consistency
                             __threadfence_system();
                             const auto* packet = heap::advance<1, 1>(dA.sHeap, lookup.epRank,
                                 lookup.localExpertIndex, sP->batchIdx * BLOCK_M);
-                            lPd(dA.tQ + lTQHead++, packet,
+                            lPd(dA.tQ, ltQHead, packet,
                                 CONST_CAST_TO(cuda::std::byte, tI),
                                 mO, sP->tokensM, flagIdx % TN, tQHead, expertIdx);
                         }
@@ -247,9 +247,9 @@ namespace aristos::subscriber{
                         auto signal = atomicLoad<cuda::thread_scope_system>(
                             CAST_TO(ull_t, flags + flagIdx));
                         const auto sP = CAST_TO(SignalPayload<PacketStage::last>, &signal);
-                        if (const uint hasVisited = visitedSet >> vIdx & 1; !hasVisited && sP->seqBit == localSeqBit) {
+                        if (!visitedSet.get(vIdx) && sP->seqBit == localSeqBit) {
                             // set visited bit
-                            visitedSet |= 1 << vIdx;
+                            visitedSet.set(vIdx);
                             // let's decode this packet
                             const auto expertIdx = flagIdx / CS;
                             const ELI lookup = eL[expertIdx];
@@ -261,14 +261,14 @@ namespace aristos::subscriber{
                                     lookup.localExpertIndex,sP->batchIdx * BLOCK_M);
 
                                 lRd(dA, packet, CONST_CAST_TO(cuda::std::byte, tI), mO, sP->tokensM,
-                                    lTQHead, tQHead, expertIdx);
+                                    ltQHead, tQHead, expertIdx);
                             }
                             else {
                                 // enforce memory consistency
                                 __threadfence_system();
                                 const auto* packet = heap::advance<1, 1>(dA.sHeap, lookup.epRank,
                                     lookup.localExpertIndex, sP->batchIdx * BLOCK_M);
-                                lPd(dA.tQ + lTQHead++, packet,
+                                lPd(dA.tQ, ltQHead, packet,
                                     CONST_CAST_TO(cuda::std::byte, tI),
                                     mO, sP->tokensM, flagIdx % TN, tQHead, expertIdx);
                             }
@@ -298,9 +298,10 @@ namespace aristos::subscriber{
     >
     requires(wSet == 16 || wSet % 32 == 0)
     __device__ __forceinline__
-    void start(uint* __restrict__ const& bitSet,
+    void start(BitSet* __restrict__ const& bitSet,
         cuda::std::byte* __restrict__ const& workspace,
         unsigned int* __restrict__ const& interrupt,
+        unsigned int* __restrict__ const& tQHead,
         const PLI* __restrict__ const& pL,
         const LXI* __restrict__ const& lX,
         const ELI* __restrict__ const& eL,
@@ -312,23 +313,22 @@ namespace aristos::subscriber{
         ExpertsDown const& expertsDown,
         BiasUp const& biasUp,
         BiasDown const& biasDown,
-        const uint16_t& lSeqBit){
+        const uint16_t& lSeqBit,
+        const uint& tIdx){
         // offset due to warp specialization for the scheduler
-        const auto tIdx = threadIdx.x - WARP_SIZE;
         static_assert(sizeof(unsigned long long int) == sizeof(flagsType));
         static_assert(sizeof(SignalPayload<>) == sizeof(uint64_t));
         static_assert(sizeof(SignalPayload<PacketStage::last>) == sizeof(uint64_t));
 
         cutlass::AlignedArray<uint, wSet> rWSet{};
-        cutlass::AlignedArray<uint, bSzPs> rBitSet{};
+        cutlass::AlignedArray<BitSet, bSzPs> rBitSet{};
 
         // lookup tables
         const auto* tokenIds = bookkeeping.tP();
         const auto* __restrict__ tileIndices = bookkeeping.tIx();
 
         // tQ things
-        auto* tQHead = bookkeeping.tQH() + tIdx;
-        auto lTQHead = 0U; // local tQ Head
+        auto ltQHead = 0U; // local tQ Head
 
         // pointers
         auto* __restrict__ sharedSpace = CAST_TO(unsigned int, workspace);
@@ -356,7 +356,7 @@ namespace aristos::subscriber{
         const auto gfSfC = bookkeeping.world * bookkeeping.xs;
         const auto dA = packet::DecoderArg{
             bookkeeping.sHeap,
-            bookkeeping.tQ() + tIdx * bookkeeping.tPs,
+            bookkeeping.tQ() + tIdx, // coalesced accessing
             bookkeeping.flags + gfSfC,
         };
 
@@ -380,7 +380,7 @@ namespace aristos::subscriber{
                     flags,
                     tQHead,
                     fSp,
-                    lTQHead,
+                    ltQHead,
                     fSl,
                     nLx,
                     tIdx,
@@ -399,7 +399,7 @@ namespace aristos::subscriber{
                 sharedSpace,
                 flags,
                 tQHead,
-                lTQHead,
+                ltQHead,
                 ssL,
                 ssT,
                 tIdx,

@@ -51,8 +51,9 @@ namespace aristos::os {
         static_assert(alignof(PLI) % alignof(uint) == 0);
         auto* __restrict__ lX = CAST_TO(LXI, pL + world);
         const auto dZ = roundToCacheLine(sizeof(ELI) * E + sizeof(PLI) * world + sizeof(LXI) * nLx);
-        auto* __restrict__ bitSet = CAST_TO(uint, workspace + dZ);
+        auto* __restrict__ bitSet = CAST_TO(BitSet, workspace + dZ);
         const auto cbSSI = roundToCacheLine(bSSI * sizeof(uint));
+        static_assert(alignof(BitSet) % alignof(uint) == 0);
         auto* __restrict__ subscriberScratch = CAST_TO(uint, workspace + dZ + cbSSI);
         auto* __restrict__ taskBound = subscriberScratch + (SUBSCRIBERS * wSet);
         const auto* __restrict__ geL = bookkeeping.eL();
@@ -60,7 +61,7 @@ namespace aristos::os {
         const auto* __restrict__ gLx = bookkeeping.lX();
         const auto z = dZ + cbSSI + (SUBSCRIBERS * wSet + 1) * sizeof(uint);
         for (uint i = threadIdx.x; i < bSSI; i += threads) {
-            bitSet[i] = 0U;
+            bitSet[i] = BitSet{0U};
         }
         #pragma unroll
         for (uint i = threadIdx.x; i < E; i += threads) {
@@ -115,17 +116,19 @@ namespace aristos::os {
         if (threadIdx.x / WARP_SIZE == 0) {
             // scheduler
             const auto gtQCl = bookkeeping.gtQCl;
-            const auto tQRl = cute::ceil_div(gtQCl * ACC::TN::value, subscriberCount);
+            const auto sO = bookkeeping.sT;
             auto* __restrict__ gtQHeads = bookkeeping.tQH();
             auto* __restrict__ sQ = bookkeeping.tSA();
             auto* __restrict__ pDB = bookkeeping.pDB();
-            scheduler::start<processors>(schedulerScratch, tQRl, gtQCl, interrupt, tQHeads,
+            scheduler::start<processors>(schedulerScratch, sO, gtQCl, interrupt, tQHeads,
                 gtQHeads, taskBound, rQ, sQ, pDB);
         }
         else {
+            const auto tIdx = threadIdx.x - WARP_SIZE;
             // subscriber
-            subscriber::start<bitSetSizePs, wSet>(bitSet, CAST_TO(cuda::std::byte, bitSet + bSSI), interrupt, pL,
-                lX, eL, ssfC, status, taskBound, moeOutput, expertsUp, expertsDown, biasUp, biasDown, lSeqBit);
+            subscriber::start<bitSetSizePs, wSet>(bitSet, CAST_TO(cuda::std::byte, bitSet + bSSI), interrupt,
+                tQHeads + tIdx, pL, lX, eL, ssfC, status, taskBound,
+                moeOutput, expertsUp, expertsDown, biasUp, biasDown, lSeqBit, tIdx);
         }
     }
 }

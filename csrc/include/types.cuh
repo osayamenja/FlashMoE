@@ -45,6 +45,7 @@
 #define TO_MB(b) (static_cast<float>(b) / (1024.0f*1024.0f))
 #define BETA_MB 1024.0f // 1GB
 #define ARISTOS_DEBUG 1
+#define NOOP_SIGNAL 0
 
 #include <cuda/barrier>
 #include <cuda/std/array>
@@ -538,7 +539,7 @@ namespace aristos{
         unsigned long int bookSize = ACC::FZ::value;
         /// length of gTQHeads
         unsigned int gtQCl = 0U;
-        unsigned int tPs = 0U;
+        unsigned int sT = 0U;
         /// Block Ring Softmax flags in bytes, non-cumulative
         unsigned int brs = 0UL;
         /// EP rank
@@ -576,10 +577,10 @@ namespace aristos{
             if constexpr (E > 1) {
                 gtQCl = world * nLx * TCM;
                 // maximum gemm tiles/tasks scheduled by processors
-                const auto prT = world * nLx * TCM * tiles<BLOCK_N>(P);
+                const auto prT = world * nLx * TCM * ACC::TNx::value;
                 // maximum gemm tiles/tasks scheduled by subscriber threads
-                auto sT = world * nLx * TCM * TN + (TCM * ACC::TNx::value * E);
-                tPs = cute::ceil_div(sT, SUBSCRIBERS);
+                sT = world * nLx * TCM * TN + (TCM * ACC::TNx::value * E);
+                const auto tPs = cute::ceil_div(sT, SUBSCRIBERS);
                 sT = tPs * SUBSCRIBERS;
                 tQl = sizeof(Task) * (sT + prT);
                 tQml = tQl + blocks * sizeof(TQSignal) + E * sizeof(PEL) + sizeof(TPS) * (E * EC);
@@ -607,7 +608,7 @@ namespace aristos{
             constexpr auto P = ACC::P::value;
             constexpr auto TPX = ACC::TPX::value;
             // maximum gemm tiles/tasks scheduled by processors
-            const auto prT = _world * _nLx * TCM * tiles<BLOCK_N>(P);
+            const auto prT = _world * _nLx * TCM * ACC::TNx::value;
             // maximum gemm tiles/tasks scheduled by subscriber threads
             auto sT = _world * _nLx * TCM * TN + TCM * ACC::TNx::value * E;
             const auto tPs = cute::ceil_div(sT, SUBSCRIBERS);
@@ -645,14 +646,15 @@ namespace aristos{
         }
 
         /**********Salami slice Pointers!************/
-        /// task queue
+        /// stride task queue
         __device__ __forceinline__
         auto* tQ() const {
             return CAST_TO(Task, book);
         }
+        /// blocked
         __device__ __forceinline__
         auto* ptQ() const {
-            return tQ() + tPs * SUBSCRIBERS;
+            return tQ() + sT;
         }
         static_assert(alignof(Task) % alignof(PEL) == 0);
         __host__ __device__ __forceinline__
@@ -848,6 +850,43 @@ namespace aristos{
             const uint& expert, const uint& token = 0){
             return sHeap + (slotSize * (bookkeeping.xs * (CELLS * (peer * STAGES + stage) + cell) + expert) +
                 token * tokenDim) * nBytes;
+        }
+    }
+    struct __align__(4) BitSet {
+        uint storage = 0U;
+        __device__ __forceinline__
+        constexpr auto get(const uint& idx) const {
+            return storage >> idx & 1U;
+        }
+        __device__ __forceinline__
+        constexpr void set(const uint& idx) {
+            storage |= 1U << idx;
+        }
+    };
+    enum class DQType {
+        stride,
+        block
+    };
+    /// Decoupled Queue, comprises head, tail and doorbell
+    namespace DQ {
+        template<
+            DQType dqt = DQType::stride,
+            unsigned int nQ = SUBSCRIBERS
+        >
+        __device__ __forceinline__
+        constexpr auto next(const uint& prev, const uint& slot) {
+            if constexpr (dqt == DQType::stride) {
+                return prev + slot * nQ;
+            }
+            return prev + slot;
+        }
+        template<
+            DQType dqt = DQType::stride,
+            unsigned int nQ = SUBSCRIBERS
+        >
+        __device__ __forceinline__
+        constexpr auto sNext(const uint& slot) {
+            return next<dqt, nQ>(0, slot);
         }
     }
 }

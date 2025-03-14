@@ -206,7 +206,8 @@ namespace aristos::packet {
             constexpr auto tNx = ACC::TNx::value;
             auto* __restrict__ flags = CAST_TO(flagsType, p == PeerConnectivity::p2p ?
                 nvshmem_ptr(dA.flags, gPeer) : dA.flags);
-            auto* __restrict__ tQ = dA.tQ + lTQHead;
+
+            const auto qIdx = DQ::sNext(lTQHead);
             const auto fTilesM = routedTokens / BLOCK_M;
             // pad here to meet tile requirements
             const auto padM = Bookkeeping::pad<BLOCK_M>(routedTokens);
@@ -231,7 +232,7 @@ namespace aristos::packet {
                 #pragma unroll
                 for (uint j = 0; j < tN; ++j) {
                     const auto tileIdx = j + i * tN;
-                    tQ[tileIdx] = Task{
+                    dA.tQ[DQ::next(qIdx, tileIdx)] = Task{
                         TaskType::preGEMM,
                         packet,
                         weights,
@@ -254,7 +255,7 @@ namespace aristos::packet {
                 #pragma unroll
                 for (uint j = 0; j < tN; ++j) {
                     const auto tileIdx = j + fTilesM * tN;
-                    tQ[tileIdx] = Task{
+                    dA.tQ[DQ::next(qIdx, tileIdx)] = Task{
                         TaskType::preGEMM,
                         packet,
                         weights,
@@ -290,6 +291,7 @@ namespace aristos::packet {
     struct Decoder<PacketStage::last, PeerConnectivity::p2p> {
         __device__ __forceinline__
         void operator()(Task* __restrict__ const& tQ,
+            unsigned int& lTQHead,
             const cuda::std::byte* const& packet,
             const cuda::std::byte* const& tokenIndices,
             cuda::std::byte* const& moeOutput,
@@ -298,7 +300,7 @@ namespace aristos::packet {
             unsigned int* __restrict__ const& tQHead,
             const unsigned int& expertIdx) const {
             // now let's decode this single tile
-            *tQ = Task{
+            tQ[DQ::sNext(lTQHead++)] = Task{
                 TaskType::combine,
                 tokenIndices,
                 cuda::std::array<const cuda::std::byte*, GEMMs>{packet},
@@ -328,11 +330,11 @@ namespace aristos::packet {
             unsigned int& lTQHead,
             unsigned int* __restrict__ const& tQHead,
             const unsigned int& expertIdx) const {
-            auto* __restrict__ tQ = dA.tQ + lTQHead;
+            const auto qIdx = DQ::sNext(lTQHead);
             constexpr auto tN = ACC::TN::value;
             #pragma unroll
             for (uint i = 0; i < tN; ++i) {
-                tQ[i] = Task{
+                dA.tQ[DQ::next(qIdx, i)] = Task{
                     TaskType::combine,
                     tokenIndices,
                     cuda::std::array<const cuda::std::byte*, GEMMs>{packet},

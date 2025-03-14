@@ -187,7 +187,6 @@ namespace aristos::processor{
         // Assume elementwise operator
         typename BlockGEMM::FusedEpilogue epilogueOp{};
         constexpr auto trips = size(accumulator) / rScratch.size();
-
         // Prefetch from global to shared memory
         #pragma unroll
         for (int j = 0; j < elems; ++j) {

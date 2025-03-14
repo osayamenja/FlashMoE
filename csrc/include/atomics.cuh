@@ -107,7 +107,7 @@ namespace aristos{
         static_assert(cuda::std::is_same_v<decltype(addr->signal), T>, "Signal types should be the same!");
         auto mail = atomicLoad<scope>(CAST_TO(ull_t, addr));
         auto* __restrict__ payload = CAST_TO(Notification, &mail);
-        while (payload->signal == previous) {
+        while (!payload->interrupt && payload->signal == previous) {
             mail = atomicLoad<scope>(CAST_TO(ull_t, addr));
             payload = CAST_TO(Notification, &mail);
         }
