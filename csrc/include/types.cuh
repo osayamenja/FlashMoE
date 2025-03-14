@@ -44,7 +44,7 @@
 #define BYTE_MAX cuda::std::numeric_limits<cuda::std::underlying_type_t<cuda::std::byte>>::max()
 #define TO_MB(b) (static_cast<float>(b) / (1024.0f*1024.0f))
 #define BETA_MB 1024.0f // 1GB
-#define ARISTOS_DEBUG 0
+#define ARISTOS_DEBUG 1
 
 #include <cuda/barrier>
 #include <cuda/std/array>
@@ -158,6 +158,7 @@ namespace aristos{
     using Nano = cuda::std::chrono::duration<float, cuda::std::nano>;
     using Milli = cuda::std::chrono::duration<float, cuda::std::milli>;
     using ull_t = unsigned long long int;
+    static_assert(sizeof(ull_t) == sizeof(flagsType) && alignof(ull_t) == alignof(flagsType));
 
     struct __align__(8) floatPair {
         float alpha;

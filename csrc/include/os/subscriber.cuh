@@ -62,15 +62,18 @@ namespace aristos::subscriber{
                 const auto vSIdx = i / bSw;
                 const auto vIdx = i % bSw;
                 // no need to batch reads from shared memory here as stageLength is very small, most likely <= 1
-                auto visitedSet = bitSet[vSIdx];
+                auto visitedSet = bitSet[tIdx + vSIdx * subscriberCount];
                 const auto flagIdx = tIdx + i * subscriberCount;
                 auto signal = atomicLoad<cuda::thread_scope_system>(
                     CAST_TO(ull_t, flags + flagIdx));
-                const auto sP = CAST_TO(SignalPayload<>, &signal);
+                const auto sP = CAST_TO(SignalPayload<PacketStage::initial>, &signal);
                 const auto received = sP->seqBit == localSeqBit;
                 stagePending -= received;
                 if (const uint hasVisited = visitedSet >> vIdx & 1; !hasVisited && received) {
                     // set visited bit
+                    #if ARISTOS_DEBUG
+                    printf("{rt: %u, ttm: %u, sb: %u}\n", sP->routedTokens, sP->totalTilesM, sP->seqBit);
+                    #endif
                     visitedSet |= 1 << vIdx;
                     // decode the received packet
                     const auto myLocalExIdx = flagIdx % nLx;
@@ -86,6 +89,10 @@ namespace aristos::subscriber{
                         CONST_CAST_TO(cuda::std::byte, &biasDown(myLocalExIdx))
                     };
                     const auto* packet = heap::advance<0, 1>(dA.sHeap, peerIdx, myLocalExIdx);
+                    #if ARISTOS_DEBUG
+                    printf("Subscriber %u received a packet from peer %u to expert %u\n",
+                        tIdx, peerIdx, myLocalExIdx);
+                    #endif
                     if (!pLI.isRemote) {
                         // P2P peer
                         // Enforce consistency
@@ -104,7 +111,7 @@ namespace aristos::subscriber{
                     }
                 }
                 // update state
-                bitSet[vSIdx] = visitedSet;
+                bitSet[tIdx + vSIdx * subscriberCount] = visitedSet;
             }
         }
     };
@@ -200,7 +207,7 @@ namespace aristos::subscriber{
                             __threadfence_system();
                             const auto* packet = heap::advance<1, 1>(dA.sHeap, lookup.epRank,
                                 lookup.localExpertIndex, sP->batchIdx * BLOCK_M);
-                            lPd(dA.tQ + (tIdx * dA.tPs + lTQHead++), packet,
+                            lPd(dA.tQ + lTQHead++, packet,
                                 CONST_CAST_TO(cuda::std::byte, tI),
                                 mO, sP->tokensM, flagIdx % TN, tQHead, expertIdx);
                         }
@@ -261,7 +268,7 @@ namespace aristos::subscriber{
                                 __threadfence_system();
                                 const auto* packet = heap::advance<1, 1>(dA.sHeap, lookup.epRank,
                                     lookup.localExpertIndex, sP->batchIdx * BLOCK_M);
-                                lPd(dA.tQ + (tIdx * dA.tPs + lTQHead++), packet,
+                                lPd(dA.tQ + lTQHead++, packet,
                                     CONST_CAST_TO(cuda::std::byte, tI),
                                     mO, sP->tokensM, flagIdx % TN, tQHead, expertIdx);
                             }
@@ -349,9 +356,8 @@ namespace aristos::subscriber{
         const auto gfSfC = bookkeeping.world * bookkeeping.xs;
         const auto dA = packet::DecoderArg{
             bookkeeping.sHeap,
-            bookkeeping.tQ(),
+            bookkeeping.tQ() + tIdx * bookkeeping.tPs,
             bookkeeping.flags + gfSfC,
-            bookkeeping.tPs,
         };
 
         while (!atomicLoad<cuda::thread_scope_block>(interrupt)) {

@@ -32,6 +32,9 @@ namespace aristos::scheduler {
                 // signal processor
                 sig.encodeSig(taskIdx + (k * WSet::kElements + l));
                 signalPayload(pDB + wSet[l], &sig);
+                #if ARISTOS_DEBUG
+                printf("Scheduler: pid is %u\n", wSet[l]);
+                #endif
             }
         }
         // Residual scheduling
@@ -47,6 +50,9 @@ namespace aristos::scheduler {
             if (l < residue) {
                 sig.encodeSig(taskIdx + (cSetB * WSet::kElements + l));
                 signalPayload(pDB + wSet[l], &sig);
+                #if ARISTOS_DEBUG
+                printf("Scheduler::pid: %u, taskIdx is %u\n", wSet[l], sig.signal);
+                #endif
             }
         }
     }

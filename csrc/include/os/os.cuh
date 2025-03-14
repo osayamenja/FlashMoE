@@ -39,8 +39,7 @@ namespace aristos::os {
         // each subscriber thread gets wSet * sizeof(uint) bytes of workspace
         constexpr auto wSet = 16U; // working set size
         constexpr auto bitSetSizePs = cute::ceil_div(wSet, sizeof(uint) * 8U);
-        const auto bitSetSize = (bookkeeping.nLx * bookkeeping.world) + ssfC;
-        const auto bSSI = nSI<subscriberCount>(bitSetSize);
+        const auto bSSI = nSI<subscriberCount>(nLx * world) + nSI<subscriberCount>(ssfC);
         constexpr auto E = ACC::E::value;
         constexpr auto TNx = ACC::TNx::value;
         constexpr auto EC = ACC::TNx::value;
@@ -51,12 +50,15 @@ namespace aristos::os {
         auto* __restrict__ pL = CAST_TO(PLI, eL + E);
         static_assert(alignof(PLI) % alignof(uint) == 0);
         auto* __restrict__ lX = CAST_TO(LXI, pL + world);
-        const auto dZ = sizeof(ELI) * E + sizeof(PLI) * world + sizeof(LXI) * nLx;
-        auto* __restrict__ bitSet = CAST_TO(uint, workspace + roundToCacheLine(dZ));
+        const auto dZ = roundToCacheLine(sizeof(ELI) * E + sizeof(PLI) * world + sizeof(LXI) * nLx);
+        auto* __restrict__ bitSet = CAST_TO(uint, workspace + dZ);
+        const auto cbSSI = roundToCacheLine(bSSI * sizeof(uint));
+        auto* __restrict__ subscriberScratch = CAST_TO(uint, workspace + dZ + cbSSI);
+        auto* __restrict__ taskBound = subscriberScratch + (SUBSCRIBERS * wSet);
         const auto* __restrict__ geL = bookkeeping.eL();
         const auto* __restrict__ gpL = bookkeeping.pL();
         const auto* __restrict__ gLx = bookkeeping.lX();
-        const auto z = dZ + bSSI + SUBSCRIBERS * wSet * sizeof(uint);
+        const auto z = dZ + cbSSI + (SUBSCRIBERS * wSet + 1) * sizeof(uint);
         for (uint i = threadIdx.x; i < bSSI; i += threads) {
             bitSet[i] = 0U;
         }
@@ -76,8 +78,7 @@ namespace aristos::os {
         auto* __restrict__ schedulerScratch = CAST_TO(cuda::std::byte, status + world);
         // shared memory arrays
         // Upper bound for expectant tasks
-        auto* __restrict__ taskBound = scratch;
-        const auto* __restrict__ eCs = taskBound + 1;
+        const auto* __restrict__ eCs = scratch;
         scratch += 1;
         if (!threadIdx.x) {
             // Expert computation expectant tasks
@@ -123,7 +124,7 @@ namespace aristos::os {
         }
         else {
             // subscriber
-            subscriber::start<bitSetSizePs, wSet>(bitSet, CAST_TO(cuda::std::byte,bitSet + bSSI), interrupt, pL,
+            subscriber::start<bitSetSizePs, wSet>(bitSet, CAST_TO(cuda::std::byte, bitSet + bSSI), interrupt, pL,
                 lX, eL, ssfC, status, taskBound, moeOutput, expertsUp, expertsDown, biasUp, biasDown, lSeqBit);
         }
     }

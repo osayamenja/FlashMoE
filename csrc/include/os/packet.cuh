@@ -64,7 +64,8 @@ namespace aristos::packet {
         #pragma unroll
         for (uint i = threadIdx.x; i < E; i += threads) {
             const auto peer = enL[i].peer;
-            atomicAdd_block(CAST_TO(uint, workspace + oT2) + peer, seC[i]);
+            atomicAdd_block(CAST_TO(uint, workspace + oT2) + peer,
+                d == DropTokens::yes ? cute::min(seC[i], EC) : seC[i]);
         }
         __syncthreads();
         // Update encoding lookup table
@@ -88,11 +89,7 @@ namespace aristos::packet {
 
             if (routedTokens) {
                 // copy tokens: not padded
-                #if ARISTOS_DEBUG
-                if (isLeader) {
-                    printf("routed tokens is %u\n", routedTokens);
-                }
-                #endif
+                #pragma unroll 4
                 for (uint j = lBid; j < routedTokens; j += superBlockSize) {
                     const auto [tokenIdx, _] = tokenIds(expertIdx, j);
                     auto* __restrict__ localPH = peerHeap + j * H * sizeof(Element);
@@ -121,7 +118,7 @@ namespace aristos::packet {
                     }
                     if (atomicIncrement(pSA + expertIdx) + 1 == superBlockSize) {
                         // I am in the last block, let's finalize this transfer.
-                        const auto sigPayload = SignalPayload{
+                        const auto sigPayload = SignalPayload<PacketStage::initial>{
                             routedTokens,
                             lI.pTTt,
                             rSeqBit
@@ -148,7 +145,7 @@ namespace aristos::packet {
             else if (isLeader){
                 // single thread sends a noop packet to notify the remote peer
                 // Pack payload into a single signal word
-                const auto sigPayload = SignalPayload{
+                const auto sigPayload = SignalPayload<PacketStage::initial>{
                     routedTokens,
                     lI.pTTt,
                     rSeqBit
@@ -169,20 +166,17 @@ namespace aristos::packet {
     }
 
     // Resident in registers
-    struct __align__(16) DecoderArg {
+    struct DecoderArg {
         cuda::std::byte* sHeap;
         Task* tQ;
         flagsType* flags;
-        const unsigned int tPs;
         const unsigned int nLx;
         __device__
         DecoderArg(
             cuda::std::byte* const& _sHeap,
             Task* const& _tQ,
-            flagsType* const& _flags,
-            unsigned int const& _tPs) :
-        sHeap(_sHeap), tQ(_tQ), flags(_flags), tPs(_tPs),
-        nLx(bookkeeping.nLx) {}
+            flagsType* const& _flags) :
+        sHeap(_sHeap), tQ(_tQ), flags(_flags), nLx(bookkeeping.nLx) {}
     };
 
     /// Decodes a single packet from the initial stage
@@ -212,8 +206,9 @@ namespace aristos::packet {
             constexpr auto tNx = ACC::TNx::value;
             auto* __restrict__ flags = CAST_TO(flagsType, p == PeerConnectivity::p2p ?
                 nvshmem_ptr(dA.flags, gPeer) : dA.flags);
-            auto* __restrict__ tQ = dA.tQ + (threadIdx.x * dA.tPs + lTQHead);
+            auto* __restrict__ tQ = dA.tQ + lTQHead;
             const auto fTilesM = routedTokens / BLOCK_M;
+            // pad here to meet tile requirements
             const auto padM = Bookkeeping::pad<BLOCK_M>(routedTokens);
 
             if (!atomicTAS<cuda::thread_scope_block>(status + peer)) {
@@ -279,6 +274,9 @@ namespace aristos::packet {
 
             if (routedTokens) {
                 const auto totalTasks = Bookkeeping::tiles<BLOCK_M>(routedTokens) * tN;
+                #if ARISTOS_DEBUG
+                printf("Thread %u, tt is %u\n", threadIdx.x, totalTasks);
+                #endif
                 lTQHead += totalTasks;
                 __threadfence();
                 // notifies scheduler of work
@@ -312,6 +310,9 @@ namespace aristos::packet {
             };
             __threadfence();
             // notifies scheduler of work
+            #if ARISTOS_DEBUG
+            printf("Thread %u, tt is %u\n", threadIdx.x, 1);
+            #endif
             atomicIncrement<cuda::thread_scope_block>(tQHead);
         }
     };
@@ -327,7 +328,7 @@ namespace aristos::packet {
             unsigned int& lTQHead,
             unsigned int* __restrict__ const& tQHead,
             const unsigned int& expertIdx) const {
-            auto* __restrict__ tQ = dA.tQ + (threadIdx.x * dA.tPs + lTQHead);
+            auto* __restrict__ tQ = dA.tQ + lTQHead;
             constexpr auto tN = ACC::TN::value;
             #pragma unroll
             for (uint i = 0; i < tN; ++i) {
@@ -344,6 +345,9 @@ namespace aristos::packet {
             }
             lTQHead += tN;
             __threadfence();
+            #if ARISTOS_DEBUG
+            printf("Thread %u, tt is %u\n", threadIdx.x, tN);
+            #endif
             // notifies scheduler
             atomicAdd_block(tQHead, tN);
         }
