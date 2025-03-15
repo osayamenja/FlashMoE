@@ -124,7 +124,7 @@ endif ()
 CPMAddPackage(
         NAME FMT
         GITHUB_REPOSITORY fmtlib/fmt
-        GIT_TAG 11.0.2
+        GIT_TAG 11.1.4
         DOWNLOAD_ONLY
 )
 if(FMT_ADDED)
@@ -142,10 +142,9 @@ target_link_libraries(csrc PRIVATE mathdx::cublasdx)
 CPMAddPackage(
         NAME NVTX3
         GITHUB_REPOSITORY NVIDIA/NVTX
-        GIT_TAG v3.1.0-c-cpp
+        GIT_TAG v3.1.1-c-cpp
         GIT_SHALLOW TRUE
 )
-
 if(NVTX3_ADDED)
     target_link_libraries(csrc PRIVATE nvtx3-cpp)
     string(FIND "$ENV{CMAKE_PREFIX_PATH}" "nvtx3" INDEX)

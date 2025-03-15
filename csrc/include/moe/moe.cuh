@@ -148,8 +148,8 @@ namespace aristos::moe{
         if (seqBit == cuda::std::numeric_limits<decltype(seqBit)>::max()) {
             syncAll<<<ACC::SYB::value, ACC::PeakHardware::OS::threads::value, 0, aristosStream>>>(
                 hostBookkeeping.pL(), hostBookkeeping.rank, hostBookkeeping.world);
+            seqBit = 0;
         }
-        // The below wrapping around to zero is fine due to the sync above
         seqBit++;
     }
 }

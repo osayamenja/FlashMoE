@@ -316,7 +316,7 @@ namespace aristos {
             using BlockReduce = cub::BlockReduce<float, threads>;
             auto* __restrict__ rTs = CAST_TO(typename BlockReduce::TempStorage, workspace);
             // Compute the block-wide max for thread0
-            auto bT = BlockReduce(*rTs).Reduce(tDt, cub::Max());
+            auto bT = BlockReduce(*rTs).Reduce(tDt, cutlass::maximum<float>{});
             // Inter-block max reduction
             if (!threadIdx.x) {
                 cuda::atomic_ref{*deviceThroughput}.fetch_max(bT);

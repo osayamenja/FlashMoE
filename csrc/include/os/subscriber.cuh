@@ -57,7 +57,6 @@ namespace aristos::subscriber{
             constexpr packet::Decoder<PacketStage::initial, PeerConnectivity::p2p, Element> fPd{};
             constexpr packet::Decoder<PacketStage::initial, PeerConnectivity::remote, Element> fRd{};
             constexpr auto bSw = sizeof(uint) * 8U;
-            #pragma unroll 2
             for (uint i = 0; i < stageLength; ++i) {
                 const auto vSIdx = i / bSw;
                 const auto vIdx = i % bSw;
@@ -67,14 +66,16 @@ namespace aristos::subscriber{
                 auto signal = atomicLoad<cuda::thread_scope_system>(
                     CAST_TO(ull_t, flags + flagIdx));
                 const auto sP = CAST_TO(SignalPayload<PacketStage::initial>, &signal);
+                // TODO >=, > self-correct
                 const auto received = sP->seqBit == localSeqBit;
                 stagePending -= received;
                 if (!visitedSet.get(vIdx) && received) {
                     // set visited bit
-                    #if ARISTOS_DEBUG
-                    printf("{rt: %u, ttm: %u, sb: %u}\n", sP->routedTokens, sP->totalTilesM, sP->seqBit);
-                    #endif
                     visitedSet.set(vIdx);
+                    #if ARISTOS_DEBUG
+                    printf("{rt: %u, ttm: %u, sb: %u}, vs: %u\n", sP->routedTokens, sP->totalTilesM, sP->seqBit,
+                        visitedSet.get(vIdx));
+                    #endif
                     // decode the received packet
                     const auto myLocalExIdx = flagIdx % nLx;
                     const auto peerIdx = flagIdx / nLx;
@@ -249,6 +250,11 @@ namespace aristos::subscriber{
                         const auto sP = CAST_TO(SignalPayload<PacketStage::last>, &signal);
                         if (!visitedSet.get(vIdx) && sP->seqBit == localSeqBit) {
                             // set visited bit
+                            #if ARISTOS_DEBUG
+                            printf("{Thread %u, tM: %u, bIdx: %u, sb: %u}, vs: %u\n",
+                                tIdx, sP->tokensM, sP->batchIdx, sP->seqBit,
+                                visitedSet.get(vIdx));
+                            #endif
                             visitedSet.set(vIdx);
                             // let's decode this packet
                             const auto expertIdx = flagIdx / CS;

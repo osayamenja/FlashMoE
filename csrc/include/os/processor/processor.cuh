@@ -429,12 +429,11 @@ namespace aristos::processor{
                 if (!tqs.interrupt) {
                     // below ensures task read happens after signal reception
                     __threadfence();
-                    tqs.decodeSig();
                     // global -> shared
                     #if ARISTOS_DEBUG
                     printf("Block %u Received task %u\n", blockIdx.x, tqs.signal);
                     #endif
-                    currentTask = gtQ[tqs.signal];
+                    currentTask = gtQ[tqs.decodeSig()];
                     // Eagerly indicate readiness for the next task
                     atomicExch(pA.sQ, ready);
                 }
@@ -461,18 +460,6 @@ namespace aristos::processor{
                         if (constexpr auto wS = 32; threadIdx.x / wS == 0) {
                             uint enqueue = 0U;
                             if (!threadIdx.x) {
-                                const auto a = make_tensor(CONST_CAST_TO(typename PreGEMM::MatrixAType,
-                                    rCurrentTask.aData), make_layout(cute::make_shape(rCurrentTask.M, H),
-                                        cute::LayoutRight{}));
-                                print_tensor(a);
-                                const auto b = make_tensor(CONST_CAST_TO(typename PreGEMM::MatrixBType,
-                                    rCurrentTask.bData[preIndex]), make_layout(cute::make_shape(P, H),
-                                        cute::LayoutRight{}));
-                                print_tensor(b);
-                                const auto c = make_tensor(CONST_CAST_TO(typename PreGEMM::MatrixDType,
-                                    rCurrentTask.cData[preIndex]), make_layout(cute::make_shape(rCurrentTask.M, P),
-                                        cute::LayoutRight{}));
-                                print_tensor(c);
                                 __threadfence();
                                 enqueue = atomicAdd(pA.tQS + rCurrentTask.syncIdx, 1U) + 1 == tN;
                             }

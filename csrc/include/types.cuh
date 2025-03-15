@@ -202,8 +202,8 @@ namespace aristos{
             signal = sig + 1;
         }
         __device__ __forceinline__
-        void decodeSig() {
-            signal -= 1;
+        auto decodeSig() const {
+            return signal - 1;
         }
     };
 

@@ -39,10 +39,10 @@ namespace aristos::scheduler {
                 #pragma unroll
                 for (uint l = 0; l < WSet::kElements; ++l) {
                     // interrupt processor
-                    signalPayload(pDB + wSet[l], &sig);
                     #if ARISTOS_DEBUG
                     printf("Scheduler::Interrupt::pid is %u\n", wSet[l]);
                     #endif
+                    signalPayload(pDB + wSet[l], &sig);
                 }
             }
             else {
@@ -50,10 +50,10 @@ namespace aristos::scheduler {
                 for (uint l = 0; l < WSet::kElements; ++l) {
                     // signal processor
                     sig.encodeSig(DQ::next<dqt>(qIdx, k * WSet::kElements + l));
-                    signalPayload(pDB + wSet[l], &sig);
                     #if ARISTOS_DEBUG
-                    printf("Scheduler: pid is %u\n", wSet[l]);
+                    printf("Scheduler::pid is %u\n", wSet[l]);
                     #endif
+                    signalPayload(pDB + wSet[l], &sig);
                 }
             }
         }
@@ -69,10 +69,10 @@ namespace aristos::scheduler {
             #pragma unroll
             for (uint l = 0; l < WSet::kElements; ++l) {
                 if (l < residue) {
-                    signalPayload(pDB + wSet[l], &sig);
                     #if ARISTOS_DEBUG
                     printf("Scheduler::Interrupt::pid: %u, taskIdx is %u\n", wSet[l], sig.signal);
                     #endif
+                    signalPayload(pDB + wSet[l], &sig);
                 }
             }
         }
@@ -81,10 +81,10 @@ namespace aristos::scheduler {
             for (uint l = 0; l < WSet::kElements; ++l) {
                 if (l < residue) {
                     sig.encodeSig(DQ::next<dqt>(qIdx, cSetB * WSet::kElements + l));
-                    signalPayload(pDB + wSet[l], &sig);
                     #if ARISTOS_DEBUG
                     printf("Scheduler::pid: %u, taskIdx is %u\n", wSet[l], sig.signal);
                     #endif
+                    signalPayload(pDB + wSet[l], &sig);
                 }
             }
         }
@@ -191,6 +191,10 @@ namespace aristos::scheduler {
                 for (uint j = sL; j < TQState::kElements; ++j) {
                     if (tqState[j].tasks && tasksToSchedule) {
                         const auto canSchedule = cute::min(tasksToSchedule, tqState[j].tasks);
+                        #if ARISTOS_DEBUG
+                        printf("Thread %u, tasks: %u, cS: %u\n", threadIdx.x,
+                            tqState[j].tasks, canSchedule);
+                        #endif
                         const auto qHead = ((j - sL) * wS + threadIdx.x) * blockQStride;
                         const auto qIdx = interrupt == ProcessorInterrupt::yes? NOOP_SIGNAL : tQOffset + qHead;
                         tasksToSchedule -= canSchedule;
@@ -243,7 +247,7 @@ namespace aristos::scheduler {
         // cub stuff
         using WarpScan = cub::WarpScan<uint>;
         auto* __restrict__ wSt = CAST_TO(WarpScan::TempStorage, workspace);
-        uint gRQIdx = 0U;
+        uint gRQIdx = 0U; // what's the purpose of this?
         uint processorTally = processors; // initially, all processors are available, ensure that rQ has all pids
         bool pTEpilog = false;
         auto tTB = atomicLoad<cuda::thread_scope_block>(taskBound);
@@ -297,6 +301,7 @@ namespace aristos::scheduler {
             #pragma unroll
             for (uint j = sL; j < decltype(tqState)::kElements; ++j) {
                 if (const auto qIdx = wS * (dQL * dT + (j - sL)) + threadIdx.x; qIdx < gtQCL) {
+                    // TODO atomicExch to ground state
                     const auto tasks = atomicLoad(gtQHeads + qIdx);
                     tqState[j].tasks = tasks;
                     lTt += tasks;
@@ -318,7 +323,7 @@ namespace aristos::scheduler {
         }
 
         uint lTt = 0U; // local task tally
-        if constexpr (constexpr auto trips = processors / (dQL * WARP_SIZE); trips > 0) {
+        if constexpr (constexpr auto trips = processors / (decltype(tqState)::kElements * WARP_SIZE); trips > 0) {
             #pragma unroll
             for (uint i = 0; i < trips; ++i) {
                 #pragma unroll
@@ -327,7 +332,8 @@ namespace aristos::scheduler {
                     tqState[j].tQTail = 0U;
                     lTt += 1U;
                 }
-                schedulerLoop<processors, 0U, ProcessorInterrupt::yes>(sQState, tqState, wSet, 0U, lTt,
+                schedulerLoop<processors, 0U, ProcessorInterrupt::yes>(sQState, tqState, wSet, 0U,
+                    lTt,
                     processorTally, gRQIdx, pTEpilog, scheduled,
                     wSt, sQ, rQ, pDB, false);
             }

@@ -213,7 +213,7 @@ namespace aristos::packet {
             const auto padM = Bookkeeping::pad<BLOCK_M>(routedTokens);
 
             if (!atomicTAS<cuda::thread_scope_block>(status + peer)) {
-                // atomically reduce taskCount
+                // self-correct termination condition
                 const auto superfluous = (tN + tNx) * (ACC::TCM::value - globalTaskTiles);
                 atomicSub_block(taskCount, superfluous);
             }
@@ -276,7 +276,7 @@ namespace aristos::packet {
             if (routedTokens) {
                 const auto totalTasks = Bookkeeping::tiles<BLOCK_M>(routedTokens) * tN;
                 #if ARISTOS_DEBUG
-                printf("Thread %u, tt is %u\n", threadIdx.x, totalTasks);
+                printf("Initial::Thread %u, tt is %u\n", threadIdx.x, totalTasks);
                 #endif
                 lTQHead += totalTasks;
                 __threadfence();
@@ -313,7 +313,7 @@ namespace aristos::packet {
             __threadfence();
             // notifies scheduler of work
             #if ARISTOS_DEBUG
-            printf("Thread %u, tt is %u\n", threadIdx.x, 1);
+            printf("Final::Thread %u, tt is %u\n", threadIdx.x, 1);
             #endif
             atomicIncrement<cuda::thread_scope_block>(tQHead);
         }
@@ -348,7 +348,7 @@ namespace aristos::packet {
             lTQHead += tN;
             __threadfence();
             #if ARISTOS_DEBUG
-            printf("Thread %u, tt is %u\n", threadIdx.x, tN);
+            printf("Final::Thread %u, tt is %u\n", threadIdx.x, tN);
             #endif
             // notifies scheduler
             atomicAdd_block(tQHead, tN);
