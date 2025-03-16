@@ -187,9 +187,9 @@ namespace aristos{
     };
 
     __device__
-    struct __align__(4) TQState {
-        uint16_t tQTail;
-        uint16_t tasks;
+    struct __align__(8) TQState {
+        uint tQTail;
+        uint tasks;
     };
 
     __device__
@@ -245,7 +245,7 @@ namespace aristos{
     };
 
     __device__
-    enum ReadySignal : unsigned int {
+    enum ReadySignal : uint {
         observed,
         ready
     };
@@ -260,6 +260,12 @@ namespace aristos{
     enum class JobType : uint8_t {
         training,
         inference
+    };
+
+    __device__
+    enum SchedulerConstants : uint {
+        interruptSignal = 0,
+        tQHeadGroundState = 0
     };
 
     template<
@@ -579,8 +585,8 @@ namespace aristos{
                 // maximum gemm tiles/tasks scheduled by processors
                 const auto prT = world * nLx * TCM * ACC::TNx::value;
                 // maximum gemm tiles/tasks scheduled by subscriber threads
-                sT = world * nLx * TCM * TN + (TCM * ACC::TNx::value * E);
-                const auto tPs = cute::ceil_div(sT, SUBSCRIBERS);
+                const auto tPs = cute::ceil_div(world * nLx * TCM * TN, SUBSCRIBERS) +
+                    cute::ceil_div(TCM * ACC::TNx::value * E, SUBSCRIBERS);
                 sT = tPs * SUBSCRIBERS;
                 tQl = sizeof(Task) * (sT + prT);
                 tQml = tQl + blocks * sizeof(TQSignal) + E * sizeof(PEL) + sizeof(TPS) * (E * EC);

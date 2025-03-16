@@ -359,7 +359,7 @@ namespace aristos::processor{
         }
     }
 
-    struct __align__(8) ProcessorArgs{
+    struct __align__(16) ProcessorArgs{
         // sensible sentinel values
         unsigned int* __restrict__ sQ = nullptr;
         TQSignal* __restrict__ pDB = nullptr;
@@ -390,11 +390,12 @@ namespace aristos::processor{
             && alignof(SignalPayload<PacketStage::last>) == alignof(flagsType));
 
         __shared__ Task currentTask;
+        // use shared for below due to register pressure
         __shared__ ProcessorArgs pA;
         __shared__ uint globalInterrupt;
 
         // Register allocations
-        uint16_t interrupt = 0U;
+        uint interrupt = 0U;
         const auto rSeqBit = _seqBit;
         Task rCurrentTask{};
         TQSignal tqs{0U, 0U};
@@ -414,7 +415,6 @@ namespace aristos::processor{
         using PreGEMM = BlockMM<ACC::ActivationOp, Element>;
         using PostGEMM = BlockMM<ACC::ActivationOpX, Element>;
         constexpr uint H = ACC::H::value;
-        constexpr uint P = ACC::P::value;
         constexpr auto tN = ACC::TN::value;
         constexpr auto tNx = ACC::TNx::value;
         __syncthreads();
@@ -428,12 +428,15 @@ namespace aristos::processor{
                 globalInterrupt = tqs.interrupt;
                 if (!tqs.interrupt) {
                     // below ensures task read happens after signal reception
+                    // I don't think the below fence is needed
                     __threadfence();
                     // global -> shared
                     #if ARISTOS_DEBUG
                     printf("Block %u Received task %u\n", blockIdx.x, tqs.signal);
                     #endif
                     currentTask = gtQ[tqs.decodeSig()];
+                    // below ensures we signal readiness only after we have read the task
+                    __threadfence();
                     // Eagerly indicate readiness for the next task
                     atomicExch(pA.sQ, ready);
                 }

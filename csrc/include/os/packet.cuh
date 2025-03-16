@@ -179,6 +179,22 @@ namespace aristos::packet {
         sHeap(_sHeap), tQ(_tQ), flags(_flags), nLx(bookkeeping.nLx) {}
     };
 
+    // Self-correct Termination Bound
+    template<
+        unsigned int TN = ACC::TN::value,
+        unsigned int TNx = ACC::TNx::value,
+        unsigned int TCM = ACC::TCM::value
+    >
+    __device__ __forceinline__
+    void sTB(unsigned int* __restrict__ const& taskCount,
+        unsigned int* __restrict__ const& status,
+        const unsigned int& peer, const unsigned int& nLx,
+        const unsigned int& peerTaskTiles = 0U) {
+        if (!atomicTAS<cuda::thread_scope_block>(status + peer)) {
+            const auto superfluous = (TN + TNx) * (nLx * TCM - peerTaskTiles);
+            atomicSub_block(taskCount, superfluous);
+        }
+    }
     /// Decodes a single packet from the initial stage
     template<
         PacketStage s,
@@ -200,10 +216,10 @@ namespace aristos::packet {
             const cuda::std::array<const cuda::std::byte*, GEMMs>& bias,
             unsigned int const& peer, // relative to the EP group
             unsigned int const& gPeer, // relative to the global group, needed for network operations
+            const unsigned int& nLx,
             unsigned int& lTQHead,
             unsigned int* __restrict__ const& tQHead) const {
             constexpr auto tN = ACC::TN::value;
-            constexpr auto tNx = ACC::TNx::value;
             auto* __restrict__ flags = CAST_TO(flagsType, p == PeerConnectivity::p2p ?
                 nvshmem_ptr(dA.flags, gPeer) : dA.flags);
 
@@ -211,12 +227,8 @@ namespace aristos::packet {
             const auto fTilesM = routedTokens / BLOCK_M;
             // pad here to meet tile requirements
             const auto padM = Bookkeeping::pad<BLOCK_M>(routedTokens);
-
-            if (!atomicTAS<cuda::thread_scope_block>(status + peer)) {
-                // self-correct termination condition
-                const auto superfluous = (tN + tNx) * (ACC::TCM::value - globalTaskTiles);
-                atomicSub_block(taskCount, superfluous);
-            }
+            // self-correct termination condition
+            sTB(taskCount, status, peer, nLx, globalTaskTiles);
 
             // expert, peer offset
             const auto fo = expertIdx * (ACC::TCM::value * ACC::TNx::value);
@@ -313,7 +325,7 @@ namespace aristos::packet {
             __threadfence();
             // notifies scheduler of work
             #if ARISTOS_DEBUG
-            printf("Final::Thread %u, tt is %u\n", threadIdx.x, 1);
+            printf("Final::Thread %u, tt is %u\n", threadIdx.x - WARP_SIZE, 1);
             #endif
             atomicIncrement<cuda::thread_scope_block>(tQHead);
         }

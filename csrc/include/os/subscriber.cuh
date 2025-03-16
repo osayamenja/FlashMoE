@@ -66,7 +66,18 @@ namespace aristos::subscriber{
                 auto signal = atomicLoad<cuda::thread_scope_system>(
                     CAST_TO(ull_t, flags + flagIdx));
                 const auto sP = CAST_TO(SignalPayload<PacketStage::initial>, &signal);
-                // TODO >=, > self-correct
+                if (sP->seqBit > localSeqBit) {
+                    // This is an exotic scenario.
+                    // Their sequence bit is ahead of ours, meaning that we missed processing some preceding packets
+                    // of theirs before they sent this current packet.
+                    // In short, they overrode those prior sequence bits before we observed them.
+                    // This occurrence is fine and more importantly,
+                    // only happens if the preceding, overridden n packets were noops,
+                    // where n = seqBit - localSeqBit.
+                    // Thus, as we catch up to them, we self-correct our termination bound to avoid a deadlock.
+                    const auto peer = flagIdx / nLx;
+                    packet::sTB(taskCount, status, peer, nLx);
+                }
                 const auto received = sP->seqBit == localSeqBit;
                 stagePending -= received;
                 if (!visitedSet.get(vIdx) && received) {
@@ -99,7 +110,7 @@ namespace aristos::subscriber{
                         // Enforce consistency
                         __threadfence_system();
                         fPd(dA, packet, status, taskCount, sP->routedTokens, sP->totalTilesM,
-                            myLocalExIdx, lXI.expertIndex, pGB, weights, bias, peerIdx, pLI.pe, ltQHead, tQHead);
+                            myLocalExIdx, lXI.expertIndex, pGB, weights, bias, peerIdx, pLI.pe, nLx, ltQHead, tQHead);
                     }
                     else {
                         // Remote peer
@@ -108,7 +119,7 @@ namespace aristos::subscriber{
                         // as the memory ordering mechanism is internal.
                         nvshmem_ushort_test(&sP->seqBit, NVSHMEM_CMP_EQ, localSeqBit);
                         fRd(dA, packet, status, taskCount, sP->routedTokens, sP->totalTilesM,
-                            myLocalExIdx, lXI.expertIndex, pGB, weights, bias, peerIdx, pLI.pe, ltQHead, tQHead);
+                            myLocalExIdx, lXI.expertIndex, pGB, weights, bias, peerIdx, pLI.pe, nLx, ltQHead, tQHead);
                     }
                 }
                 // update state

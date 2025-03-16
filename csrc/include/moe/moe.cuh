@@ -29,6 +29,7 @@ namespace aristos::moe{
         auto* __restrict__ sBp = bookkeeping.sBp();
         const auto sBz = bookkeeping.sBz();
         auto* __restrict__ pDB = bookkeeping.pDB();
+        auto* __restrict__ sQ = bookkeeping.sQ();
         auto* __restrict__ gBp = bookkeeping.gBp();
         constexpr auto gBz = Bookkeeping::gBz();
         if constexpr (c == CombineMode::multithreaded) {
@@ -41,6 +42,7 @@ namespace aristos::moe{
             // clear loss buffers
             for (uint i = threads * blockIdx.x + threadIdx.x; i < gBz; i += blocks * threads) {
                 gBp[i] = 0.0f;
+                sQ[i] = observed;
             }
         }
         // clear processor doorbells
@@ -81,7 +83,7 @@ namespace aristos::moe{
         const auto* __restrict__ bd = bU + lE * P;
         auto* __restrict__ gOp = CAST_TO(Element, oP);
         auto* __restrict__ mOp = gOp + S * PX;
-        __shared__ __align__(16) cuda::std::byte workspace[sharedSize];
+        __shared__ __align__(16) cuda::std::byte workspace[sharedSize + ACC::PeakHardware::spare::value];
         clearState<threads, blocks, processors, c, ACC::JT::value, S * H>(mOp);
 
         // prep tensors
