@@ -178,46 +178,106 @@ namespace aristos::scheduler {
     template<
         unsigned int processors,
         unsigned int wS = WARP_SIZE,
+        typename WarpScan = cub::WarpScan<uint>,
         typename SQState
     >
     /// Schedule Processor interrupts
     __device__ __forceinline__
     void sPI(SQState& sQState,
-        unsigned int* __restrict__ const& sQ,
-
-        TQSignal* __restrict__ const& pDB) {
+        unsigned int* __restrict__ const& rQ,
+        uint* __restrict__ const& sQ,
+        TQSignal* __restrict__ const& pDB,
+        uint& gRQIdx,
+        typename WarpScan::TempStorage* __restrict__ const& wSt,
+        uint* __restrict__ scratch, // assume all entries are set to 1
+        const uint& processorTally) {
+        static_assert(cuda::std::is_same_v<typename SQState::value_type, uint>);
+        /// read through the ready queue first
+        cuda::std::array<uint, SQState::kElements> bC{};
         constexpr auto sig = TQSignal{1U};
-        sQState.fill(0U);
-        // read through the ready queue first
-        constexpr auto pL = processors / wS;
-        auto remaining = pL + (threadIdx.x < processors - pL * wS);
-        while (remaining > 0) {
+        // Below must be <= ceil(processors / wS) == sQsL, so we can repurpose sQState registers as temporary storage
+        const auto tS = (processorTally / wS) + (threadIdx.x < (processorTally % wS));
+        const auto gRO = gRQIdx + (threadIdx.x * processorTally / wS + cute::max(threadIdx.x, processorTally % wS));
+        // index can only wrap around once
+        auto unguarded = gRO >= processors;
+        gRQIdx = gRO % processors;
+        unguarded = unguarded || gRQIdx + tS - 1 < processors;
+        if (unguarded) {
             #pragma unroll
-            for (uint j = 0; j < pL; ++j) {
-                if (!sQState[j]) {
-                    const auto pid = j * wS + threadIdx.x;
-                    const auto isReady = atomicExch(sQ + pid, observed) == ready;
-                    sQState[j] = isReady;
-                    if (isReady) {
-                        #if ARISTOS_DEBUG
-                        printf("Scheduler::Interrupt::pid is %u\n", pid);
-                        #endif
-                        // interrupt processor
-                        remaining -= 1;
-                        signalPayload(pDB + pid, &sig);
-                    }
+            for (uint i = 0; i < SQState::kElements; ++i) {
+                if (i < tS) {
+                    // shared -> registers
+                    sQState[i] = rQ[gRQIdx + i];
                 }
             }
-            if (threadIdx.x < processors - pL * wS) {
-                if (!sQState[pL]) {
-                    const auto pid = pL * wS + threadIdx.x;
+        }
+        else {
+            #pragma unroll
+            for (uint i = 0; i < SQState::kElements; ++i) {
+                if (i < tS) {
+                    // shared -> registers
+                    sQState[i] = rQ[(gRQIdx + i) % processors];
+                }
+            }
+        }
+        #pragma unroll
+        for (uint i = 0; i < SQState::kElements; ++i) {
+            if (i < tS) {
+                // notify interrupts
+                signalPayload(pDB + sQState[i], &sig);
+                scratch[sQState[i]] = 0U;
+            }
+        }
+        __syncwarp();
+        constexpr auto pL = processors / wS;
+        // Consolidate findings and populate the ready queue
+        auto uI = 0U;
+        // shared -> registers
+        #pragma unroll
+        for (uint i = 0; i < pL; ++i) {
+            sQState[i] = scratch[i * wS + threadIdx.x];
+            uI += scratch[i * wS + threadIdx.x];
+        }
+        if (threadIdx.x < processors % wS) {
+            sQState[pL] = scratch[pL * wS + threadIdx.x];
+        }
+
+        #pragma unroll
+        for (uint i = 0; i < pL; ++i) {
+            uI += sQState[i];
+        }
+        if (threadIdx.x < processors % wS) {
+            uI += sQState[pL];
+        }
+
+        uint startIdx;
+        uint pending;
+        WarpScan(*wSt).InclusiveSum(uI, startIdx, pending);
+        startIdx -= uI;
+        // enqueue all pending processes we discovered into the rQ
+        #pragma unroll
+        for (uint i = 0; i < pL; ++i) {
+            if (sQState[i]) {
+                rQ[startIdx++] = i * wS + threadIdx.x;
+            }
+        }
+        if (threadIdx.x < processors % wS && sQState[pL]) {
+            rQ[startIdx++] = pL * wS + threadIdx.x;
+        }
+        __syncwarp();
+        auto remaining = pending / wS + (threadIdx.x < pending % wS);
+        while (remaining) {
+            #pragma unroll
+            for (uint j = 0; j < pL; ++j) {
+                if (sQState[j]) {
+                    const auto pid = j * wS + threadIdx.x;
                     const auto isReady = atomicExch(sQ + pid, observed) == ready;
-                    sQState[pL] = isReady;
+                    sQState[j] = !isReady;
                     if (isReady) {
-                        // interrupt processor
                         #if ARISTOS_DEBUG
                         printf("Scheduler::Interrupt::pid is %u\n", pid);
                         #endif
+                        // interrupt processor
                         remaining -= 1;
                         signalPayload(pDB + pid, &sig);
                     }
@@ -235,7 +295,7 @@ namespace aristos::scheduler {
     >
     requires(processors > 0)
     __device__ __forceinline__
-    void start(cuda::std::byte* __restrict__ workspace,
+    void start(uint* __restrict__ workspace,
         const unsigned int& sO,
         const unsigned int& gtQCL,
         unsigned int* __restrict__ const& sInterrupts,
@@ -266,7 +326,8 @@ namespace aristos::scheduler {
 
         // cub stuff
         using WarpScan = cub::WarpScan<uint>;
-        auto* __restrict__ wSt = CAST_TO(WarpScan::TempStorage, workspace);
+        static_assert(alignof(uint) % alignof(WarpScan::TempStorage) == 0);
+        auto* __restrict__ wSt = CAST_TO(WarpScan::TempStorage, workspace + processors);
         uint gRQIdx = 0U;
         uint processorTally = processors; // initially, all processors are available, ensure that rQ has all pids
         auto tTB = atomicLoad<cuda::thread_scope_block>(taskBound);

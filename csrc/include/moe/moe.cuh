@@ -25,7 +25,7 @@ namespace aristos::moe{
     >
     __device__ __forceinline__
     void clearState(Element* __restrict__ const& outP) {
-        // wipe buffers before the grid-wide barrier
+        // A barrier must occur after below otherwise, undefined behavior results.
         auto* __restrict__ sBp = bookkeeping.sBp();
         const auto sBz = bookkeeping.sBz();
         auto* __restrict__ pDB = bookkeeping.pDB();

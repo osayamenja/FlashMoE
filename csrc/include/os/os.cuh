@@ -50,16 +50,16 @@ namespace aristos::os {
         auto* __restrict__ pL = CAST_TO(PLI, eL + E);
         static_assert(alignof(PLI) % alignof(uint) == 0);
         auto* __restrict__ lX = CAST_TO(LXI, pL + world);
-        const auto dZ = roundToCacheLine(sizeof(ELI) * E + sizeof(PLI) * world + sizeof(LXI) * nLx);
+        const auto dZ = roundToCacheLine<LXI>(sizeof(ELI) * E + sizeof(PLI) * world + sizeof(LXI) * nLx);
         auto* __restrict__ bitSet = CAST_TO(BitSet, workspace + dZ);
-        const auto cbSSI = roundToCacheLine(bSSI * sizeof(uint));
+        const auto bSSIz = bSSI * sizeof(uint);
         static_assert(alignof(BitSet) % alignof(uint) == 0);
-        auto* __restrict__ subscriberScratch = CAST_TO(uint, workspace + dZ + cbSSI);
+        auto* __restrict__ subscriberScratch = CAST_TO(uint, workspace + dZ + bSSIz);
         auto* __restrict__ taskBound = subscriberScratch + (SUBSCRIBERS * wSet);
         const auto* __restrict__ geL = bookkeeping.eL();
         const auto* __restrict__ gpL = bookkeeping.pL();
         const auto* __restrict__ gLx = bookkeeping.lX();
-        const auto z = dZ + cbSSI + (SUBSCRIBERS * wSet + 1) * sizeof(uint);
+        const auto z = dZ + bSSIz + (SUBSCRIBERS * wSet + 1) * sizeof(uint);
         for (uint i = threadIdx.x; i < bSSI; i += threads) {
             bitSet[i] = BitSet{0U};
         }
@@ -71,12 +71,12 @@ namespace aristos::os {
         for (uint i = threadIdx.x; i < world; i += threads) {
             lX[i] = gLx[i];
         }
-        auto* __restrict__ scratch = CAST_TO(uint, workspace + roundToCacheLine(z));
+        auto* __restrict__ scratch = CAST_TO(uint, workspace + roundToCacheLine<uint>(z));
         auto* __restrict__ tQHeads = scratch;
         auto* __restrict__ interrupt = tQHeads + subscriberCount;
         auto* __restrict__ rQ = interrupt + subscriberCount;
-        auto* __restrict__ status = rQ + processors;
-        auto* __restrict__ schedulerScratch = CAST_TO(cuda::std::byte, status + world);
+        auto* __restrict__ status = rQ + roundToCacheLine<uint>(processors);
+        auto* __restrict__ schedulerScratch = status + world;
         // shared memory arrays
         // Upper bound for expectant tasks
         const auto* __restrict__ eCs = scratch;
@@ -105,6 +105,7 @@ namespace aristos::os {
         #pragma unroll
         for (uint i = threadIdx.x; i < processors; i += threads) {
             rQ[i] = i; // initially, all processors are ready
+            schedulerScratch[i] = 1U; // needed for scheduler
         }
         #pragma unroll
         for (uint i = threadIdx.x; i < SUBSCRIBERS; i += threads) {

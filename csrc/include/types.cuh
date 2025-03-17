@@ -465,9 +465,11 @@ namespace aristos{
     };
 
     // Also applies to shared memory banks
+    template<typename Element>
+    requires(128 % sizeof(Element) == 0)
     __device__ __forceinline__
     constexpr auto roundToCacheLine(uint const& z) {
-        return cute::ceil_div(z, 128U) * 128U;
+        return cute::ceil_div(z, 128U / sizeof(Element)) * (128U / sizeof(Element));
     }
 
     struct __align__(16) Task {
