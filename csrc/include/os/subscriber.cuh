@@ -31,7 +31,7 @@ namespace aristos::subscriber{
         >
         __device__ __forceinline__
         void operator()(
-            const packet::DecoderArg& dA,
+            packet::DecoderArg& dA,
             ExpertsUp const& expertsUp,
             ExpertsDown const& expertsDown,
             BiasUp const& biasUp,
@@ -100,13 +100,16 @@ namespace aristos::subscriber{
                         CONST_CAST_TO(cuda::std::byte, &biasUp(myLocalExIdx)),
                         CONST_CAST_TO(cuda::std::byte, &biasDown(myLocalExIdx))
                     };
-                    const auto* packet = heap::advance<0, 1>(dA.sHeap, peerIdx, myLocalExIdx);
+                    const auto* packet = heap::advance<0, 1>(dA.rSHeap, peerIdx, myLocalExIdx);
                     #if ARISTOS_DEBUG
                     printf("Subscriber %u received a packet from peer %u to expert %u\n",
                         tIdx, peerIdx, myLocalExIdx);
                     #endif
                     if (!pLI.isRemote) {
                         // P2P peer
+                        // Use DMA pointers over UVA
+                        dA.rSHeap = pLI.remoteSHeap;
+                        dA.rFlags = pLI.remoteSFlags;
                         // Enforce consistency
                         __threadfence_system();
                         fPd(dA, packet, status, taskCount, sP->routedTokens, sP->totalTilesM,
@@ -205,20 +208,17 @@ namespace aristos::subscriber{
                         const auto expertIdx = flagIdx / CS;
                         const ELI lookup = eL[expertIdx];
                         const auto* tI = tokenIds + (expertIdx * EC + sP->batchIdx * BLOCK_M);
+                        const auto* packet = heap::advance<1, 1>(dA.rSHeap, lookup.epRank,
+                                lookup.localExpertIndex,sP->batchIdx * BLOCK_M);
                         if (lookup.isRemote) {
                             // enforce memory consistency
                             nvshmem_ushort_test(&sP->seqBit, NVSHMEM_CMP_EQ, localSeqBit);
-                            const auto* packet = heap::advance<1, 1>(dA.sHeap, lookup.epRank,
-                                lookup.localExpertIndex,sP->batchIdx * BLOCK_M);
-
                             lRd(dA, packet, CONST_CAST_TO(cuda::std::byte, tI), mO, sP->tokensM,
                                 ltQHead, tQHead, expertIdx);
                         }
                         else {
                             // enforce memory consistency
                             __threadfence_system();
-                            const auto* packet = heap::advance<1, 1>(dA.sHeap, lookup.epRank,
-                                lookup.localExpertIndex, sP->batchIdx * BLOCK_M);
                             lPd(dA.tQ, ltQHead, packet,
                                 CONST_CAST_TO(cuda::std::byte, tI),
                                 mO, sP->tokensM, flagIdx % TN, tQHead, expertIdx);
@@ -271,20 +271,17 @@ namespace aristos::subscriber{
                             const auto expertIdx = flagIdx / CS;
                             const ELI lookup = eL[expertIdx];
                             const auto* tI = tokenIds + (expertIdx * EC + (sP->batchIdx * BLOCK_M));
+                            const auto* packet = heap::advance<1, 1>(dA.rSHeap, lookup.epRank,
+                                    lookup.localExpertIndex, sP->batchIdx * BLOCK_M);
                             if (lookup.isRemote) {
                                 // enforce memory consistency
                                 nvshmem_ushort_test(&sP->seqBit, NVSHMEM_CMP_EQ, localSeqBit);
-                                const auto* packet = heap::advance<1, 1>(dA.sHeap, lookup.epRank,
-                                    lookup.localExpertIndex,sP->batchIdx * BLOCK_M);
-
                                 lRd(dA, packet, CONST_CAST_TO(cuda::std::byte, tI), mO, sP->tokensM,
                                     ltQHead, tQHead, expertIdx);
                             }
                             else {
                                 // enforce memory consistency
                                 __threadfence_system();
-                                const auto* packet = heap::advance<1, 1>(dA.sHeap, lookup.epRank,
-                                    lookup.localExpertIndex, sP->batchIdx * BLOCK_M);
                                 lPd(dA.tQ, ltQHead, packet,
                                     CONST_CAST_TO(cuda::std::byte, tI),
                                     mO, sP->tokensM, flagIdx % TN, tQHead, expertIdx);
@@ -371,7 +368,7 @@ namespace aristos::subscriber{
 
         // Register allocation
         const auto gfSfC = bookkeeping.world * bookkeeping.xs;
-        const auto dA = packet::DecoderArg{
+        auto dA = packet::DecoderArg{
             bookkeeping.sHeap,
             bookkeeping.tQ() + tIdx, // coalesced accessing
             bookkeeping.flags + gfSfC,

@@ -51,6 +51,7 @@ namespace aristos::moe{
         }
 
         // clear sB
+        static_assert(tQHeadGroundState == 0U);
         for (uint i = threads * blockIdx.x + threadIdx.x; i < sBz; i += blocks * threads) {
             sBp[i] = 0U;
         }

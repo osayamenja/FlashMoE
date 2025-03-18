@@ -45,11 +45,11 @@ namespace aristos::os {
         constexpr auto EC = ACC::TNx::value;
 
         // subscriber shared memory allocation
-        auto* __restrict__ eL = CAST_TO(ELI, workspace);
-        static_assert(alignof(ELI) % alignof(PLI) == 0);
-        auto* __restrict__ pL = CAST_TO(PLI, eL + E);
-        static_assert(alignof(PLI) % alignof(uint) == 0);
-        auto* __restrict__ lX = CAST_TO(LXI, pL + world);
+        auto* __restrict__ pL = CAST_TO(PLI, workspace);
+        static_assert(alignof(PLI) % alignof(ELI) == 0);
+        auto* __restrict__ eL = CAST_TO(ELI, pL + world);
+        static_assert(alignof(ELI) % alignof(uint) == 0);
+        auto* __restrict__ lX = CAST_TO(LXI, eL + E);
         const auto dZ = roundToCacheLine<LXI>(sizeof(ELI) * E + sizeof(PLI) * world + sizeof(LXI) * nLx);
         auto* __restrict__ bitSet = CAST_TO(BitSet, workspace + dZ);
         const auto bSSIz = bSSI * sizeof(uint);
@@ -105,7 +105,7 @@ namespace aristos::os {
         #pragma unroll
         for (uint i = threadIdx.x; i < processors; i += threads) {
             rQ[i] = i; // initially, all processors are ready
-            schedulerScratch[i] = 1U; // needed for scheduler
+            schedulerScratch[i] = 0U; // needed for scheduler's bitset
         }
         #pragma unroll
         for (uint i = threadIdx.x; i < SUBSCRIBERS; i += threads) {
@@ -119,7 +119,7 @@ namespace aristos::os {
             const auto gtQCl = bookkeeping.gtQCl;
             const auto sO = bookkeeping.sT;
             auto* __restrict__ gtQHeads = bookkeeping.tQH();
-            auto* __restrict__ sQ = bookkeeping.tSA();
+            auto* __restrict__ sQ = bookkeeping.sQ();
             auto* __restrict__ pDB = bookkeeping.pDB();
             scheduler::start<processors>(schedulerScratch, sO, gtQCl, interrupt, tQHeads,
                 gtQHeads, taskBound, rQ, sQ, pDB);

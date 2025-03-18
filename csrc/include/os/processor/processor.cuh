@@ -431,9 +431,6 @@ namespace aristos::processor{
                     // I don't think the below fence is needed
                     __threadfence();
                     // global -> shared
-                    #if ARISTOS_DEBUG
-                    printf("Block %u Received task %u\n", blockIdx.x, tqs.signal);
-                    #endif
                     currentTask = gtQ[tqs.decodeSig()];
                     // below ensures we signal readiness only after we have read the task
                     __threadfence();
@@ -443,7 +440,7 @@ namespace aristos::processor{
             }
             __syncthreads();
             interrupt = globalInterrupt;
-            // if received interrupt, there is nothing to do next
+            // if we received an interrupt, there is nothing to do next
             if (!interrupt) {
                 // shared -> registers
                 rCurrentTask = currentTask;
@@ -477,6 +474,7 @@ namespace aristos::processor{
                                     rCurrentTask.bData,
                                     rCurrentTask.cData,
                                     rCurrentTask.dData,
+                                    rCurrentTask.rcData,
                                     rCurrentTask.flags,
                                     rCurrentTask.syncIdx,
                                     0,
@@ -502,7 +500,7 @@ namespace aristos::processor{
                     }
                     break;
                     case TaskType::postGEMM: {
-                        constexpr unsigned int postIndex = 0;
+                        constexpr unsigned int postIndex = 1;
                         fGET<PostGEMM, ACC::H::value, ACC::P::value>(
                             CAST_TO(typename PostGEMM::MatrixDType, workspace),
                             CONST_CAST_TO(typename PostGEMM::MatrixAType, rCurrentTask.aData),
@@ -512,6 +510,16 @@ namespace aristos::processor{
                             rCurrentTask.M,
                             currentTask.tileIdx);
                         __syncthreads();
+                        if (!threadIdx.x) {
+                            constexpr auto P = ACC::P::value;
+                            const auto a = make_tensor(CONST_CAST_TO(Element, rCurrentTask.aData),
+                                make_layout(cute::make_shape(rCurrentTask.M, P), cute::LayoutRight{}));
+                            print_tensor(a);
+                            const auto c = make_tensor(CONST_CAST_TO(Element, rCurrentTask.cData[postIndex]),
+                                make_layout(cute::make_shape(rCurrentTask.M, H), cute::LayoutRight{}));
+                            print_tensor(c);
+                        }
+
                         if (!threadIdx.x) {
                             // Pack payload into single signal word of 8 bytes
                             const auto flagSignal = SignalPayload<PacketStage::last>{
@@ -523,7 +531,7 @@ namespace aristos::processor{
                                 // Remote; check if we need to do the transfer
                                 __threadfence();
                                 if (atomicIncrement(pA.tQS + rCurrentTask.syncIdx) + 1 == tN + tNx) {
-                                    nvshmem_putmem_signal_nbi(rCurrentTask.cData[postIndex],
+                                    nvshmem_putmem_signal_nbi(rCurrentTask.rcData,
                                         rCurrentTask.cData[postIndex],
                                         // Batched remote network transfer to avoid overwhelming the NIC
                                         rCurrentTask.tileSize * H * sizeof(Element),
@@ -544,14 +552,24 @@ namespace aristos::processor{
                     }
                     break;
                     case TaskType::combine: {
+                        constexpr unsigned int combineIndex = 0;
                         combine<ACC::CM::value>(CAST_TO(typename PostGEMM::MatrixDType, workspace),
                             CONST_CAST_TO(TPS, rCurrentTask.aData),
-                            CONST_CAST_TO(typename PostGEMM::MatrixAType, rCurrentTask.bData[0]),
-                            CAST_TO(typename PostGEMM::MatrixDType, rCurrentTask.cData[0]),
+                            CONST_CAST_TO(typename PostGEMM::MatrixAType, rCurrentTask.bData[combineIndex]),
+                            CAST_TO(typename PostGEMM::MatrixDType, rCurrentTask.cData[combineIndex]),
                             sW,
                             rCurrentTask.M,
                             rCurrentTask.tileIdx,
                             rCurrentTask.tileSize, rCurrentTask.expertIdx);
+                        __syncthreads();
+                        /*if (!threadIdx.x) {
+                            const auto b = make_tensor(CONST_CAST_TO(Element, rCurrentTask.bData[0]),
+                                make_layout(cute::make_shape(BLOCK_M, BLOCK_N), cute::LayoutRight{}));
+                            print_tensor(b);
+                            const auto c = make_tensor(CONST_CAST_TO(Element, rCurrentTask.cData[0]),
+                                make_layout(cute::make_shape(BLOCK_M, BLOCK_N), cute::LayoutRight{}));
+                            print_tensor(c);
+                        }*/
                     }
                     break;
                 }

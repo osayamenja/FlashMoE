@@ -342,9 +342,11 @@ namespace aristos{
 
     /// Peer lookup info: key is ep rank
     __device__
-    struct __align__(4) PLI {
-        uint16_t pe;
-        uint16_t isRemote;
+    struct __align__(16) PLI {
+        cuda::std::byte* remoteSHeap;
+        flagsType* remoteSFlags;
+        uint pe;
+        uint isRemote;
     };
 
     /// Packet Encoding Lookup info, retrievable in a single memory lookup
@@ -352,7 +354,7 @@ namespace aristos{
     __device__
     struct __align__(16) PEL {
         cuda::std::byte* remoteSHeap;
-        flagsType* remoteSFlags; //rank * expertSlots + xLIdx
+        flagsType* remoteSFlags;
         uint eC;
         uint16_t pTTt;
         uint16_t expertLocalIdx;
@@ -446,7 +448,7 @@ namespace aristos{
         mp_t probability;
     };
 
-    enum class TaskType {
+    enum class TaskType : uint8_t {
         preGEMM,
         postGEMM,
         combine
@@ -473,7 +475,7 @@ namespace aristos{
     }
 
     struct __align__(16) Task {
-        using TST = uint16_t;
+        using TST = uint8_t;
         static_assert(BLOCK_M <= cuda::std::numeric_limits<TST>::max());
         // D = A * B + C
         // sensible sentinel values
@@ -481,6 +483,7 @@ namespace aristos{
         cuda::std::array<const cuda::std::byte*, GEMMs> bData = {};
         cuda::std::array<cuda::std::byte*, GEMMs> cData = {};
         cuda::std::array<const cuda::std::byte*, GEMMs> dData = {};
+        cuda::std::byte* rcData = nullptr;
         flagsType* flags = nullptr;
         // crd2Idx(peer, expertIdx, offset)
         unsigned int syncIdx = 0UL;
@@ -488,11 +491,11 @@ namespace aristos{
         //padded
         unsigned int M = 0U;
         unsigned int batchIdx = 0U;
-        TaskType taskType;
         uint16_t peerIdx = 0U;
         uint16_t expertIdx = 0U;
-        TST tileSize = 0U; // <= BLOCK_M
         uint16_t isPeerRemote = 0U;
+        TaskType taskType;
+        TST tileSize = 0U; // <= BLOCK_M
 
         __forceinline__ __device__
         Task() = default;
@@ -504,6 +507,7 @@ namespace aristos{
             const cuda::std::array<const cuda::std::byte*, GEMMs>& _bData,
             const cuda::std::array<cuda::std::byte*, GEMMs>& _cData,
             const cuda::std::array<const cuda::std::byte*, GEMMs>& _dData,
+            cuda::std::byte* const& _rcData,
             flagsType* const& _flags,
             const unsigned int& _syncIdx,
             const unsigned int& _tile,
@@ -513,9 +517,9 @@ namespace aristos{
             const unsigned int& _batchIdx,
             const uint16_t& _isPeerRemote):
         aData(_aData), bData(_bData),
-        cData(_cData), dData(_dData), flags(_flags),
+        cData(_cData), dData(_dData), rcData(_rcData), flags(_flags),
         syncIdx(_syncIdx), tileIdx(_tile),  M(_M),
-        batchIdx(_batchIdx), taskType(_taskType), peerIdx(_peerIdx), tileSize(_size), isPeerRemote(_isPeerRemote){}
+        batchIdx(_batchIdx), peerIdx(_peerIdx), isPeerRemote(_isPeerRemote), taskType(_taskType), tileSize(_size){}
 
         // Stage 2
         __device__ __forceinline__
@@ -591,11 +595,11 @@ namespace aristos{
                     cute::ceil_div(TCM * ACC::TNx::value * E, SUBSCRIBERS);
                 sT = tPs * SUBSCRIBERS;
                 tQl = sizeof(Task) * (sT + prT);
-                tQml = tQl + blocks * sizeof(TQSignal) + E * sizeof(PEL) + sizeof(TPS) * (E * EC);
+                tQml = tQl + blocks * sizeof(TQSignal) + E * sizeof(PEL) + sizeof(PLI) * world +
+                    sizeof(TPS) * (E * EC);
                 brs = tQml + (ACC::GRL::value == GateReductionLevel::singleBlock ? 0U : S * TPX *
                     (sizeof(RingSoftmaxPayload) + 2 * sizeof(RingTopKPayload)));
-                tQXt = brs + sizeof(ELI) * E + sizeof(cuda::barrier<cuda::thread_scope_device>) +
-                    sizeof(PLI) * world + sizeof(LXI) * _nLx;
+                tQXt = brs + sizeof(ELI) * E + sizeof(cuda::barrier<cuda::thread_scope_device>) + sizeof(LXI) * _nLx;
                 gRl = tQXt + (ACC::JT::value == JobType::inference ? 0U :
                     sizeof(mp_t) * (2 * E + 1));
                 sBfC = gRl + sizeof(BookType) * (1 + (E * TCM * ACC::TNx::value) + blocks +
@@ -622,11 +626,12 @@ namespace aristos{
             const auto tPs = cute::ceil_div(sT, SUBSCRIBERS);
             sT = tPs * SUBSCRIBERS;
             const auto tQl = sizeof(Task) * (sT + prT);
-            const auto tQml = tQl + blocks * sizeof(TQSignal) + E * sizeof(PEL) + sizeof(TPS) * (E * EC);
+            const auto tQml = tQl + blocks * sizeof(TQSignal) + E * sizeof(PEL) + sizeof(PLI) * _world +
+                sizeof(TPS) * (E * EC);
             const auto brs = tQml + (ACC::GRL::value == GateReductionLevel::singleBlock ? 0U :
                 S * TPX * (sizeof(RingSoftmaxPayload) + 2 * sizeof(RingTopKPayload)));
             const auto tQXt = brs + sizeof(ELI) * E + sizeof(cuda::barrier<cuda::thread_scope_device>) +
-                sizeof(PLI) * _world + sizeof(LXI) * _nLx;
+                sizeof(LXI) * _nLx;
             const auto gRl = tQXt +
                 (ACC::JT::value == JobType::inference ? 0U : sizeof(mp_t) * (2 * E + 1));
             const auto sBfC = gRl + sizeof(BookType) * (1 + (E * TCM * ACC::TNx::value) + blocks +
@@ -669,10 +674,15 @@ namespace aristos{
         auto* pEL() const {
             return CAST_TO(PEL, book + tQl);
         }
-        static_assert(alignof(PEL) % alignof(TPS) == 0);
+        static_assert(alignof(PEL) % alignof(PLI) == 0);
+        __host__ __device__ __forceinline__
+        auto* pL() const {
+            return CAST_TO(PLI, pEL() + ACC::E::value);
+        }
+        static_assert(alignof(PLI) % alignof(TPS) == 0);
         __device__ __forceinline__
         auto* tP() const {
-            return CAST_TO(TPS, pEL() + ACC::E::value);
+            return CAST_TO(TPS, pL() + world);
         }
         static_assert(alignof(TPS) % alignof(TQSignal) == 0);
         /// processors' doorbell
@@ -725,13 +735,7 @@ namespace aristos{
             return CAST_TO(ELI, dB() + 1);
         }
 
-        static_assert(alignof(ELI) % alignof(PLI) == 0);
-        __host__ __device__ __forceinline__
-        auto* pL() const {
-            return CAST_TO(PLI, eL() + ACC::E::value);
-        }
-
-        static_assert(alignof(PLI) % alignof(LXI) == 0);
+        static_assert(alignof(ELI) % alignof(LXI) == 0);
         __host__ __device__ __forceinline__
         auto* lX() const {
             return CAST_TO(LXI, pL() + world);
@@ -875,7 +879,7 @@ namespace aristos{
         stride,
         block
     };
-    /// Decoupled Queue, comprises head, tail and doorbell
+    /// Decoupled Queue, comprises tail and doorbell
     namespace DQ {
         template<
             DQType dqt = DQType::stride,

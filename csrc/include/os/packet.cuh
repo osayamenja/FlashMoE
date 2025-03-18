@@ -85,7 +85,7 @@ namespace aristos::packet {
                 cute::min(lI.eC, EC) : lI.eC;
             auto* __restrict__ peerHeap = lI.isRemote ?
                 heap::advance<0, 0>(sHeap, lI.peer, lI.expertLocalIdx) :
-            heap::advance<0, 1>(lI.remoteSHeap, lI.peer, lI.expertLocalIdx);
+            heap::advance<0, 1>(lI.remoteSHeap, epRank, lI.expertLocalIdx);
 
             if (routedTokens) {
                 // copy tokens: not padded
@@ -126,7 +126,7 @@ namespace aristos::packet {
                         if (lI.isRemote) {
                             // do RDMA transfer + signal
                             nvshmem_putmem_signal_nbi(
-                                heap::advance<0, 1>(sHeap, lI.peer, lI.expertLocalIdx),
+                                heap::advance<0, 1>(sHeap, epRank, lI.expertLocalIdx),
                                 peerHeap,
                                 sizeof(Element) * routedTokens * H,
                                 flags + flagOffset,
@@ -167,16 +167,18 @@ namespace aristos::packet {
 
     // Resident in registers
     struct DecoderArg {
-        cuda::std::byte* sHeap;
+        cuda::std::byte* rSHeap;
         Task* tQ;
-        flagsType* flags;
+        flagsType* rFlags;
         const unsigned int nLx;
+        const unsigned int epRank;
         __device__
         DecoderArg(
             cuda::std::byte* const& _sHeap,
             Task* const& _tQ,
             flagsType* const& _flags) :
-        sHeap(_sHeap), tQ(_tQ), flags(_flags), nLx(bookkeeping.nLx) {}
+        rSHeap(_sHeap), tQ(_tQ), rFlags(_flags),
+        nLx(bookkeeping.nLx), epRank(bookkeeping.rank) {}
     };
 
     // Self-correct Termination Bound
@@ -220,8 +222,6 @@ namespace aristos::packet {
             unsigned int& lTQHead,
             unsigned int* __restrict__ const& tQHead) const {
             constexpr auto tN = ACC::TN::value;
-            auto* __restrict__ flags = CAST_TO(flagsType, p == PeerConnectivity::p2p ?
-                nvshmem_ptr(dA.flags, gPeer) : dA.flags);
 
             const auto qIdx = DQ::sNext(lTQHead);
             const auto fTilesM = routedTokens / BLOCK_M;
@@ -237,9 +237,9 @@ namespace aristos::packet {
             // Staging buffer for results of preGEMM
             taskResults[0] = pGB + peer * dA.nLx * ACC::EC::value * ACC::P::value * sizeof(Element);
             // Egress packet buffer
+            auto* rcData = heap::advance<1, 1>(dA.rSHeap, dA.epRank, localExpertIdx);
             taskResults[1] = p == PeerConnectivity::remote ?
-                heap::advance<1, 0>(dA.sHeap, peer, localExpertIdx) :
-            heap::advance<1, 1>(dA.sHeap, peer, localExpertIdx);
+                heap::advance<1, 0>(dA.rSHeap, peer, localExpertIdx) : rcData;
             for (uint i = 0; i < fTilesM; ++i) {
                 #pragma unroll
                 for (uint j = 0; j < tN; ++j) {
@@ -250,7 +250,8 @@ namespace aristos::packet {
                         weights,
                         taskResults,
                         bias,
-                        flags + fo + tileIdx,
+                        rcData,
+                        dA.rFlags + fo + tileIdx,
                         sO + i,
                         tileIdx,
                         padM,
@@ -273,7 +274,8 @@ namespace aristos::packet {
                         weights,
                         taskResults,
                         bias,
-                        dA.flags + fo + tileIdx,
+                        rcData,
+                        dA.rFlags + fo + tileIdx,
                         sO + fTilesM,
                         tileIdx,
                         padM,

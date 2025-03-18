@@ -33,9 +33,6 @@ namespace aristos::scheduler {
             for (uint l = 0; l < WSet::kElements; ++l) {
                 // signal processor
                 sig.encodeSig(DQ::next<dqt>(qIdx, k * WSet::kElements + l));
-                #if ARISTOS_DEBUG
-                printf("Scheduler::pid is %u\n", wSet[l]);
-                #endif
                 signalPayload(pDB + wSet[l], &sig);
             }
         }
@@ -51,9 +48,6 @@ namespace aristos::scheduler {
         for (uint l = 0; l < WSet::kElements; ++l) {
             if (l < residue) {
                 sig.encodeSig(DQ::next<dqt>(qIdx, cSetB * WSet::kElements + l));
-                #if ARISTOS_DEBUG
-                printf("Scheduler:%u::pid: %u, taskIdx is %u\n", threadIdx.x, wSet[l], sig.signal);
-                #endif
                 signalPayload(pDB + wSet[l], &sig);
             }
         }
@@ -141,10 +135,6 @@ namespace aristos::scheduler {
                             if (tqState[j].tasks > 0 && tasksToSchedule) {
                                 const auto canSchedule = cute::min(tasksToSchedule, tqState[j].tasks);
                                 const auto qIdx = DQ::next(j * wS + threadIdx.x, tqState[j].tQTail);
-                                #if ARISTOS_DEBUG
-                                printf("sL::Thread %u, tasks: %u, qIdx: %u, j:%u, tail: %u\n", threadIdx.x,
-                                    tqState[j].tasks, qIdx, j, tqState[j].tQTail);
-                                #endif
                                 tasksToSchedule -= canSchedule;
                                 tqState[j].tasks -= canSchedule;
                                 // have to increment tails as we will revisit this queue later on
@@ -188,9 +178,14 @@ namespace aristos::scheduler {
         TQSignal* __restrict__ const& pDB,
         uint& gRQIdx,
         typename WarpScan::TempStorage* __restrict__ const& wSt,
-        uint* __restrict__ scratch, // assume all entries are set to 1
+        uint* __restrict__ scratch,
         const uint& processorTally) {
         static_assert(cuda::std::is_same_v<typename SQState::value_type, uint>);
+        #pragma unroll
+        for (uint i = threadIdx.x; i < processors; i += wS) {
+            scratch[i] = 1U;
+        }
+        __syncwarp();
         /// read through the ready queue first
         constexpr auto sig = TQSignal{1U};
         // Below must be <= ceil(processors / wS) == sQsL, so we can repurpose sQState registers as temporary storage
@@ -284,9 +279,6 @@ namespace aristos::scheduler {
                     const auto isReady = atomicExch(sQ + pid, observed) == ready;
                     sQState[j] = !isReady;
                     if (isReady) {
-                        #if ARISTOS_DEBUG
-                        printf("Scheduler::Interrupt::pid is %u\n", pid);
-                        #endif
                         // interrupt processor
                         remaining -= 1;
                         signalPayload(pDB + pid, &sig);
@@ -356,6 +348,7 @@ namespace aristos::scheduler {
             // where B is the batch dimension or total queue / (Q * T);
             // Q is the number of queues a thread observes in one-pass;
             // and T is the number of threads in a warp
+            // TODO guard against atomic checks using bitset
             if (dT > 0) {
                 // One-shot scheduling, so tails are irrelevant.
                 // Special case, where i == 0
@@ -392,11 +385,6 @@ namespace aristos::scheduler {
             for (uint j = sL; j < decltype(tqState)::kElements; ++j) {
                 if (const auto qIdx = wS * (dQL * dT + (j - sL)) + threadIdx.x; qIdx < gtQCL) {
                     const auto tasks = atomicExch(gtQHeads + qIdx, tQHeadGroundState);
-                    #if ARISTOS_DEBUG
-                    if (tasks) {
-                        printf("Scheduler:%u found %lu\n", threadIdx.x, qIdx);
-                    }
-                    #endif
                     tqState[j].tasks = tasks;
                     lTt += tasks;
                 }
@@ -409,9 +397,6 @@ namespace aristos::scheduler {
                 tTB = atomicLoad<cuda::thread_scope_block>(taskBound);
             }
             tTB = __shfl_sync(0xffffffff, tTB, 0);
-        }
-        if (!threadIdx.x) {
-            printf("About to interrupt!\n");
         }
         // interrupt subscribers
         static_assert(subscribers % wS == 0);

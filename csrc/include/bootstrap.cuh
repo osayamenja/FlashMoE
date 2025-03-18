@@ -291,12 +291,12 @@ namespace aristos{
 
         // reuse pre-allocated memory for device data structures
         auto* __restrict__ pEL = CAST_TO(PEL, mP);
-        static_assert(alignof(PEL) % alignof(ELI) == 0);
-        auto* __restrict__ eLI = CAST_TO(ELI, pEL + E);
-        static_assert(alignof(ELI) % alignof(PLI) == 0);
-        auto* __restrict__ pLI = CAST_TO(PLI, eLI + E);
-        static_assert(alignof(PLI) % alignof(LXI) == 0);
-        auto* __restrict__ lxI = CAST_TO(LXI, pLI + ePgD.epWorld);
+        static_assert(alignof(PEL) % alignof(PLI) == 0);
+        auto* __restrict__ pLI = CAST_TO(PLI, pEL + E);
+        static_assert(alignof(PLI) % alignof(ELI) == 0);
+        auto* __restrict__ eLI = CAST_TO(ELI, pLI + ePgD.epWorld);
+        static_assert(alignof(ELI) % alignof(LXI) == 0);
+        auto* __restrict__ lxI = CAST_TO(LXI, eLI + E);
         static_assert(alignof(LXI) % alignof(uint) == 0);
         auto* __restrict__ tileIndices = CAST_TO(uint, lxI + ePgD.nLx);
 
@@ -330,6 +330,8 @@ namespace aristos{
             // PLI
             pli.isRemote = isRemote;
             pli.pe = gRank;
+            pli.remoteSHeap = rSHeap;
+            pli.remoteSFlags = rFlags;
 
             // LXI
             if (gRank == rank) {
