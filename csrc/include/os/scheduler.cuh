@@ -6,7 +6,6 @@
 #define SCHEDULER_CUH
 
 #include <cub/cub.cuh>
-#include <cuda/std/cstddef>
 #include <cutlass/array.h>
 
 #include "../atomics.cuh"
@@ -193,11 +192,11 @@ namespace aristos::scheduler {
         const uint& processorTally) {
         static_assert(cuda::std::is_same_v<typename SQState::value_type, uint>);
         /// read through the ready queue first
-        cuda::std::array<uint, SQState::kElements> bC{};
         constexpr auto sig = TQSignal{1U};
         // Below must be <= ceil(processors / wS) == sQsL, so we can repurpose sQState registers as temporary storage
-        const auto tS = (processorTally / wS) + (threadIdx.x < (processorTally % wS));
-        const auto gRO = gRQIdx + (threadIdx.x * processorTally / wS + cute::max(threadIdx.x, processorTally % wS));
+        const auto tS = processorTally / wS + (threadIdx.x < processorTally % wS);
+        const auto gRO = gRQIdx + (threadIdx.x * (processorTally / wS) +
+            cute::min(threadIdx.x, processorTally % wS));
         // index can only wrap around once
         auto unguarded = gRO >= processors;
         gRQIdx = gRO % processors;
@@ -224,8 +223,9 @@ namespace aristos::scheduler {
         for (uint i = 0; i < SQState::kElements; ++i) {
             if (i < tS) {
                 // notify interrupts
-                signalPayload(pDB + sQState[i], &sig);
-                scratch[sQState[i]] = 0U;
+                const auto pid = sQState[i];
+                signalPayload(pDB + pid, &sig);
+                scratch[pid] = 0U;
             }
         }
         __syncwarp();
@@ -236,7 +236,6 @@ namespace aristos::scheduler {
         #pragma unroll
         for (uint i = 0; i < pL; ++i) {
             sQState[i] = scratch[i * wS + threadIdx.x];
-            uI += scratch[i * wS + threadIdx.x];
         }
         if (threadIdx.x < processors % wS) {
             sQState[pL] = scratch[pL * wS + threadIdx.x];
@@ -266,11 +265,22 @@ namespace aristos::scheduler {
         }
         __syncwarp();
         auto remaining = pending / wS + (threadIdx.x < pending % wS);
+        cuda::std::array<uint, SQState::kElements> pids{};
+        // read from rQ to registers
+        #pragma unroll
+        for (uint i = 0; i < SQState::kElements; ++i) {
+            const auto idx = i * wS + threadIdx.x;
+            sQState[i] = idx < pending;
+            if (sQState[i]) {
+                pids[i] = rQ[idx];
+            }
+        }
+
         while (remaining) {
             #pragma unroll
-            for (uint j = 0; j < pL; ++j) {
+            for (uint j = 0; j < SQState::kElements; ++j) {
                 if (sQState[j]) {
-                    const auto pid = j * wS + threadIdx.x;
+                    const auto pid = pids[j];
                     const auto isReady = atomicExch(sQ + pid, observed) == ready;
                     sQState[j] = !isReady;
                     if (isReady) {
@@ -295,7 +305,7 @@ namespace aristos::scheduler {
     >
     requires(processors > 0)
     __device__ __forceinline__
-    void start(uint* __restrict__ workspace,
+    void start(uint* __restrict__ const& workspace,
         const unsigned int& sO,
         const unsigned int& gtQCL,
         unsigned int* __restrict__ const& sInterrupts,
@@ -411,7 +421,7 @@ namespace aristos::scheduler {
             atomicExch_block(sInterrupts + sid, 1U);
         }
         // interrupt processors
-        sPI<processors, wS>(sQState, sQ, pDB);
+        sPI<processors, wS>(sQState, rQ, sQ, pDB, gRQIdx, wSt, workspace, processorTally);
     }
 }
 #endif //SCHEDULER_CUH
