@@ -84,14 +84,9 @@ namespace aristos::subscriber{
                 if (!visitedSet.get(vIdx) && received) {
                     // set visited bit
                     visitedSet.set(vIdx);
-                    #if ARISTOS_DEBUG
-                    printf("{rt: %u, ttm: %u, sb: %u}, vs: %u\n", sP->routedTokens, sP->totalTilesM, sP->seqBit,
-                        visitedSet.get(vIdx));
-                    #endif
                     // decode the received packet
                     const auto myLocalExIdx = flagIdx % nLx;
                     const auto peerIdx = flagIdx / nLx;
-                    printf("peerIdx: %u, nLx: %u\n", peerIdx, nLx);
                     const auto pLI = pL[peerIdx];
                     const auto lXI = lX[myLocalExIdx];
                     cuda::std::array weights{
@@ -103,10 +98,6 @@ namespace aristos::subscriber{
                         CONST_CAST_TO(cuda::std::byte, &biasDown(myLocalExIdx))
                     };
                     const auto* packet = heap::advance<0, 1>(dA.sHeap, peerIdx, myLocalExIdx);
-                    #if ARISTOS_DEBUG
-                    printf("Subscriber %u received a packet from peer %u to expert %u\n",
-                        tIdx, peerIdx, myLocalExIdx);
-                    #endif
                     if (!pLI.isRemote) {
                         // P2P peer
                         // Use DMA pointers over UVA space
@@ -262,11 +253,6 @@ namespace aristos::subscriber{
                         const auto sP = CAST_TO(SignalPayload<PacketStage::last>, &signal);
                         if (!visitedSet.get(vIdx) && sP->seqBit == localSeqBit) {
                             // set visited bit
-                            #if ARISTOS_DEBUG
-                            printf("{Thread %u, tM: %u, bIdx: %u, sb: %u}, vs: %u\n",
-                                tIdx, sP->tokensM, sP->batchIdx, sP->seqBit,
-                                visitedSet.get(vIdx));
-                            #endif
                             visitedSet.set(vIdx);
                             // let's decode this packet
                             const auto expertIdx = flagIdx / CS;

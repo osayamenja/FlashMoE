@@ -252,7 +252,6 @@ namespace aristos{
         /// Symmetric memory
         const auto heapBytes = STAGES * CELLS * ePgD.epWorld * ePgD.expertSlots * ACC::pEC::value *
             ACC::H::value * sizeof(Element);
-        printf("heapBytes is %lu\n", heapBytes);
         const auto syncArrayBytes = sizeof(flagsType) * (ePgD.epWorld + 1);
         const auto flagBytes = (ePgD.epWorld * ePgD.expertSlots + E * ACC::TCM::value * ACC::TNx::value) *
             sizeof(flagsType);

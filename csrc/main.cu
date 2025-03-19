@@ -76,10 +76,17 @@ void runOS() {
     aristos::moe::forwardHost(p, p + dZ * sizeof(Element));
     CHECK_ERROR_EXIT(cudaPeekAtLastError());
     auto* __restrict__ oH = eHp + dZ;
-    CHECK_ERROR_EXIT(cudaMemcpyAsync(oH, p + dZ * sizeof(Element), sizeof(Element) * (S * PX),
+    CHECK_ERROR_EXIT(cudaMemcpyAsync(oH, p + dZ * sizeof(Element),
+        sizeof(Element) * S * (PX + H),
         cudaMemcpyDeviceToHost, aristos::aristosStream));
     CHECK_ERROR_EXIT(cudaFreeAsync(p, aristos::aristosStream));
     aristos::finalize();
+    const auto og = make_tensor(oH,
+        make_layout(cute::make_shape(S, PX), cute::LayoutRight{}));
+    const auto o = make_tensor(oH + S * PX,
+        make_layout(cute::make_shape(S, H), cute::LayoutRight{}));
+    print_tensor(og);
+    print_tensor(o);
     /*const auto og = make_tensor(oH,
         make_layout(cute::make_shape(S, PX), cute::LayoutRight{}));
     const auto o = make_tensor(oH + S * PX,

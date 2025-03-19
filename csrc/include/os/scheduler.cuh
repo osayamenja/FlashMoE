@@ -398,9 +398,6 @@ namespace aristos::scheduler {
             }
             tTB = __shfl_sync(0xffffffff, tTB, 0);
         }
-        if (!threadIdx.x) {
-            printf("About to interrupt\n");
-        }
         // interrupt subscribers
         static_assert(subscribers % wS == 0);
         #pragma unroll

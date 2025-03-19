@@ -552,14 +552,6 @@ namespace aristos::processor{
                             rCurrentTask.tileIdx,
                             rCurrentTask.tileSize, rCurrentTask.expertIdx);
                         __syncthreads();
-                        if (!threadIdx.x) {
-                            const auto b = make_tensor(CONST_CAST_TO(Element, rCurrentTask.bData[0]),
-                                make_layout(cute::make_shape(BLOCK_M, BLOCK_N), cute::LayoutRight{}));
-                            print_tensor(b);
-                            const auto c = make_tensor(CONST_CAST_TO(Element, rCurrentTask.cData[0]),
-                                make_layout(cute::make_shape(BLOCK_M, BLOCK_N), cute::LayoutRight{}));
-                            print_tensor(c);
-                        }
                     }
                     break;
                 }

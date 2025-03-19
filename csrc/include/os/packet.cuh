@@ -195,7 +195,6 @@ namespace aristos::packet {
         if (!atomicTAS<cuda::thread_scope_block>(status + peer)) {
             const auto superfluous = (TN + TNx) * (nLx * TCM - peerTaskTiles);
             atomicSub_block(taskCount, superfluous);
-            printf("tb %u\n", atomicLoad(taskCount));
         }
     }
     /// Decodes a single packet from the initial stage
@@ -241,9 +240,6 @@ namespace aristos::packet {
             taskResults[0] = pGB + (peer * dA.nLx * ACC::pEC::value * ACC::P::value * sizeof(Element));
             // Egress packet buffer
             auto* rcData = heap::advance<1, 1>(sHeap, dA.epRank, localExpertIdx);
-            if (routedTokens) {
-                printf("rank is %u, x is %u, rcData is %p\n", dA.epRank, localExpertIdx, rcData);
-            }
             taskResults[1] = p == PeerConnectivity::remote ?
                 heap::advance<1, 0>(sHeap, peer, localExpertIdx) : rcData;
             for (uint i = 0; i < fTilesM; ++i) {
@@ -295,9 +291,6 @@ namespace aristos::packet {
 
             if (routedTokens) {
                 const auto totalTasks = Bookkeeping::tiles<BLOCK_M>(routedTokens) * tN;
-                #if ARISTOS_DEBUG
-                printf("Initial::Thread %u, tt is %u\n", threadIdx.x, totalTasks);
-                #endif
                 lTQHead += totalTasks;
                 __threadfence();
                 // notifies scheduler of work
@@ -332,9 +325,6 @@ namespace aristos::packet {
             };
             __threadfence();
             // notifies scheduler of work
-            #if ARISTOS_DEBUG
-            printf("Final::Thread %u, tt is %u\n", threadIdx.x - WARP_SIZE, 1);
-            #endif
             atomicIncrement<cuda::thread_scope_block>(tQHead);
         }
     };
@@ -367,9 +357,6 @@ namespace aristos::packet {
             }
             lTQHead += tN;
             __threadfence();
-            #if ARISTOS_DEBUG
-            printf("Final::Thread %u, tt is %u\n", threadIdx.x, tN);
-            #endif
             // notifies scheduler
             atomicAdd_block(tQHead, tN);
         }
