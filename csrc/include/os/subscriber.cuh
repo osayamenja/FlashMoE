@@ -90,6 +90,7 @@ namespace aristos::subscriber{
                     // decode the received packet
                     const auto myLocalExIdx = flagIdx % nLx;
                     const auto peerIdx = flagIdx / nLx;
+                    printf("peerIdx: %u, nLx: %u\n", peerIdx, nLx);
                     const auto pLI = pL[peerIdx];
                     const auto lXI = lX[myLocalExIdx];
                     cuda::std::array weights{

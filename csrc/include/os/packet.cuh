@@ -235,7 +235,7 @@ namespace aristos::packet {
             const auto sO = ACC::TCM::value * (peer * dA.nLx + localExpertIdx);
             cuda::std::array<cuda::std::byte*, GEMMs> taskResults{};
             // Staging buffer for results of preGEMM
-            taskResults[0] = pGB + peer * dA.nLx * ACC::EC::value * ACC::P::value * sizeof(Element);
+            taskResults[0] = pGB + (peer * dA.nLx * ACC::pEC::value * ACC::P::value * sizeof(Element));
             // Egress packet buffer
             auto* rcData = heap::advance<1, 1>(dA.rSHeap, dA.epRank, localExpertIdx);
             taskResults[1] = p == PeerConnectivity::remote ?

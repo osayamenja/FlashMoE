@@ -409,8 +409,9 @@ namespace aristos{
         using GRB = cute::C<cute::ceil_div(PC::value, 1024 * 1024)>;
         using P2PB = cute::C<cute::ceil_div(S::value * MINI_BATCH * H::value, 1024 * 1024)>;
         using EC = cute::C<DTK::value == DropTokens::no ? S::value : cute::ceil_div(S::value, E::value)>;
+        using pEC = cute::C<cute::ceil_div(EC::value, BLOCK_M) * BLOCK_M>;
         static_assert(EC::value * BLOCK_M <= cuda::std::numeric_limits<uint16_t>::max());
-        using SZ = cute::C<EC::value * H::value>;
+        using SZ = cute::C<pEC::value * H::value>;
         using TM = cute::C<cute::ceil_div(S::value, BLOCK_M)>;
         using TN = cute::C<cute::ceil_div(P::value, BLOCK_N)>;
         using TNx = cute::C<cute::ceil_div(H::value, BLOCK_N)>;
@@ -584,6 +585,7 @@ namespace aristos{
             constexpr auto E = ACC::E::value;
             constexpr auto S = ACC::S::value;
             constexpr auto EC = ACC::EC::value;
+            constexpr auto pEC = ACC::pEC::value;
             constexpr auto P = ACC::P::value;
             constexpr auto TPX = ACC::TPX::value;
             if constexpr (E > 1) {
@@ -604,7 +606,7 @@ namespace aristos{
                     sizeof(mp_t) * (2 * E + 1));
                 sBfC = gRl + sizeof(BookType) * (1 + (E * TCM * ACC::TNx::value) + blocks +
                     2 * (E + world * nLx * TCM));
-                bookSize = sBfC + sizeof(ACC::Element) * (_world * _nLx * EC * P);
+                bookSize = sBfC + sizeof(ACC::Element) * (_world * _nLx * pEC * P);
             }
         }
 
@@ -617,14 +619,15 @@ namespace aristos{
             constexpr auto E = ACC::E::value;
             constexpr auto S = ACC::S::value;
             constexpr auto EC = ACC::EC::value;
+            constexpr auto pEC = ACC::pEC::value;
             constexpr auto P = ACC::P::value;
             constexpr auto TPX = ACC::TPX::value;
             // maximum gemm tiles/tasks scheduled by processors
             const auto prT = _world * _nLx * TCM * ACC::TNx::value;
             // maximum gemm tiles/tasks scheduled by subscriber threads
-            auto sT = _world * _nLx * TCM * TN + TCM * ACC::TNx::value * E;
-            const auto tPs = cute::ceil_div(sT, SUBSCRIBERS);
-            sT = tPs * SUBSCRIBERS;
+            const auto tPs = cute::ceil_div(_world * _nLx * TCM * TN, SUBSCRIBERS) +
+                    cute::ceil_div(TCM * ACC::TNx::value * E, SUBSCRIBERS);
+            const auto sT = tPs * SUBSCRIBERS;
             const auto tQl = sizeof(Task) * (sT + prT);
             const auto tQml = tQl + blocks * sizeof(TQSignal) + E * sizeof(PEL) + sizeof(PLI) * _world +
                 sizeof(TPS) * (E * EC);
@@ -636,7 +639,7 @@ namespace aristos{
                 (ACC::JT::value == JobType::inference ? 0U : sizeof(mp_t) * (2 * E + 1));
             const auto sBfC = gRl + sizeof(BookType) * (1 + (E * TCM * ACC::TNx::value) + blocks +
                 2 * (E + _world * _nLx * TCM));
-            return sBfC + sizeof(ACC::Element) * (_world * _nLx * EC * P);
+            return sBfC + sizeof(ACC::Element) * (_world * _nLx * pEC * P);
         }
 
         __host__ __forceinline__
@@ -784,7 +787,7 @@ namespace aristos{
 
         __device__ __forceinline__
         auto *sQ() const {
-            return (CAST_TO(BookType, book + gRl) + 1) + ACC::E::value * ACC::TCM::value * ACC::TNx::value;
+            return tIx() + ACC::E::value * ACC::TCM::value * ACC::TNx::value;
         }
 
         /// entrypoint for clearing

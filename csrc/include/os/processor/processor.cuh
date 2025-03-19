@@ -518,9 +518,6 @@ namespace aristos::processor{
                             const auto c = make_tensor(CONST_CAST_TO(Element, rCurrentTask.cData[postIndex]),
                                 make_layout(cute::make_shape(rCurrentTask.M, H), cute::LayoutRight{}));
                             print_tensor(c);
-                        }
-
-                        if (!threadIdx.x) {
                             // Pack payload into single signal word of 8 bytes
                             const auto flagSignal = SignalPayload<PacketStage::last>{
                                 rCurrentTask.batchIdx,

@@ -250,7 +250,7 @@ namespace aristos{
         const auto ePgD = *ePg;
         // Now allocate memory
         /// Symmetric memory
-        const auto heapBytes = STAGES * CELLS * ePgD.epWorld * ePgD.expertSlots * ACC::EC::value *
+        const auto heapBytes = STAGES * CELLS * ePgD.epWorld * ePgD.expertSlots * ACC::pEC::value *
             ACC::H::value * sizeof(Element);
         const auto syncArrayBytes = sizeof(flagsType) * (ePgD.epWorld + 1);
         const auto flagBytes = (ePgD.epWorld * ePgD.expertSlots + E * ACC::TCM::value * ACC::TNx::value) *
