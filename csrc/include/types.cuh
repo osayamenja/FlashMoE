@@ -741,7 +741,7 @@ namespace aristos{
         static_assert(alignof(ELI) % alignof(LXI) == 0);
         __host__ __device__ __forceinline__
         auto* lX() const {
-            return CAST_TO(LXI, pL() + world);
+            return CAST_TO(LXI, eL() + ACC::E::value);
         }
 
         static_assert(alignof(PLI) % alignof(mp_t) == 0);
@@ -852,19 +852,18 @@ namespace aristos{
         /// where P, S, C, E, EC denote dimensions for peers, communication stages,
         /// cells, experts, expert capacity, respectively.
         template<
-            unsigned int stage = 0,
-            unsigned int cell = 0,
+            unsigned int stage,
+            unsigned int cell,
             /*The user should not specify the parameters below*/
-            unsigned int tokenDim = ACC::H::value,
-            unsigned int slotSize = ACC::SZ::value,
-            unsigned int nBytes = sizeof(ACC::Element)
+            unsigned int EC = ACC::pEC::value,
+            unsigned int H = ACC::H::value,
+            unsigned long int B = sizeof(ACC::Element)
         >
         requires (stage < STAGES && cell < CELLS)
         __device__ __forceinline__
         constexpr auto* advance(cuda::std::byte* __restrict__ const& sHeap, const uint& peer,
             const uint& expert, const uint& token = 0){
-            return sHeap + (slotSize * (bookkeeping.xs * (CELLS * (peer * STAGES + stage) + cell) + expert) +
-                token * tokenDim) * nBytes;
+            return sHeap + B * H * (EC * (CELLS * (STAGES * (peer * bookkeeping.xs + expert) + stage) + cell) + token);
         }
     }
     struct __align__(4) BitSet {

@@ -98,7 +98,8 @@ namespace aristos {
         for (uint i = 0; i < cWz; ++i) {
             hVd[i] = conv(hV[i]);
         }
-        CHECK_ERROR_EXIT(cudaMemcpyAsync(p + stateSize, hVd, cWz, cudaMemcpyHostToDevice, aristosStream));
+        CHECK_ERROR_EXIT(cudaMemcpyAsync(p + stateSize, hVd,
+            cWz * sizeof(Element), cudaMemcpyHostToDevice, aristosStream));
 
         auto* __restrict__ dB = CAST_TO(cuda::barrier<cuda::thread_scope_device>, p);
         static_assert(alignof(cuda::barrier<cuda::thread_scope_device>) % alignof(float) == 0);

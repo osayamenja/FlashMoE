@@ -252,6 +252,7 @@ namespace aristos{
         /// Symmetric memory
         const auto heapBytes = STAGES * CELLS * ePgD.epWorld * ePgD.expertSlots * ACC::pEC::value *
             ACC::H::value * sizeof(Element);
+        printf("heapBytes is %lu\n", heapBytes);
         const auto syncArrayBytes = sizeof(flagsType) * (ePgD.epWorld + 1);
         const auto flagBytes = (ePgD.epWorld * ePgD.expertSlots + E * ACC::TCM::value * ACC::TNx::value) *
             sizeof(flagsType);
@@ -330,8 +331,8 @@ namespace aristos{
             // PLI
             pli.isRemote = isRemote;
             pli.pe = gRank;
-            pli.remoteSHeap = rSHeap;
             pli.remoteSFlags = rFlags;
+            pli.remoteSHeap = rSHeap;
 
             // LXI
             if (gRank == rank) {
@@ -354,18 +355,22 @@ namespace aristos{
             }
         }
 
-        // Compute flags
         for (uint i = 0; i < E; ++i) {
             pel = pEL[i];
             pel.nLocalExperts = scratch[pel.peer];
             pEL[i] = pel;
         }
 
-        CHECK_ERROR_EXIT(cudaMemcpyAsync(hostBookkeeping.pEL(), pEL, sizeof(PEL) * E,
+        CHECK_ERROR_EXIT(cudaMemcpyAsync(hostBookkeeping.pEL(), pEL,
+            sizeof(PEL) * E, cudaMemcpyHostToDevice, aristosStream));
+        CHECK_ERROR_EXIT(cudaMemcpyAsync(hostBookkeeping.pL(), pLI,
+            sizeof(PLI) * ePgD.epWorld,
             cudaMemcpyHostToDevice, aristosStream));
-        // Copy eLI and pLI in one fell sweep
         CHECK_ERROR_EXIT(cudaMemcpyAsync(hostBookkeeping.eL(), eLI,
-            sizeof(ELI) * E + sizeof(PLI) * ePgD.epWorld,
+            sizeof(ELI) * E,
+            cudaMemcpyHostToDevice, aristosStream));
+        CHECK_ERROR_EXIT(cudaMemcpyAsync(hostBookkeeping.lX(), lxI,
+            sizeof(LXI) * ePgD.nLx,
             cudaMemcpyHostToDevice, aristosStream));
         CHECK_ERROR_EXIT(cudaMemcpyAsync(hostBookkeeping.ssFc(), &tileIndex,
             sizeof(BookType), cudaMemcpyHostToDevice, aristosStream));
@@ -424,6 +429,8 @@ namespace aristos{
         isInitialized = false;
         CHECK_ERROR_EXIT(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
         CHECK_ERROR_EXIT(cudaFreeAsync(hostBookkeeping.book, aristosStream));
+        // Below ensures all work is done before deallocating via the external API
+        CHECK_ERROR_EXIT(cudaStreamSynchronize(aristosStream));
         nvshmem_free(hostBookkeeping.symHeap);
         nvshmem_finalize();
         CHECK_ERROR_EXIT(cudaPeekAtLastError());

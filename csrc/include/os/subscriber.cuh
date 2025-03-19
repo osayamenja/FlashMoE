@@ -31,7 +31,7 @@ namespace aristos::subscriber{
         >
         __device__ __forceinline__
         void operator()(
-            packet::DecoderArg& dA,
+            const packet::DecoderArg& dA,
             ExpertsUp const& expertsUp,
             ExpertsDown const& expertsDown,
             BiasUp const& biasUp,
@@ -49,6 +49,7 @@ namespace aristos::subscriber{
             uint& stagePending,
             uint& ltQHead,
             /// Constants
+            const unsigned int& gfSfC,
             const uint& stageLength,
             const uint &nLx,
             const uint &tIdx,
@@ -101,20 +102,19 @@ namespace aristos::subscriber{
                         CONST_CAST_TO(cuda::std::byte, &biasUp(myLocalExIdx)),
                         CONST_CAST_TO(cuda::std::byte, &biasDown(myLocalExIdx))
                     };
-                    const auto* packet = heap::advance<0, 1>(dA.rSHeap, peerIdx, myLocalExIdx);
+                    const auto* packet = heap::advance<0, 1>(dA.sHeap, peerIdx, myLocalExIdx);
                     #if ARISTOS_DEBUG
                     printf("Subscriber %u received a packet from peer %u to expert %u\n",
                         tIdx, peerIdx, myLocalExIdx);
                     #endif
                     if (!pLI.isRemote) {
                         // P2P peer
-                        // Use DMA pointers over UVA
-                        dA.rSHeap = pLI.remoteSHeap;
-                        dA.rFlags = pLI.remoteSFlags;
+                        // Use DMA pointers over UVA space
                         // Enforce consistency
                         __threadfence_system();
-                        fPd(dA, packet, status, taskCount, sP->routedTokens, sP->totalTilesM,
-                            myLocalExIdx, lXI.expertIndex, pGB, weights, bias, peerIdx, pLI.pe, nLx, ltQHead, tQHead);
+                        fPd(dA, pLI.remoteSHeap, pLI.remoteSFlags + gfSfC, packet, status, taskCount, sP->routedTokens,
+                            sP->totalTilesM, myLocalExIdx, lXI.expertIndex, pGB, weights, bias, peerIdx, pLI.pe,
+                            nLx, ltQHead, tQHead);
                     }
                     else {
                         // Remote peer
@@ -122,7 +122,7 @@ namespace aristos::subscriber{
                         // We cannot decouple the API, unfortunately,
                         // as the memory ordering mechanism is internal.
                         nvshmem_ushort_test(&sP->seqBit, NVSHMEM_CMP_EQ, localSeqBit);
-                        fRd(dA, packet, status, taskCount, sP->routedTokens, sP->totalTilesM,
+                        fRd(dA, dA.sHeap, dA.sFlags + gfSfC, packet, status, taskCount, sP->routedTokens, sP->totalTilesM,
                             myLocalExIdx, lXI.expertIndex, pGB, weights, bias, peerIdx, pLI.pe, nLx, ltQHead, tQHead);
                     }
                 }
@@ -209,7 +209,7 @@ namespace aristos::subscriber{
                         const auto expertIdx = flagIdx / CS;
                         const ELI lookup = eL[expertIdx];
                         const auto* tI = tokenIds + (expertIdx * EC + sP->batchIdx * BLOCK_M);
-                        const auto* packet = heap::advance<1, 1>(dA.rSHeap, lookup.epRank,
+                        const auto* packet = heap::advance<1, 1>(dA.sHeap, lookup.epRank,
                                 lookup.localExpertIndex,sP->batchIdx * BLOCK_M);
                         if (lookup.isRemote) {
                             // enforce memory consistency
@@ -272,7 +272,7 @@ namespace aristos::subscriber{
                             const auto expertIdx = flagIdx / CS;
                             const ELI lookup = eL[expertIdx];
                             const auto* tI = tokenIds + (expertIdx * EC + (sP->batchIdx * BLOCK_M));
-                            const auto* packet = heap::advance<1, 1>(dA.rSHeap, lookup.epRank,
+                            const auto* packet = heap::advance<1, 1>(dA.sHeap, lookup.epRank,
                                     lookup.localExpertIndex, sP->batchIdx * BLOCK_M);
                             if (lookup.isRemote) {
                                 // enforce memory consistency
@@ -369,10 +369,10 @@ namespace aristos::subscriber{
 
         // Register allocation
         const auto gfSfC = bookkeeping.world * bookkeeping.xs;
-        auto dA = packet::DecoderArg{
+        const auto dA = packet::DecoderArg{
             bookkeeping.sHeap,
             bookkeeping.tQ() + tIdx, // coalesced accessing
-            bookkeeping.flags + gfSfC,
+            bookkeeping.flags,
         };
 
         while (!atomicLoad<cuda::thread_scope_block>(interrupt)) {
@@ -396,6 +396,7 @@ namespace aristos::subscriber{
                     tQHead,
                     fSp,
                     ltQHead,
+                    gfSfC,
                     fSl,
                     nLx,
                     tIdx,

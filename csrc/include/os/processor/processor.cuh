@@ -511,13 +511,6 @@ namespace aristos::processor{
                             currentTask.tileIdx);
                         __syncthreads();
                         if (!threadIdx.x) {
-                            constexpr auto P = ACC::P::value;
-                            const auto a = make_tensor(CONST_CAST_TO(Element, rCurrentTask.aData),
-                                make_layout(cute::make_shape(rCurrentTask.M, P), cute::LayoutRight{}));
-                            print_tensor(a);
-                            const auto c = make_tensor(CONST_CAST_TO(Element, rCurrentTask.cData[postIndex]),
-                                make_layout(cute::make_shape(rCurrentTask.M, H), cute::LayoutRight{}));
-                            print_tensor(c);
                             // Pack payload into single signal word of 8 bytes
                             const auto flagSignal = SignalPayload<PacketStage::last>{
                                 rCurrentTask.batchIdx,
@@ -559,14 +552,14 @@ namespace aristos::processor{
                             rCurrentTask.tileIdx,
                             rCurrentTask.tileSize, rCurrentTask.expertIdx);
                         __syncthreads();
-                        /*if (!threadIdx.x) {
+                        if (!threadIdx.x) {
                             const auto b = make_tensor(CONST_CAST_TO(Element, rCurrentTask.bData[0]),
                                 make_layout(cute::make_shape(BLOCK_M, BLOCK_N), cute::LayoutRight{}));
                             print_tensor(b);
                             const auto c = make_tensor(CONST_CAST_TO(Element, rCurrentTask.cData[0]),
                                 make_layout(cute::make_shape(BLOCK_M, BLOCK_N), cute::LayoutRight{}));
                             print_tensor(c);
-                        }*/
+                        }
                     }
                     break;
                 }

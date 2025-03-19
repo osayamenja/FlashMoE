@@ -167,9 +167,9 @@ namespace aristos::packet {
 
     // Resident in registers
     struct DecoderArg {
-        cuda::std::byte* rSHeap;
+        cuda::std::byte* sHeap;
         Task* tQ;
-        flagsType* rFlags;
+        flagsType* sFlags;
         const unsigned int nLx;
         const unsigned int epRank;
         __device__
@@ -177,7 +177,7 @@ namespace aristos::packet {
             cuda::std::byte* const& _sHeap,
             Task* const& _tQ,
             flagsType* const& _flags) :
-        rSHeap(_sHeap), tQ(_tQ), rFlags(_flags),
+        sHeap(_sHeap), tQ(_tQ), sFlags(_flags),
         nLx(bookkeeping.nLx), epRank(bookkeeping.rank) {}
     };
 
@@ -195,6 +195,7 @@ namespace aristos::packet {
         if (!atomicTAS<cuda::thread_scope_block>(status + peer)) {
             const auto superfluous = (TN + TNx) * (nLx * TCM - peerTaskTiles);
             atomicSub_block(taskCount, superfluous);
+            printf("tb %u\n", atomicLoad(taskCount));
         }
     }
     /// Decodes a single packet from the initial stage
@@ -208,6 +209,8 @@ namespace aristos::packet {
         static_assert(s == PacketStage::initial);
         __device__ __forceinline__
         void operator()(const DecoderArg& dA,
+            cuda::std::byte* const& sHeap,
+            flagsType* const& flags,
             const cuda::std::byte* const& packet,
             unsigned int* __restrict__ const& status,
             unsigned int* __restrict__ const& taskCount,
@@ -237,9 +240,12 @@ namespace aristos::packet {
             // Staging buffer for results of preGEMM
             taskResults[0] = pGB + (peer * dA.nLx * ACC::pEC::value * ACC::P::value * sizeof(Element));
             // Egress packet buffer
-            auto* rcData = heap::advance<1, 1>(dA.rSHeap, dA.epRank, localExpertIdx);
+            auto* rcData = heap::advance<1, 1>(sHeap, dA.epRank, localExpertIdx);
+            if (routedTokens) {
+                printf("rank is %u, x is %u, rcData is %p\n", dA.epRank, localExpertIdx, rcData);
+            }
             taskResults[1] = p == PeerConnectivity::remote ?
-                heap::advance<1, 0>(dA.rSHeap, peer, localExpertIdx) : rcData;
+                heap::advance<1, 0>(sHeap, peer, localExpertIdx) : rcData;
             for (uint i = 0; i < fTilesM; ++i) {
                 #pragma unroll
                 for (uint j = 0; j < tN; ++j) {
@@ -251,7 +257,7 @@ namespace aristos::packet {
                         taskResults,
                         bias,
                         rcData,
-                        dA.rFlags + fo + tileIdx,
+                        flags + fo + tileIdx,
                         sO + i,
                         tileIdx,
                         padM,
@@ -275,7 +281,7 @@ namespace aristos::packet {
                         taskResults,
                         bias,
                         rcData,
-                        dA.rFlags + fo + tileIdx,
+                        flags + fo + tileIdx,
                         sO + fTilesM,
                         tileIdx,
                         padM,

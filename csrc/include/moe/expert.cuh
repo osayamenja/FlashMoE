@@ -184,8 +184,8 @@ namespace aristos {
         const auto* __restrict__ pB1 = pA + M * K;
         const auto* __restrict__ pB2 = pB1 + N * K;
         const auto* __restrict__ pD1 = pB2 + N * K;
-        const auto* __restrict__ pD2 = pD1 + K;
-        const auto* __restrict__ pS = pD2 + N;
+        const auto* __restrict__ pD2 = pD1 + N;
+        const auto* __restrict__ pS = pD2 + K;
         const auto* __restrict__ pCw = pS + M;
         auto* __restrict__ pC1 = oP;
         auto* __restrict__ pC2 = pC1 + M * N;
