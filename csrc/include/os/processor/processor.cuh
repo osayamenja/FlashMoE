@@ -12,13 +12,17 @@
 #include "gemm.cuh"
 
 namespace aristos::processor{
+    enum class ReleaseType {
+        stable,
+        experimental
+    };
     template<
         CombineMode c = CombineMode::single,
         unsigned int N = ACC::H::value,
+        ReleaseType r = ReleaseType::stable,
         class ScaleWeights,
         typename Element,
-        unsigned int Arch = ACC::PeakHardware::arch::value,
-        unsigned int elems = ACC::PeakHardware::rScratch::value
+        unsigned int Arch = ACC::PeakHardware::arch::value
     >
     requires(TensorValueType<Element> &&
             aristos::isMatrix<ScaleWeights> &&
@@ -33,6 +37,7 @@ namespace aristos::processor{
             const unsigned int& tileIdx,
             const uint16_t& tileSize,
             const uint16_t& expertIdx) {
+        constexpr auto elems = ACC::PeakHardware::rScratch::value;
         using BlockTiler = cute::Shape<cute::Int<BLOCK_M>, cute::Int<BLOCK_N>>;
         constexpr BlockTiler tiler{};
         constexpr auto bM = cute::get<0>(tiler);
@@ -54,48 +59,74 @@ namespace aristos::processor{
         const auto gA = cute::local_tile(mA, tiler, ctaCoord);
         static_assert(bN % elems == 0);
         constexpr auto trips = bN / elems;
-
         // Transposed layout
         constexpr auto sCLay = cute::make_layout(cute::Shape<cute::Int<bM>, cute::Int<elems>>{},
             cute::LayoutRight{});
         const auto sC = cute::make_tensor(cute::make_smem_ptr(workspace), sCLay);
-
-        #pragma unroll
-        for (uint i = 0; i < trips; ++i) {
-            // global -> shared
+        if constexpr (r == ReleaseType::experimental) {
+            const auto phase = threadIdx.x / bN;
+            // first prefetch inputs
             #pragma unroll
-            for (uint j = 0; j < elems; ++j) {
-                const auto rIdx = j + threadIdx.x / elems * elems;
-                const auto cIdx =  threadIdx.x % elems + i * elems;
-                sC(rIdx, cIdx) = gA(rIdx, cIdx);
-            }
-            __syncthreads();
-            #pragma unroll
-            for (uint j = 0; j < elems; ++j) {
-                registers[j + i * elems] = sC(threadIdx.x, j);
-            }
-        }
-
-        constexpr VAA<Arch, Element> vaa{};
-        if (threadIdx.x < tileSize) {
-            const auto [tokenIdx, combineWeight] = tokenIndices[threadIdx.x];
-            const auto scaleWeight = scale(tokenIdx, expertIdx) / mTe(combineWeight);
-            // do scale
-            if constexpr (c == CombineMode::multithreaded) {
+            for (uint i = 0; i < trips; ++i) {
+                // global -> shared
                 #pragma unroll
-                for (uint i = 0; i < bN; ++i) {
-                    registers[i] = registers[i] * scaleWeight;
+                for (uint j = 0; j < elems; ++j) {
+                    const auto rIdx = j + threadIdx.x / elems * elems;
+                    const auto cIdx =  threadIdx.x % elems + i * elems;
+                    sC(rIdx, cIdx) = gA(rIdx, cIdx);
                 }
-                vaa(moeOutput + tokenIdx * N, registers);
+                #pragma unroll
+                for (uint j = 0; j < elems; ++j) {
+                    registers[j + i * elems] = sC(threadIdx.x, j);
+                }
+            }
+            cutlass::AlignedArray<uint, elems> tIds{};
+            if constexpr (c == CombineMode::multithreaded) {
+
             }
             else {
-                // vector copy from registers to global directly
-                constexpr auto vL = bN * sizeof(Element) / sizeof(uint4);
-                auto* __restrict__ aP = CAST_TO(uint4, moeOutput + tokenIdx * N);
-                const auto* __restrict__ rD = CAST_TO(uint4, registers.data());
+                // vector copy from registers to global directly and call it a day
+                
+            }
+        }
+        else {
+            #pragma unroll
+            for (uint i = 0; i < trips; ++i) {
+                // global -> shared
                 #pragma unroll
-                for (uint i = 0; i < vL; ++i) {
-                    aP[i] = rD[i];
+                for (uint j = 0; j < elems; ++j) {
+                    const auto rIdx = j + threadIdx.x / elems * elems;
+                    const auto cIdx =  threadIdx.x % elems + i * elems;
+                    sC(rIdx, cIdx) = gA(rIdx, cIdx);
+                }
+                __syncthreads();
+                #pragma unroll
+                for (uint j = 0; j < elems; ++j) {
+                    registers[j + i * elems] = sC(threadIdx.x, j);
+                }
+            }
+
+            constexpr VAA<Arch, Element> vaa{};
+            if (threadIdx.x < tileSize) {
+                const auto [tokenIdx, combineWeight] = tokenIndices[threadIdx.x];
+                const auto scaleWeight = scale(tokenIdx, expertIdx) / mTe(combineWeight);
+                // do scale
+                if constexpr (c == CombineMode::multithreaded) {
+                    #pragma unroll
+                    for (uint i = 0; i < bN; ++i) {
+                        registers[i] = registers[i] * scaleWeight;
+                    }
+                    vaa(moeOutput + tokenIdx * N, registers);
+                }
+                else {
+                    // vector copy from registers to global directly
+                    constexpr auto vL = bN * sizeof(Element) / sizeof(uint4);
+                    auto* __restrict__ aP = CAST_TO(uint4, moeOutput + tokenIdx * N);
+                    const auto* __restrict__ rD = CAST_TO(uint4, registers.data());
+                    #pragma unroll
+                    for (uint i = 0; i < vL; ++i) {
+                        aP[i] = rD[i];
+                    }
                 }
             }
         }
@@ -425,15 +456,14 @@ namespace aristos::processor{
                 const auto* __restrict__ gtQ = pA.tQ;
                 // Grabs next task
                 awaitNotification(tQSignal, &tqs, tqs.signal);
+                __threadfence();
                 globalInterrupt = tqs.interrupt;
                 if (!tqs.interrupt) {
                     // below ensures task read happens after signal reception
-                    // I don't think the below fence is needed
-                    __threadfence();
+                    // I don't think the below fence is needed due
+                    // to the conditional predicated on the interrupt signal
                     // global -> shared
                     currentTask = gtQ[tqs.decodeSig()];
-                    // below ensures we signal readiness only after we have read the task
-                    __threadfence();
                     // Eagerly indicate readiness for the next task
                     atomicExch(pA.sQ, ready);
                 }

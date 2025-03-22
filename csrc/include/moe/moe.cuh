@@ -12,6 +12,7 @@
 #include "../os/sync.cuh"
 #include "fffn.cuh"
 #include "gate.cuh"
+#include "../telemetry.cuh"
 
 namespace aristos::moe{
     template<
@@ -132,8 +133,12 @@ namespace aristos::moe{
         }
     }
 
+    template<bool skip = true>
     __host__ __forceinline__
     void forwardHost(const void* __restrict__ iP, void* __restrict__ oP){
+        #if ARISTOS_TRACE
+        aristosRange forwardRange{__PRETTY_FUNCTION__};
+        #endif
         reportError(isInitialized, "Not initialized!");
         CHECK_ERROR_EXIT(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
 
@@ -142,7 +147,20 @@ namespace aristos::moe{
         constexpr auto threads = ACC::PeakHardware::OS::threads::value;
         // Call forward pass
         if constexpr (ACC::E::value > 1) {
+            cudaEvent_t start, stop;
+            if constexpr (!skip) {
+                CHECK_ERROR_EXIT(cudaEventCreate(&start));
+                CHECK_ERROR_EXIT(cudaEventCreate(&stop));
+                CHECK_ERROR_EXIT(cudaEventRecord(start, aristos::aristosStream));
+            }
             forward<<<blocks, threads, 0, aristosStream>>>(iP, oP, seqBit);
+            if constexpr (!skip) {
+                float duration;
+                CHECK_ERROR_EXIT(cudaEventRecord(stop, aristos::aristosStream));
+                CHECK_ERROR_EXIT(cudaStreamSynchronize(aristosStream));
+                CHECK_ERROR_EXIT(cudaEventElapsedTime(&duration, start, stop));
+                printf("Duration is %fms", duration);
+            }
         }
         else {
             // regular FFN forward

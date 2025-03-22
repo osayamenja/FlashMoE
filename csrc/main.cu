@@ -73,20 +73,28 @@ void runOS() {
     CHECK_ERROR_EXIT(cudaMemcpyAsync(p, eHp, sizeof(Element) * dZ, cudaMemcpyHostToDevice,
         aristos::aristosStream));
     aristos::initialize();
-    aristos::moe::forwardHost(p, p + dZ * sizeof(Element));
+    for (uint i = 0; i < 1; ++i) {
+        aristos::moe::forwardHost(p, p + dZ * sizeof(Element));
+    }
+    /*using clk = std::chrono::high_resolution_clock;
+    std::chrono::duration<float> end {};
+    const auto start = clk::now();*/
+    //aristos::moe::forwardHost(p, p + dZ * sizeof(Element));
+    /*end = clk::now() - start;
+    printf("Initialize takes %fms\n", end.count() * 1000);*/
     CHECK_ERROR_EXIT(cudaPeekAtLastError());
-    auto* __restrict__ oH = eHp + dZ;
+    /*auto* __restrict__ oH = eHp + dZ;
     CHECK_ERROR_EXIT(cudaMemcpyAsync(oH, p + dZ * sizeof(Element),
         sizeof(Element) * S * (PX + H),
-        cudaMemcpyDeviceToHost, aristos::aristosStream));
+        cudaMemcpyDeviceToHost, aristos::aristosStream));*/
     CHECK_ERROR_EXIT(cudaFreeAsync(p, aristos::aristosStream));
     aristos::finalize();
-    const auto og = make_tensor(oH,
+    /*const auto og = make_tensor(oH,
         make_layout(cute::make_shape(S, PX), cute::LayoutRight{}));
     const auto o = make_tensor(oH + S * PX,
         make_layout(cute::make_shape(S, H), cute::LayoutRight{}));
     print_tensor(og);
-    print_tensor(o);
+    print_tensor(o);*/
     /*const auto og = make_tensor(oH,
         make_layout(cute::make_shape(S, PX), cute::LayoutRight{}));
     const auto o = make_tensor(oH + S * PX,

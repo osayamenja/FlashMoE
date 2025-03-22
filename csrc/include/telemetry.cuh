@@ -9,6 +9,6 @@ namespace aristos {
     struct aristosDomain {
         static constexpr auto const* name{"Aristos"};
     };
-    using aristosInitRange = nvtx3::scoped_range_in<aristosDomain>;
+    using aristosRange = nvtx3::scoped_range_in<aristosDomain>;
 }
 #endif //TELEMETRY_CUH

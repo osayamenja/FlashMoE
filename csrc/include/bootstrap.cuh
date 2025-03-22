@@ -38,7 +38,7 @@ namespace aristos{
     __host__ __forceinline__
     void estimateMemory(WorkerAttribute* __restrict__ const& dWa) {
         #if ARISTOS_TRACE
-        aristosInitRange estRange{__PRETTY_FUNCTION__};
+        aristosRange estRange{__PRETTY_FUNCTION__};
         #endif
         // estimate available device memory
         size_t free = 0, total = 0;
@@ -53,7 +53,7 @@ namespace aristos{
     __host__ __forceinline__
     void discoverTopology(void* hAp, const uint& n, const uint& globalRank, const WorkerAttribute& lWa) {
         #if ARISTOS_TRACE
-        aristosInitRange discRange{__func__};
+        aristosRange discRange{__func__};
         #endif
         const auto aD = n * n;
         const size_t heapBytes = n * sizeof(flagsType) + aD * sizeof(floatPair)
@@ -103,7 +103,7 @@ namespace aristos{
         const WorkerAttribute* __restrict__ const& attributes,
         const uint& rank, const uint& world) {
         #if ARISTOS_TRACE
-        aristosInitRange decRange{__func__};
+        aristosRange decRange{__func__};
         #endif
         constexpr auto E = ACC::E::value;
 
@@ -189,7 +189,7 @@ namespace aristos{
     __host__ __forceinline__
     void distributedInit() {
         #if ARISTOS_TRACE
-        aristosInitRange distRange{__PRETTY_FUNCTION__};
+        aristosRange distRange{__PRETTY_FUNCTION__};
         #endif
         static_assert(e == EP::yes);
         constexpr auto blocks = ACC::PeakHardware::blocks::value;
@@ -400,7 +400,7 @@ namespace aristos{
     __host__ __forceinline__
     void initialize() {
         #if ARISTOS_TRACE
-        aristosInitRange initRange{__PRETTY_FUNCTION__};
+        aristosRange initRange{__PRETTY_FUNCTION__};
         #endif
         reportError(!isInitialized, "Already Initialized");
         using GPUType = aristos::Hardware<ARISTOS_ARCH, 255>;
@@ -422,7 +422,7 @@ namespace aristos{
     __host__ __forceinline__
     void finalize(){
         #if ARISTOS_TRACE
-        aristosInitRange finalRange{__PRETTY_FUNCTION__};
+        aristosRange finalRange{__PRETTY_FUNCTION__};
         #endif
         reportError(isInitialized, "Not initialized!");
         isInitialized = false;

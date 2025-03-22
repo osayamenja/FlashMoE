@@ -32,7 +32,7 @@ namespace aristos {
         float* __restrict__ const& deviceThroughput, uint* __restrict__ const& tileSync,
         const Element* __restrict__ const& iP /* A, B, D, S, W*/, Element* __restrict__ const& oP /*C*/) {
         #if ARISTOS_TRACE
-        aristosInitRange mFTRange{__func__};
+        aristosRange mFTRange{__func__};
         #endif
         const auto tSz = sizeof(uint) * (M / BLOCK_M) * cute::min(K / BLOCK_N, blocks);
         #pragma unroll
@@ -57,7 +57,7 @@ namespace aristos {
     __host__ __forceinline__
     void mT(WorkerAttribute* __restrict__ const& dWa) {
         #if ARISTOS_TRACE
-        aristosInitRange mTRange{__PRETTY_FUNCTION__};
+        aristosRange mTRange{__PRETTY_FUNCTION__};
         #endif
         constexpr unsigned int M = ACC::S::value;
         constexpr unsigned int N = ACC::P::value;
