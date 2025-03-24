@@ -30,6 +30,7 @@ namespace aristos::processor{
         unsigned int sharedSize = ACC::PeakHardware::sharedMemory::value + ACC::PeakHardware::spare::value
     >
     requires(TensorValueType<Element> &&
+            elems % WARP_SIZE == 0 && // guarantees warp convergence
             aristos::isMatrix<ScaleWeights> &&
             cuda::std::is_same_v<typename ScaleWeights::value_type, Element>)
     __device__ __forceinline__
@@ -81,35 +82,26 @@ namespace aristos::processor{
         const auto sC = cute::make_tensor(cute::make_smem_ptr(workspace), sCLay);
         // ensures we have enough shared memory
         static_assert(sizeof(Element) * bM * (elems + 1) + sizeof(TPS) * bM <= sharedSize);
+        static_assert(bM % elems == 0);
         if constexpr (r == ReleaseType::experimental) {
-            cutlass::AlignedArray<TPS, bN> tIds{};
+            cutlass::AlignedArray<TPS, elems> tIds{};
             auto* __restrict__ sTPS = CAST_TO(TPS, workspace + bM * elems);
             #pragma unroll
             for (uint i = threadIdx.x; i < bM; i += threads) {
                 sTPS[i] = tokenIndices[i];
             }
             __syncthreads();
-            constexpr auto pad = TPS{0U, 1.0f};
-            #pragma unroll
-            for (uint i = 0; i < trips; ++i) {
-                #pragma unroll
-                for (uint j = 0; j < elems; ++j) {
-                    tIds[j + i * elems] = sTPS[j + threadIdx.x / elems * elems];
-                }
-                #pragma unroll
-                for (uint j = 0; j < elems; ++j) {
-                    if (j + threadIdx.x / elems * elems >= tileSize) {
-                        tIds[j + i * elems] = pad;
-                    }
-                }
-            }
-            // prefetch inputs to registers
+            // slice and dice token indices
+            constexpr auto phases = bM / elems;
+            // all threads in a phase read the same token index
+            const auto phaseIdx = threadIdx.x / elems;
+            // Eagerly prefetch inputs to registers
             #pragma unroll
             for (uint i = 0; i < trips; ++i) {
                 // global -> shared
                 #pragma unroll
                 for (uint j = 0; j < elems; ++j) {
-                    const auto rIdx = j + threadIdx.x / elems * elems;
+                    const auto rIdx = phaseIdx + j * phases;
                     const auto cIdx =  threadIdx.x % elems + i * elems;
                     sC(rIdx, cIdx) = gA(rIdx, cIdx);
                 }
@@ -118,44 +110,64 @@ namespace aristos::processor{
                     registers[j + i * elems] = sC(threadIdx.x, j);
                 }
             }
+            #pragma unroll
+            for (uint i = 0; i < elems; ++i) {
+                tIds[i] = sTPS[phaseIdx + i * phases];
+            }
 
             if constexpr (c == CombineMode::multithreaded) {
+                using CDxT = typename ToCDx<Element>::T;
+                constexpr auto cTCx = cutlass::NumericConverter<CDxT, Element>{};
                 // prefetch scale to shared memory
                 auto* __restrict__ sScale = CAST_TO(Element, sTPS + bM);
+                // read like below to
                 #pragma unroll
                 for (uint i = threadIdx.x; i < bM; i += threads) {
                     sScale[i] = scale(sTPS[i], expertIdx);
                 }
-                // eagerly apply (inputs / combine weight) to free registers holding inputs
+                __syncthreads();
+                cutlass::AlignedArray<Element, elems> scaleRegs{};
+                // fetch scale
                 #pragma unroll
-                for (uint j = 0; j < bN; ++j) {
-                    tIds[j].probability = __fdividef(tIds[j].probability, eTm(registers[j]));
+                for (uint i = 0; i < elems; ++i) {
+                    scaleRegs[i] = sScale[phaseIdx + i * phases];
                 }
-                cutlass::AlignedArray<Element, bN> scaleRegs{};
                 // apply scale
                 #pragma unroll
-                for (uint i = 0; i < trips; ++i) {
-                    #pragma unroll
-                    for (uint j = 0; j < elems; ++j) {
-                        scaleRegs[j + i * elems] = sScale[j + threadIdx.x / elems * elems];
-                    }
-                    #pragma unroll
-                    for (uint j = 0; j < elems; ++j) {
-                        tIds[j +  i * elems].probability *= scaleRegs[j + i * elems];
-                    }
+                for (uint i = 0; i < elems; ++i) {
+                    tIds[i].probability *= scaleRegs[i];
                 }
 
-                // do atomic addition
-
+                #pragma unroll
+                for (uint i = 0; i < trips; ++i) {
+                    // do atomic addition
+                    if (tileSize < gM) {
+                        #pragma unroll
+                        for (uint j = 0; j < elems; ++j) {
+                            const auto cIdx = threadIdx.x % elems + i * elems;
+                            if (phaseIdx + j * phases < tileSize) {
+                                atomicAdd(CAST_TO(CDxT, &gC(tIds[j].tokenIdx, cIdx)),
+                                    cTCx(tIds[j].probability * registers[j + i * elems]));
+                            }
+                        }
+                    }
+                    else {
+                        #pragma unroll
+                        for (uint j = 0; j < elems; ++j) {
+                            const auto cIdx = threadIdx.x % elems + i * elems;
+                            atomicAdd(CAST_TO(CDxT, &gC(tIds[j].tokenIdx, cIdx)),
+                                cTCx(tIds[j].probability * registers[j + i * elems]));
+                        }
+                    }
+                }
             }
             else {
-                __syncthreads();
                 // vector copy from registers to global directly and call it a day
                 #pragma unroll
                 for (uint i = 0; i < trips; ++i) {
                     #pragma unroll
                     for (uint j = 0; j < elems; ++j) {
-                        const auto rIdx = j + threadIdx.x / elems * elems;
+                        const auto rIdx = phaseIdx + j * phases;
                         const auto cIdx =  threadIdx.x % elems + i * elems;
                         // registers -> shared
                         sC(rIdx, cIdx) = registers[j + i * elems];
@@ -165,9 +177,9 @@ namespace aristos::processor{
                         #pragma unroll
                         for (uint j = 0; j < elems; ++j) {
                             const auto cIdx = threadIdx.x % elems + i * elems;
-                            const auto tId = tIds[j + i * elems].tokenIdx;
+                            const auto tId = tIds[j].tokenIdx;
                             // predicated writes
-                            if ((j + i * elems) < tileSize) {
+                            if (phaseIdx + j * phases < tileSize) {
                                 gC(tId, cIdx) = sC(threadIdx.x, j);
                             }
                         }
@@ -176,8 +188,7 @@ namespace aristos::processor{
                         #pragma unroll
                         for (uint j = 0; j < elems; ++j) {
                             const auto cIdx = threadIdx.x % elems + i * elems;
-                            const auto tId = tIds[j +  i * elems].tokenIdx;
-                            gC(tId, cIdx) = sC(threadIdx.x, j);
+                            gC(tIds[j].tokenIdx, cIdx) = sC(threadIdx.x, j);
                         }
                     }
                 }
