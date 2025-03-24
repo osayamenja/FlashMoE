@@ -26,7 +26,8 @@ namespace aristos::processor{
         typename Element,
         unsigned int Arch = ACC::PeakHardware::arch::value,
         unsigned int elems = ACC::PeakHardware::rScratch::value,
-        unsigned int threads = ACC::PeakHardware::OS::threads::value
+        unsigned int threads = ACC::PeakHardware::OS::threads::value,
+        unsigned int sharedSize = ACC::PeakHardware::sharedMemory::value + ACC::PeakHardware::spare::value
     >
     requires(TensorValueType<Element> &&
             aristos::isMatrix<ScaleWeights> &&
@@ -45,8 +46,8 @@ namespace aristos::processor{
         constexpr auto bM = cute::get<0>(tiler);
         constexpr auto bN = cute::get<1>(tiler);
         cutlass::AlignedArray<Element, bN> registers{};
-        // Eagerly issue gmem read.
         constexpr auto mTe = cutlass::NumericConverter<Element, mp_t>{};
+        constexpr auto eTm = cutlass::NumericConverter<mp_t, Element>{};
         // Row-major
         const auto mA = make_tensor(cute::make_gmem_ptr(inputs),
             cute::Layout<cute::Shape<cute::Int<gM>, cute::Int<N>>,
@@ -78,25 +79,11 @@ namespace aristos::processor{
         constexpr auto sCLay = make_layout(cute::Shape<cute::Int<bM>,
             cute::Int<elems>>{}, cute::LayoutRight{});
         const auto sC = cute::make_tensor(cute::make_smem_ptr(workspace), sCLay);
+        // ensures we have enough shared memory
+        static_assert(sizeof(Element) * bM * (elems + 1) + sizeof(TPS) * bM <= sharedSize);
         if constexpr (r == ReleaseType::experimental) {
-            // first prefetch inputs to registers
-            #pragma unroll
-            for (uint i = 0; i < trips; ++i) {
-                // global -> shared
-                #pragma unroll
-                for (uint j = 0; j < elems; ++j) {
-                    const auto rIdx = j + threadIdx.x / elems * elems;
-                    const auto cIdx =  threadIdx.x % elems + i * elems;
-                    sC(rIdx, cIdx) = gA(rIdx, cIdx);
-                }
-                #pragma unroll
-                for (uint j = 0; j < elems; ++j) {
-                    registers[j + i * elems] = sC(threadIdx.x, j);
-                }
-            }
-            __syncthreads();
-            cutlass::AlignedArray<TPS, elems> tIds{};
-            auto* __restrict__ sTPS = CAST_TO(TPS, workspace);
+            cutlass::AlignedArray<TPS, bN> tIds{};
+            auto* __restrict__ sTPS = CAST_TO(TPS, workspace + bM * elems);
             #pragma unroll
             for (uint i = threadIdx.x; i < bM; i += threads) {
                 sTPS[i] = tokenIndices[i];
@@ -116,15 +103,53 @@ namespace aristos::processor{
                     }
                 }
             }
-            __syncthreads();
-            if constexpr (c == CombineMode::multithreaded) {
-                // get scale weights
+            // prefetch inputs to registers
+            #pragma unroll
+            for (uint i = 0; i < trips; ++i) {
+                // global -> shared
                 #pragma unroll
-                for (uint i = 0; i < trips; ++i) {
-
+                for (uint j = 0; j < elems; ++j) {
+                    const auto rIdx = j + threadIdx.x / elems * elems;
+                    const auto cIdx =  threadIdx.x % elems + i * elems;
+                    sC(rIdx, cIdx) = gA(rIdx, cIdx);
+                }
+                #pragma unroll
+                for (uint j = 0; j < elems; ++j) {
+                    registers[j + i * elems] = sC(threadIdx.x, j);
                 }
             }
+
+            if constexpr (c == CombineMode::multithreaded) {
+                // prefetch scale to shared memory
+                auto* __restrict__ sScale = CAST_TO(Element, sTPS + bM);
+                #pragma unroll
+                for (uint i = threadIdx.x; i < bM; i += threads) {
+                    sScale[i] = scale(sTPS[i], expertIdx);
+                }
+                // eagerly apply (inputs / combine weight) to free registers holding inputs
+                #pragma unroll
+                for (uint j = 0; j < bN; ++j) {
+                    tIds[j].probability = __fdividef(tIds[j].probability, eTm(registers[j]));
+                }
+                cutlass::AlignedArray<Element, bN> scaleRegs{};
+                // apply scale
+                #pragma unroll
+                for (uint i = 0; i < trips; ++i) {
+                    #pragma unroll
+                    for (uint j = 0; j < elems; ++j) {
+                        scaleRegs[j + i * elems] = sScale[j + threadIdx.x / elems * elems];
+                    }
+                    #pragma unroll
+                    for (uint j = 0; j < elems; ++j) {
+                        tIds[j +  i * elems].probability *= scaleRegs[j + i * elems];
+                    }
+                }
+
+                // do atomic addition
+
+            }
             else {
+                __syncthreads();
                 // vector copy from registers to global directly and call it a day
                 #pragma unroll
                 for (uint i = 0; i < trips; ++i) {

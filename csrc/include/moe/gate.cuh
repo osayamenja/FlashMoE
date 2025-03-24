@@ -510,7 +510,6 @@ namespace aristos::gate {
                 for (unsigned int j = 0; j < elems; ++j) {
                     tCsC(j) = accumulator(j + i * elems);
                 }
-                // Necessary to ensure THREADSxElems half-tile is ready as values are scattered across threads
                 __syncthreads();
 
                 // Prefetch to registers
