@@ -446,7 +446,7 @@ namespace aristos{
     // Index and gate combine weight
     struct __align__(8) TPS {
         uint tokenIdx;
-        mp_t probability;
+        mp_t combineWeight;
     };
 
     enum class TaskType : uint8_t {

@@ -63,58 +63,62 @@ namespace aristos::subscriber{
                 const auto vIdx = i % bSw;
                 // no need to batch reads from shared memory here as stageLength is very small, most likely <= 1
                 auto visitedSet = bitSet[tIdx + vSIdx * subscriberCount];
-                const auto flagIdx = tIdx + i * subscriberCount;
-                auto signal = atomicLoad<cuda::thread_scope_system>(
-                    CAST_TO(ull_t, flags + flagIdx));
-                const auto sP = CAST_TO(SignalPayload<PacketStage::initial>, &signal);
-                if (sP->seqBit > localSeqBit) {
-                    // This is an exotic scenario.
-                    // Their sequence bit is ahead of ours, meaning that we missed processing some preceding packets
-                    // of theirs before they sent this current packet.
-                    // In short, they overrode those prior sequence bits before we observed them.
-                    // This occurrence is fine and more importantly,
-                    // only happens if the preceding, overridden n packets were noops,
-                    // where n = seqBit - localSeqBit.
-                    // Thus, as we catch up to them, we self-correct our termination bound to avoid a deadlock.
-                    const auto peer = flagIdx / nLx;
-                    packet::sTB(taskCount, status, peer, nLx);
-                }
-                const auto received = sP->seqBit == localSeqBit;
-                stagePending -= received;
-                if (!visitedSet.get(vIdx) && received) {
-                    // set visited bit
-                    visitedSet.set(vIdx);
-                    // decode the received packet
-                    const auto myLocalExIdx = flagIdx % nLx;
-                    const auto peerIdx = flagIdx / nLx;
-                    const auto pLI = pL[peerIdx];
-                    const auto lXI = lX[myLocalExIdx];
-                    cuda::std::array weights{
-                        CONST_CAST_TO(cuda::std::byte, &expertsUp(myLocalExIdx)),
-                        CONST_CAST_TO(cuda::std::byte, &expertsDown(myLocalExIdx))
-                    };
-                    cuda::std::array bias{
-                        CONST_CAST_TO(cuda::std::byte, &biasUp(myLocalExIdx)),
-                        CONST_CAST_TO(cuda::std::byte, &biasDown(myLocalExIdx))
-                    };
-                    const auto* packet = heap::advance<0, 1>(dA.sHeap, peerIdx, myLocalExIdx);
-                    if (!pLI.isRemote) {
-                        // P2P peer
-                        // Use DMA pointers over UVA space
-                        // Enforce consistency
-                        __threadfence_system();
-                        fPd(dA, pLI.remoteSHeap, pLI.remoteSFlags + gfSfC, packet, status, taskCount, sP->routedTokens,
-                            sP->totalTilesM, myLocalExIdx, lXI.expertIndex, pGB, weights, bias, peerIdx, pLI.pe,
-                            nLx, ltQHead, tQHead);
+                if (!visitedSet.get(vIdx)) {
+                    const auto flagIdx = tIdx + i * subscriberCount;
+                    auto signal = atomicLoad<cuda::thread_scope_system>(
+                        CAST_TO(ull_t, flags + flagIdx));
+                    const auto sP = CAST_TO(SignalPayload<PacketStage::initial>, &signal);
+                    if (sP->seqBit > localSeqBit) {
+                        // This is an exotic scenario.
+                        // Their sequence bit is ahead of ours, meaning that we missed processing some preceding packets
+                        // of theirs before they sent this current packet.
+                        // In short, they overrode those prior sequence bits before we observed them.
+                        // This occurrence is fine and more importantly,
+                        // only happens if the preceding, overridden n packets were noops,
+                        // where n = seqBit - localSeqBit.
+                        // Thus, as we catch up to them, we self-correct our termination bound to avoid a deadlock.
+                        const auto peer = flagIdx / nLx;
+                        packet::sTB(taskCount, status, peer, nLx);
+                        // set visited bit
+                        visitedSet.set(vIdx);
                     }
-                    else {
-                        // Remote peer
-                        // Below enforces consistency
-                        // We cannot decouple the API, unfortunately,
-                        // as the memory ordering mechanism is internal.
-                        nvshmem_ushort_test(&sP->seqBit, NVSHMEM_CMP_EQ, localSeqBit);
-                        fRd(dA, dA.sHeap, dA.sFlags + gfSfC, packet, status, taskCount, sP->routedTokens, sP->totalTilesM,
-                            myLocalExIdx, lXI.expertIndex, pGB, weights, bias, peerIdx, pLI.pe, nLx, ltQHead, tQHead);
+                    const auto received = sP->seqBit == localSeqBit;
+                    stagePending -= received;
+                    if (received) {
+                        // set visited bit
+                        visitedSet.set(vIdx);
+                        // decode the received packet
+                        const auto myLocalExIdx = flagIdx % nLx;
+                        const auto peerIdx = flagIdx / nLx;
+                        const auto pLI = pL[peerIdx];
+                        const auto lXI = lX[myLocalExIdx];
+                        cuda::std::array weights{
+                            CONST_CAST_TO(cuda::std::byte, &expertsUp(myLocalExIdx)),
+                            CONST_CAST_TO(cuda::std::byte, &expertsDown(myLocalExIdx))
+                        };
+                        cuda::std::array bias{
+                            CONST_CAST_TO(cuda::std::byte, &biasUp(myLocalExIdx)),
+                            CONST_CAST_TO(cuda::std::byte, &biasDown(myLocalExIdx))
+                        };
+                        const auto* packet = heap::advance<0, 1>(dA.sHeap, peerIdx, myLocalExIdx);
+                        if (!pLI.isRemote) {
+                            // P2P peer
+                            // Use DMA pointers over UVA space
+                            // Enforce consistency
+                            __threadfence_system();
+                            fPd(dA, pLI.remoteSHeap, pLI.remoteSFlags + gfSfC, packet, status, taskCount, sP->routedTokens,
+                                sP->totalTilesM, myLocalExIdx, lXI.expertIndex, pGB, weights, bias, peerIdx, pLI.pe,
+                                nLx, ltQHead, tQHead);
+                        }
+                        else {
+                            // Remote peer
+                            // Below enforces consistency
+                            // We cannot decouple the API, unfortunately,
+                            // as the memory ordering mechanism is internal.
+                            nvshmem_ushort_test(&sP->seqBit, NVSHMEM_CMP_EQ, localSeqBit);
+                            fRd(dA, dA.sHeap, dA.sFlags + gfSfC, packet, status, taskCount, sP->routedTokens, sP->totalTilesM,
+                                myLocalExIdx, lXI.expertIndex, pGB, weights, bias, peerIdx, pLI.pe, nLx, ltQHead, tQHead);
+                        }
                     }
                 }
                 // update state
@@ -190,30 +194,32 @@ namespace aristos::subscriber{
                     const auto vIdx = j % bSw;
                     auto visitedSet = rBitSet[vSIdx];
                     const auto flagIdx = workSet[j];
-                    auto signal = atomicLoad<cuda::thread_scope_system>(
+                    if (!visitedSet.get(vIdx)) {
+                        auto signal = atomicLoad<cuda::thread_scope_system>(
                         CAST_TO(ull_t, flags + flagIdx));
-                    const auto sP = CAST_TO(SignalPayload<PacketStage::last>, &signal);
-                    if (!visitedSet.get(vIdx) && sP->seqBit == localSeqBit) {
-                        // let's decode this packet
-                        // set visited bit
-                        visitedSet.set(vIdx);
-                        const auto expertIdx = flagIdx / CS;
-                        const ELI lookup = eL[expertIdx];
-                        const auto* tI = tokenIds + (expertIdx * EC + sP->batchIdx * BLOCK_M);
-                        const auto* packet = heap::advance<1, 1>(dA.sHeap, lookup.epRank,
-                                lookup.localExpertIndex,sP->batchIdx * BLOCK_M);
-                        if (lookup.isRemote) {
-                            // enforce memory consistency
-                            nvshmem_ushort_test(&sP->seqBit, NVSHMEM_CMP_EQ, localSeqBit);
-                            lRd(dA, packet, CONST_CAST_TO(cuda::std::byte, tI), mO, sP->tokensM,
-                                ltQHead, tQHead, expertIdx);
-                        }
-                        else {
-                            // enforce memory consistency
-                            __threadfence_system();
-                            lPd(dA.tQ, ltQHead, packet,
-                                CONST_CAST_TO(cuda::std::byte, tI),
-                                mO, sP->tokensM, flagIdx % TN, tQHead, expertIdx);
+                        const auto sP = CAST_TO(SignalPayload<PacketStage::last>, &signal);
+                        if (sP->seqBit == localSeqBit) {
+                            // let's decode this packet
+                            // set visited bit
+                            visitedSet.set(vIdx);
+                            const auto expertIdx = flagIdx / CS;
+                            const ELI lookup = eL[expertIdx];
+                            const auto* tI = tokenIds + (expertIdx * EC + sP->batchIdx * BLOCK_M);
+                            const auto* packet = heap::advance<1, 1>(dA.sHeap, lookup.epRank,
+                                    lookup.localExpertIndex,sP->batchIdx * BLOCK_M);
+                            if (lookup.isRemote) {
+                                // enforce memory consistency
+                                nvshmem_ushort_test(&sP->seqBit, NVSHMEM_CMP_EQ, localSeqBit);
+                                lRd(dA, packet, CONST_CAST_TO(cuda::std::byte, tI), mO, sP->tokensM,
+                                    ltQHead, tQHead, expertIdx);
+                            }
+                            else {
+                                // enforce memory consistency
+                                __threadfence_system();
+                                lPd(dA.tQ, ltQHead, packet,
+                                    CONST_CAST_TO(cuda::std::byte, tI),
+                                    mO, sP->tokensM, flagIdx % TN, tQHead, expertIdx);
+                            }
                         }
                     }
                     rBitSet[vSIdx] = visitedSet;
@@ -248,30 +254,32 @@ namespace aristos::subscriber{
                         const auto vIdx = j % bSw;
                         auto visitedSet = rBitSet[vSIdx];
                         const auto flagIdx = workSet[j];
-                        auto signal = atomicLoad<cuda::thread_scope_system>(
+                        if (!visitedSet.get(vIdx)) {
+                            auto signal = atomicLoad<cuda::thread_scope_system>(
                             CAST_TO(ull_t, flags + flagIdx));
-                        const auto sP = CAST_TO(SignalPayload<PacketStage::last>, &signal);
-                        if (!visitedSet.get(vIdx) && sP->seqBit == localSeqBit) {
-                            // set visited bit
-                            visitedSet.set(vIdx);
-                            // let's decode this packet
-                            const auto expertIdx = flagIdx / CS;
-                            const ELI lookup = eL[expertIdx];
-                            const auto* tI = tokenIds + (expertIdx * EC + (sP->batchIdx * BLOCK_M));
-                            const auto* packet = heap::advance<1, 1>(dA.sHeap, lookup.epRank,
-                                    lookup.localExpertIndex, sP->batchIdx * BLOCK_M);
-                            if (lookup.isRemote) {
-                                // enforce memory consistency
-                                nvshmem_ushort_test(&sP->seqBit, NVSHMEM_CMP_EQ, localSeqBit);
-                                lRd(dA, packet, CONST_CAST_TO(cuda::std::byte, tI), mO, sP->tokensM,
-                                    ltQHead, tQHead, expertIdx);
-                            }
-                            else {
-                                // enforce memory consistency
-                                __threadfence_system();
-                                lPd(dA.tQ, ltQHead, packet,
-                                    CONST_CAST_TO(cuda::std::byte, tI),
-                                    mO, sP->tokensM, flagIdx % TN, tQHead, expertIdx);
+                            const auto sP = CAST_TO(SignalPayload<PacketStage::last>, &signal);
+                            if (sP->seqBit == localSeqBit) {
+                                // set visited bit
+                                visitedSet.set(vIdx);
+                                // let's decode this packet
+                                const auto expertIdx = flagIdx / CS;
+                                const ELI lookup = eL[expertIdx];
+                                const auto* tI = tokenIds + (expertIdx * EC + (sP->batchIdx * BLOCK_M));
+                                const auto* packet = heap::advance<1, 1>(dA.sHeap, lookup.epRank,
+                                        lookup.localExpertIndex, sP->batchIdx * BLOCK_M);
+                                if (lookup.isRemote) {
+                                    // enforce memory consistency
+                                    nvshmem_ushort_test(&sP->seqBit, NVSHMEM_CMP_EQ, localSeqBit);
+                                    lRd(dA, packet, CONST_CAST_TO(cuda::std::byte, tI), mO, sP->tokensM,
+                                        ltQHead, tQHead, expertIdx);
+                                }
+                                else {
+                                    // enforce memory consistency
+                                    __threadfence_system();
+                                    lPd(dA.tQ, ltQHead, packet,
+                                        CONST_CAST_TO(cuda::std::byte, tI),
+                                        mO, sP->tokensM, flagIdx % TN, tQHead, expertIdx);
+                                }
                             }
                         }
                         rBitSet[vSIdx] = visitedSet;

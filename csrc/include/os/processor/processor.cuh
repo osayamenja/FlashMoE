@@ -18,11 +18,15 @@ namespace aristos::processor{
     };
     template<
         CombineMode c = CombineMode::single,
+        unsigned int gM = BLOCK_M,
+        unsigned int M = ACC::S::value,
         unsigned int N = ACC::H::value,
         ReleaseType r = ReleaseType::stable,
         class ScaleWeights,
         typename Element,
-        unsigned int Arch = ACC::PeakHardware::arch::value
+        unsigned int Arch = ACC::PeakHardware::arch::value,
+        unsigned int elems = ACC::PeakHardware::rScratch::value,
+        unsigned int threads = ACC::PeakHardware::OS::threads::value
     >
     requires(TensorValueType<Element> &&
             aristos::isMatrix<ScaleWeights> &&
@@ -33,11 +37,9 @@ namespace aristos::processor{
             const Element* __restrict__ const& inputs,
             Element* __restrict__ const& moeOutput,
             ScaleWeights const& scale,
-            const unsigned int& M,
             const unsigned int& tileIdx,
             const uint16_t& tileSize,
             const uint16_t& expertIdx) {
-        constexpr auto elems = ACC::PeakHardware::rScratch::value;
         using BlockTiler = cute::Shape<cute::Int<BLOCK_M>, cute::Int<BLOCK_N>>;
         constexpr BlockTiler tiler{};
         constexpr auto bM = cute::get<0>(tiler);
@@ -47,25 +49,37 @@ namespace aristos::processor{
         constexpr auto mTe = cutlass::NumericConverter<Element, mp_t>{};
         // Row-major
         const auto mA = make_tensor(cute::make_gmem_ptr(inputs),
-            make_layout(cute::make_shape(M, N), cute::LayoutRight{}));
-
-        const auto tilesM = M / bM;
+            cute::Layout<cute::Shape<cute::Int<gM>, cute::Int<N>>,
+                cute::Stride<cute::Int<N>, cute::_1>>{});
+        const auto mC = make_tensor(cute::make_gmem_ptr(moeOutput),
+            cute::Layout<cute::Shape<cute::Int<M>, cute::Int<N>>,
+                cute::Stride<cute::Int<N>, cute::_1>>{});
         // We assert the below prior to this point
+        static_assert(gM % bM == 0);
+        constexpr auto tilesM = gM / bM;
         constexpr auto tilesN = N / bN;
 
-        const auto tileCoord = idx2crd(tileIdx, cute::Shape(tilesM, tilesN),
-            cute::Stride<cute::Int<tilesN>, cute::_1>{});
+        const auto tileCoord = idx2crd(tileIdx,
+            cute::Shape<cute::Int<tilesM>, cute::Int<tilesN>>{},
+                cute::Stride<cute::Int<tilesN>, cute::_1>{});
         const auto ctaCoord = cute::make_coord(cute::get<0>(tileCoord), cute::get<1>(tileCoord));
         const auto gA = cute::local_tile(mA, tiler, ctaCoord);
+
+        const auto tileCoordOut = idx2crd(tileIdx,
+            cute::Shape<cute::_1, cute::Int<tilesN>>{},
+                cute::Stride<cute::Int<tilesN>, cute::_1>{});
+        const auto gC = cute::local_tile(mC,
+            cute::Shape<cute::Int<M>, cute::Int<bN>>{},
+                cute::make_coord(cute::get<0>(tileCoordOut),
+                    cute::get<1>(tileCoordOut)));
         static_assert(bN % elems == 0);
         constexpr auto trips = bN / elems;
         // Transposed layout
-        constexpr auto sCLay = cute::make_layout(cute::Shape<cute::Int<bM>, cute::Int<elems>>{},
-            cute::LayoutRight{});
+        constexpr auto sCLay = make_layout(cute::Shape<cute::Int<bM>,
+            cute::Int<elems>>{}, cute::LayoutRight{});
         const auto sC = cute::make_tensor(cute::make_smem_ptr(workspace), sCLay);
         if constexpr (r == ReleaseType::experimental) {
-            const auto phase = threadIdx.x / bN;
-            // first prefetch inputs
+            // first prefetch inputs to registers
             #pragma unroll
             for (uint i = 0; i < trips; ++i) {
                 // global -> shared
@@ -80,13 +94,68 @@ namespace aristos::processor{
                     registers[j + i * elems] = sC(threadIdx.x, j);
                 }
             }
-            cutlass::AlignedArray<uint, elems> tIds{};
+            __syncthreads();
+            cutlass::AlignedArray<TPS, elems> tIds{};
+            auto* __restrict__ sTPS = CAST_TO(TPS, workspace);
+            #pragma unroll
+            for (uint i = threadIdx.x; i < bM; i += threads) {
+                sTPS[i] = tokenIndices[i];
+            }
+            __syncthreads();
+            constexpr auto pad = TPS{0U, 1.0f};
+            #pragma unroll
+            for (uint i = 0; i < trips; ++i) {
+                #pragma unroll
+                for (uint j = 0; j < elems; ++j) {
+                    tIds[j + i * elems] = sTPS[j + threadIdx.x / elems * elems];
+                }
+                #pragma unroll
+                for (uint j = 0; j < elems; ++j) {
+                    if (j + threadIdx.x / elems * elems >= tileSize) {
+                        tIds[j + i * elems] = pad;
+                    }
+                }
+            }
+            __syncthreads();
             if constexpr (c == CombineMode::multithreaded) {
+                // get scale weights
+                #pragma unroll
+                for (uint i = 0; i < trips; ++i) {
 
+                }
             }
             else {
                 // vector copy from registers to global directly and call it a day
-                
+                #pragma unroll
+                for (uint i = 0; i < trips; ++i) {
+                    #pragma unroll
+                    for (uint j = 0; j < elems; ++j) {
+                        const auto rIdx = j + threadIdx.x / elems * elems;
+                        const auto cIdx =  threadIdx.x % elems + i * elems;
+                        // registers -> shared
+                        sC(rIdx, cIdx) = registers[j + i * elems];
+                    }
+                    // coalesced shared -> global
+                    if (tileSize < gM) {
+                        #pragma unroll
+                        for (uint j = 0; j < elems; ++j) {
+                            const auto cIdx = threadIdx.x % elems + i * elems;
+                            const auto tId = tIds[j + i * elems].tokenIdx;
+                            // predicated writes
+                            if ((j + i * elems) < tileSize) {
+                                gC(tId, cIdx) = sC(threadIdx.x, j);
+                            }
+                        }
+                    }
+                    else {
+                        #pragma unroll
+                        for (uint j = 0; j < elems; ++j) {
+                            const auto cIdx = threadIdx.x % elems + i * elems;
+                            const auto tId = tIds[j +  i * elems].tokenIdx;
+                            gC(tId, cIdx) = sC(threadIdx.x, j);
+                        }
+                    }
+                }
             }
         }
         else {
@@ -457,15 +526,12 @@ namespace aristos::processor{
                 // Grabs next task
                 awaitNotification(tQSignal, &tqs, tqs.signal);
                 __threadfence();
+                // Eagerly indicate readiness for the next task as the above fence allows us to do so correctly
+                atomicExch(pA.sQ, ready);
                 globalInterrupt = tqs.interrupt;
                 if (!tqs.interrupt) {
-                    // below ensures task read happens after signal reception
-                    // I don't think the below fence is needed due
-                    // to the conditional predicated on the interrupt signal
                     // global -> shared
                     currentTask = gtQ[tqs.decodeSig()];
-                    // Eagerly indicate readiness for the next task
-                    atomicExch(pA.sQ, ready);
                 }
             }
             __syncthreads();
