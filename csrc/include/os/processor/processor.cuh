@@ -117,7 +117,7 @@ namespace aristos::processor{
 
             if constexpr (c == CombineMode::multithreaded) {
                 using CDxT = typename ToCDx<Element>::T;
-                constexpr auto cTCx = cutlass::NumericConverter<CDxT, Element>{};
+                constexpr auto cTCx = cutlass::NumericConverter<CDxT, mp_t>{};
                 // prefetch scale to shared memory
                 auto* __restrict__ sScale = CAST_TO(Element, sTPS + bM);
                 // read like below to
@@ -135,7 +135,7 @@ namespace aristos::processor{
                 // apply scale
                 #pragma unroll
                 for (uint i = 0; i < elems; ++i) {
-                    tIds[i].probability *= scaleRegs[i];
+                    tIds[i].probability =__fdividef(eTm(scaleRegs[i]), tIds[i].probability);
                 }
 
                 #pragma unroll
@@ -147,7 +147,7 @@ namespace aristos::processor{
                             const auto cIdx = threadIdx.x % elems + i * elems;
                             if (phaseIdx + j * phases < tileSize) {
                                 atomicAdd(CAST_TO(CDxT, &gC(tIds[j].tokenIdx, cIdx)),
-                                    cTCx(tIds[j].probability * registers[j + i * elems]));
+                                    cTCx(tIds[j].probability * eTm(registers[j + i * elems])));
                             }
                         }
                     }
@@ -156,7 +156,7 @@ namespace aristos::processor{
                         for (uint j = 0; j < elems; ++j) {
                             const auto cIdx = threadIdx.x % elems + i * elems;
                             atomicAdd(CAST_TO(CDxT, &gC(tIds[j].tokenIdx, cIdx)),
-                                cTCx(tIds[j].probability * registers[j + i * elems]));
+                                cTCx(tIds[j].probability * eTm(registers[j + i * elems])));
                         }
                     }
                 }
