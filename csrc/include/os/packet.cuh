@@ -320,7 +320,6 @@ namespace aristos::packet {
                 cuda::std::array<cuda::std::byte*, GEMMs>{moeOutput},
                 nTokens,
                 tileIdx,
-                BLOCK_M,
                 expertIdx
             };
             __threadfence();
@@ -351,7 +350,6 @@ namespace aristos::packet {
                     cuda::std::array<cuda::std::byte*, GEMMs>{moeOutput},
                     nTokens,
                     i,
-                    BLOCK_M,
                     expertIdx
                 };
             }

@@ -530,9 +530,8 @@ namespace aristos{
         const cuda::std::array<cuda::std::byte*, GEMMs>& _cData,
         const unsigned int& _size,
         const unsigned int& _tile,
-        const unsigned int& _M,
         const unsigned int& _expertIdx):
-        aData(_aData), bData(_bData), cData(_cData), tileIdx(_tile), M(_M), taskType(_taskType), expertIdx(_expertIdx),
+        aData(_aData), bData(_bData), cData(_cData), tileIdx(_tile), expertIdx(_expertIdx), taskType(_taskType),
         tileSize(_size){}
     };
 

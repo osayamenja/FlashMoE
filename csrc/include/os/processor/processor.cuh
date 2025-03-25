@@ -77,8 +77,7 @@ namespace aristos::processor{
         static_assert(bN % elems == 0);
         constexpr auto trips = bN / elems;
         // Transposed layout
-        constexpr auto sCLay = make_layout(cute::Shape<cute::Int<bM>,
-            cute::Int<elems>>{}, cute::LayoutRight{});
+        constexpr auto sCLay = make_layout(cute::Shape<cute::Int<bM>, cute::Int<elems>>{});
         const auto sC = cute::make_tensor(cute::make_smem_ptr(workspace), sCLay);
         // ensures we have enough shared memory
         static_assert(sizeof(Element) * bM * (elems + 1) + sizeof(TPS) * bM <= sharedSize);
@@ -103,7 +102,7 @@ namespace aristos::processor{
                 for (uint j = 0; j < elems; ++j) {
                     const auto rIdx = phaseIdx + j * phases;
                     const auto cIdx =  threadIdx.x % elems + i * elems;
-                    sC(rIdx, cIdx) = gA(rIdx, cIdx);
+                    sC(threadIdx.x, j) = gA(rIdx, cIdx);
                 }
                 #pragma unroll
                 for (uint j = 0; j < elems; ++j) {
@@ -120,7 +119,6 @@ namespace aristos::processor{
                 constexpr auto cTCx = cutlass::NumericConverter<CDxT, mp_t>{};
                 // prefetch scale to shared memory
                 auto* __restrict__ sScale = CAST_TO(Element, sTPS + bM);
-                // read like below to
                 #pragma unroll
                 for (uint i = threadIdx.x; i < bM; i += threads) {
                     sScale[i] = scale(sTPS[i], expertIdx);
@@ -167,10 +165,8 @@ namespace aristos::processor{
                 for (uint i = 0; i < trips; ++i) {
                     #pragma unroll
                     for (uint j = 0; j < elems; ++j) {
-                        const auto rIdx = phaseIdx + j * phases;
-                        const auto cIdx =  threadIdx.x % elems + i * elems;
                         // registers -> shared
-                        sC(rIdx, cIdx) = registers[j + i * elems];
+                        sC(threadIdx.x, j) = registers[j + i * elems];
                     }
                     // coalesced shared -> global
                     if (tileSize < gM) {
