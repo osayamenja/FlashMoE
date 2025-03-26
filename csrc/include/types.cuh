@@ -375,9 +375,21 @@ namespace aristos{
             (cute::ceil_div(cute::ceil_div(numBits, T), integerBitWidth) * (numBits % T));
     }
 
+    // Captures transitory states of a finite state machine
+    __inline__ uint16_t seqBit = 1U;
+    enum SignalConstants : flagsType {
+        ground = 0U
+    };
     /// Aristos Compile-time Config
     struct ACC {
-        using SYB = cute::C<1>;
+        // Upper bound of allowable early exits
+        using AEE = cute::C<0U>;
+        // Below ensures we can represent all states in the given integer type
+        static_assert(2 * AEE::value <= cuda::std::numeric_limits<decltype(seqBit)>::max() - 3);
+        // TODO write a proof for the below in the paper
+        // sequence bit states necessary to break symmetry in forward or backward detection
+        // includes ground state
+        using SBS = cute::C<2U * (2U + AEE::value)>;
         using GRL = cute::C<NUM_EXPERTS <= BLOCK_N ? GateReductionLevel::singleBlock :
             GateReductionLevel::multiBlock>;
         using TK = cute::C<E_TOP_K>;
@@ -838,9 +850,6 @@ namespace aristos{
             unsigned int tQl = 0U;
     };
 
-    // monotonically increasing integer
-    // has to differ from the ground state of 0, so starts at 1U
-    __inline__ uint16_t seqBit = 1U;
     __constant__ __inline__ Bookkeeping bookkeeping{};
     __inline__ Bookkeeping hostBookkeeping{};
     __inline__ bool isInitialized = false;
@@ -876,6 +885,13 @@ namespace aristos{
             storage |= 1U << idx;
         }
     };
+    // sequence bit's state
+    namespace sbs {
+        __forceinline__ __host__
+        constexpr auto next(const uint16_t& current) {
+            return current + 1 == ACC::SBS::value ? 1U : current + 1;
+        }
+    }
     enum class DQType {
         stride,
         block

@@ -166,12 +166,7 @@ namespace aristos::moe{
             // regular FFN forward
             fffn<<<blocks, threads, 0, aristosStream>>>(iP, oP);
         }
-        if (seqBit == cuda::std::numeric_limits<decltype(seqBit)>::max()) {
-            syncAll<<<ACC::SYB::value, ACC::PeakHardware::OS::threads::value, 0, aristosStream>>>(
-                hostBookkeeping.pL(), hostBookkeeping.rank, hostBookkeeping.world);
-            seqBit = 0;
-        }
-        seqBit++;
+        seqBit = sbs::next(seqBit);
     }
 }
 #endif //ARISTOS_MOE_CUH
