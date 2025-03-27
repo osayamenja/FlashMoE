@@ -376,14 +376,16 @@ namespace aristos{
     }
 
     // Captures transitory states of a finite state machine
-    __inline__ uint16_t seqBit = 1U;
     enum SignalConstants : flagsType {
-        ground = 0U
+        ground = 0U,
+        sequenceStart = 1U,
     };
+    __inline__ uint16_t seqBit = sequenceStart;
     /// Aristos Compile-time Config
     struct ACC {
         // Upper bound of allowable early exits
         using AEE = cute::C<0U>;
+        using IDZ = cute::C<AEE::value + 1>;
         // Below ensures we can represent all states in the given integer type
         static_assert(2 * AEE::value <= cuda::std::numeric_limits<decltype(seqBit)>::max() - 3);
         // TODO write a proof for the below in the paper
@@ -885,11 +887,24 @@ namespace aristos{
             storage |= 1U << idx;
         }
     };
-    // sequence bit's state
+    // sequence bits' state
     namespace sbs {
         __forceinline__ __host__
-        constexpr auto next(const uint16_t& current) {
-            return current + 1 == ACC::SBS::value ? 1U : current + 1;
+        constexpr uint16_t next(const uint16_t& current) {
+            return current + 1 == ACC::SBS::value ?
+                static_cast<decltype(current)>(sequenceStart) : current + 1;
+        }
+
+        __forceinline__ __device__
+        constexpr auto ahead(const uint16_t& receivedState, const uint16_t& localState) {
+            if (receivedState < sequenceStart) {
+                // this is the case, when we observe the ground state
+                return false;
+            }
+            const auto wD =  (ACC::SBS::value - localState) + (receivedState -
+                static_cast<decltype(receivedState)>(sequenceStart));
+            return (receivedState > localState && ((receivedState - localState) <= ACC::IDZ::value)) ||
+                (receivedState < localState && wD <= ACC::IDZ::value);
         }
     }
     enum class DQType {

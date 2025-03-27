@@ -42,7 +42,7 @@ namespace aristos::os {
         const auto bSSI = nSI<subscriberCount>(nLx * world) + nSI<subscriberCount>(ssfC);
         constexpr auto E = ACC::E::value;
         constexpr auto TNx = ACC::TNx::value;
-        constexpr auto EC = ACC::TNx::value;
+        constexpr auto EC = ACC::EC::value;
 
         // subscriber shared memory allocation
         auto* __restrict__ pL = CAST_TO(PLI, workspace);
@@ -63,12 +63,14 @@ namespace aristos::os {
         for (uint i = threadIdx.x; i < bSSI; i += threads) {
             bitSet[i] = BitSet{0U};
         }
+        for (uint i = threadIdx.x; i < world; i += threads) {
+            pL[i] = gpL[i];
+        }
         #pragma unroll
         for (uint i = threadIdx.x; i < E; i += threads) {
             eL[i] = geL[i];
-            pL[i] = gpL[i];
         }
-        for (uint i = threadIdx.x; i < world; i += threads) {
+        for (uint i = threadIdx.x; i < nLx; i += threads) {
             lX[i] = gLx[i];
         }
         auto* __restrict__ scratch = CAST_TO(uint, workspace + roundToCacheLine<uint>(z));
@@ -76,11 +78,9 @@ namespace aristos::os {
         auto* __restrict__ interrupt = tQHeads + subscriberCount;
         auto* __restrict__ rQ = interrupt + subscriberCount;
         auto* __restrict__ status = rQ + roundToCacheLine<uint>(processors);
+        static_assert(alignof(uint) % alignof(BitSet) == 0);
         auto* __restrict__ schedulerScratch = status + world;
-        // shared memory arrays
-        // Upper bound for expectant tasks
-        const auto* __restrict__ eCs = scratch;
-        scratch += 1;
+        auto* __restrict__ eCs = scratch;
         if (!threadIdx.x) {
             // Expert computation expectant tasks
             // unknown a priori
@@ -89,7 +89,7 @@ namespace aristos::os {
         }
         #pragma unroll
         for (uint i = threadIdx.x; i < E; i += threads) {
-            scratch[i] = __ldg(eC + i);
+            eCs[i] = __ldg(eC + i);
         }
         __syncthreads();
         // Combine tasks
@@ -97,26 +97,32 @@ namespace aristos::os {
         #pragma unroll
         for (uint i = threadIdx.x; i < E; i += threads) {
             const auto eCt = Bookkeeping::tiles<BLOCK_M>(d == DropTokens::yes ?
-                cute::min(eCs[i], EC)
-                : eCs[i]);
+                cute::min(eCs[i], EC) : eCs[i]);
             atomicAdd_block(taskBound, eCt * TNx);
         }
         __syncthreads();
         #pragma unroll
         for (uint i = threadIdx.x; i < processors; i += threads) {
             rQ[i] = i; // initially, all processors are ready
-            schedulerScratch[i] = 0U; // needed for scheduler's bitset
+        }
+        const auto gtQCl = bookkeeping.gtQCl;
+        const auto aZ = roundToCacheLine<uint>(cute::max(nSI<WARP_SIZE>(gtQCl), processors));
+        #pragma unroll
+        for (uint i = threadIdx.x; i < aZ; i += threads) {
+            schedulerScratch[i] = 0U; // zero-fill the scheduler's bitset
         }
         #pragma unroll
         for (uint i = threadIdx.x; i < SUBSCRIBERS; i += threads) {
             tQHeads[i] = 0U;
             interrupt[i] = 0U;
         }
+        for (uint i = threadIdx.x; i < world; i += threads) {
+            status[i] = 0U;
+        }
         __syncthreads();
         // build arguments for scheduler and subscriber
         if (threadIdx.x / WARP_SIZE == 0) {
             // scheduler
-            const auto gtQCl = bookkeeping.gtQCl;
             const auto sO = bookkeeping.sT;
             auto* __restrict__ gtQHeads = bookkeeping.tQH();
             auto* __restrict__ sQ = bookkeeping.sQ();

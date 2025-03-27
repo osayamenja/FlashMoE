@@ -73,9 +73,10 @@ void runOS() {
     CHECK_ERROR_EXIT(cudaMemcpyAsync(p, eHp, sizeof(Element) * dZ, cudaMemcpyHostToDevice,
         aristos::aristosStream));
     aristos::initialize();
-    for (uint i = 0; i < 1; ++i) {
+    for (uint i = 0; i < 500; ++i) {
         aristos::moe::forwardHost(p, p + dZ * sizeof(Element));
     }
+    //aristos::moe::forwardHost<false>(p, p + dZ * sizeof(Element));
     /*using clk = std::chrono::high_resolution_clock;
     std::chrono::duration<float> end {};
     const auto start = clk::now();*/

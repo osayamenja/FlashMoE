@@ -65,26 +65,12 @@ namespace aristos::subscriber{
                 auto visitedSet = bitSet[tIdx + vSIdx * subscriberCount];
                 if (!visitedSet.get(vIdx)) {
                     const auto flagIdx = tIdx + i * subscriberCount;
-                    auto signal = atomicLoad<cuda::thread_scope_system>(
-                        CAST_TO(ull_t, flags + flagIdx));
+                    auto signal = atomicExch_system(CAST_TO(ull_t, flags + flagIdx), SignalConstants::ground);
                     const auto sP = CAST_TO(SignalPayload<PacketStage::initial>, &signal);
-                    if (sP->seqBit > localSeqBit) {
-                        // This is an exotic scenario.
-                        // Their sequence bit is ahead of ours, meaning that we missed processing some preceding packets
-                        // of theirs before they sent this current packet.
-                        // In short, they overrode those prior sequence bits before we observed them.
-                        // This occurrence is fine and more importantly,
-                        // only happens if the preceding, overridden n packets were noops,
-                        // where n = seqBit - localSeqBit.
-                        // Thus, as we catch up to them, we self-correct our termination bound to avoid a deadlock.
-                        const auto peer = flagIdx / nLx;
-                        packet::sTB(taskCount, status, peer, nLx);
-                        // set visited bit
-                        visitedSet.set(vIdx);
-                    }
-                    const auto received = sP->seqBit == localSeqBit;
-                    stagePending -= received;
-                    if (received) {
+                    if (sP->seqBit == localSeqBit) {
+                        printf("Thread %u decoding %u tokens, ttM: %u\n",
+                            tIdx, sP->routedTokens, static_cast<uint>(sP->totalTilesM));
+                        stagePending -= 1;
                         // set visited bit
                         visitedSet.set(vIdx);
                         // decode the received packet
@@ -119,6 +105,27 @@ namespace aristos::subscriber{
                             fRd(dA, dA.sHeap, dA.sFlags + gfSfC, packet, status, taskCount, sP->routedTokens, sP->totalTilesM,
                                 myLocalExIdx, lXI.expertIndex, pGB, weights, bias, peerIdx, pLI.pe, nLx, ltQHead, tQHead);
                         }
+                    }
+                    else if (sbs::ahead(sP->seqBit, localSeqBit)) {
+                        /*
+                        This is an exotic scenario.
+                        Their sequence bit is ahead of ours, meaning that we missed processing some preceding packets
+                        of theirs before they sent this current packet.
+                        In short, they overrode those prior sequence bits before we observed them.
+                        This occurrence is fine and more importantly,
+                        only happens if the preceding,
+                        overridden packets were noops or the sender timed out.
+                        Thus, as we catch up to them, we self-correct our termination bound to avoid a deadlock.
+                        Also, we have to restore the signal for self-correction in subsequent rounds,
+                        until we are fully caught up.
+                        Potentially, we may have received a signal in the meantime, so we only swap if the current
+                        value is the ground state, which we previously stored.
+                        */
+                        atomicCAS_system(CAST_TO(ull_t, flags + flagIdx), SignalConstants::ground, signal);
+                        const auto peer = flagIdx / nLx;
+                        packet::sTB(taskCount, status, peer, nLx);
+                        // set visited bit
+                        visitedSet.set(vIdx);
                     }
                 }
                 // update state
@@ -195,8 +202,8 @@ namespace aristos::subscriber{
                     auto visitedSet = rBitSet[vSIdx];
                     const auto flagIdx = workSet[j];
                     if (!visitedSet.get(vIdx)) {
-                        auto signal = atomicLoad<cuda::thread_scope_system>(
-                        CAST_TO(ull_t, flags + flagIdx));
+                        auto signal = atomicExch_system(CAST_TO(ull_t, flags + flagIdx),
+                            SignalConstants::ground);
                         const auto sP = CAST_TO(SignalPayload<PacketStage::last>, &signal);
                         if (sP->seqBit == localSeqBit) {
                             // let's decode this packet
@@ -241,9 +248,10 @@ namespace aristos::subscriber{
                         workSet[j] = scratch[tIdx + j * subscriberCount];
                     }
                 }
+                const auto bR = cute::ceil_div(residue, bSw);
                 #pragma unroll
                 for (uint j = 0; j < RBitSet::kElements; ++j) {
-                    if (j < residue) {
+                    if (j < bR) {
                         rBitSet[j] = bitSet[tIdx + (j + (stageTrips * WorkSet::kElements) / bSw) * subscriberCount];
                     }
                 }
@@ -255,8 +263,8 @@ namespace aristos::subscriber{
                         auto visitedSet = rBitSet[vSIdx];
                         const auto flagIdx = workSet[j];
                         if (!visitedSet.get(vIdx)) {
-                            auto signal = atomicLoad<cuda::thread_scope_system>(
-                            CAST_TO(ull_t, flags + flagIdx));
+                            auto signal = atomicExch_system(CAST_TO(ull_t, flags + flagIdx),
+                                SignalConstants::ground);
                             const auto sP = CAST_TO(SignalPayload<PacketStage::last>, &signal);
                             if (sP->seqBit == localSeqBit) {
                                 // set visited bit

@@ -51,36 +51,48 @@ namespace aristos::packet {
         const auto* __restrict__ eC = bookkeeping.eC();
         const auto* __restrict__ eL = bookkeeping.pEL();
         constexpr auto oT = E * sizeof(PEL);
-        const auto* __restrict__ seC = CAST_TO(uint, workspace + oT);
+        auto* __restrict__ seC = CAST_TO(uint, workspace + oT);
 
         #pragma unroll
         for (uint i = threadIdx.x; i < E; i += threads) {
             CAST_TO(PEL, workspace)[i] = eL[i];
-            CAST_TO(uint, workspace + oT)[i] = eC[i];
+            seC[i] = eC[i];
         }
         constexpr auto oT2 = oT + E * sizeof(uint);
-        const auto* __restrict__ sPTT = CAST_TO(uint, workspace + oT2);
+        auto* __restrict__ sPTT = CAST_TO(uint, workspace + oT2);
+        const auto world = bookkeeping.world;
+        #pragma unroll
+        for (uint i = 0; i < world; i += threads) {
+            sPTT[i] = 0U; // clear before accumulation
+        }
         __syncthreads();
         #pragma unroll
         for (uint i = threadIdx.x; i < E; i += threads) {
             const auto peer = enL[i].peer;
-            atomicAdd_block(CAST_TO(uint, workspace + oT2) + peer,
+            atomicAdd_block(sPTT + peer,
                 d == DropTokens::yes ? cute::min(seC[i], EC) : seC[i]);
         }
         __syncthreads();
+
         // Update encoding lookup table
         #pragma unroll
         for (uint i = threadIdx.x; i < E; i += threads) {
             auto* __restrict__ peL = CAST_TO(PEL, workspace) + i;
             const auto peer = peL->peer;
             peL->eC = seC[i];
-            peL->pTTt = Bookkeeping::tiles<BLOCK_M>(sPTT[peer]);
+            peL->pTTt = static_cast<uint16_t>(Bookkeeping::tiles<BLOCK_M>(sPTT[peer]));
+            if (!lBid && !superBlockIdx) {
+                printf("expert %u, peer %u, spTT[peer] %u\n", i, peer, sPTT[peer]);
+            }
         }
         __syncthreads();
         #pragma unroll
         for (uint expertIdx = superBlockIdx; expertIdx < E; expertIdx += numSuperBlocks) {
             const auto lI = enL[expertIdx];
             const auto flagOffset = epRank * lI.nLocalExperts + lI.expertLocalIdx;
+            if (isLeader) {
+                printf("xI: %u, fO: %u, lI.pTTt: %u\n", expertIdx, flagOffset, lI.pTTt);
+            }
             const auto routedTokens = d == DropTokens::yes ?
                 cute::min(lI.eC, EC) : lI.eC;
             auto* __restrict__ peerHeap = lI.isRemote ?
@@ -146,7 +158,7 @@ namespace aristos::packet {
                 // single thread sends a noop packet to notify the remote peer
                 // Pack payload into a single signal word
                 const auto sigPayload = SignalPayload<PacketStage::initial>{
-                    routedTokens,
+                    0U,
                     lI.pTTt,
                     rSeqBit
                 };
@@ -195,6 +207,11 @@ namespace aristos::packet {
         if (!atomicTAS<cuda::thread_scope_block>(status + peer)) {
             const auto superfluous = (TN + TNx) * (nLx * TCM - peerTaskTiles);
             atomicSub_block(taskCount, superfluous);
+            printf("Thread %u->{pTT: %u, sf: %u}, taskBound after dec is %u\n",
+                threadIdx.x - WARP_SIZE,
+                peerTaskTiles,
+                superfluous,
+                atomicLoad<cuda::thread_scope_block>(taskCount));
         }
     }
     /// Decodes a single packet from the initial stage

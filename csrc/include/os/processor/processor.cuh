@@ -17,11 +17,11 @@ namespace aristos::processor{
         experimental
     };
     template<
+        ReleaseType r = ReleaseType::stable,
         CombineMode c = CombineMode::single,
         unsigned int gM = BLOCK_M,
         unsigned int M = ACC::S::value,
         unsigned int N = ACC::H::value,
-        ReleaseType r = ReleaseType::stable,
         class ScaleWeights,
         typename Element,
         unsigned int Arch = ACC::PeakHardware::arch::value,
@@ -671,15 +671,15 @@ namespace aristos::processor{
                     break;
                     case TaskType::combine: {
                         constexpr unsigned int combineIndex = 0;
-                        combine<ACC::CM::value>(CAST_TO(typename PostGEMM::MatrixDType, workspace),
+                        combine<ReleaseType::experimental, ACC::CM::value>(
+                            CAST_TO(typename PostGEMM::MatrixDType, workspace),
                             CONST_CAST_TO(TPS, rCurrentTask.aData),
                             CONST_CAST_TO(typename PostGEMM::MatrixAType, rCurrentTask.bData[combineIndex]),
                             CAST_TO(typename PostGEMM::MatrixDType, rCurrentTask.cData[combineIndex]),
                             sW,
-                            rCurrentTask.M,
                             rCurrentTask.tileIdx,
-                            rCurrentTask.tileSize, rCurrentTask.expertIdx);
-                        __syncthreads();
+                            rCurrentTask.tileSize,
+                            rCurrentTask.expertIdx);
                     }
                     break;
                 }
