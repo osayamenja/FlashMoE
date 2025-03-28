@@ -45,7 +45,10 @@ namespace aristos::packet {
         const auto tokenIds = make_tensor(cute::make_gmem_ptr(tP),
             cute::Layout<cute::Shape<cute::Int<E>, cute::Int<EC>>,
                 cute::Stride<cute::Int<EC>, cute::_1>>{});
-
+        static_assert(cuda::std::is_same_v<TPS, typename decltype(tokenIds)::value_type>);
+        // non-bank conflict type
+        using TR = uint64_t;
+        static_assert(sizeof(TR) == sizeof(TPS) && alignof(TR) == alignof(TPS));
         /// Populate Data Structures
         const auto* __restrict__ enL = CAST_TO(PEL, workspace);
         const auto* __restrict__ eC = bookkeeping.eC();
@@ -83,91 +86,93 @@ namespace aristos::packet {
             peL->pTTt = static_cast<uint16_t>(Bookkeeping::tiles<BLOCK_M>(sPTT[peer]));
         }
         __syncthreads();
-        // TODO Swizzle communication
+        constexpr auto exL = cute::ceil_div(E, numSuperBlocks);
         #pragma unroll
-        for (uint expertIdx = superBlockIdx; expertIdx < E; expertIdx += numSuperBlocks) {
-            const auto lI = enL[expertIdx];
-            const auto flagOffset = epRank * lI.nLocalExperts + lI.expertLocalIdx;
-            const auto routedTokens = d == DropTokens::yes ?
-                cute::min(lI.eC, EC) : lI.eC;
-            auto* __restrict__ peerHeap = lI.isRemote ?
-                heap::advance<0, 0>(sHeap, lI.peer, lI.expertLocalIdx) :
-            heap::advance<0, 1>(lI.remoteSHeap, epRank, lI.expertLocalIdx);
-
-            if (routedTokens) {
-                // copy tokens: not padded
-                // TODO prefetch tokenIds
-                #pragma unroll 4
-                for (uint j = lBid; j < routedTokens; j += superBlockSize) {
-                    const auto [tokenIdx, _] = tokenIds(expertIdx, j);
-                    auto* __restrict__ localPH = peerHeap + j * H * sizeof(Element);
-                    const auto* __restrict__ aP = CONST_CAST_TO(NativeElement, &activations(tokenIdx, 0));
-                    const auto* __restrict__ vAP = static_cast<const uint4*>(static_cast<const void*>(aP));
-                    constexpr auto vTokenSize = H / (sizeof(uint4) / sizeof(Element));
-                    // Use high-throughput vector copy
-                    #pragma unroll
-                    for (uint k = threadIdx.x; k < vTokenSize; k += threads) {
-                        CAST_TO(uint4, localPH)[k] = __ldg(vAP + k);
+        for (uint i = 0; i < exL; ++i) {
+            // We do this swizzling to mitigate potential congestion during communication
+            const auto swizzleIdx = (i + superBlockIdx) % exL;
+            if (const auto expertIdx = superBlockIdx + swizzleIdx * numSuperBlocks; expertIdx < E) {
+                const auto lI = enL[expertIdx];
+                const auto flagOffset = epRank * lI.nLocalExperts + lI.expertLocalIdx;
+                const auto routedTokens = d == DropTokens::yes ?
+                    cute::min(lI.eC, EC) : lI.eC;
+                auto* __restrict__ peerHeap = lI.isRemote ?
+                    heap::advance<0, 0>(sHeap, lI.peer, lI.expertLocalIdx) :
+                heap::advance<0, 1>(lI.remoteSHeap, epRank, lI.expertLocalIdx);
+                if (routedTokens) {
+                    #pragma unroll 8
+                    for (uint j = lBid; j < routedTokens; j += superBlockSize) {
+                        const auto tR = __ldg(CAST_TO(uint64_t, &tokenIds(expertIdx, j)));
+                        const auto tps = CONST_CAST_TO(TPS, &tR);
+                        auto* __restrict__ localPH = peerHeap + j * H * sizeof(Element);
+                        const auto* __restrict__ aP = CONST_CAST_TO(NativeElement, &activations(tps->tokenIdx, 0));
+                        const auto* __restrict__ vAP = static_cast<const uint4*>(static_cast<const void*>(aP));
+                        constexpr auto vTokenSize = H / (sizeof(uint4) / sizeof(Element));
+                        // Use high-throughput vector copy
+                        #pragma unroll
+                        for (uint k = threadIdx.x; k < vTokenSize; k += threads) {
+                            CAST_TO(uint4, localPH)[k] = __ldg(vAP + k);
+                        }
+                        const auto rIdx = vTokenSize * (sizeof(uint4) / sizeof(Element));
+                        localPH += sizeof(uint4) * vTokenSize;
+                        #pragma unroll
+                        for (uint k = threadIdx.x + rIdx; k < H; k += threads) {
+                            CAST_TO(NativeElement, localPH)[k] = __ldg(aP + k);
+                        }
                     }
-                    const auto rIdx = vTokenSize * (sizeof(uint4) / sizeof(Element));
-                    localPH += sizeof(uint4) * vTokenSize;
-                    #pragma unroll
-                    for (uint k = threadIdx.x + rIdx; k < H; k += threads) {
-                        CAST_TO(NativeElement, localPH)[k] = __ldg(aP + k);
-                    }
-                }
-                __syncthreads();
-                if (!threadIdx.x) {
-                    if (lI.isRemote) {
-                        __threadfence();
-                    }
-                    else {
-                        __threadfence_system();
-                    }
-                    if (atomicIncrement(pSA + expertIdx) + 1 == superBlockSize) {
-                        // I am in the last block, let's finalize this transfer.
-                        const auto sigPayload = SignalPayload<PacketStage::initial>{
-                            routedTokens,
-                            lI.pTTt,
-                            rSeqBit
-                        };
+                    __syncthreads();
+                    if (!threadIdx.x) {
                         if (lI.isRemote) {
-                            // do RDMA transfer + signal
-                            nvshmem_putmem_signal_nbi(
-                                heap::advance<0, 1>(sHeap, epRank, lI.expertLocalIdx),
-                                peerHeap,
-                                sizeof(Element) * routedTokens * H,
-                                flags + flagOffset,
-                                *CONST_CAST_TO(flagsType, &sigPayload),
-                                NVSHMEM_SIGNAL_SET,
-                                lI.pe);
+                            __threadfence();
                         }
                         else {
-                            // we've done the DMA transfer already, so we set the signal instead
-                            atomicExch_system(CAST_TO(ull_t, lI.remoteSFlags + flagOffset),
-                                *CONST_CAST_TO(ull_t, &sigPayload));
+                            __threadfence_system();
+                        }
+                        if (atomicIncrement(pSA + expertIdx) + 1 == superBlockSize) {
+                            // I am in the last block, let's finalize this transfer.
+                            const auto sigPayload = SignalPayload<PacketStage::initial>{
+                                routedTokens,
+                                lI.pTTt,
+                                rSeqBit
+                            };
+                            if (lI.isRemote) {
+                                // do RDMA transfer + signal
+                                nvshmem_putmem_signal_nbi(
+                                    heap::advance<0, 1>(sHeap, epRank, lI.expertLocalIdx),
+                                    peerHeap,
+                                    sizeof(Element) * routedTokens * H,
+                                    flags + flagOffset,
+                                    *CONST_CAST_TO(flagsType, &sigPayload),
+                                    NVSHMEM_SIGNAL_SET,
+                                    lI.pe);
+                            }
+                            else {
+                                // we've done the DMA transfer already, so we set the signal instead
+                                atomicExch_system(CAST_TO(ull_t, lI.remoteSFlags + flagOffset),
+                                    *CONST_CAST_TO(ull_t, &sigPayload));
+                            }
                         }
                     }
                 }
-            }
-            else if (isLeader){
-                // single thread sends a noop packet to notify the remote peer
-                // Pack payload into a single signal word
-                const auto sigPayload = SignalPayload<PacketStage::initial>{
-                    0U,
-                    lI.pTTt,
-                    rSeqBit
-                };
-                if (lI.isRemote) {
-                    // transmit signal
-                    nvshmemx_signal_op(flags + flagOffset,
-                        *CONST_CAST_TO(flagsType, &sigPayload), NVSHMEM_SIGNAL_SET, lI.pe);
-                }
-                else {
-                    // Better to use below than the volatile
-                    // write operation used in the public-facing API
-                    atomicExch_system(CAST_TO(ull_t, lI.remoteSFlags + flagOffset),
-                        *CONST_CAST_TO(ull_t, &sigPayload));
+                else if (isLeader){
+                    // single thread sends a noop packet to notify the remote peer
+                    // Pack payload into a single signal word
+                    const auto sigPayload = SignalPayload<PacketStage::initial>{
+                        0U,
+                        lI.pTTt,
+                        rSeqBit
+                    };
+                    if (lI.isRemote) {
+                        // transmit signal
+                        nvshmemx_signal_op(flags + flagOffset,
+                            *CONST_CAST_TO(flagsType, &sigPayload), NVSHMEM_SIGNAL_SET, lI.pe);
+                    }
+                    else {
+                        // Better to use below than the volatile
+                        // write operation used in the public-facing API
+                        atomicExch_system(CAST_TO(ull_t, lI.remoteSFlags + flagOffset),
+                            *CONST_CAST_TO(ull_t, &sigPayload));
+                    }
                 }
             }
         }
