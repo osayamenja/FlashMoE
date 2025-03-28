@@ -402,6 +402,10 @@ namespace aristos{
         using ActivationOp = AFunction<HIDDEN_ACT, GEA>::DT;
         using ActivationOpX = cute::identity;
         using PeakHardware = aristos::Hardware<ARISTOS_ARCH, 255>;
+        using sharedSize = cute::C<PeakHardware::sharedMemory::value +
+            (PeakHardware::spare::value > 1024 ? PeakHardware::spare::value - 1024 : PeakHardware::spare::value)>;
+        static_assert(sharedSize::value >= sizeof(mp_t) * BLOCK_M * BLOCK_N / 2);
+        using STE = cute::C<sharedSize::value >= BLOCK_M * BLOCK_N * sizeof(mp_t) ? BLOCK_N : BLOCK_N / 2U>;
         using JT = cute::C<IS_TRAINING? JobType::training : JobType::inference>;
         using S = cute::C<SEQ_LEN * MINI_BATCH>;
         using P = cute::C<I_SIZE>;
@@ -606,8 +610,8 @@ namespace aristos{
                 // maximum gemm tiles/tasks scheduled by processors
                 const auto prT = world * nLx * TCM * ACC::TNx::value;
                 // maximum gemm tiles/tasks scheduled by subscriber threads
-                const auto tPs = cute::ceil_div(world * nLx * TCM * TN, SUBSCRIBERS) +
-                    cute::ceil_div(TCM * ACC::TNx::value * E, SUBSCRIBERS);
+                const auto tPs = cute::ceil_div(world * nLx, SUBSCRIBERS) * TCM * TN +
+                    cute::ceil_div(TCM * E, SUBSCRIBERS) * ACC::TNx::value;
                 sT = tPs * SUBSCRIBERS;
                 tQl = sizeof(Task) * (sT + prT);
                 tQml = tQl + blocks * sizeof(TQSignal) + E * sizeof(PEL) + sizeof(PLI) * world +
@@ -638,8 +642,8 @@ namespace aristos{
             // maximum gemm tiles/tasks scheduled by processors
             const auto prT = _world * _nLx * TCM * ACC::TNx::value;
             // maximum gemm tiles/tasks scheduled by subscriber threads
-            const auto tPs = cute::ceil_div(_world * _nLx * TCM * TN, SUBSCRIBERS) +
-                    cute::ceil_div(TCM * ACC::TNx::value * E, SUBSCRIBERS);
+            const auto tPs = cute::ceil_div(_world * _nLx, SUBSCRIBERS) * TCM * TN +
+                    cute::ceil_div(TCM * E, SUBSCRIBERS) * ACC::TNx::value;
             const auto sT = tPs * SUBSCRIBERS;
             const auto tQl = sizeof(Task) * (sT + prT);
             const auto tQml = tQl + blocks * sizeof(TQSignal) + E * sizeof(PEL) + sizeof(PLI) * _world +

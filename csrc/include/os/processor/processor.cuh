@@ -522,8 +522,6 @@ namespace aristos::processor{
             && alignof(SignalPayload<PacketStage::last>) == alignof(flagsType));
 
         __shared__ Task currentTask;
-        // use shared for below due to register pressure
-        __shared__ ProcessorArgs pA;
         __shared__ uint globalInterrupt;
 
         // Register allocations
@@ -531,19 +529,18 @@ namespace aristos::processor{
         const auto rSeqBit = _seqBit;
         Task rCurrentTask{};
         TQSignal tqs{0U, 0U};
+        const auto pA = ProcessorArgs{
+            bookkeeping.sQ() + blockIdx.x,
+            bookkeeping.pDB() + blockIdx.x,
+            bookkeeping.tQH(),
+            bookkeeping.tQ(),
+            bookkeeping.ptQ(),
+            bookkeeping.tSA()
+        };
 
         if (!threadIdx.x) {
             globalInterrupt = 0U;
-            pA = ProcessorArgs{
-                bookkeeping.sQ() + blockIdx.x,
-                bookkeeping.pDB() + blockIdx.x,
-                bookkeeping.tQH(),
-                bookkeeping.tQ(),
-                bookkeeping.ptQ(),
-                bookkeeping.tSA()
-            };
         }
-
         using PreGEMM = BlockMM<ACC::ActivationOp, Element>;
         using PostGEMM = BlockMM<ACC::ActivationOpX, Element>;
         constexpr uint H = ACC::H::value;

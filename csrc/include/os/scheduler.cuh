@@ -178,13 +178,9 @@ namespace aristos::scheduler {
         TQSignal* __restrict__ const& pDB,
         uint& gRQIdx,
         typename WarpScan::TempStorage* __restrict__ const& wSt,
-        uint* __restrict__ scratch,
+        uint* __restrict__ scratch, // pre-filled with 1
         const uint& processorTally) {
         static_assert(cuda::std::is_same_v<typename SQState::value_type, uint>);
-        #pragma unroll
-        for (uint i = threadIdx.x; i < processors; i += wS) {
-            scratch[i] = 1U;
-        }
         __syncwarp();
         /// read through the ready queue first
         constexpr auto sig = TQSignal{1U};
@@ -286,7 +282,6 @@ namespace aristos::scheduler {
                 }
             }
         }
-        __syncwarp();
     }
 
     /// Making processorCount a compile-time constant is not a functional requirement but rather strictly
@@ -317,11 +312,9 @@ namespace aristos::scheduler {
         constexpr auto sL = subscribers / wS;
         // initialize register buffers
         constexpr auto gTQWSet = 2;
-        constexpr auto bSw = sizeof(uint) * 8U;
         constexpr auto wSz = 8U;
         cutlass::Array<TQState, gTQWSet + sL> tqState{};
         cutlass::Array<uint, sQsL> sQState{};
-        cutlass::Array<BitSet, cute::ceil_div(gTQWSet, bSw)> rBitSet{};
         cutlass::Array<uint, wSz> wSet{};
         tqState.fill({0U,0U});
         sQState.fill(0U);
@@ -331,9 +324,7 @@ namespace aristos::scheduler {
 
         // cub stuff
         using WarpScan = cub::WarpScan<uint>;
-        const auto nSIw = nSI<wS>(gtQCL);
-        const auto aZ = roundToCacheLine<uint>(cute::max(nSIw, processors));
-        auto* __restrict__ bitSet = CAST_TO(BitSet, workspace);
+        const auto aZ = roundToCacheLine<uint>(processors);
         static_assert(alignof(uint) % alignof(WarpScan::TempStorage) == 0);
         auto* __restrict__ wSt = CAST_TO(WarpScan::TempStorage, workspace + aZ);
         uint gRQIdx = 0U;
@@ -355,10 +346,6 @@ namespace aristos::scheduler {
             // Q is the number of queues a thread observes in one-pass;
             // and T is the number of threads in a warp
             if (dT > 0) {
-                /*#pragma unroll
-                for (uint j = 0; j < decltype(rBitSet)::kElements; ++j) {
-                    rBitSet[j] = bitSet[threadIdx.x + j * wS];
-                }*/
                 // One-shot scheduling, so tails are irrelevant.
                 // Special case, where i == 0
                 #pragma unroll
@@ -367,36 +354,13 @@ namespace aristos::scheduler {
                     const auto tasks = atomicExch(gtQHeads + qIdx, tQHeadGroundState);
                     tqState[j].tasks = tasks;
                     lTt += tasks;
-                    /*const auto vSIdx = j / bSw;
-                    const auto vIdx = j % bSw;
-                    auto visitedSet = rBitSet[vSIdx];
-                    if (!visitedSet.get(vIdx)) {
-                        const auto qIdx = wS * (j - sL) + threadIdx.x;
-                        const auto tasks = atomicExch(gtQHeads + qIdx, tQHeadGroundState);
-                        if (tasks) {
-                            // one and done
-                            visitedSet.set(vIdx);
-                            rBitSet[vSIdx] = visitedSet;
-                        }
-                        tqState[j].tasks = tasks;
-                        lTt += tasks;
-                    }*/
                 }
                 // schedule observed tasks
                 schedulerLoop<processors>(sQState, tqState, wSet, sO, lTt,
                     processorTally, gRQIdx, scheduled,
                     wSt, sQ, rQ, pDB, true);
 
-                /*#pragma unroll
-                for (uint j = 0; j < decltype(rBitSet)::kElements; ++j) {
-                    bitSet[threadIdx.x + j * wS] = rBitSet[j];
-                }*/
-
                 for (uint i = 1; i < dT; ++i) {
-                    /*#pragma unroll
-                    for (uint j = 0; j < decltype(rBitSet)::kElements; ++j) {
-                        rBitSet[j] = bitSet[threadIdx.x + (j + (i * decltype(tqState)::kElements) / bSw) * wS];
-                    }*/
                     // Needed to enforce register storage
                     #pragma unroll
                     for (uint j = sL; j < decltype(tqState)::kElements; ++j) {
@@ -404,41 +368,13 @@ namespace aristos::scheduler {
                         const auto tasks = atomicExch(gtQHeads + qIdx, tQHeadGroundState);
                         tqState[j].tasks = tasks;
                         lTt += tasks;
-                        /*const auto vSIdx = j / bSw;
-                        const auto vIdx = j % bSw;
-                        auto visitedSet = rBitSet[vSIdx];
-                        if (!visitedSet.get(vIdx)) {
-                            const auto qIdx = wS * (dQL * i + (j - sL)) + threadIdx.x;
-                            const auto tasks = atomicExch(gtQHeads + qIdx, tQHeadGroundState);
-                            if (tasks) {
-                                visitedSet.set(vIdx);
-                                rBitSet[vSIdx] = visitedSet;
-                            }
-                            tqState[j].tasks = tasks;
-                            lTt += tasks;
-                        }*/
                     }
                     // schedule observed tasks
                     schedulerLoop<processors>(sQState, tqState, wSet, sO, lTt,
                         processorTally, gRQIdx, scheduled,
                         wSt, sQ, rQ, pDB);
-
-                    /*#pragma unroll
-                    for (uint j = 0; j < decltype(rBitSet)::kElements; ++j) {
-                        bitSet[threadIdx.x + (j + (i * decltype(tqState)::kElements) / bSw) * wS] = rBitSet[j];
-                    }*/
                 }
             }
-
-            /*const auto residue = gtQCL - dT * wS * dQL;
-            const auto bR = cute::ceil_div(residue, bSw);
-            // fetch bitsets
-            #pragma unroll
-            for (uint j = 0; j < decltype(rBitSet)::kElements; ++j) {
-                if (j < bR) {
-                    rBitSet[j] = bitSet[threadIdx.x + (j + (dT * decltype(tqState)::kElements) / bSw) * wS];
-                }
-            }*/
             // residue
             #pragma unroll
             for (uint j = sL; j < decltype(tqState)::kElements; ++j) {
@@ -446,38 +382,16 @@ namespace aristos::scheduler {
                     const auto tasks = atomicExch(gtQHeads + qIdx, tQHeadGroundState);
                     tqState[j].tasks = tasks;
                     lTt += tasks;
-                    /*const auto vSIdx = j / bSw;
-                    const auto vIdx = j % bSw;
-                    auto visitedSet = rBitSet[vSIdx];
-                    if (!visitedSet.get(vIdx)) {
-                        const auto tasks = atomicExch(gtQHeads + qIdx, tQHeadGroundState);
-                        if (tasks) {
-                            visitedSet.set(vIdx);
-                            rBitSet[vSIdx] = visitedSet;
-                        }
-                        tqState[j].tasks = tasks;
-                        lTt += tasks;
-                    }*/
                 }
             }
             // schedule observed tasks
             schedulerLoop<processors>(sQState, tqState, wSet, sO, lTt,
                 processorTally, gRQIdx, scheduled,
                 wSt, sQ, rQ, pDB, dT == 0);
-            /*// restore bitsets
-            #pragma unroll
-            for (uint j = 0; j < decltype(rBitSet)::kElements; ++j) {
-                if (j < bR) {
-                    bitSet[threadIdx.x + (j + (dT * decltype(tqState)::kElements) / bSw) * wS] = rBitSet[j];
-                }
-            }*/
             if (!threadIdx.x) {
                 tTB = atomicLoad<cuda::thread_scope_block>(taskBound);
             }
             tTB = __shfl_sync(0xffffffff, tTB, 0);
-        }
-        if (!threadIdx.x) {
-            printf("interrupting!\n");
         }
         // interrupt subscribers
         static_assert(subscribers % wS == 0);

@@ -433,7 +433,8 @@ namespace aristos::gate {
             typename MatrixC,
             typename GArg,
             typename ElementC,
-            unsigned int elems = ACC::PeakHardware::rScratch::value,
+            typename Element = typename MatrixA::value_type,
+            unsigned int elems = ACC::STE::value,
             unsigned int sharedSize = ACC::PeakHardware::sharedMemory::value
         >
         __device__ __forceinline__
@@ -494,10 +495,14 @@ namespace aristos::gate {
 
             // Transposed layout in shared memory to minimize bank conflicts
             using sCLay = cute::Layout<cute::Shape<cute::Int<bM>, cute::Int<elems>>>;
-            const auto sC = cute::make_tensor(cute::make_smem_ptr(gateScratch), sCLay{});
+            const auto sC = cute::make_tensor(cute::make_smem_ptr(CAST_TO(Element, gateScratch)), sCLay{});
             typename BlockGEMM::MMA tiledMMA{};
             const auto tCsC = tiledMMA.get_slice(threadIdx.x).partition_C(sC);
             constexpr auto abN = cute::min(bN, ACC::E::value);
+            constexpr auto gCStoreOp = cutlass::NumericConverter<typename decltype(gC)::value_type,
+                                                        typename decltype(accumulator)::value_type>{};
+            constexpr auto gCLoadOp = cutlass::NumericConverter<typename decltype(accumulator)::value_type,
+                                                        typename decltype(gC)::value_type>{};
 
             // Begin softmax
             // using notation from https://courses.cs.washington.edu/courses/cse599m/23sp/notes/flashattn.pdf
@@ -508,14 +513,13 @@ namespace aristos::gate {
             for (unsigned int i = 0; i < trips; ++i) {
                 #pragma unroll
                 for (unsigned int j = 0; j < elems; ++j) {
-                    tCsC(j) = accumulator(j + i * elems);
+                    tCsC(j) = gCStoreOp(accumulator(j + i * elems));
                 }
                 __syncthreads();
-
                 // Prefetch to registers
                 #pragma unroll
                 for (unsigned int j = 0; j < elems; ++j) {
-                    accumulator(j + i * elems) = sC(threadIdx.x, j);
+                    accumulator(j + i * elems) = gCLoadOp(sC(threadIdx.x, j));
                 }
             }
 
@@ -534,12 +538,50 @@ namespace aristos::gate {
             for (uint i = 0; i < abN; ++i) {
                 accumulator(i) = __fdividef(__expf(accumulator(i) - mI), dI);
             }
+            if (!threadIdx.x) {
+                print_tensor(accumulator);
+            }
 
-            constexpr auto gCStoreOp = cutlass::NumericConverter<typename decltype(gC)::value_type,
-                                                        typename decltype(accumulator)::value_type>{};
+            /// Eagerly Copy results to global memory
+            // allocate temporary storage
+            cutlass::Array<Element, accumulator.size()> stage{};
+            // Exchange first from blocked to striped, without bank conflicts
             #pragma unroll
-            for (unsigned int j = 0; j < abN; ++j) {
-                gC(threadIdx.x, j) = gCStoreOp(accumulator(j));
+            for (uint i = 0; i < trips; ++i) {
+                __syncthreads();
+                #pragma unroll
+                for (uint j = 0; j < elems; ++j) {
+                    sC(threadIdx.x, j) = gCStoreOp(accumulator(j + i * elems));
+                }
+                __syncthreads();
+                #pragma unroll
+                for (uint j = 0; j < elems; ++j) {
+                    const auto swizzleOffset = (j + threadIdx.x) % elems;
+                    const auto rIdx = (threadIdx.x / elems * elems) + swizzleOffset;
+                    stage[j + i * elems] = sC(rIdx, threadIdx.x % elems);
+                }
+            }
+
+            __syncthreads();
+            if (!threadIdx.x) {
+                print_tensor(cute::make_tensor(stage.data(),
+                    cute::Layout<cute::Shape<cute::Int<decltype(stage)::kElements>, cute::_1>,
+                        cute::Stride<cute::_1, cute::_1>>{}));
+            }
+            __syncthreads();
+            #pragma unroll
+            for (uint i = 0; i < trips; ++i) {
+                #pragma unroll
+                for (uint j = 0; j < elems; ++j) {
+                    // Un-swizzle registers as we copy to shared memory
+                    sC(threadIdx.x, (j + threadIdx.x) % elems) = stage[j + i * elems];
+                }
+                #pragma unroll
+                for (uint j = 0; j < elems; ++j) {
+                    const auto rIdx = threadIdx.x / elems * elems;
+                    const auto cIdx = threadIdx.x % elems;
+                    gC(rIdx + j, cIdx + i * elems) = sC(threadIdx.x, j);
+                }
             }
 
             // Begin loss computation and global token ordering construction

@@ -106,10 +106,9 @@ namespace aristos::os {
             rQ[i] = i; // initially, all processors are ready
         }
         const auto gtQCl = bookkeeping.gtQCl;
-        const auto aZ = roundToCacheLine<uint>(cute::max(nSI<WARP_SIZE>(gtQCl), processors));
         #pragma unroll
-        for (uint i = threadIdx.x; i < aZ; i += threads) {
-            schedulerScratch[i] = 0U; // zero-fill the scheduler's bitset
+        for (uint i = threadIdx.x; i < processors; i += threads) {
+            schedulerScratch[i] = 1U; // pre-fill the scheduler's bitmask
         }
         #pragma unroll
         for (uint i = threadIdx.x; i < SUBSCRIBERS; i += threads) {

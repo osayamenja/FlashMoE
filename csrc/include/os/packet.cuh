@@ -81,18 +81,13 @@ namespace aristos::packet {
             const auto peer = peL->peer;
             peL->eC = seC[i];
             peL->pTTt = static_cast<uint16_t>(Bookkeeping::tiles<BLOCK_M>(sPTT[peer]));
-            if (!lBid && !superBlockIdx) {
-                printf("expert %u, peer %u, spTT[peer] %u\n", i, peer, sPTT[peer]);
-            }
         }
         __syncthreads();
+        // TODO Swizzle communication
         #pragma unroll
         for (uint expertIdx = superBlockIdx; expertIdx < E; expertIdx += numSuperBlocks) {
             const auto lI = enL[expertIdx];
             const auto flagOffset = epRank * lI.nLocalExperts + lI.expertLocalIdx;
-            if (isLeader) {
-                printf("xI: %u, fO: %u, lI.pTTt: %u\n", expertIdx, flagOffset, lI.pTTt);
-            }
             const auto routedTokens = d == DropTokens::yes ?
                 cute::min(lI.eC, EC) : lI.eC;
             auto* __restrict__ peerHeap = lI.isRemote ?
@@ -101,6 +96,7 @@ namespace aristos::packet {
 
             if (routedTokens) {
                 // copy tokens: not padded
+                // TODO prefetch tokenIds
                 #pragma unroll 4
                 for (uint j = lBid; j < routedTokens; j += superBlockSize) {
                     const auto [tokenIdx, _] = tokenIds(expertIdx, j);
@@ -207,11 +203,6 @@ namespace aristos::packet {
         if (!atomicTAS<cuda::thread_scope_block>(status + peer)) {
             const auto superfluous = (TN + TNx) * (nLx * TCM - peerTaskTiles);
             atomicSub_block(taskCount, superfluous);
-            printf("Thread %u->{pTT: %u, sf: %u}, taskBound after dec is %u\n",
-                threadIdx.x - WARP_SIZE,
-                peerTaskTiles,
-                superfluous,
-                atomicLoad<cuda::thread_scope_block>(taskCount));
         }
     }
     /// Decodes a single packet from the initial stage

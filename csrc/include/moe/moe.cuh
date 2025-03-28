@@ -69,7 +69,7 @@ namespace aristos::moe{
         using GPUType = ACC::PeakHardware;
         constexpr auto blocks = GPUType::blocks::value;
         constexpr auto processors = GPUType::OS::processorBlocks::value;
-        constexpr auto sharedSize = GPUType::sharedMemory::value;
+        constexpr auto sharedSize = ACC::sharedSize::value;
         constexpr auto threads = GPUType::OS::threads::value;
         constexpr auto d = ACC::DTK::value;
         constexpr auto c = ACC::CM::value;
@@ -85,7 +85,7 @@ namespace aristos::moe{
         const auto* __restrict__ bd = bU + lE * P;
         auto* __restrict__ gOp = CAST_TO(Element, oP);
         auto* __restrict__ mOp = gOp + S * PX;
-        __shared__ __align__(16) cuda::std::byte workspace[sharedSize + ACC::PeakHardware::spare::value];
+        __shared__ __align__(16) cuda::std::byte workspace[sharedSize];
         clearState<threads, blocks, processors, c, ACC::JT::value, S * H>(mOp);
 
         // prep tensors
@@ -121,7 +121,7 @@ namespace aristos::moe{
                 cute::Stride<cute::Int<H>, cute::_1>>{});
 
         gate::forward(activations, gateWeights, gateOutput, CAST_TO(ElementC, workspace));
-        if (blockIdx.x + 1 < blocks) {
+        /*if (blockIdx.x + 1 < blocks) {
             constexpr auto cutoff = processors / ARISTOS_SUPER_BLOCK_SIZE * ARISTOS_SUPER_BLOCK_SIZE;
             if (blockIdx.x < cutoff) {
                 packet::encode<cutoff, d, ARISTOS_SUPER_BLOCK_SIZE>(activations, workspace, sb);
@@ -130,7 +130,7 @@ namespace aristos::moe{
         }
         else {
             os::start<processors, d>(workspace, moeOutput, expertsUp, expertsDown, biasUp, biasDown, sb);
-        }
+        }*/
     }
 
     template<bool skip = true>

@@ -68,8 +68,6 @@ namespace aristos::subscriber{
                     auto signal = atomicExch_system(CAST_TO(ull_t, flags + flagIdx), SignalConstants::ground);
                     const auto sP = CAST_TO(SignalPayload<PacketStage::initial>, &signal);
                     if (sP->seqBit == localSeqBit) {
-                        printf("Thread %u decoding %u tokens, ttM: %u\n",
-                            tIdx, sP->routedTokens, static_cast<uint>(sP->totalTilesM));
                         stagePending -= 1;
                         // set visited bit
                         visitedSet.set(vIdx);
