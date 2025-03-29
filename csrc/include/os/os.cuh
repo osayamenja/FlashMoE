@@ -132,7 +132,7 @@ namespace aristos::os {
         else {
             const auto tIdx = threadIdx.x - WARP_SIZE;
             // subscriber
-            subscriber::start<bitSetSizePs, wSet>(bitSet, CAST_TO(cuda::std::byte, bitSet + bSSI), interrupt,
+            subscriber::start<bitSetSizePs, wSet>(bitSet, subscriberScratch, interrupt,
                 tQHeads + tIdx, pL, lX, eL, ssfC, status, taskBound,
                 moeOutput, expertsUp, expertsDown, biasUp, biasDown, lSeqBit, tIdx);
         }

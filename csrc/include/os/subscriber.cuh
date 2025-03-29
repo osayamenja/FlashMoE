@@ -16,6 +16,15 @@ namespace aristos::subscriber{
         final
     };
 
+    // Below enforces consistency
+    // We cannot decouple the API, unfortunately,
+    // as the memory ordering mechanism is internal.
+    __device__ __forceinline__
+    void eMC(uint16_t* __restrict__ const& mCN,
+        const uint16_t& localSeqBit) {
+        nvshmem_ushort_test(mCN, NVSHMEM_CMP_EQ, localSeqBit);
+    }
+
     template<
         SubscriberStage s,
         unsigned int subscriberCount
@@ -53,7 +62,8 @@ namespace aristos::subscriber{
             const uint& stageLength,
             const uint &nLx,
             const uint &tIdx,
-            const uint16_t& localSeqBit) const {
+            const uint16_t& localSeqBit,
+            uint16_t& pSB) const {
             /// Flags has dimension [W, L], where W is expert parallel world and L is number of local experts
             constexpr packet::Decoder<PacketStage::initial, PeerConnectivity::p2p, Element> fPd{};
             constexpr packet::Decoder<PacketStage::initial, PeerConnectivity::remote, Element> fRd{};
@@ -65,8 +75,9 @@ namespace aristos::subscriber{
                 auto visitedSet = bitSet[tIdx + vSIdx * subscriberCount];
                 if (!visitedSet.get(vIdx)) {
                     const auto flagIdx = tIdx + i * subscriberCount;
-                    auto signal = atomicExch_system(CAST_TO(ull_t, flags + flagIdx), SignalConstants::ground);
-                    const auto sP = CAST_TO(SignalPayload<PacketStage::initial>, &signal);
+                    const auto signal = atomicExch_system(CAST_TO(ull_t, flags + flagIdx),
+                        SignalConstants::ground);
+                    const auto* __restrict__ sP = CONST_CAST_TO(SignalPayload<PacketStage::initial>, &signal);
                     if (sP->seqBit == localSeqBit) {
                         stagePending -= 1;
                         // set visited bit
@@ -96,10 +107,7 @@ namespace aristos::subscriber{
                         }
                         else {
                             // Remote peer
-                            // Below enforces consistency
-                            // We cannot decouple the API, unfortunately,
-                            // as the memory ordering mechanism is internal.
-                            nvshmem_ushort_test(&sP->seqBit, NVSHMEM_CMP_EQ, localSeqBit);
+                            eMC(&pSB, localSeqBit);
                             fRd(dA, dA.sHeap, dA.sFlags + gfSfC, packet, status, taskCount, sP->routedTokens, sP->totalTilesM,
                                 myLocalExIdx, lXI.expertIndex, pGB, weights, bias, peerIdx, pLI.pe, nLx, ltQHead, tQHead);
                         }
@@ -164,8 +172,8 @@ namespace aristos::subscriber{
             const uint& stageLength,
             const uint& stageTrips,
             const uint& tIdx,
-            const uint16_t& localSeqBit
-            ) const {
+            const uint16_t& localSeqBit,
+            uint16_t& pSB) const {
             constexpr auto bSw = sizeof(uint) * 8U;
             static_assert(WorkSet::kElements == 16 || WorkSet::kElements % bSw == 0);
             constexpr packet::Decoder<PacketStage::last, PeerConnectivity::p2p> lPd{};
@@ -200,9 +208,9 @@ namespace aristos::subscriber{
                     auto visitedSet = rBitSet[vSIdx];
                     const auto flagIdx = workSet[j];
                     if (!visitedSet.get(vIdx)) {
-                        auto signal = atomicExch_system(CAST_TO(ull_t, flags + flagIdx),
+                        const auto signal = atomicExch_system(CAST_TO(ull_t, flags + flagIdx),
                             SignalConstants::ground);
-                        const auto sP = CAST_TO(SignalPayload<PacketStage::last>, &signal);
+                        const auto* __restrict__ sP = CONST_CAST_TO(SignalPayload<PacketStage::last>, &signal);
                         if (sP->seqBit == localSeqBit) {
                             // let's decode this packet
                             // set visited bit
@@ -214,7 +222,7 @@ namespace aristos::subscriber{
                                     lookup.localExpertIndex,sP->batchIdx * BLOCK_M);
                             if (lookup.isRemote) {
                                 // enforce memory consistency
-                                nvshmem_ushort_test(&sP->seqBit, NVSHMEM_CMP_EQ, localSeqBit);
+                                eMC(&pSB, localSeqBit);
                                 lRd(dA, packet, CONST_CAST_TO(cuda::std::byte, tI), mO, sP->tokensM,
                                     ltQHead, tQHead, expertIdx);
                             }
@@ -261,9 +269,9 @@ namespace aristos::subscriber{
                         auto visitedSet = rBitSet[vSIdx];
                         const auto flagIdx = workSet[j];
                         if (!visitedSet.get(vIdx)) {
-                            auto signal = atomicExch_system(CAST_TO(ull_t, flags + flagIdx),
+                            const auto signal = atomicExch_system(CAST_TO(ull_t, flags + flagIdx),
                                 SignalConstants::ground);
-                            const auto sP = CAST_TO(SignalPayload<PacketStage::last>, &signal);
+                            const auto* __restrict__ sP = CONST_CAST_TO(SignalPayload<PacketStage::last>, &signal);
                             if (sP->seqBit == localSeqBit) {
                                 // set visited bit
                                 visitedSet.set(vIdx);
@@ -275,7 +283,7 @@ namespace aristos::subscriber{
                                         lookup.localExpertIndex, sP->batchIdx * BLOCK_M);
                                 if (lookup.isRemote) {
                                     // enforce memory consistency
-                                    nvshmem_ushort_test(&sP->seqBit, NVSHMEM_CMP_EQ, localSeqBit);
+                                    eMC(&pSB, localSeqBit);
                                     lRd(dA, packet, CONST_CAST_TO(cuda::std::byte, tI), mO, sP->tokensM,
                                         ltQHead, tQHead, expertIdx);
                                 }
@@ -314,7 +322,7 @@ namespace aristos::subscriber{
     requires(wSet == 16 || wSet % 32 == 0)
     __device__ __forceinline__
     void start(BitSet* __restrict__ const& bitSet,
-        cuda::std::byte* __restrict__ const& workspace,
+        uint* __restrict__ const& workspace,
         unsigned int* __restrict__ const& interrupt,
         unsigned int* __restrict__ const& tQHead,
         const PLI* __restrict__ const& pL,
@@ -330,6 +338,7 @@ namespace aristos::subscriber{
         BiasDown const& biasDown,
         const uint16_t& lSeqBit,
         const uint& tIdx){
+        auto pSB = lSeqBit;
         // offset due to warp specialization for the scheduler
         static_assert(sizeof(unsigned long long int) == sizeof(flagsType));
         static_assert(sizeof(SignalPayload<>) == sizeof(uint64_t));
@@ -346,7 +355,6 @@ namespace aristos::subscriber{
         auto ltQHead = 0U; // local tQ Head
 
         // pointers
-        auto* __restrict__ sharedSpace = CAST_TO(unsigned int, workspace);
         auto* __restrict__ sFlags = bookkeeping.flags;
         auto* __restrict__ pGB = bookkeeping.xM(); // post GEMM buffer
 
@@ -400,7 +408,7 @@ namespace aristos::subscriber{
                     fSl,
                     nLx,
                     tIdx,
-                    lSeqBit
+                    lSeqBit, pSB
                 );
             }
             flags += gfSfC;
@@ -412,14 +420,14 @@ namespace aristos::subscriber{
                 CAST_TO(cuda::std::byte, moeOutput.data().get()),
                 tileIndices,
                 eL,
-                sharedSpace,
+                workspace,
                 flags,
                 tQHead,
                 ltQHead,
                 ssL,
                 ssT,
                 tIdx,
-                lSeqBit);
+                lSeqBit, pSB);
         }
     }
 }
