@@ -18,12 +18,14 @@ namespace aristos::packet {
         unsigned int E = ACC::E::value,
         unsigned int EC = ACC::EC::value,
         unsigned int threads = ACC::PeakHardware::OS::threads::value,
+        unsigned int batch = cute::min(cute::ceil_div(ACC::EC::value, 32U), 32U),
         typename Activations
     >
-    requires (isTensor<Activations>::value)
+    requires (isTensor<Activations>::value && cutlass::is_pow2<batch>::value)
     __forceinline__ __device__
     void encode(const Activations& activations, cuda::std::byte* __restrict__ const& workspace, const uint16_t& rSeqBit) {
         static_assert(sizeof(SignalPayload<>) == sizeof(ull_t) && alignof(SignalPayload<>) == alignof(ull_t));
+        static_assert(sizeof(flagsType) == sizeof(ull_t) && alignof(flagsType) == alignof(ull_t));
         using Element = typename Activations::value_type;
         using NativeElement = typename ToCDx<Element>::T;
         // Below is always true, but we assert to ensure
@@ -46,9 +48,6 @@ namespace aristos::packet {
             cute::Layout<cute::Shape<cute::Int<E>, cute::Int<EC>>,
                 cute::Stride<cute::Int<EC>, cute::_1>>{});
         static_assert(cuda::std::is_same_v<TPS, typename decltype(tokenIds)::value_type>);
-        // non-bank conflict type
-        using TR = uint64_t;
-        static_assert(sizeof(TR) == sizeof(TPS) && alignof(TR) == alignof(TPS));
         /// Populate Data Structures
         const auto* __restrict__ enL = CAST_TO(PEL, workspace);
         const auto* __restrict__ eC = bookkeeping.eC();
@@ -87,6 +86,11 @@ namespace aristos::packet {
         }
         __syncthreads();
         constexpr auto exL = cute::ceil_div(E, numSuperBlocks);
+        static_assert(alignof(PEL) % alignof(uint) == 0);
+        constexpr auto pZ = roundToCacheLine<PEL>(E * sizeof(PEL));
+        const auto sC = cute::make_tensor(cute::make_smem_ptr(CAST_TO(uint, workspace + pZ)),
+            cute::Layout<cute::Shape<cute::Int<threads>, cute::Int<batch>>>{});
+        cutlass::AlignedArray<uint, batch> rTID{};
         #pragma unroll
         for (uint i = 0; i < exL; ++i) {
             // We do this swizzling to mitigate potential congestion during communication
@@ -100,24 +104,85 @@ namespace aristos::packet {
                     heap::advance<0, 0>(sHeap, lI.peer, lI.expertLocalIdx) :
                 heap::advance<0, 1>(lI.remoteSHeap, epRank, lI.expertLocalIdx);
                 if (routedTokens) {
-                    #pragma unroll 8
-                    for (uint j = lBid; j < routedTokens; j += superBlockSize) {
-                        const auto tR = __ldg(CAST_TO(uint64_t, &tokenIds(expertIdx, j)));
-                        const auto tps = CONST_CAST_TO(TPS, &tR);
-                        auto* __restrict__ localPH = peerHeap + j * H * sizeof(Element);
-                        const auto* __restrict__ aP = CONST_CAST_TO(NativeElement, &activations(tps->tokenIdx, 0));
-                        const auto* __restrict__ vAP = static_cast<const uint4*>(static_cast<const void*>(aP));
-                        constexpr auto vTokenSize = H / (sizeof(uint4) / sizeof(Element));
-                        // Use high-throughput vector copy
+                    const auto allocation = cute::ceil_div(routedTokens, superBlockSize);
+                    const auto partition = lBid + 1 == superBlockSize ?
+                        routedTokens - lBid * allocation : allocation;
+                    const auto trips = partition / batch;
+                    for (uint j = 0; j < trips; ++j) {
+                        // global -> shared
+                        const auto offset = lBid * allocation + j * batch;
                         #pragma unroll
-                        for (uint k = threadIdx.x; k < vTokenSize; k += threads) {
-                            CAST_TO(uint4, localPH)[k] = __ldg(vAP + k);
+                        for (uint k = 0; k < batch; ++k) {
+                            sC(threadIdx.x, k) = __ldg(&tokenIds(expertIdx, offset + k).tokenIdx);
                         }
-                        const auto rIdx = vTokenSize * (sizeof(uint4) / sizeof(Element));
-                        localPH += sizeof(uint4) * vTokenSize;
+                        // shared -> registers
                         #pragma unroll
-                        for (uint k = threadIdx.x + rIdx; k < H; k += threads) {
-                            CAST_TO(NativeElement, localPH)[k] = __ldg(aP + k);
+                        for (uint k = 0; k < batch; ++k) {
+                            rTID[k] = sC(threadIdx.x, k);
+                        }
+                        if (j + 1 < trips) {
+                            // if needed, start loads for the next batch after draining shared memory
+                            // global -> shared
+                            #pragma unroll
+                            for (uint k = 0; k < batch; ++k) {
+                                sC(threadIdx.x, k) = __ldg(&tokenIds(expertIdx, (offset + batch) + k).tokenIdx);
+                            }
+                        }
+                        // Communicate these tokens
+                        #pragma unroll
+                        for (uint k = 0; k < batch; ++k) {
+                            const auto tokenIdx = rTID[k];
+                            auto* __restrict__ localPH = peerHeap + (offset + k) * H * sizeof(Element);
+                            const auto* __restrict__ aP = CONST_CAST_TO(NativeElement, &activations(tokenIdx, 0));
+                            const auto* __restrict__ vAP = static_cast<const uint4*>(static_cast<const void*>(aP));
+                            constexpr auto vTokenSize = H / (sizeof(uint4) / sizeof(Element));
+                            // Use high-throughput vector copy
+                            #pragma unroll
+                            for (uint l = threadIdx.x; l < vTokenSize; l += threads) {
+                                CAST_TO(uint4, localPH)[l] = __ldg(vAP + l);
+                            }
+                            const auto rIdx = vTokenSize * (sizeof(uint4) / sizeof(Element));
+                            localPH += sizeof(uint4) * vTokenSize;
+                            #pragma unroll
+                            for (uint l = threadIdx.x + rIdx; l < H; l += threads) {
+                                CAST_TO(NativeElement, localPH)[l] = __ldg(aP + l);
+                            }
+                        }
+                    }
+                    // residue
+                    if (const auto residue = partition - trips * batch; residue) {
+                        const auto offset = lBid * allocation + trips * batch;
+                        // global -> shared
+                        for (uint k = 0; k < residue; ++k) {
+                            sC(threadIdx.x, k) = __ldg(&tokenIds(expertIdx, offset + k).tokenIdx);
+                        }
+                        // shared -> registers
+                        #pragma unroll
+                        for (uint k = 0; k < batch; ++k) {
+                            if (k < residue) {
+                                rTID[k] = sC(threadIdx.x, k);
+                            }
+                        }
+                        #pragma unroll
+                        for (uint k = 0; k < batch; ++k) {
+                            if (k < residue) {
+                                const auto tokenIdx = rTID[k];
+                                auto* __restrict__ localPH = peerHeap + (offset + k) * H * sizeof(Element);
+                                const auto* __restrict__ aP = CONST_CAST_TO(NativeElement, &activations(tokenIdx, 0));
+                                const auto* __restrict__ vAP = static_cast<const uint4*>(static_cast<const void*>(aP));
+                                constexpr auto vTokenSize = H / (sizeof(uint4) / sizeof(Element));
+                                // Use high-throughput vector copy
+                                #pragma unroll
+                                for (uint l = threadIdx.x; l < vTokenSize; l += threads) {
+                                    CAST_TO(uint4, localPH)[l] = __ldg(vAP + l);
+                                }
+                                const auto rIdx = vTokenSize * (sizeof(uint4) / sizeof(Element));
+                                localPH += sizeof(uint4) * vTokenSize;
+                                #pragma unroll
+                                for (uint l = threadIdx.x + rIdx; l < H; l += threads) {
+                                    CAST_TO(NativeElement, localPH)[l] = __ldg(aP + l);
+                                }
+                            }
                         }
                     }
                     __syncthreads();

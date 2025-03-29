@@ -91,7 +91,7 @@ namespace aristos::gate {
             typename GArg,
             typename ElementC,
             typename Element = typename MatrixA::value_type,
-            unsigned int elems = ACC::PeakHardware::rScratch::value,
+            unsigned int elems = ACC::STE::value,
             unsigned int sharedSize = ACC::PeakHardware::sharedMemory::value
         >
         __device__ __forceinline__

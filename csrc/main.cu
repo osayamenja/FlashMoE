@@ -90,10 +90,10 @@ void runOS() {
         cudaMemcpyDeviceToHost, aristos::aristosStream));
     CHECK_ERROR_EXIT(cudaFreeAsync(p, aristos::aristosStream));
     aristos::finalize();
-    const auto og = make_tensor(oH,
+    /*const auto og = make_tensor(oH,
         make_layout(cute::make_shape(S, PX), cute::LayoutRight{}));
     print_tensor(og);
-    /*const auto o = make_tensor(oH + S * PX,
+    const auto o = make_tensor(oH + S * PX,
         make_layout(cute::make_shape(S, H), cute::LayoutRight{}));
     print_tensor(o);*/
     /*const auto og = make_tensor(oH,
