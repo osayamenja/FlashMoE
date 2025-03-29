@@ -137,7 +137,7 @@ namespace aristos::moe{
     __host__ __forceinline__
     void forwardHost(const void* __restrict__ iP, void* __restrict__ oP){
         #if ARISTOS_TRACE
-        aristosRange forwardRange{__PRETTY_FUNCTION__};
+        aristosRange forwardRange{__PRETTY_FUNCTION__ + std::string(", seqNo: ") + std::to_string(seqBit)};
         #endif
         reportError(isInitialized, "Not initialized!");
         CHECK_ERROR_EXIT(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));

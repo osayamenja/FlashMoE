@@ -108,13 +108,16 @@ namespace aristos::packet {
                     const auto partition = lBid + 1 == superBlockSize ?
                         routedTokens - lBid * allocation : allocation;
                     const auto trips = partition / batch;
-                    for (uint j = 0; j < trips; ++j) {
+                    if (trips) {
+                        // prefetch
                         // global -> shared
-                        const auto offset = lBid * allocation + j * batch;
                         #pragma unroll
                         for (uint k = 0; k < batch; ++k) {
-                            sC(threadIdx.x, k) = __ldg(&tokenIds(expertIdx, offset + k).tokenIdx);
+                            sC(threadIdx.x, k) = __ldg(&tokenIds(expertIdx, lBid * allocation + k).tokenIdx);
                         }
+                    }
+                    for (uint j = 0; j < trips; ++j) {
+                        const auto offset = lBid * allocation + j * batch;
                         // shared -> registers
                         #pragma unroll
                         for (uint k = 0; k < batch; ++k) {
