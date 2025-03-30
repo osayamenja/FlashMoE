@@ -30,7 +30,6 @@ namespace aristos::os {
         BiasUp const& biasUp,
         BiasDown const& biasDown,
         const uint16_t& lSeqBit) {
-        __shared__ uint16_t sSeqBit;
         const auto ssfC = __ldg(bookkeeping.ssFc());
         const auto* __restrict__ eC = bookkeeping.eC();
         const auto world = bookkeeping.world;
@@ -86,8 +85,6 @@ namespace aristos::os {
             // unknown a priori
             *taskBound = bookkeeping.nLx * bookkeeping.world *
                 ACC::TCM::value * (ACC::TN::value + ACC::TNx::value);
-            // Operand for a NOOP instruction executed by the subscriber
-            sSeqBit = lSeqBit;
         }
         #pragma unroll
         for (uint i = threadIdx.x; i < E; i += threads) {
@@ -132,9 +129,12 @@ namespace aristos::os {
                 gtQHeads, taskBound, rQ, sQ, pDB);
         }
         else {
+            __shared__ uint16_t sSeqBit[SUBSCRIBERS];
             const auto tIdx = threadIdx.x - WARP_SIZE;
+            // Operand for a NOOP instruction
+            sSeqBit[tIdx] = lSeqBit;
             // subscriber
-            subscriber::start<bitSetSizePs, wSet>(bitSet, subscriberScratch, &sSeqBit,
+            subscriber::start<bitSetSizePs, wSet>(bitSet, subscriberScratch, sSeqBit + tIdx,
                 interrupt, tQHeads + tIdx, pL, lX, eL, ssfC, status, taskBound,
                 moeOutput, expertsUp, expertsDown, biasUp, biasDown, lSeqBit, tIdx);
         }

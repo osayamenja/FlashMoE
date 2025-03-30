@@ -18,7 +18,7 @@
 namespace aristos {
     template<
         UseBarrier u = UseBarrier::no,
-        unsigned int trials = 16U,
+        unsigned int trials = 128U,
         unsigned int N = ACC::P::value,
         unsigned int K = ACC::H::value,
         unsigned int blocks = ACC::PeakHardware::OS::processorBlocks::value,
@@ -26,6 +26,7 @@ namespace aristos {
         CombineMode c = ACC::CM::value,
         typename Element
     >
+    requires(trials > 0)
     __host__ __forceinline__
     void mFT(unsigned int const& M,
         cuda::barrier<cuda::thread_scope_device>* __restrict__ const& dB,
@@ -52,7 +53,7 @@ namespace aristos {
     }
     template<
         UseBarrier u = UseBarrier::no,
-        unsigned int trials = 1U
+        unsigned int trials = 128U
     >
     __host__ __forceinline__
     void mT(WorkerAttribute* __restrict__ const& dWa) {

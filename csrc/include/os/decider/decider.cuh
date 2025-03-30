@@ -304,7 +304,9 @@ namespace aristos{
 
         auto j = 0U;
         while(!t.empty()){
-            auto budget = static_cast<int>(std::ceil(wG[j].processingRate * totalCost / totalRate));
+            // lower bound at 0.51 ensures rounding to 1 for very small pBudget
+            const auto pBudget = cute::max(wG[j].processingRate * totalCost / totalRate, 0.51f);
+            auto budget = static_cast<int>(std::rint(pBudget));
             const auto allocated = budget;
             while(budget > 0 && wG[j].memoryCapacity > 0 && !t.empty()){
                 auto expertBudget = Expert(budget);

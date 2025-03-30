@@ -32,6 +32,7 @@ void makeIdentity(float* const& __restrict__ p, const bool print = false) {
 
 __host__ __forceinline__
 void runOS() {
+    aristos::initialize();
     // generate random input tile and eye weights
     constexpr auto S = aristos::ACC::S::value;
     constexpr auto H = aristos::ACC::H::value;
@@ -72,10 +73,9 @@ void runOS() {
     }
     CHECK_ERROR_EXIT(cudaMemcpyAsync(p, eHp, sizeof(Element) * dZ, cudaMemcpyHostToDevice,
         aristos::aristosStream));
-    aristos::initialize();
-    for (uint i = 0; i < 1; ++i) {
-        aristos::moe::forwardHost(p, p + dZ * sizeof(Element));
-    }
+    // for (uint i = 0; i < 64; ++i) {
+    //     aristos::moe::forwardHost(p, p + dZ * sizeof(Element));
+    // }
     //aristos::moe::forwardHost<false>(p, p + dZ * sizeof(Element));
     /*using clk = std::chrono::high_resolution_clock;
     std::chrono::duration<float> end {};
@@ -83,12 +83,13 @@ void runOS() {
     //aristos::moe::forwardHost(p, p + dZ * sizeof(Element));
     /*end = clk::now() - start;
     printf("Initialize takes %fms\n", end.count() * 1000);*/
-    CHECK_ERROR_EXIT(cudaPeekAtLastError());
+
+    /*CHECK_ERROR_EXIT(cudaPeekAtLastError());
     auto* __restrict__ oH = eHp + dZ;
     CHECK_ERROR_EXIT(cudaMemcpyAsync(oH, p + dZ * sizeof(Element),
         sizeof(Element) * S * (PX + H),
         cudaMemcpyDeviceToHost, aristos::aristosStream));
-    CHECK_ERROR_EXIT(cudaFreeAsync(p, aristos::aristosStream));
+    CHECK_ERROR_EXIT(cudaFreeAsync(p, aristos::aristosStream));*/
     aristos::finalize();
     /*const auto og = make_tensor(oH,
         make_layout(cute::make_shape(S, PX), cute::LayoutRight{}));

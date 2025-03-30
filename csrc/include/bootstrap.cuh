@@ -33,6 +33,18 @@ namespace aristos{
             const uint16_t& _nLx,
             const uint16_t& _epW):
         epRank(_epR), expertSlots(_eS), nLx(_nLx), epWorld(_epW) {}
+
+        void dump() const {
+            printf("{\n\t"
+                   "this: %p,\n\t"
+                   "epRank: %u,\n\t"
+                   "expertSlots: %u,\n\t"
+                   "nLx: %u,\n\t"
+                   "epWorld: %u"
+                   "\n}\n",
+                   this,
+                   epRank, expertSlots, nLx, epWorld);
+        }
     };
 
     __host__ __forceinline__
@@ -98,7 +110,7 @@ namespace aristos{
         uint* __restrict__ const& pT,
         uint* __restrict__ const& ePs,
         uint* __restrict__ const& ePsX,
-        uint16_t* __restrict__ const& scratch, // assume zeroed out
+        uint16_t* __restrict__ const& scratch,
         const floatPair* __restrict__ const& aP,
         const WorkerAttribute* __restrict__ const& attributes,
         const uint& rank, const uint& world) {
@@ -106,10 +118,10 @@ namespace aristos{
         aristosRange decRange{__func__};
         #endif
         constexpr auto E = ACC::E::value;
-
+        constexpr cutlass::NumericConverter<float, cute::half_t> h2f{};
         for (uint16_t i = 0; i < world; ++i) {
             const auto [t, m] = attributes[i];
-            wG[i] = Worker{i, __half2float(t.to_half()), m};
+            wG[i] = Worker{i, h2f(t), m};
         }
         const auto adj = make_tensor(aP, make_layout(cute::make_shape(world, world), cute::LayoutRight{}));
         constexpr Decider<ACC::JT::value> decider{};
@@ -130,6 +142,7 @@ namespace aristos{
         }
         assign(ePwG, epWorld, experts, E, ePs);
         uint16_t expertSlots = 0U;
+        std::ranges::fill(scratch, scratch + world, 0U);
         // compute expert slots for our group
         for (uint16_t i = 0; i < E; ++i) {
             const auto wIdx = ePs[i];
@@ -411,11 +424,6 @@ namespace aristos{
         ACC::P::value % BLOCK_N == 0 && ACC::H::value % BLOCK_N == 0);
         static_assert(NUM_EXPERTS <= cuda::std::numeric_limits<uint16_t>::max(),
             "For performance, we assume number of experts <= UINT16_MAX");
-        int cudaDevAttribute = 0;
-        int dev = 0;
-        CHECK_ERROR_EXIT(cudaGetDevice(&dev));
-        CHECK_ERROR_EXIT(cudaDeviceGetAttribute(&cudaDevAttribute, cudaDevAttrMemoryPoolsSupported, dev));
-        reportError(cudaDevAttribute, "Memory Pools support required");
         distributedInit<(ACC::E::value > 1) ? EP::yes : EP::no>();
     }
 

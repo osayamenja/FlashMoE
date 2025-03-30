@@ -332,12 +332,30 @@ namespace aristos{
         uint epRank; // host peer
         uint16_t localExpertIndex;
         uint16_t isRemote;
+
+        __host__ __device__ __forceinline__
+        void dump() const {
+            printf("{\n\t"
+                   "this: %p,\n\t"
+                   "epRank: %u,\n\t"
+                   "localExpertIndex: %u,\n\t"
+                   "isRemote: %s"
+                   "\n}\n",
+                   this,
+                   epRank, localExpertIndex, isRemote ? "True" : "False");
+        }
     };
 
     /// Local expert lookup: key is local expert index
     __device__
     struct __align__(4) LXI {
         uint expertIndex;
+        __host__ __device__ __forceinline__
+        void dump() const {
+            printf("{\n\t"
+                   "this: %p\n\t"
+                   "expertIndex: %u\n}\n", this, expertIndex);
+        }
     };
 
     /// Peer lookup info: key is ep rank
@@ -347,6 +365,18 @@ namespace aristos{
         flagsType* remoteSFlags;
         uint pe;
         uint isRemote;
+
+        __host__ __device__ __forceinline__
+        void dump() const {
+            printf("{\n\t"
+                   "this: %p,\n\t"
+                   "remoteSHeap: %p,\n\t"
+                   "remoteSFlags: %p,\n\t"
+                   "pe: %u,\n\t"
+                   "isRemote: %s"
+                   "\n}\n",
+                   this, remoteSHeap, remoteSFlags, pe, isRemote ? "True" : "False");
+        }
     };
 
     /// Packet Encoding Lookup info, retrievable in a single memory lookup
@@ -362,6 +392,24 @@ namespace aristos{
         uint16_t pe;
         uint16_t isRemote;
         uint16_t nLocalExperts;
+
+        __host__ __device__ __forceinline__
+        void dump() const {
+            printf("{\n\t"
+                   "this: %p,\n\t"
+                   "remoteSHeap: %p,\n\t"
+                   "remoteSFlags: %p,\n\t"
+                   "eC: %u,\n\t"
+                   "pTTt: %u,\n\t"
+                   "expertLocalIndex: %u,\n\t"
+                   "peer: %u,\n\t"
+                   "pe: %u,\n\t"
+                   "isRemote: %s,\n\t"
+                   "nLocalExperts: %u"
+                   "\n}\n",
+                   this, remoteSHeap, remoteSFlags, eC, pTTt, expertLocalIdx,
+                   peer, pe, isRemote ? "True" : "False", nLocalExperts);
+        }
     };
 
     /// Computes precise number of integers needed to represent a consecutive set of bits of size,
