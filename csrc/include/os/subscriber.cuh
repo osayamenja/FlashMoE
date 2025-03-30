@@ -20,9 +20,8 @@ namespace aristos::subscriber{
     // We cannot decouple the API, unfortunately,
     // as the memory ordering mechanism is internal.
     __device__ __forceinline__
-    void eMC(uint16_t* __restrict__ const& mCN,
-        const uint16_t& localSeqBit) {
-        nvshmem_ushort_test(mCN, NVSHMEM_CMP_EQ, localSeqBit);
+    void eMC(uint16_t* __restrict__ const& sSeqBit, const uint16_t& localSeqBit) {
+        nvshmem_ushort_test(sSeqBit, NVSHMEM_CMP_EQ, localSeqBit);
     }
 
     template<
@@ -63,7 +62,7 @@ namespace aristos::subscriber{
             const uint &nLx,
             const uint &tIdx,
             const uint16_t& localSeqBit,
-            uint16_t& pSB) const {
+            uint16_t* __restrict__ const& sSeqBit) const {
             /// Flags has dimension [W, L], where W is expert parallel world and L is number of local experts
             constexpr packet::Decoder<PacketStage::initial, PeerConnectivity::p2p, Element> fPd{};
             constexpr packet::Decoder<PacketStage::initial, PeerConnectivity::remote, Element> fRd{};
@@ -107,7 +106,7 @@ namespace aristos::subscriber{
                         }
                         else {
                             // Remote peer
-                            eMC(&pSB, localSeqBit);
+                            eMC(sSeqBit, localSeqBit);
                             fRd(dA, dA.sHeap, dA.sFlags + gfSfC, packet, status, taskCount, sP->routedTokens, sP->totalTilesM,
                                 myLocalExIdx, lXI.expertIndex, pGB, weights, bias, peerIdx, pLI.pe, nLx, ltQHead, tQHead);
                         }
@@ -173,7 +172,7 @@ namespace aristos::subscriber{
             const uint& stageTrips,
             const uint& tIdx,
             const uint16_t& localSeqBit,
-            uint16_t& pSB) const {
+            uint16_t* __restrict__ const& sSeqBit) const {
             constexpr auto bSw = sizeof(uint) * 8U;
             static_assert(WorkSet::kElements == 16 || WorkSet::kElements % bSw == 0);
             constexpr packet::Decoder<PacketStage::last, PeerConnectivity::p2p> lPd{};
@@ -222,7 +221,7 @@ namespace aristos::subscriber{
                                     lookup.localExpertIndex,sP->batchIdx * BLOCK_M);
                             if (lookup.isRemote) {
                                 // enforce memory consistency
-                                eMC(&pSB, localSeqBit);
+                                eMC(sSeqBit, localSeqBit);
                                 lRd(dA, packet, CONST_CAST_TO(cuda::std::byte, tI), mO, sP->tokensM,
                                     ltQHead, tQHead, expertIdx);
                             }
@@ -283,7 +282,7 @@ namespace aristos::subscriber{
                                         lookup.localExpertIndex, sP->batchIdx * BLOCK_M);
                                 if (lookup.isRemote) {
                                     // enforce memory consistency
-                                    eMC(&pSB, localSeqBit);
+                                    eMC(sSeqBit, localSeqBit);
                                     lRd(dA, packet, CONST_CAST_TO(cuda::std::byte, tI), mO, sP->tokensM,
                                         ltQHead, tQHead, expertIdx);
                                 }
@@ -323,6 +322,7 @@ namespace aristos::subscriber{
     __device__ __forceinline__
     void start(BitSet* __restrict__ const& bitSet,
         uint* __restrict__ const& workspace,
+        uint16_t* __restrict__ const& sSeqBit,
         unsigned int* __restrict__ const& interrupt,
         unsigned int* __restrict__ const& tQHead,
         const PLI* __restrict__ const& pL,
@@ -338,7 +338,6 @@ namespace aristos::subscriber{
         BiasDown const& biasDown,
         const uint16_t& lSeqBit,
         const uint& tIdx){
-        auto pSB = lSeqBit;
         // offset due to warp specialization for the scheduler
         static_assert(sizeof(unsigned long long int) == sizeof(flagsType));
         static_assert(sizeof(SignalPayload<>) == sizeof(uint64_t));
@@ -408,7 +407,7 @@ namespace aristos::subscriber{
                     fSl,
                     nLx,
                     tIdx,
-                    lSeqBit, pSB
+                    lSeqBit, sSeqBit
                 );
             }
             flags += gfSfC;
@@ -427,7 +426,7 @@ namespace aristos::subscriber{
                 ssL,
                 ssT,
                 tIdx,
-                lSeqBit, pSB);
+                lSeqBit, sSeqBit);
         }
     }
 }

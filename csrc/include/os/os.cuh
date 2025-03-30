@@ -30,12 +30,12 @@ namespace aristos::os {
         BiasUp const& biasUp,
         BiasDown const& biasDown,
         const uint16_t& lSeqBit) {
+        __shared__ uint16_t sSeqBit;
         const auto ssfC = __ldg(bookkeeping.ssFc());
         const auto* __restrict__ eC = bookkeeping.eC();
         const auto world = bookkeeping.world;
         const auto nLx = bookkeeping.nLx;
         constexpr auto subscriberCount = threads - WARP_SIZE;
-
         // each subscriber thread gets wSet * sizeof(uint) bytes of workspace
         constexpr auto wSet = 16U; // working set size
         constexpr auto bitSetSizePs = cute::ceil_div(wSet, sizeof(uint) * 8U);
@@ -86,6 +86,8 @@ namespace aristos::os {
             // unknown a priori
             *taskBound = bookkeeping.nLx * bookkeeping.world *
                 ACC::TCM::value * (ACC::TN::value + ACC::TNx::value);
+            // Operand for a NOOP instruction executed by the subscriber
+            sSeqBit = lSeqBit;
         }
         #pragma unroll
         for (uint i = threadIdx.x; i < E; i += threads) {
@@ -132,8 +134,8 @@ namespace aristos::os {
         else {
             const auto tIdx = threadIdx.x - WARP_SIZE;
             // subscriber
-            subscriber::start<bitSetSizePs, wSet>(bitSet, subscriberScratch, interrupt,
-                tQHeads + tIdx, pL, lX, eL, ssfC, status, taskBound,
+            subscriber::start<bitSetSizePs, wSet>(bitSet, subscriberScratch, &sSeqBit,
+                interrupt, tQHeads + tIdx, pL, lX, eL, ssfC, status, taskBound,
                 moeOutput, expertsUp, expertsDown, biasUp, biasDown, lSeqBit, tIdx);
         }
     }
