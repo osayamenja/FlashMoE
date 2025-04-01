@@ -159,7 +159,9 @@ namespace aristos::moe{
                 CHECK_ERROR_EXIT(cudaEventRecord(stop, aristos::aristosStream));
                 CHECK_ERROR_EXIT(cudaStreamSynchronize(aristosStream));
                 CHECK_ERROR_EXIT(cudaEventElapsedTime(&duration, start, stop));
-                printf("Duration is %fms", duration);
+                CHECK_ERROR_EXIT(cudaEventDestroy(start));
+                CHECK_ERROR_EXIT(cudaEventDestroy(stop));
+                printf("Duration is %fms\n", duration);
             }
         }
         else {

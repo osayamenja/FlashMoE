@@ -1,7 +1,6 @@
 /******************************************************************************
  * Copyright (c) 2024, Osayamen Jonathan Aimuyo.
  ******************************************************************************/
-#include <ATen/core/interned_strings.h>
 #include <fmt/ranges.h>
 #include <thrust/generate.h>
 #include <thrust/random.h>
@@ -85,7 +84,7 @@ void runOS() {
     }
     CHECK_ERROR_EXIT(cudaMemcpyAsync(p, eHp, sizeof(Element) * dZ, cudaMemcpyHostToDevice,
         aristos::aristosStream));
-    for (uint i = 0; i < 1; ++i) {
+    for (uint i = 0; i < 1024; ++i) {
         aristos::moe::forwardHost(p, p + dZ * sizeof(Element));
     }
     //aristos::moe::forwardHost<false>(p, p + dZ * sizeof(Element));
@@ -122,12 +121,13 @@ void runOS() {
         fmt::println(file, "Rank {}->Expert {}->{} tokens: {}", rank, i, expertCounts[i], tokenOrderingIds);
     }
     std::fclose(file);
-    if (!rank) {
+    /*if (rank == 1) {
         const auto o = make_tensor(oH + S * PX,
             make_layout(cute::make_shape(S, H), cute::LayoutRight{}));
-        //print_tensor(local_tile(o, Tiler{}, 0));
-        print_tensor(o);
-    }
+        using Tiler = cute::Shape<cute::Int<BLOCK_M>, cute::_8>;
+        print_tensor(local_tile(o, Tiler{}, 0));
+        //print_tensor(o);
+    }*/
     CHECK_ERROR_EXIT(cudaFreeAsync(p, aristos::aristosStream));
     aristos::finalize();
     /*const auto og = make_tensor(oH,

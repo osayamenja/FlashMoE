@@ -66,7 +66,7 @@ namespace aristos::packet {
         auto* __restrict__ sPTT = CAST_TO(uint, workspace + oT2);
         const auto world = bookkeeping.world;
         #pragma unroll
-        for (uint i = 0; i < world; i += threads) {
+        for (uint i = threadIdx.x; i < world; i += threads) {
             sPTT[i] = 0U; // clear before accumulation
         }
         __syncthreads();
