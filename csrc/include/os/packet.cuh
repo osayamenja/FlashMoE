@@ -309,7 +309,6 @@ namespace aristos::packet {
             taskResults[1] = p == PeerConnectivity::remote ?
                 heap::advance<1, 0>(sHeap, peer, localExpertIdx) : rcData;
             for (uint i = 0; i < fTilesM; ++i) {
-                #pragma unroll
                 for (uint j = 0; j < tN; ++j) {
                     const auto tileIdx = j + i * tN;
                     dA.tQ[DQ::next(qIdx, tileIdx)] = Task{
@@ -333,7 +332,6 @@ namespace aristos::packet {
 
             // residue tile
             if (const auto residue = routedTokens - fTilesM * BLOCK_M; residue) {
-                #pragma unroll
                 for (uint j = 0; j < tN; ++j) {
                     const auto tileIdx = j + fTilesM * tN;
                     dA.tQ[DQ::next(qIdx, tileIdx)] = Task{
@@ -407,7 +405,6 @@ namespace aristos::packet {
             const unsigned int& expertIdx) const {
             const auto qIdx = DQ::sNext(lTQHead);
             constexpr auto tN = ACC::TN::value;
-            #pragma unroll
             for (uint i = 0; i < tN; ++i) {
                 dA.tQ[DQ::next(qIdx, i)] = Task{
                     TaskType::combine,

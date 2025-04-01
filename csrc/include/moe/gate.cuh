@@ -748,8 +748,7 @@ namespace aristos::gate {
         constexpr auto bN = cute::get<1>(ctaTiler{});
         FusedGate<g, Operation> fusedGate{};
 
-        constexpr auto nT = ACC::TN::value * ACC::TPX::value;
-        #pragma unroll
+        constexpr auto nT = ACC::TM::value * ACC::TPX::value;
         for (unsigned int i = blockIdx.x; i < nT; i += blocks) {
             fusedGate(activations, weights, routing, i, gArg, scratch);
         }

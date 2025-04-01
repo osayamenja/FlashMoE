@@ -71,9 +71,13 @@ void runOS() {
     // loop for number of experts
     for (uint i = 0; i < nLx; ++i) {
         // expert up
-        makeIdentity<P, H>(fHp + gwZ + i * (P * H));
+        thrust::generate(fHp + gwZ + i * (P * H), fHp + gwZ + (i + 1) * (P * H),
+            [&] { return dist(rng); });
+        //makeIdentity<P, H>(fHp + gwZ + i * (P * H));
         // expert down
-        makeIdentity<P, H>(fHp + bZ +  i * (P * H));
+        //makeIdentity<P, H>(fHp + bZ +  i * (P * H));
+        thrust::generate(fHp + bZ + i * (P * H), fHp + bZ + (i + 1) * (P * H),
+            [&] { return dist(rng); });
     }
     // bias
     std::ranges::fill(fHp + b2Z, fHp + dZ, 0.0f);
@@ -82,9 +86,10 @@ void runOS() {
     for (uint i = 0; i < dZ; ++i) {
         eHp[i] = conv(fHp[i]);
     }
-    CHECK_ERROR_EXIT(cudaMemcpyAsync(p, eHp, sizeof(Element) * dZ, cudaMemcpyHostToDevice,
+    CHECK_ERROR_EXIT(cudaMemcpyAsync(p, eHp, sizeof(Element) * dZ,
+        cudaMemcpyHostToDevice,
         aristos::aristosStream));
-    for (uint i = 0; i < 1024; ++i) {
+    for (uint i = 0; i < 1; ++i) {
         aristos::moe::forwardHost(p, p + dZ * sizeof(Element));
     }
     //aristos::moe::forwardHost<false>(p, p + dZ * sizeof(Element));

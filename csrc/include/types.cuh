@@ -700,7 +700,6 @@ namespace aristos{
             constexpr auto blocks = ACC::PeakHardware::OS::processorBlocks::value;
             constexpr auto E = ACC::E::value;
             constexpr auto S = ACC::S::value;
-            constexpr auto EC = ACC::EC::value;
             constexpr auto pEC = ACC::pEC::value;
             constexpr auto P = ACC::P::value;
             constexpr auto TPX = ACC::TPX::value;
@@ -734,7 +733,6 @@ namespace aristos{
             constexpr auto blocks = ACC::PeakHardware::OS::processorBlocks::value;
             constexpr auto E = ACC::E::value;
             constexpr auto S = ACC::S::value;
-            constexpr auto EC = ACC::EC::value;
             constexpr auto pEC = ACC::pEC::value;
             constexpr auto P = ACC::P::value;
             constexpr auto TPX = ACC::TPX::value;
@@ -968,8 +966,8 @@ namespace aristos{
             unsigned int stage,
             unsigned int cell,
             /*The user should not specify the parameters below*/
-            unsigned int EC = ACC::pEC::value,
-            unsigned int H = ACC::H::value,
+            unsigned long int EC = ACC::pEC::value,
+            unsigned long int H = ACC::H::value,
             unsigned long int B = sizeof(ACC::Element)
         >
         requires (stage < STAGES && cell < CELLS)

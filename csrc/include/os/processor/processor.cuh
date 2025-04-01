@@ -592,7 +592,7 @@ namespace aristos::processor{
                             // Broadcast from t0 to everyone else in the warp
                             enqueue = __shfl_sync(0xffffffff, enqueue, 0);
                             if (enqueue) {
-                                auto* __restrict__ tQ = pA.ptQ + rCurrentTask.syncIdx;
+                                auto* __restrict__ tQ = pA.ptQ + rCurrentTask.syncIdx * ACC::TNx::value;
                                 auto* __restrict__ tQH = pA.tQH;
                                 auto nextTask = Task {
                                     TaskType::postGEMM,
@@ -610,7 +610,6 @@ namespace aristos::processor{
                                     rCurrentTask.batchIdx,
                                     rCurrentTask.isPeerRemote,
                                 };
-                                #pragma unroll
                                 for (uint i = threadIdx.x; i < tNx; i += wS) {
                                     nextTask.tileIdx = i;
                                     tQ[i] = nextTask;

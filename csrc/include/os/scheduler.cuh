@@ -330,7 +330,6 @@ namespace aristos::scheduler {
         uint gRQIdx = 0U;
         uint processorTally = processors; // initially, all processors are available, ensure that rQ has all pids
         auto tTB = atomicLoad<cuda::thread_scope_block>(taskBound);
-        const auto rank = nvshmem_my_pe();
         while (scheduled < tTB) {
             // statically sweep tQ for tasks
             uint lTt = 0U; // local task tally
