@@ -428,6 +428,18 @@ namespace aristos{
     }
 
     __host__ __forceinline__
+    void setDevice() {
+        reportError(isInitialized, "Not initialized!");
+        CHECK_ERROR_EXIT(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
+    }
+
+    __host__ __forceinline__
+    auto getRank() {
+        reportError(isInitialized, "Not initialized!");
+        return nvshmem_my_pe();
+    }
+
+    __host__ __forceinline__
     void finalize(){
         #if ARISTOS_TRACE
         aristosRange finalRange{__PRETTY_FUNCTION__};

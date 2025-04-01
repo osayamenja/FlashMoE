@@ -17,13 +17,15 @@ namespace aristos::packet {
         unsigned int H = ACC::H::value,
         unsigned int E = ACC::E::value,
         unsigned int EC = ACC::EC::value,
+        unsigned int pEC = ACC::pEC::value,
         unsigned int threads = ACC::PeakHardware::OS::threads::value,
         unsigned int batch = cute::min(cute::ceil_div(ACC::EC::value, 32U), 32U),
         typename Activations
     >
     requires (isTensor<Activations>::value && cutlass::is_pow2<batch>::value)
     __forceinline__ __device__
-    void encode(const Activations& activations, cuda::std::byte* __restrict__ const& workspace, const uint16_t& rSeqBit) {
+    void encode(const Activations& activations,
+        cuda::std::byte* __restrict__ const& workspace, const uint16_t& rSeqBit) {
         static_assert(sizeof(SignalPayload<>) == sizeof(ull_t) && alignof(SignalPayload<>) == alignof(ull_t));
         static_assert(sizeof(flagsType) == sizeof(ull_t) && alignof(flagsType) == alignof(ull_t));
         using Element = typename Activations::value_type;
@@ -45,8 +47,8 @@ namespace aristos::packet {
         auto* __restrict__ flags = bookkeeping.flags;
 
         const auto tokenIds = make_tensor(cute::make_gmem_ptr(tP),
-            cute::Layout<cute::Shape<cute::Int<E>, cute::Int<EC>>,
-                cute::Stride<cute::Int<EC>, cute::_1>>{});
+            cute::Layout<cute::Shape<cute::Int<E>, cute::Int<pEC>>,
+                cute::Stride<cute::Int<pEC>, cute::_1>>{});
         static_assert(cuda::std::is_same_v<TPS, typename decltype(tokenIds)::value_type>);
         /// Populate Data Structures
         const auto* __restrict__ enL = CAST_TO(PEL, workspace);
@@ -71,8 +73,8 @@ namespace aristos::packet {
         #pragma unroll
         for (uint i = threadIdx.x; i < E; i += threads) {
             const auto peer = enL[i].peer;
-            atomicAdd_block(sPTT + peer,
-                d == DropTokens::yes ? cute::min(seC[i], EC) : seC[i]);
+            const auto nTokens = d == DropTokens::yes ? cute::min(seC[i], EC) : seC[i];
+            atomicAdd_block(sPTT + peer, Bookkeeping::tiles<BLOCK_M>(nTokens));
         }
         __syncthreads();
 
@@ -82,7 +84,7 @@ namespace aristos::packet {
             auto* __restrict__ peL = CAST_TO(PEL, workspace) + i;
             const auto peer = peL->peer;
             peL->eC = seC[i];
-            peL->pTTt = static_cast<uint16_t>(Bookkeeping::tiles<BLOCK_M>(sPTT[peer]));
+            peL->pTTt = static_cast<uint16_t>(sPTT[peer]);
         }
         __syncthreads();
         constexpr auto exL = cute::ceil_div(E, numSuperBlocks);
@@ -104,20 +106,18 @@ namespace aristos::packet {
                     heap::advance<0, 0>(sHeap, lI.peer, lI.expertLocalIdx) :
                 heap::advance<0, 1>(lI.remoteSHeap, epRank, lI.expertLocalIdx);
                 if (routedTokens) {
-                    const auto allocation = cute::ceil_div(routedTokens, superBlockSize);
-                    const auto partition = lBid + 1 == superBlockSize ?
-                        routedTokens - lBid * allocation : allocation;
+                    const auto partition = routedTokens / superBlockSize +
+                        (lBid < routedTokens % superBlockSize);
                     const auto trips = partition / batch;
                     if (trips) {
                         // prefetch
                         // global -> shared
                         #pragma unroll
                         for (uint k = 0; k < batch; ++k) {
-                            sC(threadIdx.x, k) = __ldg(&tokenIds(expertIdx, lBid * allocation + k).tokenIdx);
+                            sC(threadIdx.x, k) = __ldg(&tokenIds(expertIdx, lBid + k * superBlockSize).tokenIdx);
                         }
                     }
                     for (uint j = 0; j < trips; ++j) {
-                        const auto offset = lBid * allocation + j * batch;
                         // shared -> registers
                         #pragma unroll
                         for (uint k = 0; k < batch; ++k) {
@@ -128,36 +128,29 @@ namespace aristos::packet {
                             // global -> shared
                             #pragma unroll
                             for (uint k = 0; k < batch; ++k) {
-                                sC(threadIdx.x, k) = __ldg(&tokenIds(expertIdx, (offset + batch) + k).tokenIdx);
+                                sC(threadIdx.x, k) = __ldg(&tokenIds(expertIdx,
+                                    lBid + (k + (j + 1) * batch) * superBlockSize).tokenIdx);
                             }
                         }
                         // Communicate these tokens
                         #pragma unroll
                         for (uint k = 0; k < batch; ++k) {
                             const auto tokenIdx = rTID[k];
-                            auto* __restrict__ localPH = peerHeap + (offset + k) * H * sizeof(Element);
+                            const auto intraIdx = lBid + (k + j * batch) * superBlockSize;
+                            auto* __restrict__ localPH = peerHeap + intraIdx * H * sizeof(Element);
                             const auto* __restrict__ aP = CONST_CAST_TO(NativeElement, &activations(tokenIdx, 0));
-                            const auto* __restrict__ vAP = static_cast<const uint4*>(static_cast<const void*>(aP));
-                            constexpr auto vTokenSize = H / (sizeof(uint4) / sizeof(Element));
-                            // Use high-throughput vector copy
+                            // coalesced copy
                             #pragma unroll
-                            for (uint l = threadIdx.x; l < vTokenSize; l += threads) {
-                                CAST_TO(uint4, localPH)[l] = __ldg(vAP + l);
-                            }
-                            const auto rIdx = vTokenSize * (sizeof(uint4) / sizeof(Element));
-                            localPH += sizeof(uint4) * vTokenSize;
-                            #pragma unroll
-                            for (uint l = threadIdx.x + rIdx; l < H; l += threads) {
+                            for (uint l = threadIdx.x; l < H; l += threads) {
                                 CAST_TO(NativeElement, localPH)[l] = __ldg(aP + l);
                             }
                         }
                     }
                     // residue
                     if (const auto residue = partition - trips * batch; residue) {
-                        const auto offset = lBid * allocation + trips * batch;
                         // global -> shared
                         for (uint k = 0; k < residue; ++k) {
-                            sC(threadIdx.x, k) = __ldg(&tokenIds(expertIdx, offset + k).tokenIdx);
+                            sC(threadIdx.x, k) = __ldg(&tokenIds(expertIdx, lBid + (k + trips * batch) * superBlockSize).tokenIdx);
                         }
                         // shared -> registers
                         #pragma unroll
@@ -170,19 +163,11 @@ namespace aristos::packet {
                         for (uint k = 0; k < batch; ++k) {
                             if (k < residue) {
                                 const auto tokenIdx = rTID[k];
-                                auto* __restrict__ localPH = peerHeap + (offset + k) * H * sizeof(Element);
+                                const auto intraIdx = lBid + (k + trips * batch) * superBlockSize;
+                                auto* __restrict__ localPH = peerHeap + intraIdx * H * sizeof(Element);
                                 const auto* __restrict__ aP = CONST_CAST_TO(NativeElement, &activations(tokenIdx, 0));
-                                const auto* __restrict__ vAP = static_cast<const uint4*>(static_cast<const void*>(aP));
-                                constexpr auto vTokenSize = H / (sizeof(uint4) / sizeof(Element));
-                                // Use high-throughput vector copy
                                 #pragma unroll
-                                for (uint l = threadIdx.x; l < vTokenSize; l += threads) {
-                                    CAST_TO(uint4, localPH)[l] = __ldg(vAP + l);
-                                }
-                                const auto rIdx = vTokenSize * (sizeof(uint4) / sizeof(Element));
-                                localPH += sizeof(uint4) * vTokenSize;
-                                #pragma unroll
-                                for (uint l = threadIdx.x + rIdx; l < H; l += threads) {
+                                for (uint l = threadIdx.x; l < H; l += threads) {
                                     CAST_TO(NativeElement, localPH)[l] = __ldg(aP + l);
                                 }
                             }

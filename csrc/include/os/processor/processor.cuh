@@ -56,6 +56,7 @@ namespace aristos::processor{
         const auto mC = make_tensor(cute::make_gmem_ptr(moeOutput),
             cute::Layout<cute::Shape<cute::Int<M>, cute::Int<N>>,
                 cute::Stride<cute::Int<N>, cute::_1>>{});
+
         // We assert the below prior to this point
         static_assert(gM % bM == 0);
         constexpr auto tilesM = gM / bM;

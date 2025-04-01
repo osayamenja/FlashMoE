@@ -316,6 +316,17 @@ namespace aristos{
         uint routedTokens;
         uint16_t totalTilesM;
         uint16_t seqBit;
+
+       __device__ __forceinline__
+       void dump() const {
+            printf("{\n\t"
+                   "this: %p,\n\t"
+                   "routedTokens: %u,\n\t"
+                   "totalTilesM: %u,\n\t"
+                   "seqBit: %u"
+                   "\n}\n",
+                   this, routedTokens, totalTilesM, seqBit);
+        }
     };
 
     template<>
@@ -324,6 +335,17 @@ namespace aristos{
         uint batchIdx;
         uint16_t tokensM; // <= BLOCK_M
         uint16_t seqBit;
+
+       __device__ __forceinline__
+       void dump() const {
+            printf("{\n\t"
+                   "this: %p,\n\t"
+                   "batchIdx: %u,\n\t"
+                   "tokensM: %u,\n\t"
+                   "seqBit: %u"
+                   "\n}\n",
+                   this, batchIdx, tokensM, seqBit);
+        }
     };
 
     /// Expert lookup info: key is global expert index
@@ -599,6 +621,35 @@ namespace aristos{
         const unsigned int& _expertIdx):
         aData(_aData), bData(_bData), cData(_cData), tileIdx(_tile), expertIdx(_expertIdx), taskType(_taskType),
         tileSize(_size){}
+
+        __device__ __forceinline__
+        void dump() const {
+            printf("{\n\t"
+                   "this: %p,\n\t"
+                   "aData: %p,\n\t"
+                   "bData[0]: %p,\n\t"
+                   "bData[1]: %p,\n\t"
+                   "cData[0]: %p,\n\t"
+                   "cData[1]: %p,\n\t"
+                   "dData[0]: %p,\n\t"
+                   "dData[1]: %p,\n\t"
+                   "rcData: %p,\n\t"
+                   "flags: %p,\n\t"
+                   "syncIdx: %u,\n\t"
+                   "tileIdx: %u,\n\t"
+                   "M: %u,\n\t"
+                   "batchIdx: %u,\n\t"
+                   "peerIdx: %u,\n\t"
+                   "expertIdx: %u,\n\t"
+                   "isPeerRemote: %s,\n\t"
+                   "taskType: %u,\n\t"
+                   "tileSize: %u"
+                   "\n}\n",
+                   this, aData, bData[0], bData[1], cData[0], cData[1],
+                   dData[0], dData[1], rcData, flags, syncIdx, tileIdx, M,
+                   batchIdx, peerIdx, expertIdx, isPeerRemote ? "True" : "False",
+                   taskType, tileSize);
+        }
     };
 
     /// Information about auxiliary data structures comprising bookkeeping state
@@ -663,7 +714,7 @@ namespace aristos{
                 sT = tPs * SUBSCRIBERS;
                 tQl = sizeof(Task) * (sT + prT);
                 tQml = tQl + blocks * sizeof(TQSignal) + E * sizeof(PEL) + sizeof(PLI) * world +
-                    sizeof(TPS) * (E * EC);
+                    sizeof(TPS) * (E * pEC);
                 brs = tQml + (ACC::GRL::value == GateReductionLevel::singleBlock ? 0U : S * TPX *
                     (sizeof(RingSoftmaxPayload) + 2 * sizeof(RingTopKPayload)));
                 tQXt = brs + sizeof(ELI) * E + sizeof(cuda::barrier<cuda::thread_scope_device>) + sizeof(LXI) * _nLx;
@@ -695,7 +746,7 @@ namespace aristos{
             const auto sT = tPs * SUBSCRIBERS;
             const auto tQl = sizeof(Task) * (sT + prT);
             const auto tQml = tQl + blocks * sizeof(TQSignal) + E * sizeof(PEL) + sizeof(PLI) * _world +
-                sizeof(TPS) * (E * EC);
+                sizeof(TPS) * (E * pEC);
             const auto brs = tQml + (ACC::GRL::value == GateReductionLevel::singleBlock ? 0U :
                 S * TPX * (sizeof(RingSoftmaxPayload) + 2 * sizeof(RingTopKPayload)));
             const auto tQXt = brs + sizeof(ELI) * E + sizeof(cuda::barrier<cuda::thread_scope_device>) +
@@ -748,7 +799,7 @@ namespace aristos{
             return CAST_TO(PLI, pEL() + ACC::E::value);
         }
         static_assert(alignof(PLI) % alignof(TPS) == 0);
-        __device__ __forceinline__
+        __host__ __device__ __forceinline__
         auto* tP() const {
             return CAST_TO(TPS, pL() + world);
         }
@@ -756,7 +807,7 @@ namespace aristos{
         /// processors' doorbell
         __device__ __forceinline__
         auto* pDB() const {
-            return CAST_TO(TQSignal, tP() + ACC::E::value * ACC::EC::value);
+            return CAST_TO(TQSignal, tP() + ACC::E::value * ACC::pEC::value);
         }
 
         static_assert(alignof(ull_t) % alignof(RingSoftmaxPayload) == 0
@@ -850,7 +901,7 @@ namespace aristos{
             return ssFc() + 1;
         }
 
-        __device__ __forceinline__
+        __host__ __device__ __forceinline__
         auto *sQ() const {
             return tIx() + ACC::E::value * ACC::TCM::value * ACC::TNx::value;
         }
@@ -865,7 +916,7 @@ namespace aristos{
             return 2 * (ACC::E::value + world * nLx * ACC::TCM::value);
         }
         /***********CONTIGUOUS**************/
-        __device__ __forceinline__
+        __host__ __device__ __forceinline__
         auto* eC() const {
             return sQ() + ACC::PeakHardware::OS::processorBlocks::value;
         }

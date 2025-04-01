@@ -126,8 +126,8 @@ namespace aristos::gate {
                 cute::Shape<cute::Int<tilesM>, cute::Int<tilesN>>{},
                     cute::Stride<cute::Int<tilesN>, cute::_1>{});
             const auto tokenIds = make_tensor(cute::make_gmem_ptr(gArg.tP),
-                cute::Layout<cute::Shape<cute::Int<ACC::E::value>, cute::Int<ACC::EC::value>>,
-                    cute::Stride<cute::Int<ACC::EC::value>, cute::_1>>{});
+                cute::Layout<cute::Shape<cute::Int<ACC::E::value>, cute::Int<ACC::pEC::value>>,
+                    cute::Stride<cute::Int<ACC::pEC::value>, cute::_1>>{});
             const auto ctaCoord = make_coord(cute::get<0>(tileCoord), cute::get<1>(tileCoord), cute::_);
             const auto gA = cute::local_tile(activations, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1, cute::X,cute::_1>{});
             const auto gB = cute::local_tile(weights, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step< cute::X,cute::_1,cute::_1>{});
@@ -491,8 +491,8 @@ namespace aristos::gate {
             static_assert(cute::size(accumulator) == bN);
             constexpr auto threads = BlockGEMM::GEMM::block_dim.x;
             const auto tokenIds = make_tensor(cute::make_gmem_ptr(gArg.tP),
-                cute::Layout<cute::Shape<cute::Int<ACC::E::value>, cute::Int<ACC::EC::value>>,
-                    cute::Stride<cute::Int<ACC::EC::value>, cute::_1>>{});
+                cute::Layout<cute::Shape<cute::Int<ACC::E::value>, cute::Int<ACC::pEC::value>>,
+                    cute::Stride<cute::Int<ACC::pEC::value>, cute::_1>>{});
 
             constexpr auto tilesM = M / bM;
             constexpr auto tilesN = 1U;

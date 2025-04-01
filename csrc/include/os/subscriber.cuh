@@ -144,7 +144,7 @@ namespace aristos::subscriber{
         template<
             typename WorkSet,
             typename RBitSet,
-            unsigned int EC = ACC::EC::value,
+            typename TokenIds,
             unsigned int TN = ACC::TNx::value,
             unsigned int CS = ACC::TCM::value * TN
         >
@@ -156,7 +156,7 @@ namespace aristos::subscriber{
             BitSet* __restrict__ const& bitSet,
             const packet::DecoderArg& dA,
             /// Task Arguments
-            const TPS* const& tokenIds,
+            TokenIds const& tokenIds,
             cuda::std::byte* const& mO,
             /// Data Structures
             const uint* __restrict__ const& tileIndices,
@@ -216,9 +216,10 @@ namespace aristos::subscriber{
                             visitedSet.set(vIdx);
                             const auto expertIdx = flagIdx / CS;
                             const ELI lookup = eL[expertIdx];
-                            const auto* tI = tokenIds + (expertIdx * EC + sP->batchIdx * BLOCK_M);
+                            const auto tokenIdx = sP->batchIdx * BLOCK_M;
+                            const auto* tI = &tokenIds(expertIdx, tokenIdx);
                             const auto* packet = heap::advance<1, 1>(dA.sHeap, lookup.epRank,
-                                    lookup.localExpertIndex,sP->batchIdx * BLOCK_M);
+                                    lookup.localExpertIndex,tokenIdx);
                             if (lookup.isRemote) {
                                 // enforce memory consistency
                                 eMC(sSeqBit, localSeqBit);
@@ -277,9 +278,10 @@ namespace aristos::subscriber{
                                 // let's decode this packet
                                 const auto expertIdx = flagIdx / CS;
                                 const ELI lookup = eL[expertIdx];
-                                const auto* tI = tokenIds + (expertIdx * EC + (sP->batchIdx * BLOCK_M));
+                                const auto tokenIdx = sP->batchIdx * BLOCK_M;
+                                const auto* tI = &tokenIds(expertIdx, tokenIdx);
                                 const auto* packet = heap::advance<1, 1>(dA.sHeap, lookup.epRank,
-                                        lookup.localExpertIndex, sP->batchIdx * BLOCK_M);
+                                        lookup.localExpertIndex, tokenIdx);
                                 if (lookup.isRemote) {
                                     // enforce memory consistency
                                     eMC(sSeqBit, localSeqBit);
@@ -347,7 +349,9 @@ namespace aristos::subscriber{
         cutlass::AlignedArray<BitSet, bSzPs> rBitSet{};
 
         // lookup tables
-        const auto* tokenIds = bookkeeping.tP();
+        const auto tokenIds = make_tensor(cute::make_gmem_ptr(bookkeeping.tP()),
+            cute::Layout<cute::Shape<cute::Int<ACC::E::value>, cute::Int<ACC::pEC::value>>,
+                cute::Stride<cute::Int<ACC::pEC::value>, cute::_1>>{});
         const auto* __restrict__ tileIndices = bookkeeping.tIx();
 
         // tQ things
