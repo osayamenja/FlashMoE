@@ -127,7 +127,7 @@ namespace aristos {
         using blocks = cute::C<blocksPerSM::value * 108>;
         using bKBase = cute::C<8U>;
         using rScratch = cute::C<64U>;
-        using pipeStages = cute::C<BASE_PIPE_STAGES>;
+        using pipeStages = cute::C<BASE_PIPE_STAGES * 2>;
         using sharedMemory = cute::C<BASE_SHARED_SIZE * 2>;
         using spare = ArchShared<800U, blocksPerSM::value, sharedMemory::value, UseSharedBound::yes>::Spare;
         using OS = OSD<blocks::value>;

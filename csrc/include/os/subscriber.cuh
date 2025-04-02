@@ -99,16 +99,20 @@ namespace aristos::subscriber{
                             // P2P peer
                             // Use DMA pointers over UVA space
                             // Enforce consistency
+                            auto* nFlags = pLI.remoteSFlags + gfSfC +
+                                lXI.expertIndex * (ACC::TCM::value * ACC::TNx::value);
                             __threadfence_system();
-                            fPd(dA, pLI.remoteSHeap, pLI.remoteSFlags + gfSfC, packet, status, taskCount, sP->routedTokens,
-                                sP->totalTilesM, myLocalExIdx, lXI.expertIndex, pGB, weights, bias, peerIdx, pLI.pe,
+                            fPd(dA, pLI.remoteSHeap, nFlags, packet, status, taskCount, sP->routedTokens,
+                                sP->totalTilesM, myLocalExIdx, pGB, weights, bias, peerIdx, pLI.pe,
                                 nLx, ltQHead, tQHead);
                         }
                         else {
                             // Remote peer
+                            auto* nFlags = dA.sFlags + gfSfC +
+                                lXI.expertIndex * (ACC::TCM::value * ACC::TNx::value);
                             eMC(sSeqBit, localSeqBit);
-                            fRd(dA, dA.sHeap, dA.sFlags + gfSfC, packet, status, taskCount, sP->routedTokens, sP->totalTilesM,
-                                myLocalExIdx, lXI.expertIndex, pGB, weights, bias, peerIdx, pLI.pe, nLx, ltQHead, tQHead);
+                            fRd(dA, dA.sHeap, nFlags, packet, status, taskCount, sP->routedTokens, sP->totalTilesM,
+                                myLocalExIdx, pGB, weights, bias, peerIdx, pLI.pe, nLx, ltQHead, tQHead);
                         }
                     }
                     else if (sbs::ahead(sP->seqBit, localSeqBit)) {
@@ -370,7 +374,7 @@ namespace aristos::subscriber{
         auto fSp = fSl; // first stage pending
 
         // second stage
-        const auto ssL = ssfC / subscriberCount + (tIdx < fSfC % subscriberCount);
+        const auto ssL = ssfC / subscriberCount + (tIdx < ssfC % subscriberCount);
         const auto ssT = ssL / wSet;
 
         constexpr Subscribe<SubscriberStage::initial, subscriberCount> initialSubscriber{};

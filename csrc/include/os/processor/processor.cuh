@@ -548,7 +548,6 @@ namespace aristos::processor{
         constexpr auto tN = ACC::TN::value;
         constexpr auto tNx = ACC::TNx::value;
         __syncthreads();
-
         while (!interrupt) {
             if (!threadIdx.x) {
                 auto* __restrict__ tQSignal = pA.pDB;
@@ -592,6 +591,7 @@ namespace aristos::processor{
                             // Broadcast from t0 to everyone else in the warp
                             enqueue = __shfl_sync(0xffffffff, enqueue, 0);
                             if (enqueue) {
+                                const auto fO = ACC::TNx::value * (rCurrentTask.tileIdx / ACC::TN::value);
                                 auto* __restrict__ tQ = pA.ptQ + rCurrentTask.syncIdx * ACC::TNx::value;
                                 auto* __restrict__ tQH = pA.tQH;
                                 auto nextTask = Task {
@@ -601,7 +601,7 @@ namespace aristos::processor{
                                     rCurrentTask.cData,
                                     rCurrentTask.dData,
                                     rCurrentTask.rcData,
-                                    rCurrentTask.flags,
+                                    rCurrentTask.flags + fO,
                                     rCurrentTask.syncIdx,
                                     0,
                                     rCurrentTask.M,
@@ -610,10 +610,20 @@ namespace aristos::processor{
                                     rCurrentTask.batchIdx,
                                     rCurrentTask.isPeerRemote,
                                 };
-                                for (uint i = threadIdx.x; i < tNx; i += wS) {
-                                    nextTask.tileIdx = i;
-                                    tQ[i] = nextTask;
+                                if (!rCurrentTask.isPeerRemote) {
+                                    for (uint i = threadIdx.x; i < tNx; i += wS) {
+                                        nextTask.tileIdx = i;
+                                        nextTask.flags += i;
+                                        tQ[i] = nextTask;
+                                    }
                                 }
+                                else {
+                                    for (uint i = threadIdx.x; i < tNx; i += wS) {
+                                        nextTask.tileIdx = i;
+                                        tQ[i] = nextTask;
+                                    }
+                                }
+
                                 __syncwarp();
                                 if (!threadIdx.x) {
                                     __threadfence();

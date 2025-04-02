@@ -194,8 +194,8 @@ namespace aristos{
 
     __device__
     struct __align__(8) TQSignal{
-        uint interrupt;
         uint signal; // one ahead
+        uint interrupt;
 
         __device__ __forceinline__
         void encodeSig(const uint& sig) {
@@ -481,6 +481,7 @@ namespace aristos{
         using P = cute::C<I_SIZE>;
         using H = cute::C<HIDDEN_SIZE>;
         using E = cute::C<NUM_EXPERTS>;
+        static_assert(E::value <= cuda::std::numeric_limits<uint16_t>::max());
         // padded expert dimension
         using PX = cute::C<cute::ceil_div(E::value, BLOCK_N) * BLOCK_N>;
         using L = cute::C<NUM_LAYERS>;
@@ -498,7 +499,6 @@ namespace aristos{
         using P2PB = cute::C<cute::ceil_div(S::value * MINI_BATCH * H::value, 1024 * 1024)>;
         using EC = cute::C<DTK::value == DropTokens::no ? S::value : cute::ceil_div(S::value, E::value)>;
         using pEC = cute::C<cute::ceil_div(EC::value, BLOCK_M) * BLOCK_M>;
-        static_assert(EC::value * BLOCK_M <= cuda::std::numeric_limits<uint16_t>::max());
         using SZ = cute::C<pEC::value * H::value>;
         using TM = cute::C<cute::ceil_div(S::value, BLOCK_M)>;
         using TN = cute::C<cute::ceil_div(P::value, BLOCK_N)>;

@@ -19,7 +19,7 @@ namespace aristos::packet {
         unsigned int EC = ACC::EC::value,
         unsigned int pEC = ACC::pEC::value,
         unsigned int threads = ACC::PeakHardware::OS::threads::value,
-        unsigned int batch = cute::min(cute::ceil_div(ACC::EC::value, 32U), 32U),
+        unsigned int batch = cute::min(cute::ceil_div(ACC::EC::value, superBlockSize), 32U),
         typename Activations
     >
     requires (isTensor<Activations>::value && cutlass::is_pow2<batch>::value)
@@ -280,7 +280,7 @@ namespace aristos::packet {
             unsigned int* __restrict__ const& status,
             unsigned int* __restrict__ const& taskCount,
             uint const& routedTokens, uint16_t const& globalTaskTiles,
-            unsigned int const& localExpertIdx, unsigned int const& expertIdx,
+            unsigned int const& localExpertIdx,
             cuda::std::byte* __restrict__ const& pGB, //postGEMM buffer
             const cuda::std::array<const cuda::std::byte*, GEMMs>& weights,
             const cuda::std::array<const cuda::std::byte*, GEMMs>& bias,
@@ -299,7 +299,6 @@ namespace aristos::packet {
             sTB(taskCount, status, peer, nLx, globalTaskTiles);
 
             // expert, peer offset
-            const auto fo = expertIdx * (ACC::TCM::value * ACC::TNx::value);
             const auto sO = ACC::TCM::value * (peer * dA.nLx + localExpertIdx);
             cuda::std::array<cuda::std::byte*, GEMMs> taskResults{};
             // Staging buffer for results of preGEMM
@@ -318,7 +317,7 @@ namespace aristos::packet {
                         taskResults,
                         bias,
                         rcData,
-                        flags + fo + tileIdx,
+                        flags,
                         sO + i,
                         tileIdx,
                         padM,
@@ -341,7 +340,7 @@ namespace aristos::packet {
                         taskResults,
                         bias,
                         rcData,
-                        flags + fo + tileIdx,
+                        flags,
                         sO + fTilesM,
                         tileIdx,
                         padM,

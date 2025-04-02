@@ -422,7 +422,7 @@ namespace aristos::gate {
             static_assert(bM <= cuda::std::numeric_limits<uint>::max());
 
             constexpr auto syncLimit = sharedSize / 1024;
-            static_assert(sizeof(typename BlockScan::TempStorage) * syncLimit <= sharedSize);
+            static_assert(sizeof(typename BlockScan::TempStorage) * syncLimit + sizeof(uint) * bN <= sharedSize);
             uint cachedSelected = 0U;
             cuda::std::array<uint, bN> myIndices{};
             // scan down the column
@@ -446,9 +446,13 @@ namespace aristos::gate {
             __syncthreads();
             #pragma unroll
             for (uint i = 0; i < bN; ++i) {
-                if (rTopK[i]) {
-                    tokenIds(i, startIndices[i] + myIndices[i] - 1) =
-                        TPS{bM * cute::get<0>(tileCoord) + threadIdx.x, mCw};
+                myIndices[i] = startIndices[i] + myIndices[i] - 1;
+            }
+            constexpr auto EC = ACC::EC::value;
+            #pragma unroll
+            for (uint i = 0; i < bN; ++i) {
+                if (rTopK[i] && myIndices[i] < EC) {
+                    tokenIds(i, myIndices[i]) = TPS{bM * cute::get<0>(tileCoord) + threadIdx.x, mCw};
                 }
             }
         }
@@ -682,7 +686,7 @@ namespace aristos::gate {
             uint cachedSelected = 0U;
             cuda::std::array<uint, abN> myIndices{};
             constexpr auto syncLimit = sharedSize / 1024;
-            static_assert(sizeof(typename BlockScan::TempStorage) * syncLimit <= sharedSize);
+            static_assert(sizeof(typename BlockScan::TempStorage) * syncLimit + sizeof(uint) * bN <= sharedSize);
             // scan down the column
             #pragma unroll
             for (uint i = 0; i < abN; ++i) {
@@ -706,9 +710,13 @@ namespace aristos::gate {
             __syncthreads();
             #pragma unroll
             for (uint i = 0; i < abN; ++i) {
-                if (rTopK[i]) {
-                    tokenIds(i, startIndices[i] + myIndices[i] - 1) = TPS{bM * cute::get<0>(tileCoord) +
-                        threadIdx.x, mCw};
+                myIndices[i] = startIndices[i] + myIndices[i] - 1;
+            }
+            constexpr auto EC = ACC::EC::value;
+            #pragma unroll
+            for (uint i = 0; i < abN; ++i) {
+                if (rTopK[i] && myIndices[i] < EC) {
+                    tokenIds(i, myIndices[i]) = TPS{bM * cute::get<0>(tileCoord) + threadIdx.x, mCw};
                 }
             }
         }

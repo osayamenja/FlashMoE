@@ -89,7 +89,7 @@ namespace aristos{
     requires(sizeof(Payload) == sizeof(ull_t) && alignof(Payload) == alignof(ull_t))
     __device__ __forceinline__
     void awaitPayload(Payload* __restrict__ const& addr, Payload* __restrict__ const& dest, const T& expected = 1U) {
-        static_assert(cuda::std::is_same_v<decltype(addr->signal), T>, "Signal types should be the same!");
+        static_assert(cuda::std::is_same_v<decltype(dest->signal), T>, "Signal types should be the same!");
         auto mail = atomicLoad<scope>(CAST_TO(ull_t, addr));
         auto* __restrict__ payload = CAST_TO(Payload, &mail);
         while (payload->signal != expected) {
@@ -104,7 +104,7 @@ namespace aristos{
     __device__ __forceinline__
     void awaitNotification(Notification* __restrict__ const& addr, Notification* __restrict__ const& dest,
         const T& previous) {
-        static_assert(cuda::std::is_same_v<decltype(addr->signal), T>, "Signal types should be the same!");
+        static_assert(cuda::std::is_same_v<decltype(dest->signal), T>, "Signal types should be the same!");
         auto mail = atomicLoad<scope>(CAST_TO(ull_t, addr));
         auto* __restrict__ payload = CAST_TO(Notification, &mail);
         while (!payload->interrupt && payload->signal == previous) {

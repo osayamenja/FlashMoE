@@ -23,7 +23,7 @@ namespace aristos::scheduler {
     const uint& canSchedule, const uint& qIdx, uint& lRQIdx,
     const uint& gRQIdx, uint* __restrict__ const& rQ,
     TQSignal* __restrict__ const& pDB) {
-        auto sig = TQSignal{0U};
+        auto sig = TQSignal{0U, 0U};
         for (uint k = 0; k < cSetB; ++k) {
             #pragma unroll
             for (uint l = 0; l < WSet::kElements; ++l) {
@@ -183,7 +183,7 @@ namespace aristos::scheduler {
         static_assert(cuda::std::is_same_v<typename SQState::value_type, uint>);
         __syncwarp();
         /// read through the ready queue first
-        constexpr auto sig = TQSignal{1U};
+        constexpr auto sig = TQSignal{0U, 1U}; // set interrupt to 1
         // Below must be <= ceil(processors / wS) == sQsL, so we can repurpose sQState registers as temporary storage
         const auto tS = processorTally / wS + (threadIdx.x < processorTally % wS);
         const auto gRO = gRQIdx + (threadIdx.x * (processorTally / wS) +
@@ -390,6 +390,7 @@ namespace aristos::scheduler {
                 wSt, sQ, rQ, pDB, dT == 0);
             if (!threadIdx.x) {
                 tTB = atomicLoad<cuda::thread_scope_block>(taskBound);
+                printf("scheduled: %u, ttb: %u", scheduled, tTB);
             }
             tTB = __shfl_sync(0xffffffff, tTB, 0);
         }
