@@ -19,8 +19,7 @@ namespace aristos::os {
         typename ExpertsUp,
         typename ExpertsDown,
         typename BiasUp,
-        typename BiasDown,
-        unsigned int threads = ACC::PeakHardware::OS::threads::value
+        typename BiasDown
     >
     __device__ __forceinline__
     void start(cuda::std::byte* __restrict__ const& workspace,
@@ -34,11 +33,14 @@ namespace aristos::os {
         const auto* __restrict__ eC = bookkeeping.eC();
         const auto world = bookkeeping.world;
         const auto nLx = bookkeeping.nLx;
+        constexpr auto threads = ACC::PeakHardware::OS::threads::value;
         constexpr auto subscriberCount = threads - WARP_SIZE;
+        constexpr auto sNW = subscriberCount / WARP_SIZE;
         // each subscriber thread gets wSet * sizeof(uint) bytes of workspace
-        constexpr auto wSet = 16U; // working set size
+        constexpr auto uSfC = ACC::TCM::value * ACC::TNx::value / subscriberCount;
+        constexpr auto wSet = uSfC >= 32 ? 32U : 16U;
         constexpr auto bitSetSizePs = cute::ceil_div(wSet, sizeof(uint) * 8U);
-        const auto bSSI = nSI<subscriberCount>(nLx * world) + nSI<subscriberCount>(ssfC);
+        const auto bSSI = nSI<sNW>(nLx * world) + nSI<subscriberCount>(ssfC);
         constexpr auto E = ACC::E::value;
         constexpr auto TNx = ACC::TNx::value;
         constexpr auto EC = ACC::EC::value;

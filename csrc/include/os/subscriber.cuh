@@ -35,7 +35,8 @@ namespace aristos::subscriber{
             typename ExpertsDown,
             typename BiasUp,
             typename BiasDown,
-            typename Element = ACC::Element
+            typename Element = ACC::Element,
+            unsigned int sNW = subscriberCount / WARP_SIZE
         >
         __device__ __forceinline__
         void operator()(
@@ -67,78 +68,93 @@ namespace aristos::subscriber{
             constexpr packet::Decoder<PacketStage::initial, PeerConnectivity::p2p, Element> fPd{};
             constexpr packet::Decoder<PacketStage::initial, PeerConnectivity::remote, Element> fRd{};
             constexpr auto bSw = sizeof(uint) * 8U;
+            const auto laneId = tIdx % WARP_SIZE;
+            const auto warpId = tIdx / WARP_SIZE;
+            #pragma unroll 2
             for (uint i = 0; i < stageLength; ++i) {
                 const auto vSIdx = i / bSw;
                 const auto vIdx = i % bSw;
-                // no need to batch reads from shared memory here as stageLength is very small, most likely <= 1
-                auto visitedSet = bitSet[tIdx + vSIdx * subscriberCount];
-                if (!visitedSet.get(vIdx)) {
-                    const auto flagIdx = tIdx + i * subscriberCount;
-                    const auto signal = atomicExch_system(CAST_TO(ull_t, flags + flagIdx),
-                        SignalConstants::ground);
-                    const auto* __restrict__ sP = CONST_CAST_TO(SignalPayload<PacketStage::initial>, &signal);
-                    if (sP->seqBit == localSeqBit) {
-                        stagePending -= 1;
-                        // set visited bit
-                        visitedSet.set(vIdx);
-                        // decode the received packet
-                        const auto myLocalExIdx = flagIdx % nLx;
-                        const auto peerIdx = flagIdx / nLx;
-                        const auto pLI = pL[peerIdx];
-                        const auto lXI = lX[myLocalExIdx];
-                        cuda::std::array weights{
-                            CONST_CAST_TO(cuda::std::byte, &expertsUp(myLocalExIdx)),
-                            CONST_CAST_TO(cuda::std::byte, &expertsDown(myLocalExIdx))
-                        };
-                        cuda::std::array bias{
-                            CONST_CAST_TO(cuda::std::byte, &biasUp(myLocalExIdx)),
-                            CONST_CAST_TO(cuda::std::byte, &biasDown(myLocalExIdx))
-                        };
-                        const auto* packet = heap::advance<0, 1>(dA.sHeap, peerIdx, myLocalExIdx);
-                        if (!pLI.isRemote) {
-                            // P2P peer
-                            // Use DMA pointers over UVA space
-                            // Enforce consistency
-                            auto* nFlags = pLI.remoteSFlags + gfSfC +
-                                lXI.expertIndex * (ACC::TCM::value * ACC::TNx::value);
-                            __threadfence_system();
-                            fPd(dA, pLI.remoteSHeap, nFlags, packet, status, taskCount, sP->routedTokens,
-                                sP->totalTilesM, myLocalExIdx, pGB, weights, bias, peerIdx, pLI.pe,
-                                nLx, ltQHead, tQHead);
+                ull_t signal;
+                if (!laneId) {
+                    auto visitedSet = bitSet[warpId + vSIdx * sNW];
+                    if (!visitedSet.get(vIdx)) {
+                        const auto flagIdx = warpId + i * sNW;
+                        signal = atomicExch_system(CAST_TO(ull_t, flags + flagIdx),
+                            SignalConstants::ground);
+                        const auto* __restrict__ sP = CONST_CAST_TO(SignalPayload<PacketStage::initial>, &signal);
+                        sP->seqBit == localSeqBit;
+                        if (sP->seqBit == localSeqBit) {
+                            sP->dump();
+                            // set visited bit
+                            visitedSet.set(vIdx);
                         }
-                        else {
-                            // Remote peer
-                            auto* nFlags = dA.sFlags + gfSfC +
-                                lXI.expertIndex * (ACC::TCM::value * ACC::TNx::value);
-                            eMC(sSeqBit, localSeqBit);
-                            fRd(dA, dA.sHeap, nFlags, packet, status, taskCount, sP->routedTokens, sP->totalTilesM,
-                                myLocalExIdx, pGB, weights, bias, peerIdx, pLI.pe, nLx, ltQHead, tQHead);
+                        else if (sbs::ahead(sP->seqBit, localSeqBit)) {
+                            /*
+                            This is an exotic scenario.
+                            Their sequence bit is ahead of ours,
+                            meaning that we missed processing some preceding packets
+                            of theirs before they sent this current packet.
+                            In short, they overrode those prior sequence bits before we observed them.
+                            This occurrence is fine and more importantly,
+                            only happens if the preceding,
+                            overridden packets were noops or the sender timed out.
+                            Thus, as we catch up to them, we self-correct our termination bound to avoid a deadlock.
+                            Also, we have to restore the signal for self-correction in subsequent rounds,
+                            until we are fully caught up.
+                            Potentially, we may have received a signal in the meantime, so we only swap if the current
+                            value is the ground state, which we previously stored.
+                            */
+                            atomicCAS_system(CAST_TO(ull_t, flags + flagIdx), SignalConstants::ground, signal);
+                            const auto peer = flagIdx / nLx;
+                            packet::sTB(taskCount, status, peer, nLx);
+                            // set visited bit
+                            visitedSet.set(vIdx);
                         }
-                    }
-                    else if (sbs::ahead(sP->seqBit, localSeqBit)) {
-                        /*
-                        This is an exotic scenario.
-                        Their sequence bit is ahead of ours, meaning that we missed processing some preceding packets
-                        of theirs before they sent this current packet.
-                        In short, they overrode those prior sequence bits before we observed them.
-                        This occurrence is fine and more importantly,
-                        only happens if the preceding,
-                        overridden packets were noops or the sender timed out.
-                        Thus, as we catch up to them, we self-correct our termination bound to avoid a deadlock.
-                        Also, we have to restore the signal for self-correction in subsequent rounds,
-                        until we are fully caught up.
-                        Potentially, we may have received a signal in the meantime, so we only swap if the current
-                        value is the ground state, which we previously stored.
-                        */
-                        atomicCAS_system(CAST_TO(ull_t, flags + flagIdx), SignalConstants::ground, signal);
-                        const auto peer = flagIdx / nLx;
-                        packet::sTB(taskCount, status, peer, nLx);
-                        // set visited bit
-                        visitedSet.set(vIdx);
+                        // update state
+                        bitSet[warpId + vSIdx * sNW] = visitedSet;
                     }
                 }
-                // update state
-                bitSet[tIdx + vSIdx * subscriberCount] = visitedSet;
+                // broadcast received signal from leader to others
+                signal = __shfl_sync(0xffffffff, signal, 0);
+                const auto* __restrict__ sP = CONST_CAST_TO(SignalPayload<PacketStage::initial>, &signal);
+                if (sP->seqBit == localSeqBit) {
+                    const auto flagIdx = tIdx + i * subscriberCount;
+                    stagePending -= 1;
+                    const auto myLocalExIdx = flagIdx % nLx;
+                    const auto peerIdx = flagIdx / nLx;
+                    const auto pLI = pL[peerIdx];
+                    const auto lXI = lX[myLocalExIdx];
+                    cuda::std::array weights{
+                        CONST_CAST_TO(cuda::std::byte, &expertsUp(myLocalExIdx)),
+                        CONST_CAST_TO(cuda::std::byte, &expertsDown(myLocalExIdx))
+                    };
+                    cuda::std::array bias{
+                        CONST_CAST_TO(cuda::std::byte, &biasUp(myLocalExIdx)),
+                        CONST_CAST_TO(cuda::std::byte, &biasDown(myLocalExIdx))
+                    };
+                    const auto* packet = heap::advance<0, 1>(dA.sHeap, peerIdx, myLocalExIdx);
+                    if (!pLI.isRemote) {
+                        if (!laneId) {
+                            __threadfence_system();
+                        }
+                        __syncwarp();
+                        auto* nFlags = pLI.remoteSFlags + gfSfC +
+                            lXI.expertIndex * (ACC::TCM::value * ACC::TNx::value);
+                        fPd(dA, pLI.remoteSHeap, nFlags, packet, status, taskCount, sP->routedTokens,
+                                sP->totalTilesM, myLocalExIdx, pGB, weights, bias, peerIdx, pLI.pe,
+                                nLx, tIdx, ltQHead, tQHead);
+                    }
+                    else {
+                        if (!laneId) {
+                            eMC(sSeqBit, localSeqBit);
+                        }
+                        __syncwarp();
+                        auto* nFlags = dA.sFlags + gfSfC +
+                                lXI.expertIndex * (ACC::TCM::value * ACC::TNx::value);
+                        fRd(dA, dA.sHeap, nFlags, packet, status, taskCount, sP->routedTokens, sP->totalTilesM,
+                                myLocalExIdx, pGB, weights, bias, peerIdx, pLI.pe, nLx, tIdx, ltQHead, tQHead);
+                    }
+                }
             }
         }
     };
@@ -324,7 +340,7 @@ namespace aristos::subscriber{
         typename BiasUp,
         typename BiasDown
     >
-    requires(wSet == 16 || wSet % 32 == 0)
+    requires(subscriberCount % WARP_SIZE == 0 && (wSet == 16 || wSet % 32 == 0))
     __device__ __forceinline__
     void start(BitSet* __restrict__ const& bitSet,
         uint* __restrict__ const& workspace,
@@ -369,15 +385,16 @@ namespace aristos::subscriber{
         const auto nLx = bookkeeping.nLx;
 
         // first stage
+        constexpr auto sNW = subscriberCount / WARP_SIZE;
         const auto fSfC = bookkeeping.world * nLx; // first stage flag count
-        const auto fSl = fSfC / subscriberCount + (tIdx < fSfC % subscriberCount);
+        const auto fSl = fSfC / sNW + (tIdx / WARP_SIZE < fSfC % sNW);
         auto fSp = fSl; // first stage pending
 
         // second stage
         const auto ssL = ssfC / subscriberCount + (tIdx < ssfC % subscriberCount);
         const auto ssT = ssL / wSet;
 
-        constexpr Subscribe<SubscriberStage::initial, subscriberCount> initialSubscriber{};
+        constexpr Subscribe<SubscriberStage::initial, sNW> initialSubscriber{};
         constexpr Subscribe<SubscriberStage::final, subscriberCount> finalSubscriber{};
 
         const auto pSI = nSI<subscriberCount>(ssfC);

@@ -75,12 +75,12 @@ namespace aristos::scheduler {
         uint* __restrict__ const& rQ,
         TQSignal* __restrict__ const& pDB,
         const bool& isMedley = false) {
-        uint lRQIdx;
+        uint queueSlot;
         uint taskTally;
         // things are about to get warped :)
         // Aggregate tally across the warp
-        WarpScan(wSt[0]).InclusiveSum(lTt, lRQIdx, taskTally);
-        lRQIdx -= lTt;
+        WarpScan(wSt[0]).InclusiveSum(lTt, queueSlot, taskTally);
+        queueSlot -= lTt;
         auto prefixTaskSum = 0U;
         while (taskTally) {
             // Find processors if we are not currently aware of any
@@ -125,8 +125,9 @@ namespace aristos::scheduler {
             processorTally -= tasks;
             taskTally -= tasks;
             // these will get scheduled now
-            if (lTt > 0 && lRQIdx < prefixTaskSum) {
-                auto tasksToSchedule = lRQIdx + lTt > tasks ? tasks - lRQIdx : lTt;
+            if (lTt > 0 && queueSlot < prefixTaskSum) {
+                auto tasksToSchedule = umin(lTt, prefixTaskSum - queueSlot);
+                printf("Thread %u has %u tasksToSchedule\n", threadIdx.x, tasksToSchedule);
                 lTt -= tasksToSchedule;
                 if (isMedley) {
                     if constexpr (sL > 0) {
@@ -141,7 +142,7 @@ namespace aristos::scheduler {
                                 tqState[j].tQTail += canSchedule;
                                 const auto cSetB = canSchedule / WSet::kElements;
                                 schedule<processors>(wSet, cSetB, canSchedule, qIdx,
-                                    lRQIdx, gRQIdx, rQ, pDB);
+                                    queueSlot, gRQIdx, rQ, pDB);
                             }
                         }
                     }
@@ -156,7 +157,7 @@ namespace aristos::scheduler {
                         tqState[j].tasks -= canSchedule;
                         const auto cSetB = canSchedule / WSet::kElements;
                         schedule<processors, DQType::block>(wSet, cSetB, canSchedule,
-                            qIdx, lRQIdx, gRQIdx, rQ, pDB);
+                            qIdx, queueSlot, gRQIdx, rQ, pDB);
                     }
                 }
             }
@@ -312,7 +313,7 @@ namespace aristos::scheduler {
         constexpr auto sL = subscribers / wS;
         // initialize register buffers
         constexpr auto gTQWSet = 2;
-        constexpr auto wSz = 8U;
+        constexpr auto wSz = 16U;
         cutlass::Array<TQState, gTQWSet + sL> tqState{};
         cutlass::Array<uint, sQsL> sQState{};
         cutlass::Array<uint, wSz> wSet{};
@@ -390,7 +391,6 @@ namespace aristos::scheduler {
                 wSt, sQ, rQ, pDB, dT == 0);
             if (!threadIdx.x) {
                 tTB = atomicLoad<cuda::thread_scope_block>(taskBound);
-                printf("scheduled: %u, ttb: %u", scheduled, tTB);
             }
             tTB = __shfl_sync(0xffffffff, tTB, 0);
         }
