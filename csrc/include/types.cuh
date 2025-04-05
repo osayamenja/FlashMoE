@@ -711,9 +711,11 @@ namespace aristos{
                 // maximum gemm tiles/tasks scheduled by processors
                 const auto prT = world * nLx * TCM * ACC::TNx::value;
                 // maximum gemm tiles/tasks scheduled by subscriber threads
-                const auto tPs = cute::ceil_div(world * nLx, SUBSCRIBERS) * TCM * TN +
-                    cute::ceil_div(TCM * E, SUBSCRIBERS) * ACC::TNx::value;
-                sT = tPs * SUBSCRIBERS;
+                static_assert(SUBSCRIBERS % WARP_SIZE == 0);
+                const auto tPS = cute::ceil_div(world * nLx, SUBSCRIBERS / WARP_SIZE) *
+                        cute::ceil_div(TCM * TN, WARP_SIZE) +
+                        cute::ceil_div(TCM * E, SUBSCRIBERS) * ACC::TNx::value;
+                sT = tPS * SUBSCRIBERS;
                 tQl = sizeof(Task) * (sT + prT);
                 tQml = tQl + blocks * sizeof(TQSignal) + E * sizeof(PEL) + sizeof(PLI) * world +
                     sizeof(TPS) * (E * pEC);
@@ -741,10 +743,12 @@ namespace aristos{
             constexpr auto TPX = ACC::TPX::value;
             // maximum gemm tiles/tasks scheduled by processors
             const auto prT = _world * _nLx * TCM * ACC::TNx::value;
+            static_assert(SUBSCRIBERS % WARP_SIZE == 0);
             // maximum gemm tiles/tasks scheduled by subscriber threads
-            const auto tPs = cute::ceil_div(_world * _nLx, SUBSCRIBERS) * TCM * TN +
+            const auto tPS = cute::ceil_div(_world * _nLx, SUBSCRIBERS / WARP_SIZE) *
+                    cute::ceil_div(TCM * TN, WARP_SIZE) +
                     cute::ceil_div(TCM * E, SUBSCRIBERS) * ACC::TNx::value;
-            const auto sT = tPs * SUBSCRIBERS;
+            const auto sT = tPS * SUBSCRIBERS;
             const auto tQl = sizeof(Task) * (sT + prT);
             const auto tQml = tQl + blocks * sizeof(TQSignal) + E * sizeof(PEL) + sizeof(PLI) * _world +
                 sizeof(TPS) * (E * pEC);
