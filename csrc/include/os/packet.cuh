@@ -357,7 +357,6 @@ namespace aristos::packet {
             }
 
             if (tSlice) {
-                printf("Subscriber %u notifying %u\n", threadIdx.x - WARP_SIZE, tSlice);
                 lTQHead += tSlice;
                 __threadfence();
                 // notifies scheduler of work

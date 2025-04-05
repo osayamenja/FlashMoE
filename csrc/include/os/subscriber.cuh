@@ -83,7 +83,6 @@ namespace aristos::subscriber{
                             SignalConstants::ground);
                         const auto* __restrict__ sP = CONST_CAST_TO(SignalPayload<PacketStage::initial>, &signal);
                         if (sP->seqBit == localSeqBit) {
-                            sP->dump();
                             // set visited bit
                             visitedSet.set(vIdx);
                         }

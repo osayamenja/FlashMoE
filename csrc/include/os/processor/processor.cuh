@@ -523,10 +523,10 @@ namespace aristos::processor{
             && alignof(SignalPayload<PacketStage::last>) == alignof(flagsType));
 
         __shared__ Task currentTask;
+        static_assert(sizeof(Task) == 128);
         __shared__ uint globalInterrupt;
 
         // Register allocations
-        uint interrupt = 0U;
         const auto rSeqBit = _seqBit;
         Task rCurrentTask{};
         TQSignal tqs{0U, 0U};
@@ -548,25 +548,31 @@ namespace aristos::processor{
         constexpr auto tN = ACC::TN::value;
         constexpr auto tNx = ACC::TNx::value;
         __syncthreads();
-        while (!interrupt) {
-            if (!threadIdx.x) {
-                auto* __restrict__ tQSignal = pA.pDB;
-                const auto* __restrict__ gtQ = pA.tQ;
-                // Grabs next task
-                awaitNotification(tQSignal, &tqs, tqs.signal);
-                __threadfence();
-                // Eagerly indicate readiness for the next task as the above fence allows us to do so correctly
-                atomicExch(pA.sQ, ready);
-                globalInterrupt = tqs.interrupt;
+        while (!tqs.interrupt) {
+            if (constexpr auto wS = 32; threadIdx.x / wS == 0) {
+                if (!threadIdx.x) {
+                    auto* __restrict__ tQSignal = pA.pDB;
+                    // Grabs next task
+                    awaitNotification(tQSignal, &tqs, tqs.signal);
+                    __threadfence();
+                    // Eagerly indicate readiness for the next task as the above fence allows us to do so correctly
+                    globalInterrupt = tqs.interrupt;
+                    atomicExch(pA.sQ, ready);
+                }
+                // The below is necessary as it guarantees memory ordering
+                __syncwarp();
+                auto* __restrict__ tqsP = CAST_TO(ull_t, &tqs);
+                *tqsP = __shfl_sync(0xffffffff, *tqsP, 0);
+                const auto* __restrict__ gtQ = pA.tQ + tqs.decodeSig();
                 if (!tqs.interrupt) {
-                    // global -> shared
-                    currentTask = gtQ[tqs.decodeSig()];
+                    // coalesced copy from global to shared memory
+                    CAST_TO(uint, &currentTask)[threadIdx.x] = __ldg(CONST_CAST_TO(uint, gtQ) + threadIdx.x);
                 }
             }
             __syncthreads();
-            interrupt = globalInterrupt;
+            tqs.interrupt = globalInterrupt;
             // if we received an interrupt, there is nothing to do next
-            if (!interrupt) {
+            if (!tqs.interrupt) {
                 // shared -> registers
                 rCurrentTask = currentTask;
                 switch (rCurrentTask.taskType) {

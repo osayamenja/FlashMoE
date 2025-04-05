@@ -537,7 +537,7 @@ namespace aristos{
         mp_t probability;
     };
 
-    enum class TaskType : uint8_t {
+    enum class TaskType : uint16_t {
         preGEMM,
         postGEMM,
         combine
@@ -564,7 +564,7 @@ namespace aristos{
     }
 
     struct __align__(16) Task {
-        using TST = uint8_t;
+        using TST = uint16_t;
         static_assert(BLOCK_M <= cuda::std::numeric_limits<TST>::max());
         // D = A * B + C
         // sensible sentinel values
@@ -580,11 +580,13 @@ namespace aristos{
         //padded
         unsigned int M = 0U;
         unsigned int batchIdx = 0U;
-        uint16_t peerIdx = 0U;
-        uint16_t expertIdx = 0U;
-        uint16_t isPeerRemote = 0U;
+        uint peerIdx = 0U;
+        uint expertIdx = 0U;
+        uint isPeerRemote = 0U;
         TaskType taskType;
         TST tileSize = 0U; // <= BLOCK_M
+        // below pads the struct to a cache line of 128 bytes
+        uint padding[6] = {};
 
         __forceinline__ __device__
         Task() = default;
@@ -604,7 +606,7 @@ namespace aristos{
             const uint16_t& _size,
             const unsigned int& _peerIdx,
             const unsigned int& _batchIdx,
-            const uint16_t& _isPeerRemote):
+            const uint& _isPeerRemote):
         aData(_aData), bData(_bData),
         cData(_cData), dData(_dData), rcData(_rcData), flags(_flags),
         syncIdx(_syncIdx), tileIdx(_tile),  M(_M),
@@ -651,6 +653,7 @@ namespace aristos{
                    taskType, tileSize);
         }
     };
+    static_assert(sizeof(Task) == 128);
 
     /// Information about auxiliary data structures comprising bookkeeping state
     /// Includes length of data structures (arrays) and pointer arithmetic functions
