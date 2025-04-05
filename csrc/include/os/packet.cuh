@@ -287,11 +287,10 @@ namespace aristos::packet {
             unsigned int const& peer, // relative to the EP group
             unsigned int const& gPeer, // relative to the global group, needed for network operations
             const unsigned int& nLx,
-            const uint& tIdx,
+            const uint& laneId,
             unsigned int& lTQHead,
             unsigned int* __restrict__ const& tQHead) const {
             constexpr auto tN = ACC::TN::value;
-            constexpr auto uF= cute::ceil_div(tN, WARP_SIZE);
             const auto qIdx = DQ::sNext(lTQHead);
             const auto fTilesM = routedTokens / BLOCK_M;
             // pad here to meet tile requirements
@@ -309,14 +308,14 @@ namespace aristos::packet {
             taskResults[1] = p == PeerConnectivity::remote ?
                 heap::advance<1, 0>(sHeap, peer, localExpertIdx) : rcData;
             const auto wT = fTilesM * tN;
-            const auto totalTasks = Bookkeeping::tiles<BLOCK_M>(routedTokens) * tN;
-            const auto tSlice = totalTasks / WARP_SIZE + (tIdx < totalTasks % WARP_SIZE);
+            const auto fS = wT / WARP_SIZE + (laneId < wT % WARP_SIZE);
+            const auto lS = tN / WARP_SIZE + (laneId < tN % WARP_SIZE);
+            const auto tSlice = fS + (routedTokens % BLOCK_M == 0 ? 0 : lS);
 
-            // split across the warp
-            for (uint i = tIdx; i < wT; i += WARP_SIZE) {
-                const auto tileIdx = i;
+            for (uint i = 0; i < fS; ++i) {
+                const auto tileIdx = laneId + i * WARP_SIZE;
                 const auto rowIdx = tileIdx / tN;
-                dA.tQ[DQ::next(qIdx, tileIdx)] = Task{
+                dA.tQ[DQ::next(qIdx, i)] = Task{
                     TaskType::preGEMM,
                     packet,
                     weights,
@@ -324,21 +323,21 @@ namespace aristos::packet {
                     bias,
                     rcData,
                     flags,
-                    sO + i,
+                    sO + rowIdx,
                     tileIdx,
                     padM,
                     static_cast<uint16_t>(BLOCK_M),
                     gPeer,
-                    i,
+                    rowIdx,
                     p == PeerConnectivity::remote
                 };
             }
 
             // residue tile
             if (const auto residue = routedTokens - fTilesM * BLOCK_M; residue) {
-                for (uint j = tIdx; j < tN; j += WARP_SIZE) {
-                    const auto tileIdx = j + fTilesM * tN;
-                    dA.tQ[DQ::next(qIdx, tileIdx)] = Task{
+                for (uint j = 0; j < lS; j++) {
+                    const auto tileIdx = fTilesM * tN + laneId + j * WARP_SIZE;
+                    dA.tQ[DQ::next(qIdx, fS + j)] = Task{
                         TaskType::preGEMM,
                         packet,
                         weights,
@@ -358,7 +357,8 @@ namespace aristos::packet {
             }
 
             if (tSlice) {
-                lTQHead += totalTasks;
+                printf("Subscriber %u notifying %u\n", threadIdx.x - WARP_SIZE, tSlice);
+                lTQHead += tSlice;
                 __threadfence();
                 // notifies scheduler of work
                 atomicAdd_block(tQHead, tSlice);

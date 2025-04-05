@@ -127,7 +127,6 @@ namespace aristos::scheduler {
             // these will get scheduled now
             if (lTt > 0 && queueSlot < prefixTaskSum) {
                 auto tasksToSchedule = umin(lTt, prefixTaskSum - queueSlot);
-                printf("Thread %u has %u tasksToSchedule\n", threadIdx.x, tasksToSchedule);
                 lTt -= tasksToSchedule;
                 if (isMedley) {
                     if constexpr (sL > 0) {

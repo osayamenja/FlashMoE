@@ -74,15 +74,14 @@ namespace aristos::subscriber{
             for (uint i = 0; i < stageLength; ++i) {
                 const auto vSIdx = i / bSw;
                 const auto vIdx = i % bSw;
+                const auto flagIdx = warpId + i * sNW;
                 ull_t signal;
                 if (!laneId) {
                     auto visitedSet = bitSet[warpId + vSIdx * sNW];
                     if (!visitedSet.get(vIdx)) {
-                        const auto flagIdx = warpId + i * sNW;
                         signal = atomicExch_system(CAST_TO(ull_t, flags + flagIdx),
                             SignalConstants::ground);
                         const auto* __restrict__ sP = CONST_CAST_TO(SignalPayload<PacketStage::initial>, &signal);
-                        sP->seqBit == localSeqBit;
                         if (sP->seqBit == localSeqBit) {
                             sP->dump();
                             // set visited bit
@@ -118,7 +117,6 @@ namespace aristos::subscriber{
                 signal = __shfl_sync(0xffffffff, signal, 0);
                 const auto* __restrict__ sP = CONST_CAST_TO(SignalPayload<PacketStage::initial>, &signal);
                 if (sP->seqBit == localSeqBit) {
-                    const auto flagIdx = tIdx + i * subscriberCount;
                     stagePending -= 1;
                     const auto myLocalExIdx = flagIdx % nLx;
                     const auto peerIdx = flagIdx / nLx;
@@ -142,7 +140,7 @@ namespace aristos::subscriber{
                             lXI.expertIndex * (ACC::TCM::value * ACC::TNx::value);
                         fPd(dA, pLI.remoteSHeap, nFlags, packet, status, taskCount, sP->routedTokens,
                                 sP->totalTilesM, myLocalExIdx, pGB, weights, bias, peerIdx, pLI.pe,
-                                nLx, tIdx, ltQHead, tQHead);
+                                nLx, laneId, ltQHead, tQHead);
                     }
                     else {
                         if (!laneId) {
@@ -152,7 +150,7 @@ namespace aristos::subscriber{
                         auto* nFlags = dA.sFlags + gfSfC +
                                 lXI.expertIndex * (ACC::TCM::value * ACC::TNx::value);
                         fRd(dA, dA.sHeap, nFlags, packet, status, taskCount, sP->routedTokens, sP->totalTilesM,
-                                myLocalExIdx, pGB, weights, bias, peerIdx, pLI.pe, nLx, tIdx, ltQHead, tQHead);
+                                myLocalExIdx, pGB, weights, bias, peerIdx, pLI.pe, nLx, laneId, ltQHead, tQHead);
                     }
                 }
             }
