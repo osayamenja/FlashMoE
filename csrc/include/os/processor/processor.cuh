@@ -513,6 +513,120 @@ namespace aristos::processor{
     };
 
     template<
+        PeerConnectivity p,
+        unsigned int tasks = ACC::TNx::value
+    >
+    __device__ __forceinline__
+    void notifyNext(const Task& rCurrentTask, uint* __restrict__ const& workspace, const ProcessorArgs& pA) {
+        static_assert(sizeof(Task) == 128);
+        constexpr auto eS = sizeof(Task) / sizeof(uint);
+        static_assert(eS == WARP_SIZE);
+        constexpr auto threads = ACC::PeakHardware::OS::threads::value;
+        constexpr auto sharedSize = ACC::sharedSize::value;
+        static_assert(sharedSize % sizeof(Task) == 0);
+        static_assert(sharedSize / sizeof(Task) >= threads);
+        constexpr auto capacity = threads;
+        constexpr auto trips = tasks / capacity;
+        static_assert(threads % eS == 0);
+        static_assert(capacity % threads == 0);
+        constexpr auto elems = capacity * eS / threads;
+        constexpr unsigned int preIndex = 0;
+
+        const auto fO = ACC::TNx::value * (rCurrentTask.tileIdx / ACC::TN::value);
+        auto* __restrict__ tQ = pA.ptQ + rCurrentTask.syncIdx * ACC::TNx::value;
+        auto* __restrict__ tQH = pA.tQH;
+        const auto cIdx = threadIdx.x % eS;
+        const auto rIdx = threadIdx.x / eS * eS;
+        // prep memory-view tensors
+        const auto sTQ = make_tensor(cute::make_smem_ptr(workspace),
+            cute::Layout<cute::Shape<cute::Int<threads>, cute::Int<eS>>,
+                cute::Stride<cute::Int<eS>, cute::_1>>{});
+        const auto gTQ = make_tensor(cute::make_gmem_ptr(tQ),
+            cute::Layout<cute::Shape<cute::Int<tasks>, cute::Int<eS>>,
+                cute::Stride<cute::Int<eS>, cute::_1>>{});
+        // copy from registers to shared memory using swizzle
+        #pragma unroll
+        for (uint i = 0; i < trips; ++i) {
+            // each thread does a copy from registers to shared memory
+            const auto tileIdx = threadIdx.x + i * capacity;
+            const auto nextTask = Task {
+                TaskType::postGEMM,
+                rCurrentTask.cData[preIndex],
+                rCurrentTask.bData,
+                rCurrentTask.cData,
+                rCurrentTask.dData,
+                rCurrentTask.rcData,
+                rCurrentTask.flags + fO + (p == PeerConnectivity::p2p ? tileIdx : 0),
+                rCurrentTask.syncIdx,
+                tileIdx,
+                rCurrentTask.M,
+                rCurrentTask.tileSize,
+                rCurrentTask.peerIdx,
+                rCurrentTask.batchIdx,
+                rCurrentTask.isPeerRemote,
+            };
+            // Directive to the compiler to reinterpret the Task structure as a stream of 4-byte blocks
+            const auto* __restrict__ uT = CONST_CAST_TO(uint, &nextTask);
+            #pragma unroll
+            for (uint j = 0; j < eS; ++j) {
+                // temporal shift of indices to eliminate bank conflicts
+                const auto swizzleIdx = (j + threadIdx.x) % eS;
+                sTQ(threadIdx.x, swizzleIdx) = uT[j];
+            }
+            __syncthreads();
+            // now copy from shared memory to global memory
+            #pragma unroll
+            for (uint j = 0; j < elems; ++j) {
+                gTQ(rIdx + (j + i * capacity), cIdx) = sTQ(rIdx + j, cIdx);
+            }
+        }
+        if constexpr (constexpr auto residue = tasks - trips * capacity; residue) {
+            if (threadIdx.x < residue) {
+                const auto tileIdx = threadIdx.x + trips * threads;
+                const auto nextTask = Task {
+                    TaskType::postGEMM,
+                    rCurrentTask.cData[preIndex],
+                    rCurrentTask.bData,
+                    rCurrentTask.cData,
+                    rCurrentTask.dData,
+                    rCurrentTask.rcData,
+                    rCurrentTask.flags + fO + (p == PeerConnectivity::p2p ? tileIdx : 0),
+                    rCurrentTask.syncIdx,
+                    tileIdx,
+                    rCurrentTask.M,
+                    rCurrentTask.tileSize,
+                    rCurrentTask.peerIdx,
+                    rCurrentTask.batchIdx,
+                    rCurrentTask.isPeerRemote,
+                };
+                // Directive to the compiler to reinterpret the Task structure as a stream of 4-byte blocks
+                const auto* __restrict__ uT = CONST_CAST_TO(uint, &nextTask);
+                #pragma unroll
+                for (uint j = 0; j < eS; ++j) {
+                    // temporal shift of indices to eliminate bank conflicts
+                    const auto swizzleIdx = (j + threadIdx.x) % eS;
+                    sTQ(threadIdx.x, swizzleIdx) = uT[j];
+                }
+            }
+            __syncthreads();
+            constexpr auto stride = threads / eS;
+            const auto pIdx = threadIdx.x / eS;
+            // now copy from shared memory to global memory by multiplexing each row across available warps
+            #pragma unroll
+            for (uint j = pIdx; j < residue; j += stride) {
+                gTQ(rIdx + (j + trips * capacity), cIdx) = sTQ(rIdx + j, cIdx);
+            }
+        }
+
+        __syncthreads();
+        if (!threadIdx.x) {
+            __threadfence();
+            // notify scheduler
+            atomicAdd(tQH + rCurrentTask.syncIdx, tasks);
+        }
+    }
+
+    template<
         typename ScaleWeights
     >
     __device__ __forceinline__
@@ -525,6 +639,7 @@ namespace aristos::processor{
         __shared__ Task currentTask;
         static_assert(sizeof(Task) == 128);
         __shared__ uint globalInterrupt;
+        __shared__ uint enqueue;
 
         // Register allocations
         const auto rSeqBit = _seqBit;
@@ -540,7 +655,8 @@ namespace aristos::processor{
         };
 
         if (!threadIdx.x) {
-            globalInterrupt = 0U;
+            atomicExch_block(&globalInterrupt, 0U);
+            atomicExch_block(&enqueue, 0U);
         }
         using PreGEMM = BlockMM<ACC::ActivationOp, Element>;
         using PostGEMM = BlockMM<ACC::ActivationOpX, Element>;
@@ -587,55 +703,17 @@ namespace aristos::processor{
                             rCurrentTask.M,
                             rCurrentTask.tileIdx);
                         __syncthreads();
-                        // use warp 0
-                        if (constexpr auto wS = 32; threadIdx.x / wS == 0) {
-                            uint enqueue = 0U;
-                            if (!threadIdx.x) {
-                                __threadfence();
-                                enqueue = atomicAdd(pA.tQS + rCurrentTask.syncIdx, 1U) + 1 == tN;
+                        if (!threadIdx.x) {
+                            __threadfence();
+                            enqueue = atomicAdd(pA.tQS + rCurrentTask.syncIdx, 1U) + 1 == tN;
+                        }
+                        __syncthreads();
+                        if (enqueue) {
+                            if (!rCurrentTask.isPeerRemote)[[likely]] {
+                                notifyNext<PeerConnectivity::p2p>(rCurrentTask, CAST_TO(uint, workspace), pA);
                             }
-                            // Broadcast from t0 to everyone else in the warp
-                            enqueue = __shfl_sync(0xffffffff, enqueue, 0);
-                            if (enqueue) {
-                                const auto fO = ACC::TNx::value * (rCurrentTask.tileIdx / ACC::TN::value);
-                                auto* __restrict__ tQ = pA.ptQ + rCurrentTask.syncIdx * ACC::TNx::value;
-                                auto* __restrict__ tQH = pA.tQH;
-                                auto nextTask = Task {
-                                    TaskType::postGEMM,
-                                    rCurrentTask.cData[preIndex],
-                                    rCurrentTask.bData,
-                                    rCurrentTask.cData,
-                                    rCurrentTask.dData,
-                                    rCurrentTask.rcData,
-                                    rCurrentTask.flags + fO,
-                                    rCurrentTask.syncIdx,
-                                    0,
-                                    rCurrentTask.M,
-                                    rCurrentTask.tileSize,
-                                    rCurrentTask.peerIdx,
-                                    rCurrentTask.batchIdx,
-                                    rCurrentTask.isPeerRemote,
-                                };
-                                if (!rCurrentTask.isPeerRemote) {
-                                    for (uint i = threadIdx.x; i < tNx; i += wS) {
-                                        nextTask.tileIdx = i;
-                                        nextTask.flags += i;
-                                        tQ[i] = nextTask;
-                                    }
-                                }
-                                else {
-                                    for (uint i = threadIdx.x; i < tNx; i += wS) {
-                                        nextTask.tileIdx = i;
-                                        tQ[i] = nextTask;
-                                    }
-                                }
-
-                                __syncwarp();
-                                if (!threadIdx.x) {
-                                    __threadfence();
-                                    // notify scheduler
-                                    atomicAdd(tQH + rCurrentTask.syncIdx, tNx);
-                                }
+                            else {
+                                notifyNext<PeerConnectivity::remote>(rCurrentTask, CAST_TO(uint, workspace), pA);
                             }
                         }
                     }
