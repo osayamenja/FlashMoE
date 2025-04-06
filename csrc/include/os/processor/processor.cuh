@@ -536,7 +536,6 @@ namespace aristos::processor{
         const auto offset = ACC::TNx::value * (rCurrentTask.tileIdx / ACC::TN::value);
         auto* __restrict__ tQ = CAST_TO(uint, pA.ptQ + (rCurrentTask.syncIdx * ACC::TNx::value));
         const auto cIdx = threadIdx.x % eS;
-        const auto rIdx = threadIdx.x / eS * eS;
         // prep memory-view tensors
         const auto sTQ = make_tensor(cute::make_smem_ptr(workspace),
             cute::Layout<cute::Shape<cute::Int<threads>, cute::Int<eS>>,
@@ -546,6 +545,7 @@ namespace aristos::processor{
                 cute::Stride<cute::Int<eS>, cute::_1>>{});
         // copy from registers to shared memory using swizzle
         if constexpr (trips) {
+            const auto rIdx = threadIdx.x / eS * eS;
             #pragma unroll
             for (uint i = 0; i < trips; ++i) {
                 // each thread does a copy from registers to shared memory
@@ -619,13 +619,12 @@ namespace aristos::processor{
             #pragma unroll
             for (uint j = pIdx; j < residue; j += stride) {
                 // reorder the index per previous swizzle
-                gTQ(rIdx + (j + trips * capacity), cIdx) = sTQ(rIdx + j, (cIdx + j) % eS);
+                gTQ(j + trips * capacity, cIdx) = sTQ(j, (cIdx + j) % eS);
             }
         }
 
         __syncthreads();
         if (!threadIdx.x) {
-            const auto* __restrict__ q = pA.ptQ + rCurrentTask.syncIdx * ACC::TNx::value;
             __threadfence();
             // notify scheduler
             atomicAdd(pA.tQH + rCurrentTask.syncIdx, tasks);
@@ -678,9 +677,6 @@ namespace aristos::processor{
                     awaitNotification(tQSignal, &tqs, tqs.signal);
                     __threadfence();
                     // Eagerly indicate readiness for the next task as the above fence allows us to do so correctly
-                    if (blockIdx.x == 9 || blockIdx.x == 11) {
-                        printf("Block %u received %u\n", blockIdx.x, tqs.signal);
-                    }
                     globalInterrupt = tqs.interrupt;
                     atomicExch(pA.sQ, ready);
                 }
@@ -700,10 +696,6 @@ namespace aristos::processor{
             if (!tqs.interrupt) {
                 // shared -> registers
                 rCurrentTask = currentTask;
-                if ((blockIdx.x == 9 || blockIdx.x == 11) && !threadIdx.x) {
-                    //rCurrentTask.dump();
-                }
-                __syncthreads();
                 switch (rCurrentTask.taskType) {
                     case TaskType::preGEMM: {
                         constexpr unsigned int preIndex = 0;
