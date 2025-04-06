@@ -189,25 +189,12 @@ namespace aristos::scheduler {
         const auto gRO = gRQIdx + (threadIdx.x * (processorTally / wS) +
             cute::min(threadIdx.x, processorTally % wS));
         // index can only wrap around once
-        auto unguarded = gRO >= processors;
         gRQIdx = gRO % processors;
-        unguarded = unguarded || gRQIdx + tS - 1 < processors;
-        if (unguarded) {
-            #pragma unroll
-            for (uint i = 0; i < SQState::kElements; ++i) {
-                if (i < tS) {
-                    // shared -> registers
-                    sQState[i] = rQ[gRQIdx + i];
-                }
-            }
-        }
-        else {
-            #pragma unroll
-            for (uint i = 0; i < SQState::kElements; ++i) {
-                if (i < tS) {
-                    // shared -> registers
-                    sQState[i] = rQ[(gRQIdx + i) % processors];
-                }
+        #pragma unroll
+        for (uint i = 0; i < SQState::kElements; ++i) {
+            if (i < tS) {
+                // shared -> registers
+                sQState[i] = rQ[(gRQIdx + i) % processors];
             }
         }
         #pragma unroll
@@ -244,6 +231,7 @@ namespace aristos::scheduler {
         uint pending;
         WarpScan(*wSt).InclusiveSum(uI, startIdx, pending);
         startIdx -= uI;
+        __syncwarp();
         // enqueue all pending processes we discovered into the rQ
         #pragma unroll
         for (uint i = 0; i < pL; ++i) {
@@ -256,6 +244,11 @@ namespace aristos::scheduler {
         }
         __syncwarp();
         auto remaining = pending / wS + (threadIdx.x < pending % wS);
+        if (!threadIdx.x) {
+            printf("remaining is %u, pending is %u\n", remaining, pending);
+            print_tensor(make_tensor(sQ, make_layout(cute::make_shape(1, processors), cute::LayoutRight{})));
+        }
+        __syncwarp();
         cuda::std::array<uint, SQState::kElements> pids{};
         // read from rQ to registers
         #pragma unroll

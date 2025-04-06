@@ -89,7 +89,7 @@ void runOS() {
     CHECK_ERROR_EXIT(cudaMemcpyAsync(p, eHp, sizeof(Element) * dZ,
         cudaMemcpyHostToDevice,
         aristos::aristosStream));
-    for (uint i = 0; i < 1; ++i) {
+    for (uint i = 0; i < 2; ++i) {
         aristos::moe::forwardHost(p, p + dZ * sizeof(Element));
     }
     //aristos::moe::forwardHost<false>(p, p + dZ * sizeof(Element));

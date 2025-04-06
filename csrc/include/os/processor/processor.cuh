@@ -549,7 +549,8 @@ namespace aristos::processor{
             #pragma unroll
             for (uint i = 0; i < trips; ++i) {
                 // each thread does a copy from registers to shared memory
-                const auto tileIdx = offset + (threadIdx.x + i * capacity);
+                const auto taskIdx = threadIdx.x + i * capacity;
+                const auto tileIdx = offset + taskIdx;
                 const auto nextTask = Task {
                     TaskType::postGEMM,
                     rCurrentTask.cData[preIndex],
@@ -557,7 +558,7 @@ namespace aristos::processor{
                     rCurrentTask.cData,
                     rCurrentTask.dData,
                     rCurrentTask.rcData,
-                    rCurrentTask.flags + offset + (p == PeerConnectivity::p2p ? tileIdx : 0),
+                    rCurrentTask.flags + offset + (p == PeerConnectivity::p2p ? taskIdx : 0),
                     rCurrentTask.syncIdx,
                     tileIdx,
                     rCurrentTask.M,
@@ -586,7 +587,8 @@ namespace aristos::processor{
         }
         if constexpr (constexpr auto residue = tasks - trips * capacity; residue) {
             if (threadIdx.x < residue) {
-                const auto tileIdx = offset + (threadIdx.x + trips * threads);
+                const auto taskIdx = threadIdx.x + trips * capacity;
+                const auto tileIdx = offset + taskIdx;
                 const auto nextTask = Task {
                     TaskType::postGEMM,
                     rCurrentTask.cData[preIndex],
@@ -594,7 +596,7 @@ namespace aristos::processor{
                     rCurrentTask.cData,
                     rCurrentTask.dData,
                     rCurrentTask.rcData,
-                    rCurrentTask.flags + offset + (p == PeerConnectivity::p2p ? tileIdx : 0),
+                    rCurrentTask.flags + offset + (p == PeerConnectivity::p2p ? taskIdx : 0),
                     rCurrentTask.syncIdx,
                     tileIdx,
                     rCurrentTask.M,
