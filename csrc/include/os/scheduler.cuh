@@ -80,14 +80,15 @@ namespace aristos::scheduler {
         // things are about to get warped :)
         // Aggregate tally across the warp
         WarpScan(wSt[0]).InclusiveSum(lTt, queueSlot, taskTally);
+        __syncwarp();
         queueSlot -= lTt;
         auto prefixTaskSum = 0U;
+        constexpr auto pL = processors / wS;
         while (taskTally) {
             // Find processors if we are not currently aware of any
             while (!processorTally) {
                 // sweep sQ to identify ready processes
                 uint lPt = 0U; // local processor tally
-                constexpr auto pL = processors / wS;
                 #pragma unroll
                 for (uint j = 0; j < pL; ++j) {
                     const auto readiness = atomicExch(sQ + (j * wS + threadIdx.x),
@@ -106,11 +107,12 @@ namespace aristos::scheduler {
                 WarpScan(wSt[1]).InclusiveSum(lPt, startIdx, processorTally);
                 startIdx -= lPt;
                 // write to rQ
+                const auto qSIdx = gRQIdx + prefixTaskSum;
                 #pragma unroll
                 for (uint j = 0; j < SQState::kElements; ++j) {
                     if (sQState[j]) {
                         // write ready process pid to rQ
-                        rQ[(gRQIdx + startIdx++) % processors] = j * wS + threadIdx.x;
+                        rQ[(qSIdx + startIdx++) % processors] = j * wS + threadIdx.x;
                     }
                 }
                 if (processorTally) {
@@ -160,8 +162,8 @@ namespace aristos::scheduler {
                     }
                 }
             }
-            gRQIdx = (gRQIdx + tasks) % processors;
         }
+        gRQIdx = (gRQIdx + prefixTaskSum) % processors;
     }
 
     template<
@@ -209,7 +211,7 @@ namespace aristos::scheduler {
         __syncwarp();
         constexpr auto pL = processors / wS;
         // Consolidate findings and populate the ready queue
-        auto uI = 0U;
+        uint uI = 0U;
         // shared -> registers
         #pragma unroll
         for (uint i = 0; i < pL; ++i) {
@@ -231,7 +233,6 @@ namespace aristos::scheduler {
         uint pending;
         WarpScan(*wSt).InclusiveSum(uI, startIdx, pending);
         startIdx -= uI;
-        __syncwarp();
         // enqueue all pending processes we discovered into the rQ
         #pragma unroll
         for (uint i = 0; i < pL; ++i) {
@@ -240,15 +241,10 @@ namespace aristos::scheduler {
             }
         }
         if (threadIdx.x < processors % wS && sQState[pL]) {
-            rQ[startIdx++] = pL * wS + threadIdx.x;
+            rQ[startIdx] = pL * wS + threadIdx.x;
         }
         __syncwarp();
         auto remaining = pending / wS + (threadIdx.x < pending % wS);
-        if (!threadIdx.x) {
-            printf("remaining is %u, pending is %u\n", remaining, pending);
-            print_tensor(make_tensor(sQ, make_layout(cute::make_shape(1, processors), cute::LayoutRight{})));
-        }
-        __syncwarp();
         cuda::std::array<uint, SQState::kElements> pids{};
         // read from rQ to registers
         #pragma unroll
