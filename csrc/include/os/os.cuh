@@ -51,7 +51,7 @@ namespace aristos::os {
         auto* __restrict__ eL = CAST_TO(ELI, pL + world);
         static_assert(alignof(ELI) % alignof(uint) == 0);
         auto* __restrict__ lX = CAST_TO(LXI, eL + E);
-        const auto dZ = roundToCacheLine<LXI>(sizeof(ELI) * E + sizeof(PLI) * world + sizeof(LXI) * nLx);
+        const auto dZ = rTCL<LXI>(sizeof(ELI) * E + sizeof(PLI) * world + sizeof(LXI) * nLx);
         auto* __restrict__ bitSet = CAST_TO(BitSet, workspace + dZ);
         const auto bSSIz = bSSI * sizeof(uint);
         static_assert(alignof(BitSet) % alignof(uint) == 0);
@@ -74,13 +74,21 @@ namespace aristos::os {
         for (uint i = threadIdx.x; i < nLx; i += threads) {
             lX[i] = gLx[i];
         }
-        auto* __restrict__ scratch = CAST_TO(uint, workspace + roundToCacheLine<uint>(z));
+        // Scheduler shared memory allocation
+        const auto sBz = nSI<WARP_SIZE>(bookkeeping.gtQCl);
+        auto* __restrict__ scratch = CAST_TO(uint, workspace + rTCL<uint>(z));
         auto* __restrict__ tQHeads = scratch;
         auto* __restrict__ interrupt = tQHeads + subscriberCount;
         auto* __restrict__ rQ = interrupt + subscriberCount;
-        auto* __restrict__ status = rQ + roundToCacheLine<uint>(processors);
         static_assert(alignof(uint) % alignof(BitSet) == 0);
-        auto* __restrict__ schedulerScratch = status + world;
+        auto* __restrict__ schedulerBitSet = CAST_TO(BitSet, rQ + rTCL<uint>(processors));
+        static_assert(alignof(BitSet) % alignof(uint) == 0);
+        auto* __restrict__ interruptScratch = CAST_TO(uint, schedulerBitSet + rTCL<BitSet>(sBz));
+        auto* __restrict__ status = interruptScratch + rTCL<uint>(processors);
+        using WarpScan = cub::WarpScan<uint>;
+        static_assert(alignof(uint) % alignof(WarpScan::TempStorage) == 0);
+        auto* __restrict__ wSt = CAST_TO(WarpScan::TempStorage, status + rTCL<uint>(world));
+
         auto* __restrict__ eCs = scratch;
         if (!threadIdx.x) {
             // Expert computation expectant tasks
@@ -109,7 +117,7 @@ namespace aristos::os {
         const auto gtQCl = bookkeeping.gtQCl;
         #pragma unroll
         for (uint i = threadIdx.x; i < processors; i += threads) {
-            schedulerScratch[i] = 1U; // pre-fill the scheduler's bitmask
+            interruptScratch[i] = 1U; // pre-fill the scheduler's bitmask
         }
         #pragma unroll
         for (uint i = threadIdx.x; i < SUBSCRIBERS; i += threads) {
@@ -127,7 +135,8 @@ namespace aristos::os {
             auto* __restrict__ gtQHeads = bookkeeping.tQH();
             auto* __restrict__ sQ = bookkeeping.sQ();
             auto* __restrict__ pDB = bookkeeping.pDB();
-            scheduler::start<processors>(schedulerScratch, sO, gtQCl, interrupt, tQHeads,
+            scheduler::start<processors>(wSt, interruptScratch,
+                sO, gtQCl, interrupt, tQHeads,
                 gtQHeads, taskBound, rQ, sQ, pDB);
         }
         else {

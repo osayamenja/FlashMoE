@@ -559,7 +559,7 @@ namespace aristos{
     template<typename Element>
     requires(128 % sizeof(Element) == 0)
     __device__ __forceinline__
-    constexpr auto roundToCacheLine(uint const& zb) {
+    constexpr auto rTCL(uint const& zb) {
         return cute::ceil_div(zb, 128U / sizeof(Element)) * (128U / sizeof(Element));
     }
 

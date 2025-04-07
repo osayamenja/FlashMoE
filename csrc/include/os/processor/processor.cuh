@@ -617,11 +617,16 @@ namespace aristos::processor{
             __syncthreads();
             constexpr auto stride = threads / eS;
             const auto pIdx = threadIdx.x / eS;
+            constexpr auto length = residue / stride;
             // now copy from shared memory to global memory by multiplexing each row across available warps
             #pragma unroll
-            for (uint j = pIdx; j < residue; j += stride) {
-                // reorder the index per previous swizzle
-                gTQ(j + trips * capacity, cIdx) = sTQ(j, (cIdx + j) % eS);
+            for (uint j = 0; j < length; ++j) {
+                const auto idx = j * stride + pIdx;
+                gTQ(idx + trips * capacity, cIdx) = sTQ(idx, (cIdx + idx) % eS);
+            }
+            if (pIdx < residue % stride) {
+                const auto idx = length * stride + pIdx;
+                gTQ(idx + trips * capacity, cIdx) = sTQ(idx, (cIdx + idx) % eS);
             }
         }
 

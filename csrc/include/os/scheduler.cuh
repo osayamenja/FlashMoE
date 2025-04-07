@@ -278,11 +278,13 @@ namespace aristos::scheduler {
     /// Benchmarks confirm an order of magnitude performance improvement for that operation.
     template<
         unsigned int processors,
-        unsigned int subscribers = SUBSCRIBERS
+        unsigned int subscribers = SUBSCRIBERS,
+        typename WST
     >
-    requires(processors > 0)
+    requires(processors > 0 && cuda::std::is_same_v<WST, cub::WarpScan<uint>::TempStorage>)
     __device__ __forceinline__
-    void start(uint* __restrict__ const& workspace,
+    void start(WST* __restrict__ const& wSt,
+        uint* __restrict__ const& interruptScratch,
         const unsigned int& sO,
         const unsigned int& gtQCL,
         unsigned int* __restrict__ const& sInterrupts,
@@ -312,10 +314,6 @@ namespace aristos::scheduler {
         const uint dT = gtQCL / (wS * dQL);
 
         // cub stuff
-        using WarpScan = cub::WarpScan<uint>;
-        const auto aZ = roundToCacheLine<uint>(processors);
-        static_assert(alignof(uint) % alignof(WarpScan::TempStorage) == 0);
-        auto* __restrict__ wSt = CAST_TO(WarpScan::TempStorage, workspace + aZ);
         uint gRQIdx = 0U;
         uint processorTally = processors; // initially, all processors are available, ensure that rQ has all pids
         auto tTB = atomicLoad<cuda::thread_scope_block>(taskBound);
@@ -390,7 +388,7 @@ namespace aristos::scheduler {
             atomicExch_block(sInterrupts + sid, 1U);
         }
         // interrupt processors
-        sPI<processors, wS>(sQState, rQ, sQ, pDB, gRQIdx, wSt, workspace, processorTally);
+        sPI<processors, wS>(sQState, rQ, sQ, pDB, gRQIdx, wSt, interruptScratch, processorTally);
     }
 }
 #endif //SCHEDULER_CUH

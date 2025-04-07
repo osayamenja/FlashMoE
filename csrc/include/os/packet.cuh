@@ -89,7 +89,7 @@ namespace aristos::packet {
         __syncthreads();
         constexpr auto exL = cute::ceil_div(E, numSuperBlocks);
         static_assert(alignof(PEL) % alignof(uint) == 0);
-        constexpr auto pZ = roundToCacheLine<PEL>(E * sizeof(PEL));
+        constexpr auto pZ = rTCL<PEL>(E * sizeof(PEL));
         const auto sC = cute::make_tensor(cute::make_smem_ptr(CAST_TO(uint, workspace + pZ)),
             cute::Layout<cute::Shape<cute::Int<threads>, cute::Int<batch>>>{});
         cutlass::AlignedArray<uint, batch> rTID{};
