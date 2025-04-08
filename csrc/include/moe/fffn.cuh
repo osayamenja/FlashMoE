@@ -23,7 +23,7 @@ namespace aristos {
     __global__ __maxnreg__(ACC::PeakHardware::registers::value) void fffn(
         const void* __restrict__ iP /* A, B, D*/, void* __restrict__ oP /*C*/) {
         constexpr unsigned int blocks = ACC::PeakHardware::OS::processorBlocks::value;
-        constexpr unsigned int sharedSize = ACC::PeakHardware::sharedMemory::value;
+        constexpr unsigned int sharedSize = ACC::sharedSize::value;
         __shared__ __align__(16) Element workspace[sharedSize / sizeof(Element)];
         __shared__ __align__(16) uint tQ[ACC::TMU::value];
         using Operation = BlockMM<ACC::ActivationOp, Element>;
@@ -50,12 +50,36 @@ namespace aristos {
             cute::Layout<cute::Shape<cute::Int<tSCl>, cute::Int<tilesM>>,
                 cute::Stride<cute::Int<tilesM>, cute::_1>>{});
 
-        #pragma unroll
-        for (uint i = blockIdx.x; i < tiles; i += blocks) {
-            processor::sfGET<Operation, M, N, K>(workspace, pA, pB1, pC1, pD1,i);
+        constexpr auto bL = tiles / blocks;
+        for (uint i = 0; i < bL; ++i) {
+            const auto tileIdx = blockIdx.x + i * blocks;
+            processor::sfGET<Operation, M, N, K>(workspace, pA, pB1, pC1, pD1, tileIdx);
             __syncthreads();
             if (constexpr auto wS = 32; threadIdx.x / wS == 0) {
-                const auto tM = i / tilesN;
+                const auto tM = tileIdx / tilesN;
+                uint propagate = 0U;
+                if (!threadIdx.x) {
+                    __threadfence();
+                    // Notify this tile's completion
+                    propagate = atomicIncrement(&tSync(0, tM)) == tilesN - 1;
+                }
+                // Broadcast from t0 to everyone else in the warp
+                propagate = __shfl_sync(0xffffffff, propagate, 0);
+                if (propagate) {
+                    // We were the last, let's propagate this information down
+                    #pragma unroll
+                    for (uint j = threadIdx.x + 1; j < tSCl; j += wS) {
+                        atomicExch(&tSync(j, tM), tilesN);
+                    }
+                }
+            }
+        }
+        if (blockIdx.x < tiles % blocks) {
+            const auto tileIdx = blockIdx.x + bL * blocks;
+            processor::sfGET<Operation, M, N, K>(workspace, pA, pB1, pC1, pD1, tileIdx);
+            __syncthreads();
+            if (constexpr auto wS = 32; threadIdx.x / wS == 0) {
+                const auto tM = tileIdx / tilesN;
                 uint propagate = 0U;
                 if (!threadIdx.x) {
                     __threadfence();
