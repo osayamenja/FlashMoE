@@ -423,8 +423,23 @@ namespace aristos::processor{
             cute::Step<cute::_1,cute::_1, cute::X>{});
 
         auto k_tile_iter = cute::make_coord_iterator(tilesK);
-
         using ElementD = typename BlockGEMM::MatrixDType;
+
+        // prefetch bias from global memory
+        static_assert(ACC::sharedSize::value >= (threads * 2 + sizeof(ElementD)) * bN);
+        const auto mBias = make_tensor(cute::make_gmem_ptr(bias),
+            cute::Layout<cute::Shape<cute::_1, cute::Int<N>>,
+                cute::Stride<cute::Int<N>, cute::_1>>{});
+        const auto biasCoord = idx2crd(tileIdx, cute::Shape<cute::_1, cute::Int<tilesN>>{},
+            cute::Stride<cute::Int<bN>, cute::_1>{});
+        const auto gBias = cute::local_tile(mBias,
+            cute::Shape<cute::_1, cute::Int<bN>>{}, cute::get<1>(biasCoord));
+        static_assert(threads % bN == 0);
+        if (threadIdx.x < bN) {
+            using LT =  cuda::std::conditional_t<sizeof(ElementD) == 2, uint16_t, uint32_t>;
+            CAST_TO(LT, workspace)[threadIdx.x] = __ldg(CONST_CAST_TO(LT, &gBias(threadIdx.x)));
+        }
+
         mainLoop(
             accumulator,
             gA,
@@ -433,7 +448,7 @@ namespace aristos::processor{
             k_tile_iter, tilesK,
             cute::Underscore{},
             threadIdx.x,
-            CAST_TO(char, workspace));
+            CAST_TO(char, workspace + bN));
         /// There is a block-wide barrier at the end of the above ^
 
         // Epilogue
@@ -448,6 +463,27 @@ namespace aristos::processor{
         // Assume elementwise operator
         typename BlockGEMM::FusedEpilogue epilogueOp{};
         constexpr auto trips = size(accumulator) / rScratch.size();
+        // copy single bias value
+        const auto rB = gDLoadOp(sBias(threadIdx.x % bN));
+
+        constexpr auto sCLay = cute::make_layout(cute::Shape<cute::Int<bM>, cute::Int<elems>>{},
+            cute::LayoutRight{});
+        const auto sC = cute::make_tensor(cute::make_smem_ptr(workspace), sCLay);
+        const auto tCsC = tiledMMA.get_slice(threadIdx.x).partition_C(sC);
+        const auto rIdx = threadIdx.x / elems * elems;
+        const auto cIdx = threadIdx.x % elems;
+        #pragma unroll
+        for (unsigned int i = 0; i < trips; ++i) {
+            #pragma unroll
+            for (unsigned int j = 0; j < elems; ++j) {
+                tCsC(j) = gCStoreOp(accumulator(j + i * elems));
+            }
+            __syncthreads();
+            #pragma unroll
+            for (unsigned int j = 0; j < elems; ++j) {
+                accumulator(j + i * elems) = sC(rIdx + j, cIdx);
+            }
+        }
 
         // Prefetch from global to shared memory
         #pragma unroll
@@ -473,12 +509,6 @@ namespace aristos::processor{
         }
 
         __syncthreads();
-        constexpr auto sCLay = cute::make_layout(cute::Shape<cute::Int<bM>, cute::Int<elems>>{},
-            cute::LayoutRight{});
-        const auto sC = cute::make_tensor(cute::make_smem_ptr(workspace), sCLay);
-        const auto tCsC = tiledMMA.get_slice(threadIdx.x).partition_C(sC);
-        const auto rIdx = threadIdx.x / elems * elems;
-        const auto cIdx = threadIdx.x % elems;
         #pragma unroll
         for (unsigned int i = 0; i < trips; ++i) {
             #pragma unroll
@@ -533,7 +563,7 @@ namespace aristos::processor{
         constexpr auto elems = capacity * eS / threads;
         constexpr unsigned int preIndex = 0;
 
-        const auto offset = ACC::TNx::value * (rCurrentTask.tileIdx / ACC::TN::value);
+        const auto offset = ACC::TNx::value * rCurrentTask.batchIdx;
         auto* __restrict__ tQ = CAST_TO(uint, pA.ptQ + (rCurrentTask.syncIdx * ACC::TNx::value));
         const auto cIdx = threadIdx.x % eS;
         // prep memory-view tensors

@@ -106,11 +106,11 @@ namespace aristos::moe{
         // Bias
         // Broadcast from vector to matrix
         const auto biasUp = make_tensor(cute::make_gmem_ptr(bU),
-            make_layout(make_shape(lE, cute::Shape<cute::Int<S>, cute::Int<P>>{}),
-                cute::Stride<cute::Int<P>, cute::Stride<cute::_0, cute::_1>>{}));
+            make_layout(cute::make_shape(lE, P),
+                cute::Stride<cute::Int<P>, cute::_1>{}));
         const auto biasDown = make_tensor(cute::make_gmem_ptr(bd),
-            make_layout(make_shape(lE, cute::Shape<cute::Int<S>, cute::Int<H>>{}),
-                cute::Stride<cute::Int<H>, cute::Stride<cute::_0, cute::_1>>{}));
+            make_layout(make_shape(lE, cute::Int<H>{}),
+                cute::Stride<cute::Int<H>, cute::_1>{}));
 
         // Output
         const auto gateOutput = make_tensor(cute::make_gmem_ptr(gOp),

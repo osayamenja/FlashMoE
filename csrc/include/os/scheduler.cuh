@@ -68,6 +68,7 @@ namespace aristos::scheduler {
     __device__ __forceinline__
     void schedulerLoop(SQState& sQState, TQState& tqState, WSet& wSet,
         const unsigned int& tQOffset,
+        const unsigned int& gTbO,
         uint& lTt, uint& processorTally,
         uint& gRQIdx, uint& scheduled,
         typename WarpScan::TempStorage* __restrict__ const& wSt,
@@ -152,10 +153,12 @@ namespace aristos::scheduler {
                 for (uint j = sL; j < TQState::kElements; ++j) {
                     if (tqState[j].tasks && tasksToSchedule) {
                         const auto canSchedule = cute::min(tasksToSchedule, tqState[j].tasks);
-                        const auto qHead = ((j - sL) * wS + threadIdx.x) * blockQStride;
+                        const auto qHead = (wS * (gTbO + (j - sL)) + threadIdx.x) * blockQStride + tqState[j].tQTail;
                         const auto qIdx = tQOffset + qHead;
                         tasksToSchedule -= canSchedule;
                         tqState[j].tasks -= canSchedule;
+                        // checkpoint state in case of partial scheduling
+                        tqState[j].tQTail += canSchedule;
                         const auto cSetB = canSchedule / WSet::kElements;
                         schedule<processors, DQType::block>(wSet, cSetB, canSchedule,
                             qIdx, queueSlot, gRQIdx, rQ, pDB);
@@ -163,6 +166,12 @@ namespace aristos::scheduler {
                 }
             }
         }
+        // clear checkpoints
+        #pragma unroll
+        for (uint j = sL; j < TQState::kElements; ++j) {
+            tqState[j].tQTail = 0;
+        }
+        // Advance global rQ index
         gRQIdx = (gRQIdx + prefixTaskSum) % processors;
     }
 
@@ -343,7 +352,7 @@ namespace aristos::scheduler {
                     lTt += tasks;
                 }
                 // schedule observed tasks
-                schedulerLoop<processors>(sQState, tqState, wSet, sO, lTt,
+                schedulerLoop<processors>(sQState, tqState, wSet, sO, 0, lTt,
                     processorTally, gRQIdx, scheduled,
                     wSt, sQ, rQ, pDB, true);
 
@@ -357,8 +366,8 @@ namespace aristos::scheduler {
                         lTt += tasks;
                     }
                     // schedule observed tasks
-                    schedulerLoop<processors>(sQState, tqState, wSet, sO, lTt,
-                        processorTally, gRQIdx, scheduled,
+                    schedulerLoop<processors>(sQState, tqState, wSet, sO, i * dQL,
+                        lTt, processorTally, gRQIdx, scheduled,
                         wSt, sQ, rQ, pDB);
                 }
             }
@@ -372,8 +381,8 @@ namespace aristos::scheduler {
                 }
             }
             // schedule observed tasks
-            schedulerLoop<processors>(sQState, tqState, wSet, sO, lTt,
-                processorTally, gRQIdx, scheduled,
+            schedulerLoop<processors>(sQState, tqState, wSet, sO, dQL * dT,
+                lTt, processorTally, gRQIdx, scheduled,
                 wSt, sQ, rQ, pDB, dT == 0);
             if (!threadIdx.x) {
                 tTB = atomicLoad<cuda::thread_scope_block>(taskBound);

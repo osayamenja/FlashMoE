@@ -41,15 +41,15 @@
       "description": "Intermediate dimension for the FFN/expert",
       "multipleOf": 64
     },
-    "moe_frequency": {
-      "type": "integer",
-      "description": "MoE frequency",
-      "minimum": 1
-    },
     "mini_batch": {
       "type": "integer",
       "description": "Batch of token sequences per step",
       "multipleOf": 2
+    },
+    "moe_frequency": {
+      "type": "integer",
+      "description": "MoE frequency",
+      "minimum": 1
     },
     "num_experts": {
       "type": "integer",
@@ -79,8 +79,8 @@
     "hidden_act",
     "hidden_size",
     "intermediate_size",
-    "moe_frequency",
     "mini_batch",
+    "moe_frequency",
     "num_experts",
     "num_layers",
     "sequence_len",
