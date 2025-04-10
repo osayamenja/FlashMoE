@@ -132,7 +132,7 @@ namespace aristos {
         typename ElementA,
         typename ElementB = ElementA,
         typename ElementC = ACC::ElementC,
-        unsigned int sizeK = ACC::PeakHardware::bKBase::value * sizeof(mp_t) / sizeof(ElementA),
+        unsigned int sizeK = ACC::PeakHardware::bKBase::value,
         unsigned int Arch = ACC::PeakHardware::arch::value,
         unsigned int threads = ACC::PeakHardware::OS::threads::value,
         unsigned int pipeStages = ACC::PeakHardware::pipeStages::value

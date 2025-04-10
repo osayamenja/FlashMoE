@@ -18,14 +18,12 @@ namespace aristos::processor{
         experimental
     };
     template<
-        ReleaseType r = ReleaseType::stable,
         CombineMode c = CombineMode::single,
         unsigned int gM = BLOCK_M,
         unsigned int M = ACC::S::value,
         unsigned int N = ACC::H::value,
         class ScaleWeights,
         typename Element,
-        unsigned int Arch = ACC::PeakHardware::arch::value,
         unsigned int elems = ACC::PeakHardware::rScratch::value,
         unsigned int threads = ACC::PeakHardware::OS::threads::value,
         unsigned int sharedSize = ACC::PeakHardware::sharedMemory::value + ACC::PeakHardware::spare::value
@@ -47,7 +45,7 @@ namespace aristos::processor{
         constexpr BlockTiler tiler{};
         constexpr auto bM = cute::get<0>(tiler);
         constexpr auto bN = cute::get<1>(tiler);
-        cutlass::AlignedArray<Element, bN> registers{};
+        cutlass::Array<Element, bN> registers{};
         constexpr auto mTe = cutlass::NumericConverter<Element, mp_t>{};
         constexpr auto eTm = cutlass::NumericConverter<mp_t, Element>{};
         // Row-major
@@ -480,6 +478,7 @@ namespace aristos::processor{
         sQ(_sQ), pDB(_pDB), tQH(_tQH), tQ(_tQ), ptQ(_ptQ), tQS(_tQS) {}
     };
 
+    __device__ __inline__ uint16_t check[ACC::E::value * ACC::TCM::value * ACC::TNx::value];
     template<
         PeerConnectivity p,
         unsigned int tasks = ACC::TNx::value
@@ -553,6 +552,10 @@ namespace aristos::processor{
             __syncthreads();
         }
         if constexpr (constexpr auto residue = tasks - trips * capacity; residue) {
+            if (!threadIdx.x) {
+                printf("Populating Row %ld\n",
+                    rCurrentTask.flags - (bookkeeping.flags + bookkeeping.world * bookkeeping.xs) + offset);
+            }
             if (threadIdx.x < residue) {
                 const auto taskIdx = threadIdx.x + trips * capacity;
                 const auto tileIdx = offset + taskIdx;
@@ -653,6 +656,13 @@ namespace aristos::processor{
                     // Eagerly indicate readiness for the next task as the above fence allows us to do so correctly
                     globalInterrupt = tqs.interrupt;
                     atomicExch(pA.sQ, ready);
+                    if (rCurrentTask.taskType == TaskType::postGEMM) {
+                        const auto fOff = rCurrentTask.flags - (bookkeeping.flags +
+                            bookkeeping.xs * bookkeeping.world);
+                        /*if (!tqs.interrupt && atomicTAS<cuda::thread_scope_device>(check + fOff)) {
+                            printf("Duplicate flags at %u!\n", tqs.decodeSig());
+                        }*/
+                    }
                 }
                 // The below is necessary as it guarantees memory ordering
                 __syncwarp();
@@ -741,7 +751,7 @@ namespace aristos::processor{
                     break;
                     case TaskType::combine: {
                         constexpr unsigned int combineIndex = 0;
-                        combine<ReleaseType::experimental, ACC::CM::value>(
+                        combine<ACC::CM::value>(
                             CAST_TO(typename PostGEMM::MatrixDType, workspace),
                             CONST_CAST_TO(TPS, rCurrentTask.aData),
                             CONST_CAST_TO(typename PostGEMM::MatrixAType, rCurrentTask.bData[combineIndex]),
