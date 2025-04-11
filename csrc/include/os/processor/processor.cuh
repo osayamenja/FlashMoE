@@ -552,10 +552,6 @@ namespace aristos::processor{
             __syncthreads();
         }
         if constexpr (constexpr auto residue = tasks - trips * capacity; residue) {
-            if (!threadIdx.x) {
-                printf("Populating Row %ld\n",
-                    rCurrentTask.flags - (bookkeeping.flags + bookkeeping.world * bookkeeping.xs) + offset);
-            }
             if (threadIdx.x < residue) {
                 const auto taskIdx = threadIdx.x + trips * capacity;
                 const auto tileIdx = offset + taskIdx;
@@ -656,13 +652,6 @@ namespace aristos::processor{
                     // Eagerly indicate readiness for the next task as the above fence allows us to do so correctly
                     globalInterrupt = tqs.interrupt;
                     atomicExch(pA.sQ, ready);
-                    if (rCurrentTask.taskType == TaskType::postGEMM) {
-                        const auto fOff = rCurrentTask.flags - (bookkeeping.flags +
-                            bookkeeping.xs * bookkeeping.world);
-                        /*if (!tqs.interrupt && atomicTAS<cuda::thread_scope_device>(check + fOff)) {
-                            printf("Duplicate flags at %u!\n", tqs.decodeSig());
-                        }*/
-                    }
                 }
                 // The below is necessary as it guarantees memory ordering
                 __syncwarp();

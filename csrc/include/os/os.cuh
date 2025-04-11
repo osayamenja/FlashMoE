@@ -107,7 +107,6 @@ namespace aristos::os {
         for (uint i = threadIdx.x; i < E; i += threads) {
             const auto eCt = Bookkeeping::tiles<BLOCK_M>(d == DropTokens::yes ?
                 cute::min(eCs[i], EC) : eCs[i]);
-            printf("eC[%u]: %u\n", i, eCs[i]);
             atomicAdd_block(taskBound, eCt * TNx);
         }
         __syncthreads();

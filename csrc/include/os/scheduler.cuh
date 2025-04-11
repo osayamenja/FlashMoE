@@ -322,7 +322,6 @@ namespace aristos::scheduler {
         constexpr auto dQL = decltype(tqState)::kElements - sL;
         const uint dT = gtQCL / (wS * dQL);
 
-        // cub stuff
         uint gRQIdx = 0U;
         uint processorTally = processors; // initially, all processors are available, ensure that rQ has all pids
         auto tTB = atomicLoad<cuda::thread_scope_block>(taskBound);
@@ -386,7 +385,6 @@ namespace aristos::scheduler {
                 wSt, sQ, rQ, pDB, dT == 0);
             if (!threadIdx.x) {
                 tTB = atomicLoad<cuda::thread_scope_block>(taskBound);
-                //printf("s: %u, ttb: %u\n", scheduled, tTB);
             }
             tTB = __shfl_sync(0xffffffff, tTB, 0);
         }

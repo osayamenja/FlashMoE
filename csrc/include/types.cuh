@@ -902,12 +902,12 @@ namespace aristos{
 
         /// Scheduler buffers and flag checkpoints
         __host__ __device__ __forceinline__
-        auto *tIx() const {
+        auto* tIx() const {
             return ssFc() + 1;
         }
 
         __host__ __device__ __forceinline__
-        auto *sQ() const {
+        auto* sQ() const {
             return tIx() + ACC::E::value * ACC::TCM::value * ACC::TNx::value;
         }
 
@@ -926,7 +926,7 @@ namespace aristos{
             return sQ() + ACC::PeakHardware::OS::processorBlocks::value;
         }
         __device__ __forceinline__
-        auto *tQH() const {
+        auto* tQH() const {
             return eC() + ACC::E::value;
         }
         /// Packet Sync array

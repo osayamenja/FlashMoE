@@ -246,7 +246,6 @@ namespace aristos::subscriber{
                             else {
                                 // enforce memory consistency
                                 __threadfence_system();
-                                //printf("Decoded %u\n", flagIdx);
                                 lPd(dA.tQ, ltQHead, packet,
                                     CONST_CAST_TO(cuda::std::byte, tI),
                                     mO, sP->tokensM, flagIdx % TN, tQHead, expertIdx);
@@ -309,7 +308,6 @@ namespace aristos::subscriber{
                                 else {
                                     // enforce memory consistency
                                     __threadfence_system();
-                                    //printf("Decoded %u\n", flagIdx);
                                     lPd(dA.tQ, ltQHead, packet,
                                         CONST_CAST_TO(cuda::std::byte, tI),
                                         mO, sP->tokensM, flagIdx % TN, tQHead, expertIdx);

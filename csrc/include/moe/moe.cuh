@@ -43,12 +43,12 @@ namespace aristos::moe{
             // clear loss buffers
             for (uint i = threads * blockIdx.x + threadIdx.x; i < gBz; i += blocks * threads) {
                 gBp[i] = 0.0f;
-                sQ[i] = observed;
             }
         }
         // clear processor doorbells
         for (uint i = threads * blockIdx.x + threadIdx.x; i < processors; i += blocks * threads) {
             pDB[i] = TQSignal{0U, 0U};
+            sQ[i] = observed;
         }
 
         // clear sB
