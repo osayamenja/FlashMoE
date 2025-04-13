@@ -42,7 +42,6 @@ void runOS() {
     constexpr auto E = aristos::ACC::E::value;
     constexpr auto P = aristos::ACC::P::value;
     constexpr auto PX = aristos::ACC::PX::value;
-    constexpr auto pEC = aristos::ACC::pEC::value;
     const auto nLx = aristos::hostBookkeeping.nLx;
     constexpr unsigned long aZ =  S * H;
     constexpr auto gwZ = aZ + PX * H;
@@ -89,7 +88,7 @@ void runOS() {
     CHECK_ERROR_EXIT(cudaMemcpyAsync(p, eHp, sizeof(Element) * dZ,
         cudaMemcpyHostToDevice,
         aristos::aristosStream));
-    for (uint i = 0; i < 2; ++i) {
+    for (uint i = 0; i < 8; ++i) {
         aristos::moe::forwardHost(p, p + dZ * sizeof(Element));
     }
     aristos::moe::forwardHost<false>(p, p + dZ * sizeof(Element));
@@ -105,28 +104,6 @@ void runOS() {
     CHECK_ERROR_EXIT(cudaMemcpyAsync(oH, p + dZ * sizeof(Element),
         sizeof(Element) * S * (PX + H),
         cudaMemcpyDeviceToHost, aristos::aristosStream));
-    cuda::std::array<aristos::TPS, E * pEC> tokenOrdering{};
-    cuda::std::array<uint, E * pEC> tokenOrderingIds{};
-    cuda::std::array<uint, E> expertCounts{};
-    CHECK_ERROR_EXIT(cudaMemcpyAsync(tokenOrdering.data(), aristos::hostBookkeeping.tP(),
-        sizeof(decltype(tokenOrdering)::value_type) * tokenOrdering.size(),
-        cudaMemcpyDeviceToHost, aristos::aristosStream));
-    CHECK_ERROR_EXIT(cudaMemcpyAsync(expertCounts.data(),
-        aristos::hostBookkeeping.eC(),
-        sizeof(decltype(expertCounts)::value_type) * expertCounts.size(),
-        cudaMemcpyDeviceToHost, aristos::aristosStream));
-    CHECK_ERROR_EXIT(cudaStreamSynchronize(aristos::aristosStream));
-
-    auto* file = std::fopen(std::string("eC_")
-            .append(std::to_string(rank)).append(".txt").c_str(), "w");
-    for (uint i = 0; i < E; ++i) {
-        for (uint j = 0; j < pEC; ++j) {
-            tokenOrderingIds[j] = tokenOrdering[j + i * pEC].tokenIdx;
-        }
-        fmt::println(file, "Rank {}->Expert {}->{} tokens: {}", rank, i,
-            expertCounts[i], tokenOrderingIds);
-    }
-    std::fclose(file);
     /*if (rank == 1) {
         const auto o = make_tensor(oH + S * PX,
             make_layout(cute::make_shape(S, H), cute::LayoutRight{}));

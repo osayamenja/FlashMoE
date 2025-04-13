@@ -62,9 +62,9 @@ namespace aristos {
         auto sW = scaleWeights[rowIdx + threadIdx.x];
         auto cW = combineWeights[rowIdx + threadIdx.x];
 
-        auto k_tile_iter = cute::make_coord_iterator(tilesK);
+        const auto k_tile_iter = cute::make_coord_iterator(tilesK);
 
-        using ElementD = typename BlockGEMM::MatrixDType;
+        using Element = typename BlockGEMM::MatrixDType;
         mainLoop(
             accumulator,
             gA,
@@ -83,7 +83,7 @@ namespace aristos {
         constexpr auto gCStoreOp = cutlass::NumericConverter<typename decltype(gC)::value_type,
                                                     typename decltype(accumulator)::value_type>{};
         constexpr auto gDLoadOp = cutlass::NumericConverter<typename decltype(accumulator)::value_type,
-                                                    ElementD>{};
+                                                    Element>{};
 
         // Assume elementwise operator
         constexpr typename BlockGEMM::FusedEpilogue epilogueOp{};
@@ -120,8 +120,8 @@ namespace aristos {
         const auto tCsC = tiledMMA.get_slice(threadIdx.x).partition_C(sC);
         const auto rIdx = threadIdx.x / elems * elems;
         const auto cIdx = threadIdx.x % elems;
-        using CDxT = typename ToCDx<ElementD>::T;
-        constexpr auto cTCx = cutlass::NumericConverter<CDxT, ElementD>{};
+        using CDxT = typename ToCDx<Element>::T;
+        constexpr auto cTCx = cutlass::NumericConverter<CDxT, Element>{};
         // Transpose data
         #pragma unroll
         for (unsigned int i = 0; i < trips; ++i) {
@@ -234,7 +234,8 @@ namespace aristos {
         const auto mC = make_tensor(cute::make_gmem_ptr(pC2),
             make_layout(cute::make_shape(M, K), cute::LayoutRight{}));
         const auto mD = make_tensor(cute::make_gmem_ptr(pD2),
-            make_layout(cute::make_shape(M, K), cute::make_stride(0, 1)));
+            cute::Layout<cute::Shape<cute::_1, cute::Int<K>>,
+                cute::Stride<cute::_0, cute::_1>>{});
 
         if constexpr (u == UseBarrier::yes) {
             __syncthreads();
@@ -244,7 +245,8 @@ namespace aristos {
             }
             __syncthreads();
             for (uint i = blockIdx.x; i < tiles2; i += blocks) {
-                fGST<OperationX, K, N, c, elems>(workspace, mA, mB, mD, mC, pS, pCw, i, M);
+                fGST<OperationX, K, N, c, elems>(workspace, mA, mB, mD, mC,
+                    pS, pCw, i, M);
             }
         }
         else {

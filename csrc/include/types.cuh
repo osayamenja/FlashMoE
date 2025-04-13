@@ -716,7 +716,7 @@ namespace aristos{
                         cute::ceil_div(TCM * TN, WARP_SIZE) +
                         cute::ceil_div(TCM * E, SUBSCRIBERS) * ACC::TNx::value;
                 sT = tPS * SUBSCRIBERS;
-                tQl = sizeof(Task) * (sT + prT); printf("tql is %u\n", tQl);
+                tQl = sizeof(Task) * (sT + prT);
                 tQml = tQl + blocks * sizeof(TQSignal) + E * sizeof(PEL) + sizeof(PLI) * world +
                     sizeof(TPS) * (E * pEC);
                 brs = tQml + (ACC::GRL::value == GateReductionLevel::singleBlock ? 0U : S * TPX *

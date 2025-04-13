@@ -133,8 +133,6 @@ namespace aristos::moe{
         }
     }
 
-    bool __inline__  initCheck = false;
-    uint __inline__ count = 0;
     template<bool skip = true>
     __host__ __forceinline__
     void forwardHost(const void* __restrict__ iP, void* __restrict__ oP){
@@ -143,18 +141,9 @@ namespace aristos::moe{
         #endif
         reportError(isInitialized, "Not initialized!");
         CHECK_ERROR_EXIT(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
-        count++;
-        printf("----------Start Round %u!----------------\n", count);
         /// Consume precompiled macros
         constexpr auto blocks = ACC::PeakHardware::blocks::value;
         constexpr auto threads = ACC::PeakHardware::OS::threads::value;
-        std::array<uint16_t, ACC::E::value * ACC::TCM::value * ACC::TNx::value> a{};
-        if (!initCheck) {
-            initCheck = true;
-            for (uint i = 0; i < a.size(); ++i) {
-                a[i] = 0U;
-            }
-        }
         // Call forward pass
         if constexpr (ACC::E::value > 1) {
             cudaEvent_t start, stop;
@@ -163,11 +152,7 @@ namespace aristos::moe{
                 CHECK_ERROR_EXIT(cudaEventCreate(&stop));
                 CHECK_ERROR_EXIT(cudaEventRecord(start, aristos::aristosStream));
             }
-            CHECK_ERROR_EXIT(cudaMemcpyToSymbolAsync(aristos::processor::check, a.data(),
-                sizeof(decltype(a)::value_type) * a.size(), 0, cudaMemcpyDefault, aristos::aristosStream));
             forward<<<blocks, threads, 0, aristosStream>>>(iP, oP, seqBit);
-            CHECK_ERROR_EXIT(cudaStreamSynchronize(aristos::aristosStream));
-            printf("----------End Round %u!----------------\n", count);
             if constexpr (!skip) {
                 float duration;
                 CHECK_ERROR_EXIT(cudaEventRecord(stop, aristos::aristosStream));

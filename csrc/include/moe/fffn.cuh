@@ -98,10 +98,10 @@ namespace aristos {
             }
         }
 
-        using BlockScan = cub::BlockScan<uint16_t, threads>;
+        using BlockScan = cub::BlockScan<uint, threads>;
         constexpr auto tSlice = ACC::TMU::value / threads;
         // Register allocations
-        uint16_t predicates[tSlice];
+        uint predicates[tSlice];
         FlagState flagState[tSlice];
         #pragma unroll
         for (uint i = 0; i < tSlice; ++i) {
@@ -129,7 +129,7 @@ namespace aristos {
                     flagState[i] = predicates[i] ? FlagState::identified : FlagState::unidentified;
                 }
             }
-            uint16_t identifiedFlags = 0U;
+            uint identifiedFlags = 0U;
             // Perform block-wide Aggregation
             BlockScan(*bTs).InclusiveSum(predicates, predicates, identifiedFlags);
             // Populate task queue with identified flag indices

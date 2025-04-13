@@ -26,10 +26,11 @@ namespace aristos::processor{
         typename Element,
         unsigned int elems = ACC::PeakHardware::rScratch::value,
         unsigned int threads = ACC::PeakHardware::OS::threads::value,
-        unsigned int sharedSize = ACC::PeakHardware::sharedMemory::value + ACC::PeakHardware::spare::value
+        unsigned int sharedSize = ACC::PeakHardware::sharedMemory::value + ACC::PeakHardware::spare::value,
+        unsigned int wS = WARP_SIZE
     >
     requires(TensorValueType<Element> &&
-            elems % WARP_SIZE == 0 && // guarantees warp convergence
+            elems % wS == 0 && // guarantees warp convergence
             aristos::isMatrix<ScaleWeights> &&
             cuda::std::is_same_v<typename ScaleWeights::value_type, Element>)
     __device__ __forceinline__
@@ -82,17 +83,17 @@ namespace aristos::processor{
         // ensures we have enough shared memory
         static_assert(sizeof(Element) * bM * (elems + 1) + sizeof(TPS) * bM <= sharedSize);
         static_assert(bM % elems == 0);
-        cutlass::AlignedArray<TPS, elems> tIds{};
+        // slice and dice token indices
+        constexpr auto phases = bM / elems;
+        // all threads in a phase read the same token index
+        const auto phaseIdx = threadIdx.x / elems;
+        static_assert(elems % wS == 0);
+        constexpr auto wE = elems / wS;
         auto* __restrict__ sTPS = CAST_TO(TPS, workspace + bM * elems);
         #pragma unroll
         for (uint i = threadIdx.x; i < bM; i += threads) {
             sTPS[i] = tokenIndices[i];
         }
-        __syncthreads();
-        // slice and dice token indices
-        constexpr auto phases = bM / elems;
-        // all threads in a phase read the same token index
-        const auto phaseIdx = threadIdx.x / elems;
         // Eagerly prefetch inputs to registers
         #pragma unroll
         for (uint i = 0; i < trips; ++i) {
@@ -108,31 +109,44 @@ namespace aristos::processor{
                 registers[j + i * elems] = sC(threadIdx.x, j);
             }
         }
-        #pragma unroll
-        for (uint i = 0; i < elems; ++i) {
-            tIds[i] = sTPS[phaseIdx + i * phases];
-        }
-
+        __syncthreads();
         if constexpr (c == CombineMode::multithreaded) {
+            TPS wT[wE];
+            #pragma unroll
+            for (uint i = 0; i < wE; ++i) {
+                const auto tid = threadIdx.x % wS;
+                wT[i] = sTPS[phaseIdx + (tid + i * wS) * phases];
+            }
+            cutlass::AlignedArray<TPS, elems> tIds{};
+            __syncwarp();
+            #pragma unroll
+            for (uint j = 0; j < elems; ++j) {
+                const auto msg = wT[j / wS];
+                const auto* __restrict__ mP = CONST_CAST_TO(ull_t, &msg);
+                const auto rM = __shfl_sync(0xffffffff, *mP, j % wS);
+                tIds[j] = *CONST_CAST_TO(TPS, &rM);
+            }
+
             using CDxT = typename ToCDx<Element>::T;
             constexpr auto cTCx = cutlass::NumericConverter<CDxT, mp_t>{};
-            // prefetch scale to shared memory
-            auto* __restrict__ sScale = CAST_TO(Element, sTPS + bM);
+            Element rS[wE];
             #pragma unroll
-            for (uint i = threadIdx.x; i < bM; i += threads) {
-                sScale[i] = scale(sTPS[i], expertIdx);
+            for (uint i = 0; i < wE; ++i) {
+                rS[i] = scale(wT[i].tokenIdx, expertIdx);
             }
-            __syncthreads();
-            cutlass::AlignedArray<Element, elems> scaleRegs{};
-            // fetch scale
+            cutlass::AlignedArray<Element, elems> sR{};
+            __syncwarp();
             #pragma unroll
-            for (uint i = 0; i < elems; ++i) {
-                scaleRegs[i] = sScale[phaseIdx + i * phases];
+            for (uint j = 0; j < elems; ++j) {
+                const auto msg = rS[j / wS];
+                const auto* __restrict__ mP = CONST_CAST_TO(CDxT, &msg);
+                const auto rM = __shfl_sync(0xffffffff, *mP, j % wS);
+                sR[j] = *CONST_CAST_TO(Element, &rM);
             }
             // apply scale
             #pragma unroll
             for (uint i = 0; i < elems; ++i) {
-                tIds[i].probability =__fdividef(eTm(scaleRegs[i]), tIds[i].probability);
+                tIds[i].probability =__fdividef(eTm(sR[i]), tIds[i].probability);
             }
 
             #pragma unroll
@@ -159,17 +173,29 @@ namespace aristos::processor{
             }
         }
         else {
+            uint wT[wE];
+            #pragma unroll
+            for (uint i = 0; i < wE; ++i) {
+                const auto tid = threadIdx.x % wS;
+                wT[i] = sTPS[phaseIdx + (tid + i * wS) * phases].tokenIdx;
+            }
             // vector copy from registers to global directly and call it a day
+            cutlass::AlignedArray<uint, elems> tIds{};
+            __syncwarp();
+            #pragma unroll
+            for (uint j = 0; j < elems; ++j) {
+                const auto msg = wT[j / wS];
+                tIds[j] = __shfl_sync(0xffffffff, msg, j % wS);
+            }
             #pragma unroll
             for (uint i = 0; i < trips; ++i) {
                 if (tileSize < gM) {
                     #pragma unroll
                     for (uint j = 0; j < elems; ++j) {
                         const auto cIdx = threadIdx.x % elems + i * elems;
-                        const auto tId = tIds[j].tokenIdx;
                         // predicated writes
                         if (phaseIdx + j * phases < tileSize) {
-                            gC(tId, cIdx) = registers[j + i * elems];
+                            gC(tIds[j], cIdx) = registers[j + i * elems];
                         }
                     }
                 }
@@ -177,7 +203,7 @@ namespace aristos::processor{
                     #pragma unroll
                     for (uint j = 0; j < elems; ++j) {
                         const auto cIdx = threadIdx.x % elems + i * elems;
-                        gC(tIds[j].tokenIdx, cIdx) = registers[j + i * elems];
+                        gC(tIds[j], cIdx) = registers[j + i * elems];
                     }
                 }
             }
@@ -289,7 +315,7 @@ namespace aristos::processor{
                 cute::Stride<cute::Int<bN>, cute::_1>>{});
         const auto tCsC = tiledMMA.get_slice(threadIdx.x).partition_C(sC);
 
-        // Reorder to blocked arrangement
+        // Reorder to striped arrangement
         #pragma unroll
         for (unsigned int i = 0; i < trips; ++i) {
             #pragma unroll
@@ -424,7 +450,7 @@ namespace aristos::processor{
                 cute::Stride<cute::Int<bN>, cute::_1>>{});
         const auto tCsC = tiledMMA.get_slice(threadIdx.x).partition_C(sC);
 
-        // Reorder to blocked arrangement
+        // Reorder to striped arrangement
         #pragma unroll
         for (unsigned int i = 0; i < trips; ++i) {
             #pragma unroll
@@ -478,7 +504,6 @@ namespace aristos::processor{
         sQ(_sQ), pDB(_pDB), tQH(_tQH), tQ(_tQ), ptQ(_ptQ), tQS(_tQS) {}
     };
 
-    __device__ __inline__ uint16_t check[ACC::E::value * ACC::TCM::value * ACC::TNx::value];
     template<
         PeerConnectivity p,
         unsigned int tasks = ACC::TNx::value
