@@ -434,15 +434,17 @@ namespace aristos{
         }
     };
 
-    /// Computes precise number of integers needed to represent a consecutive set of bits of size,
-    /// where
+    /// Computes precise number of integers needed to represent a consecutive set of bits
     /// each of T threads has stride ownership of a single bit
     /// and requires an integer to store 32 of such bits.
-    template<unsigned int T, unsigned int integerBitWidth = 32U>
+    template<
+        unsigned int T,
+        unsigned int integerBitWidth = 32U,
+        unsigned int width = integerBitWidth * T
+    >
     __host__ __device__ __forceinline__
     constexpr uint nSI(const unsigned int& numBits) {
-        return (cute::ceil_div(numBits / T, integerBitWidth) * T) +
-            (cute::ceil_div(cute::ceil_div(numBits, T), integerBitWidth) * (numBits % T));
+        return (numBits / width) * T + cute::min(numBits % width, T);
     }
 
     // Captures transitory states of a finite state machine

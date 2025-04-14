@@ -75,7 +75,7 @@ namespace aristos::subscriber{
                 const auto vSIdx = i / bSw;
                 const auto vIdx = i % bSw;
                 const auto flagIdx = warpId + i * sNW;
-                ull_t signal;
+                ull_t signal = SignalConstants::ground;
                 if (!laneId) {
                     auto visitedSet = bitSet[warpId + vSIdx * sNW];
                     if (!visitedSet.get(vIdx)) {
@@ -102,7 +102,8 @@ namespace aristos::subscriber{
                             Potentially, we may have received a signal in the meantime, so we only swap if the current
                             value is the ground state, which we previously stored.
                             */
-                            atomicCAS_system(CAST_TO(ull_t, flags + flagIdx), SignalConstants::ground, signal);
+                            atomicCAS_system(CAST_TO(ull_t, flags + flagIdx),
+                                SignalConstants::ground, signal);
                             const auto peer = flagIdx / nLx;
                             packet::sTB(taskCount, status, peer, nLx);
                             // set visited bit
@@ -391,7 +392,7 @@ namespace aristos::subscriber{
         const auto ssL = ssfC / subscriberCount + (tIdx < ssfC % subscriberCount);
         const auto ssT = ssL / wSet;
 
-        constexpr Subscribe<SubscriberStage::initial, sNW> initialSubscriber{};
+        constexpr Subscribe<SubscriberStage::initial, subscriberCount> initialSubscriber{};
         constexpr Subscribe<SubscriberStage::final, subscriberCount> finalSubscriber{};
 
         const auto pSI = nSI<subscriberCount>(ssfC);
