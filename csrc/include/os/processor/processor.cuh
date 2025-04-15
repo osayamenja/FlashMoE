@@ -615,9 +615,11 @@ namespace aristos::processor{
                 const auto idx = j * stride + pIdx;
                 gTQ(idx + trips * capacity, cIdx) = sTQ(idx, (cIdx + idx) % eS);
             }
-            if (pIdx < residue % stride) {
-                const auto idx = length * stride + pIdx;
-                gTQ(idx + trips * capacity, cIdx) = sTQ(idx, (cIdx + idx) % eS);
+            if constexpr (constexpr auto rS = residue % stride; rS) {
+                if (pIdx < rS) {
+                    const auto idx = length * stride + pIdx;
+                    gTQ(idx + trips * capacity, cIdx) = sTQ(idx, (cIdx + idx) % eS);
+                }
             }
         }
 
