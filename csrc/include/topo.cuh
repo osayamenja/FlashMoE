@@ -73,8 +73,7 @@ namespace aristos::topology{
         if(!id) {
             // Compute beta using slope intercept equation
             remoteDurations[peerIdx].beta = ((duration - remoteDurations[peerIdx].alpha) / (TO_MB(betaBuf) - TO_MB(alphaBuf)));
-            // Compute alpha and apply abs for spurious negatives
-            remoteDurations[peerIdx].alpha = fabs(remoteDurations[peerIdx].alpha - (TO_MB(alphaBuf) * remoteDurations[peerIdx].beta));
+            remoteDurations[peerIdx].alpha = remoteDurations[peerIdx].alpha - (TO_MB(alphaBuf) * remoteDurations[peerIdx].beta);
         }
     }
 

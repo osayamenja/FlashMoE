@@ -90,13 +90,14 @@ namespace aristos {
         CHECK_ERROR_EXIT(cudaPeekAtLastError());
         CHECK_ERROR_EXIT(cudaStreamSynchronize(aristosStream));
         cudaEventElapsedTime(&duration, start, stop);
-        auto* aP = calloc(ax * sizeof(floatPair) + n * sizeof(uint),
+        auto* aP = std::calloc(ax * sizeof(floatPair) + n * sizeof(WorkerAttribute),
             sizeof(cuda::std::byte));
         auto* adjMatrix = static_cast<floatPair*>(aP);
+        const auto aMt = make_tensor(adjMatrix, make_layout(cute::make_shape(n, n), cute::LayoutRight{}));
         auto* attributesPtr = CAST_TO(WorkerAttribute, adjMatrix + ax);
 
         /// Epilogue
-        CHECK_ERROR_EXIT(cudaMemcpyAsync(aP, adj, ax * sizeof(floatPair) + n * sizeof(uint),
+        CHECK_ERROR_EXIT(cudaMemcpyAsync(aP, adj, ax * sizeof(floatPair) + n * sizeof(WorkerAttribute),
             cudaMemcpyDeviceToHost, aristosStream));
         CHECK_ERROR_EXIT(cudaPeekAtLastError());
         CHECK_ERROR_EXIT(cudaStreamSynchronize(aristosStream));
@@ -109,7 +110,8 @@ namespace aristos {
         fmt::print(file, "----> {} processes pair-wise (𝛼 ms, 𝛽 ms/MB) costs <------\n", n);
         for (uint i = 0; i < n; ++i){
             for (uint j = 0; j < n; ++j){
-                temp[j] = {adjMatrix[i*n + j].alpha, adjMatrix[i*n + j].beta};
+                const auto [alpha, beta] = aMt(i, j);
+                temp[j] = {alpha, beta};
             }
             fmt::print(file, "Rank {}: {:::.2e}\n", i, temp);
         }
@@ -119,11 +121,11 @@ namespace aristos {
             aT[i] = static_cast<float>(t);
             aM[i] = m;
         }
-        fmt::print(file, "Rank {}: \n\t Throughput: {}\n\t MemoryCapacity: {}\n", globalRank, aT, aM);
+        //fmt::print(file, "Rank {}: \n\t Throughput: {}\n\t MemoryCapacity: {}\n", globalRank, aT, aM);
         fmt::println(file, "Duration is {}ms", duration);
         std::fclose(file);
         nvshmem_free(symHeap);
-        free(adjMatrix);
+        std::free(aP);
         nvshmem_finalize();
         cudaEventDestroy(start);
         cudaEventDestroy(stop);

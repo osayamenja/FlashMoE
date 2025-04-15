@@ -60,7 +60,7 @@ namespace aristos{
 
         auto* file = std::fopen(std::string("adjMatrix_Rank")
             .append(std::to_string(rank)).append(".txt").c_str(), "w");
-        fmt::println(file, "----> {} processes pair-wise (𝛼 ms, 𝛽 ms/MB) costs <------\n", world);
+        fmt::print(file, "----> {} processes pair-wise (𝛼 ms, 𝛽 ms/MB) costs <------\n", world);
         for (uint i = 0; i < world; ++i){
             for (uint j = 0; j < world; ++j){
                 const auto [alpha, beta] = aM(i, j);
