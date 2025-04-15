@@ -160,7 +160,7 @@ namespace aristos::moe{
                 CHECK_ERROR_EXIT(cudaEventElapsedTime(&duration, start, stop));
                 CHECK_ERROR_EXIT(cudaEventDestroy(start));
                 CHECK_ERROR_EXIT(cudaEventDestroy(stop));
-                printf("Duration is %fms\n", duration);
+                printf("epR %u: Duration is %fms\n", hostBookkeeping.rank, duration);
             }
         }
         else {

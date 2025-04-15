@@ -102,7 +102,7 @@ namespace aristos {
         CHECK_ERROR_EXIT(cudaStreamSynchronize(aristosStream));
 
         std::vector<std::array<float, 2>> temp(n);
-        std::vector<uint16_t> aT(n);
+        std::vector<float> aT(n);
         std::vector<uint16_t> aM(n);
         auto* file = std::fopen(std::string("adjMatrix_Rank")
             .append(std::to_string(globalRank)).append(".txt").c_str(), "w");
@@ -116,7 +116,7 @@ namespace aristos {
 
         for (uint i = 0; i < n; ++i){
             const auto [t, m] = attributesPtr[i];
-            aT[i] = static_cast<uint16_t>(t);
+            aT[i] = static_cast<float>(t);
             aM[i] = m;
         }
         fmt::print(file, "Rank {}: \n\t Throughput: {}\n\t MemoryCapacity: {}\n", globalRank, aT, aM);

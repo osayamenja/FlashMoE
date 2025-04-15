@@ -7,6 +7,7 @@
 
 #include <cute/layout.hpp>
 #include <cute/tensor.hpp>
+#include <fmt/ranges.h>
 
 #include "throughput.cuh"
 #include "topo.cuh"
@@ -46,6 +47,35 @@ namespace aristos{
                    epRank, expertSlots, nLx, epWorld);
         }
     };
+
+    __host__ __forceinline__
+    void exportTopo(const floatPair* __restrict__ const& aP,
+        const WorkerAttribute* __restrict__ const& attributes,
+        const uint& world, const uint& rank) {
+        const auto aM = make_tensor(aP,
+            make_layout(cute::make_shape(world, world), cute::LayoutRight{}));
+        std::vector<std::array<float, 2>> tAM(world);
+        std::vector<float> tWT(world);
+        std::vector<uint16_t> tWM(world);
+
+        auto* file = std::fopen(std::string("adjMatrix_Rank")
+            .append(std::to_string(rank)).append(".txt").c_str(), "w");
+        fmt::println(file, "----> {} processes pair-wise (𝛼 ms, 𝛽 ms/MB) costs <------\n", world);
+        for (uint i = 0; i < world; ++i){
+            for (uint j = 0; j < world; ++j){
+                const auto [alpha, beta] = aM(i, j);
+                tAM[j] = {alpha, beta};
+            }
+            fmt::print(file, "Rank {}: {:::.2e}\n", i, tAM);
+        }
+        for (uint i = 0; i < world; ++i) {
+            const auto [t, m] = attributes[i];
+            tWT[i] = static_cast<float>(t);
+            tWM[i] = m;
+        }
+        fmt::print(file, "Rank {}: \n\t Throughput: {}\n\t MemoryCapacity: {}\n", rank, tWT, tWM);
+        std::fclose(file);
+    }
 
     __host__ __forceinline__
     void estimateMemory(WorkerAttribute* __restrict__ const& dWa) {
@@ -261,6 +291,8 @@ namespace aristos{
         runDecider(ePg, experts, workers, ePWorkers, dTg, pT, ePs, ePsX,
             scratch, aP, wAp, rank, globalWorld);
         const auto ePgD = *ePg;
+        //ePgD.dump();
+        //exportTopo(aP, wAp, globalWorld, rank);
         // Now allocate memory
         /// Symmetric memory
         const auto heapBytes = STAGES * CELLS * ePgD.epWorld * ePgD.expertSlots * ACC::pEC::value *
