@@ -17,13 +17,13 @@ endif ()
 project(csrc CUDA CXX)
 
 # flags
-set(ARISTOS_CUDA_CXX_FLAGS "${ARISTOS_CUDA_CXX_FLAGS} -Wall -Wextra -Wsuggest-attribute=const")
+set(ARISTOS_CUDA_CXX_FLAGS "${ARISTOS_CUDA_CXX_FLAGS} -Wall -Wextra")
 set(ARISTOS_CUDA_CXX_FLAGS "${ARISTOS_CUDA_CXX_FLAGS} -fno-strict-aliasing")
 if(NOT ${CMAKE_SYSTEM_PROCESSOR} MATCHES "^aarch64")
     set(ARISTOS_CUDA_CXX_FLAGS "${ARISTOS_CUDA_CXX_FLAGS} -m64")
 endif ()
 set(ARISTOS_CUDA_CXX_FLAGS "${ARISTOS_CUDA_CXX_FLAGS} -Wno-unknown-pragmas -Wnull-dereference -Wnarrowing")
-set(ARISTOS_CUDA_CXX_FLAGS "${ARISTOS_CUDA_CXX_FLAGS} -Wno-switch -Wfloat-equal -Wduplicated-branches -Wformat=2")
+set(ARISTOS_CUDA_CXX_FLAGS "${ARISTOS_CUDA_CXX_FLAGS} -Wno-switch -Wduplicated-branches -Wformat=2")
 set(ARISTOS_CUDA_CXX_FLAGS "${ARISTOS_CUDA_CXX_FLAGS} -Wno-unused-but-set-parameter")
 set(ARISTOS_CUDA_CXX_FLAGS "${ARISTOS_CUDA_CXX_FLAGS} -Wno-sign-compare -v")
 # Silence nvtx deprecation warning from legacy version used in libtorch

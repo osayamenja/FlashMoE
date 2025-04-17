@@ -127,6 +127,9 @@ namespace aristos::os {
         for (uint i = threadIdx.x; i < world; i += threads) {
             status[i] = 0U;
         }
+        for (uint i = threadIdx.x; i < sBz; i += threads) {
+            schedulerBitSet[i] = BitSet{0U};
+        }
         __syncthreads();
         // build arguments for scheduler and subscriber
         if (threadIdx.x / WARP_SIZE == 0) {
@@ -135,7 +138,7 @@ namespace aristos::os {
             auto* __restrict__ gtQHeads = bookkeeping.tQH();
             auto* __restrict__ sQ = bookkeeping.sQ();
             auto* __restrict__ pDB = bookkeeping.pDB();
-            scheduler::start<processors>(wSt, interruptScratch,
+            scheduler::start<processors>(wSt, interruptScratch, schedulerBitSet,
                 sO, gtQCl, interrupt, tQHeads,
                 gtQHeads, taskBound, rQ, sQ, pDB);
         }

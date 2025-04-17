@@ -294,6 +294,7 @@ namespace aristos::scheduler {
     __device__ __forceinline__
     void start(WST* __restrict__ const& wSt,
         uint* __restrict__ const& interruptScratch,
+        BitSet* __restrict__ const& bitSet,
         const unsigned int& sO,
         const unsigned int& gtQCL,
         unsigned int* __restrict__ const& sInterrupts,
@@ -311,15 +312,15 @@ namespace aristos::scheduler {
         static_assert(subscribers % wS == 0);
         constexpr auto sL = subscribers / wS;
         // initialize register buffers
-        constexpr auto gTQWSet = 2;
+        constexpr auto dQL = 2;
         constexpr auto wSz = 16U;
-        cutlass::Array<TQState, gTQWSet + sL> tqState{};
+        constexpr auto bSw = sizeof(uint) * 8U;
+        static_assert(dQL <= bSw);
+        cutlass::Array<TQState, dQL + sL> tqState{};
         cutlass::Array<uint, sQsL> sQState{};
         cutlass::Array<uint, wSz> wSet{};
         tqState.fill({0U,0U});
         sQState.fill(0U);
-
-        constexpr auto dQL = decltype(tqState)::kElements - sL;
         const uint dT = gtQCL / (wS * dQL);
 
         uint gRQIdx = 0U;
@@ -341,48 +342,79 @@ namespace aristos::scheduler {
             // Q is the number of queues a thread observes in one-pass;
             // and T is the number of threads in a warp
             if (dT > 0) {
+                auto sBS = bitSet[threadIdx.x];
                 // One-shot scheduling, so tails are irrelevant.
                 // Special case, where i == 0
                 #pragma unroll
                 for (uint j = sL; j < decltype(tqState)::kElements; ++j) {
-                    const auto qIdx = wS * (j - sL) + threadIdx.x;
-                    const auto tasks = atomicExch(gtQHeads + qIdx, tQHeadGroundState);
-                    tqState[j].tasks = tasks;
-                    lTt += tasks;
+                    const auto pJ = j - sL;
+                    if (const auto isVisited = sBS.get(pJ % bSw); !isVisited) {
+                        const auto qIdx = wS * pJ + threadIdx.x;
+                        const auto tasks = atomicExch(gtQHeads + qIdx, tQHeadGroundState);
+                        if (tasks) {
+                            // one and done
+                            sBS.set(pJ % bSw);
+                        }
+                        tqState[j].tasks = tasks;
+                        lTt += tasks;
+                    }
                 }
+                bitSet[threadIdx.x] = sBS;
                 // schedule observed tasks
                 schedulerLoop<processors>(sQState, tqState, wSet, sO, 0, lTt,
                     processorTally, gRQIdx, scheduled,
                     wSt, sQ, rQ, pDB, true);
 
                 for (uint i = 1; i < dT; ++i) {
+                    const uint sBIdx = threadIdx.x + (i * dQL / bSw) * wS;
+                    sBS = bitSet[sBIdx];
                     // Needed to enforce register storage
                     #pragma unroll
                     for (uint j = sL; j < decltype(tqState)::kElements; ++j) {
-                        const auto qIdx = wS * (dQL * i + (j - sL)) + threadIdx.x;
-                        const auto tasks = atomicExch(gtQHeads + qIdx, tQHeadGroundState);
-                        tqState[j].tasks = tasks;
-                        lTt += tasks;
+                        const auto pJ = j - sL;
+                        const uint bIdx = (i * dQL + pJ) % bSw;
+                        if (const auto isVisited = sBS.get(bIdx); !isVisited) {
+                            const auto qIdx = wS * (dQL * i + pJ) + threadIdx.x;
+                            const auto tasks = atomicExch(gtQHeads + qIdx, tQHeadGroundState);
+                            if (tasks) {
+                                sBS.set(bIdx);
+                            }
+                            tqState[j].tasks = tasks;
+                            lTt += tasks;
+                        }
                     }
+                    bitSet[sBIdx] = sBS;
                     // schedule observed tasks
                     schedulerLoop<processors>(sQState, tqState, wSet, sO, i * dQL,
                         lTt, processorTally, gRQIdx, scheduled,
                         wSt, sQ, rQ, pDB);
                 }
             }
+            // fetch bitsets
+            const uint sBIdx = threadIdx.x + (dT * dQL / bSw) * wS;
+            auto sBS = bitSet[sBIdx];
             // residue
             #pragma unroll
             for (uint j = sL; j < decltype(tqState)::kElements; ++j) {
-                if (const auto qIdx = wS * (dQL * dT + (j - sL)) + threadIdx.x; qIdx < gtQCL) {
-                    const auto tasks = atomicExch(gtQHeads + qIdx, tQHeadGroundState);
-                    tqState[j].tasks = tasks;
-                    lTt += tasks;
+                const auto pJ = j - sL;
+                if (const auto qIdx = wS * (dQL * dT + pJ) + threadIdx.x; qIdx < gtQCL) {
+                    const uint bIdx = (dT * dQL + pJ) % bSw;
+                    if (const auto isVisited = sBS.get(bIdx); !isVisited) {
+                        const auto tasks = atomicExch(gtQHeads + qIdx, tQHeadGroundState);
+                        if (tasks) {
+                            sBS.set(bIdx);
+                        }
+                        tqState[j].tasks = tasks;
+                        lTt += tasks;
+                    }
                 }
             }
+            bitSet[sBIdx] = sBS;
             // schedule observed tasks
             schedulerLoop<processors>(sQState, tqState, wSet, sO, dQL * dT,
                 lTt, processorTally, gRQIdx, scheduled,
                 wSt, sQ, rQ, pDB, dT == 0);
+
             if (!threadIdx.x) {
                 tTB = atomicLoad<cuda::thread_scope_block>(taskBound);
             }
