@@ -28,8 +28,6 @@ namespace aristos::topology{
             if (i != rank) {
                 awaitBarrier<cuda::thread_scope_system>(CAST_TO(Payload, flags + i), &result, seqNo);
                 workerAttributes[i] = result.wA;
-                // Enforce consistency
-                nvshmem_uint_test(&CAST_TO(Payload, flags + i)->signal, NVSHMEM_CMP_GE, seqNo);
             }
         }
     }

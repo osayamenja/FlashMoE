@@ -121,16 +121,19 @@ if(CUTLASS_ADDED)
     set(cublasdx_CUTLASS_ROOT "${CUTLASS_SOURCE_DIR}")
 endif ()
 
+set(FMT_SYSTEM_HEADERS, ON)
 CPMAddPackage(
         NAME FMT
         GITHUB_REPOSITORY fmtlib/fmt
         GIT_TAG 11.1.4
-        DOWNLOAD_ONLY
+        OPTIONS
+        "FMT_SYSTEM_HEADERS=ON"
 )
 if(FMT_ADDED)
     target_link_libraries(csrc PRIVATE fmt::fmt)
 endif ()
 
+# TODO Deprecate
 set(MATHDX_VER 25.01)
 CPMFindPackage(
         NAME mathdx

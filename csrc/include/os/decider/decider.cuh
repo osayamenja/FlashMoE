@@ -323,11 +323,11 @@ namespace aristos{
                 wG[j].memoryCapacity -= 1;
                 budget -= bestMatch.cost;
             }
-            j = (j + 1) % world;
             totalCost -= (allocated - budget);
             if(wG[j].memoryCapacity == 0 || wellDistributedCapacity){
                 totalRate -= wG[j].processingRate;
             }
+            j = (j + 1) % world;
         }
     }
 }

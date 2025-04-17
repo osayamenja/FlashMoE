@@ -174,9 +174,9 @@ namespace aristos::processor{
         }
         else {
             uint wT[wE];
+            const auto tid = threadIdx.x % wS;
             #pragma unroll
             for (uint i = 0; i < wE; ++i) {
-                const auto tid = threadIdx.x % wS;
                 wT[i] = sTPS[phaseIdx + (tid + i * wS) * phases].tokenIdx;
             }
             // vector copy from registers to global directly and call it a day
@@ -189,10 +189,10 @@ namespace aristos::processor{
             }
             #pragma unroll
             for (uint i = 0; i < trips; ++i) {
+                const auto cIdx = threadIdx.x % elems + i * elems;
                 if (tileSize < gM) {
                     #pragma unroll
                     for (uint j = 0; j < elems; ++j) {
-                        const auto cIdx = threadIdx.x % elems + i * elems;
                         // predicated writes
                         if (phaseIdx + j * phases < tileSize) {
                             gC(tIds[j], cIdx) = registers[j + i * elems];
@@ -202,7 +202,6 @@ namespace aristos::processor{
                 else {
                     #pragma unroll
                     for (uint j = 0; j < elems; ++j) {
-                        const auto cIdx = threadIdx.x % elems + i * elems;
                         gC(tIds[j], cIdx) = registers[j + i * elems];
                     }
                 }

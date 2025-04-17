@@ -119,7 +119,7 @@ namespace aristos::gate {
             constexpr auto tilesM = M / bM;
             // padded to fill bN
             constexpr auto tilesN = cute::ceil_div(E, bN);
-            static_assert(ACC::PeakHardware::blocks::value <= tilesN);
+            static_assert(ACC::PeakHardware::OS::processorBlocks::value <= tilesN);
             constexpr auto tilesK = H / bK;
 
             const auto tileCoord = idx2crd(tileIdx,

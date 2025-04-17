@@ -37,13 +37,13 @@ namespace aristos{
 
         void dump() const {
             printf("{\n\t"
-                   "this: %p,\n\t"
+                   "gRank: %d,\n\t"
                    "epRank: %u,\n\t"
                    "expertSlots: %u,\n\t"
                    "nLx: %u,\n\t"
                    "epWorld: %u"
                    "\n}\n",
-                   this,
+                   nvshmem_my_pe(),
                    epRank, expertSlots, nLx, epWorld);
         }
     };
@@ -291,8 +291,23 @@ namespace aristos{
         runDecider(ePg, experts, workers, ePWorkers, dTg, pT, ePs, ePsX,
             scratch, aP, wAp, rank, globalWorld);
         const auto ePgD = *ePg;
-        //ePgD.dump();
+        /********EVALUATION************/
+        /*const auto ePgD = EPG{
+            static_cast<uint16_t>(rank),
+            static_cast<uint16_t>(E / globalWorld),
+            static_cast<uint16_t>(E / globalWorld),
+            static_cast<uint16_t>(globalWorld)
+        };
+        for (uint i = 0; i < globalWorld; ++i) {
+            pT[i] = i;
+        }
+        const auto split = E / globalWorld;
+        for (uint i = 0; i < E; ++i) {
+            ePs[i] = i / split;
+        }
+        ePgD.dump();*/
         //exportTopo(aP, wAp, globalWorld, rank);
+        /********EVALUATION************/
         // Now allocate memory
         /// Symmetric memory
         const auto heapBytes = STAGES * CELLS * ePgD.epWorld * ePgD.expertSlots * ACC::pEC::value *

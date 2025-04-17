@@ -14,10 +14,10 @@ namespace aristos{
         const unsigned int& world,
         const unsigned int& myRank){
         uint16_t gSize = 0U;
+        const auto gID = parents[myRank];
         for(unsigned int i = 0; i < world; ++i){
-            if (parents[i] == parents[myRank]) {
-                platoon[i] = i;
-                ++gSize;
+            if (parents[i] == gID) {
+                platoon[gSize++] = i;
             }
         }
         return gSize;
