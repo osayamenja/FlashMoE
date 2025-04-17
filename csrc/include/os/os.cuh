@@ -39,7 +39,6 @@ namespace aristos::os {
         // each subscriber thread gets wSet * sizeof(uint) bytes of workspace
         constexpr auto uSfC = ACC::TCM::value * ACC::TNx::value / subscriberCount;
         constexpr auto wSet = uSfC >= 32 ? 32U : 16U;
-        constexpr auto bitSetSizePs = cute::ceil_div(wSet, sizeof(uint) * 8U);
         const auto bSSI = nSI<sNW>(nLx * world) + nSI<subscriberCount>(ssfC);
         constexpr auto E = ACC::E::value;
         constexpr auto TNx = ACC::TNx::value;
@@ -148,7 +147,7 @@ namespace aristos::os {
             // Operand for a NOOP instruction
             sSeqBit[tIdx] = lSeqBit;
             // subscriber
-            subscriber::start<bitSetSizePs, wSet>(bitSet, subscriberScratch, sSeqBit + tIdx,
+            subscriber::start<wSet>(bitSet, subscriberScratch, sSeqBit + tIdx,
                 interrupt, tQHeads + tIdx, pL, lX, eL, ssfC, status, taskBound,
                 moeOutput, expertsUp, expertsDown, biasUp, biasDown, lSeqBit, tIdx);
         }

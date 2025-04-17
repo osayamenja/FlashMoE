@@ -161,16 +161,15 @@ namespace aristos::subscriber{
     struct Subscribe<SubscriberStage::final, subscriberCount> {
         template<
             typename WorkSet,
-            typename RBitSet,
             typename TokenIds,
             unsigned int TN = ACC::TNx::value,
-            unsigned int CS = ACC::TCM::value * TN
+            unsigned int CS = ACC::TCM::value * TN,
+            unsigned int wS = WARP_SIZE
         >
-        requires(isRegisterV<WorkSet> && isRegisterV<RBitSet>)
+        requires(isRegisterV<WorkSet>)
         __device__ __forceinline__
         void operator()(
             WorkSet& workSet,
-            RBitSet& rBitSet,
             BitSet* __restrict__ const& bitSet,
             const packet::DecoderArg& dA,
             /// Task Arguments
@@ -204,10 +203,8 @@ namespace aristos::subscriber{
                 }
             }
             for (uint i = 0; i < stageTrips; ++i) {
-                #pragma unroll
-                for (uint j = 0; j < RBitSet::kElements; ++j) {
-                    rBitSet[j] = bitSet[tIdx + (j + (i * WorkSet::kElements) / bSw) * subscriberCount];
-                }
+                const uint sBIdx = tIdx + (i * WorkSet::kElements / bSw) * wS;
+                auto sBS = bitSet[sBIdx];
                 // shared -> registers
                 #pragma unroll
                 for (uint j = 0; j < WorkSet::kElements; ++j) {
@@ -220,18 +217,16 @@ namespace aristos::subscriber{
                 }
                 #pragma unroll
                 for (uint j = 0; j < WorkSet::kElements; ++j) {
-                    const auto vSIdx = j / bSw;
-                    const auto vIdx = j % bSw;
-                    auto visitedSet = rBitSet[vSIdx];
+                    const uint bIdx = (i * WorkSet::kElements + j) % bSw;
                     const auto flagIdx = workSet[j];
-                    if (!visitedSet.get(vIdx)) {
+                    if (const auto isVisited = sBS.get(bIdx); !isVisited) {
                         const auto signal = atomicExch_system(CAST_TO(ull_t, flags + flagIdx),
                             SignalConstants::ground);
                         const auto* __restrict__ sP = CONST_CAST_TO(SignalPayload<PacketStage::last>, &signal);
                         if (sP->seqBit == localSeqBit) {
                             // let's decode this packet
                             // set visited bit
-                            visitedSet.set(vIdx);
+                            sBS.set(bIdx);
                             const auto expertIdx = flagIdx / CS;
                             const ELI lookup = eL[expertIdx];
                             const auto tokenIdx = sP->batchIdx * BLOCK_M;
@@ -253,46 +248,35 @@ namespace aristos::subscriber{
                             }
                         }
                     }
-                    rBitSet[vSIdx] = visitedSet;
                 }
                 // update checkpoint state
-                #pragma unroll
-                for (uint j = 0; j < RBitSet::kElements; ++j) {
-                    bitSet[tIdx + (j + (i * WorkSet::kElements) / bSw) * subscriberCount] = rBitSet[j];
-                }
+                bitSet[sBIdx] = sBS;
             }
             if (const auto residue = stageLength - stageTrips * WorkSet::kElements; residue) {
                 for (uint j = 0; j < residue; ++j) {
                     scratch[tIdx + j * subscriberCount] = tileIndices[tIdx +
                         (j + stageTrips * WorkSet::kElements) * subscriberCount];
                 }
+                const uint sBIdx = tIdx + (stageTrips * WorkSet::kElements / bSw) * wS;
+                auto sBS = bitSet[sBIdx];
                 #pragma unroll
                 for (uint j = 0; j < WorkSet::kElements; ++j) {
                     if (j < residue) {
                         workSet[j] = scratch[tIdx + j * subscriberCount];
                     }
                 }
-                const auto bR = cute::ceil_div(residue, bSw);
-                #pragma unroll
-                for (uint j = 0; j < RBitSet::kElements; ++j) {
-                    if (j < bR) {
-                        rBitSet[j] = bitSet[tIdx + (j + (stageTrips * WorkSet::kElements) / bSw) * subscriberCount];
-                    }
-                }
                 #pragma unroll
                 for (uint j = 0; j < WorkSet::kElements; ++j) {
                     if (j < residue) {
-                        const auto vSIdx = j / bSw;
-                        const auto vIdx = j % bSw;
-                        auto visitedSet = rBitSet[vSIdx];
+                        const uint bIdx = (stageTrips * WorkSet::kElements + j) % bSw;
                         const auto flagIdx = workSet[j];
-                        if (!visitedSet.get(vIdx)) {
+                        if (const auto isVisited = sBS.get(bIdx); !isVisited) {
                             const auto signal = atomicExch_system(CAST_TO(ull_t, flags + flagIdx),
                                 SignalConstants::ground);
                             const auto* __restrict__ sP = CONST_CAST_TO(SignalPayload<PacketStage::last>, &signal);
                             if (sP->seqBit == localSeqBit) {
                                 // set visited bit
-                                visitedSet.set(vIdx);
+                                sBS.set(bIdx);
                                 // let's decode this packet
                                 const auto expertIdx = flagIdx / CS;
                                 const ELI lookup = eL[expertIdx];
@@ -315,22 +299,16 @@ namespace aristos::subscriber{
                                 }
                             }
                         }
-                        rBitSet[vSIdx] = visitedSet;
                     }
                 }
-
                 // update checkpoint state
-                #pragma unroll
-                for (uint j = 0; j < RBitSet::kElements; ++j) {
-                    bitSet[tIdx + (j + (stageTrips * WorkSet::kElements) / bSw) * subscriberCount] = rBitSet[j];
-                }
+                bitSet[sBIdx] = sBS;
             }
         }
     };
     /// Decode packets deposited
     template<
-        unsigned int bSzPs,
-        unsigned int wSet = 16U,
+        unsigned int wSet,
         unsigned int subscriberCount = SUBSCRIBERS,
         typename Output,
         typename ExpertsUp,
@@ -338,7 +316,7 @@ namespace aristos::subscriber{
         typename BiasUp,
         typename BiasDown
     >
-    requires(subscriberCount % WARP_SIZE == 0 && (wSet == 16 || wSet % 32 == 0))
+    requires(subscriberCount % WARP_SIZE == 0 && wSet <= sizeof(uint) * 8U)
     __device__ __forceinline__
     void start(BitSet* __restrict__ const& bitSet,
         uint* __restrict__ const& workspace,
@@ -364,7 +342,6 @@ namespace aristos::subscriber{
         static_assert(sizeof(SignalPayload<PacketStage::last>) == sizeof(uint64_t));
 
         cutlass::AlignedArray<uint, wSet> rWSet{};
-        cutlass::AlignedArray<BitSet, bSzPs> rBitSet{};
 
         // lookup tables
         const auto tokenIds = make_tensor(cute::make_gmem_ptr(bookkeeping.tP()),
@@ -435,7 +412,6 @@ namespace aristos::subscriber{
             }
             flags += gfSfC;
             finalSubscriber(rWSet,
-                rBitSet,
                 bitSet,
                 dA,
                 tokenIds,

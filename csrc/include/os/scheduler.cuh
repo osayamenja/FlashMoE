@@ -390,26 +390,27 @@ namespace aristos::scheduler {
                         wSt, sQ, rQ, pDB);
                 }
             }
-            // fetch bitsets
-            const uint sBIdx = threadIdx.x + (dT * dQL / bSw) * wS;
-            auto sBS = bitSet[sBIdx];
-            // residue
-            #pragma unroll
-            for (uint j = sL; j < decltype(tqState)::kElements; ++j) {
-                const auto pJ = j - sL;
-                if (const auto qIdx = wS * (dQL * dT + pJ) + threadIdx.x; qIdx < gtQCL) {
-                    const uint bIdx = (dT * dQL + pJ) % bSw;
-                    if (const auto isVisited = sBS.get(bIdx); !isVisited) {
-                        const auto tasks = atomicExch(gtQHeads + qIdx, tQHeadGroundState);
-                        if (tasks) {
-                            sBS.set(bIdx);
+            if (threadIdx.x < gtQCL - dT * dQL * wS) {
+                const uint sBIdx = threadIdx.x + (dT * dQL / bSw) * wS;
+                auto sBS = bitSet[sBIdx];
+                // residue
+                #pragma unroll
+                for (uint j = sL; j < decltype(tqState)::kElements; ++j) {
+                    const auto pJ = j - sL;
+                    if (const auto qIdx = wS * (dQL * dT + pJ) + threadIdx.x; qIdx < gtQCL) {
+                        const uint bIdx = (dT * dQL + pJ) % bSw;
+                        if (const auto isVisited = sBS.get(bIdx); !isVisited) {
+                            const auto tasks = atomicExch(gtQHeads + qIdx, tQHeadGroundState);
+                            if (tasks) {
+                                sBS.set(bIdx);
+                            }
+                            tqState[j].tasks = tasks;
+                            lTt += tasks;
                         }
-                        tqState[j].tasks = tasks;
-                        lTt += tasks;
                     }
                 }
+                bitSet[sBIdx] = sBS;
             }
-            bitSet[sBIdx] = sBS;
             // schedule observed tasks
             schedulerLoop<processors>(sQState, tqState, wSet, sO, dQL * dT,
                 lTt, processorTally, gRQIdx, scheduled,
