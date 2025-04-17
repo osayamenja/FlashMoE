@@ -499,7 +499,11 @@ namespace aristos{
         using PC = cute::C<H::value * (L::value * (12UL * H::value + 13U) + (VOCAB_SIZE + H::value))>;
         using GRB = cute::C<cute::ceil_div(PC::value, 1024 * 1024)>;
         using P2PB = cute::C<cute::ceil_div(S::value * MINI_BATCH * H::value, 1024 * 1024)>;
-        using EC = cute::C<DTK::value == DropTokens::no ? S::value : cute::ceil_div(S::value, E::value)>;
+        using CF = cute::C<CAP_FACTOR>;
+        static_assert(CF::value >= 0);
+        static_assert(TK::value <= E::value);
+        using EC = cute::C<(DTK::value == DropTokens::no ? S::value : cute::ceil_div(S::value, E::value)) *
+            CF::value * TK::value>;
         using pEC = cute::C<cute::ceil_div(EC::value, BLOCK_M) * BLOCK_M>;
         using SZ = cute::C<pEC::value * H::value>;
         using TM = cute::C<cute::ceil_div(S::value, BLOCK_M)>;
