@@ -271,7 +271,7 @@ namespace aristos::processor{
         using Element = typename BlockGEMM::MatrixDType;
 
         // prefetch bias from global memory
-        static_assert(ACC::sharedSize::value >= (threads * 2 + sizeof(Element)) * bN);
+        static_assert(ACC::sharedSize::value >= ACC::GSM::value + sizeof(Element) * bN);
         const auto biasCoord = idx2crd(tileIdx, cute::Shape<cute::_1, cute::Int<tilesN>>{},
             cute::Stride<cute::Int<bN>, cute::_1>{});
         const auto gD = cute::local_tile(mD,
@@ -339,12 +339,15 @@ namespace aristos::processor{
             }
         }
 
-        const auto rIdx = threadIdx.x / bN * bN;
-        const auto cIdx = threadIdx.x % bN;
+        const auto rIdx = threadIdx.x / elems * elems;
+        const auto cIdx = threadIdx.x % elems;
         // Coalesced copy from registers to global memory
         #pragma unroll
-        for (unsigned int j = 0; j < bN; ++j) {
-            gC(rIdx + j, cIdx) = rC(j);
+        for (uint i = 0; i < trips; ++i) {
+            #pragma unroll
+            for (unsigned int j = 0; j < elems; ++j) {
+                gC(rIdx + j, cIdx + i * elems) = rC(j + i * elems);
+            }
         }
     }
 
@@ -403,7 +406,7 @@ namespace aristos::processor{
         const auto k_tile_iter = cute::make_coord_iterator(tilesK);
         using Element = typename BlockGEMM::MatrixDType;
         // prefetch bias from global memory
-        static_assert(ACC::sharedSize::value >= (threads * 2 + sizeof(Element)) * bN);
+        static_assert(ACC::sharedSize::value >= ACC::GSM::value + sizeof(Element) * bN);
         const auto mD = make_tensor(cute::make_gmem_ptr(bias),
             cute::Layout<cute::Shape<cute::_1, cute::Int<N>>,
                 cute::Stride<cute::_0, cute::_1>>{});
@@ -474,12 +477,15 @@ namespace aristos::processor{
             }
         }
 
-        const auto rIdx = threadIdx.x / bN * bN;
-        const auto cIdx = threadIdx.x % bN;
+        const auto rIdx = threadIdx.x / elems * elems;
+        const auto cIdx = threadIdx.x % elems;
         // Coalesced copy from registers to global memory
         #pragma unroll
-        for (unsigned int j = 0; j < bN; ++j) {
-            gC(rIdx + j, cIdx) = rC(j);
+        for (uint i = 0; i < trips; ++i) {
+            #pragma unroll
+            for (unsigned int j = 0; j < elems; ++j) {
+                gC(rIdx + j, cIdx + i * elems) = rC(j + i * elems);
+            }
         }
     }
 

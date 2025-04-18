@@ -475,7 +475,9 @@ namespace aristos{
         using ActivationOpX = cute::identity;
         using PeakHardware = aristos::Hardware<ARISTOS_ARCH, 255>;
         using sharedSize = cute::C<PeakHardware::sharedMemory::value +
-            (PeakHardware::spare::value > 1024 ? PeakHardware::spare::value - 1024 : PeakHardware::spare::value)>;
+            (PeakHardware::spare::value > 2048 ? PeakHardware::spare::value - 2048 : PeakHardware::spare::value)>;
+        using GSM = cute::C<cute::max(BLOCK_M * BLOCK_N * 2,
+            BLOCK_K_FULL * PeakHardware::pipeStages::value * sizeof(Element) * (BLOCK_M + BLOCK_N))>;
         static_assert(sharedSize::value >= sizeof(mp_t) * BLOCK_M * BLOCK_N / 2);
         using STE = cute::C<sharedSize::value >= BLOCK_M * BLOCK_N * sizeof(mp_t) ? BLOCK_N : BLOCK_N / 2U>;
         using JT = cute::C<IS_TRAINING? JobType::training : JobType::inference>;
@@ -498,7 +500,7 @@ namespace aristos{
         // source: https://arxiv.org/abs/2401.14489
         using PC = cute::C<H::value * (L::value * (12UL * H::value + 13U) + (VOCAB_SIZE + H::value))>;
         using GRB = cute::C<cute::ceil_div(PC::value, 1024 * 1024)>;
-        using P2PB = cute::C<cute::ceil_div(S::value * MINI_BATCH * H::value, 1024 * 1024)>;
+        using P2PB = cute::C<cute::ceil_div(S::value * H::value, 1024 * 1024)>;
         using CF = cute::C<CAP_FACTOR>;
         static_assert(CF::value >= 0);
         static_assert(TK::value <= E::value);

@@ -57,7 +57,7 @@ namespace aristos {
         cuda::barrier<cuda::thread_scope_device>* __restrict__ const& dB,
         float* __restrict__ const& deviceThroughput, uint* __restrict__ const& tileSync,
         const Element* __restrict__ const& iP /* A, B, D, S, W*/, Element* __restrict__ const& oP /*C*/) {
-        #if ARISTOS_TRACE
+        #if ARISTOS_NVTX
         aristosRange mFTRange{__func__};
         #endif
         const auto tSz = sizeof(uint) * (M / BLOCK_M) * cute::min(K / BLOCK_N, blocks);
@@ -90,11 +90,11 @@ namespace aristos {
     }
     template<
         UseBarrier u = UseBarrier::no,
-        unsigned int trials = 64U
+        unsigned int trials = 16U
     >
     __host__ __forceinline__
     void mT(WorkerAttribute* __restrict__ const& dWa) {
-        #if ARISTOS_TRACE
+        #if ARISTOS_NVTX
         aristosRange mTRange{__PRETTY_FUNCTION__};
         #endif
         constexpr unsigned int M = ACC::pEC::value;

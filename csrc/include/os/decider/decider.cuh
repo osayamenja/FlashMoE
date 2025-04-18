@@ -252,13 +252,6 @@ namespace aristos{
                     groupInfo.erase(child);
                 }
             }
-            /// Post-processing
-            for(const auto& i: std::views::keys(groupInfo)){
-                if(infeasibleGroups.contains(i)){
-                    groupInfo.erase(i);
-                }
-            }
-
             // If there is an infeasible group by this point,
             // then all nodes would be in that group, therefore return an empty vector
             uint i = 0U;
@@ -266,7 +259,7 @@ namespace aristos{
                 deviceToGroups[i++] = static_cast<uint>(groupId);
             }
 
-            return infeasibleGroups.size() > 0; // provably, this can only be 0 or 1
+            return infeasibleGroups.size() == 0; // provably, this can only be 0 or 1
         }
     };
 

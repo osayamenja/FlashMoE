@@ -79,14 +79,14 @@ namespace aristos{
 
     __host__ __forceinline__
     void estimateMemory(WorkerAttribute* __restrict__ const& dWa) {
-        #if ARISTOS_TRACE
+        #if ARISTOS_NVTX
         aristosRange estRange{__PRETTY_FUNCTION__};
         #endif
         // estimate available device memory
         size_t free = 0, total = 0;
         CHECK_ERROR_EXIT(cudaMemGetInfo(&free, &total));
         // Deduct cost for the dense case, assuming at least one expert per device
-        free -= ACC::BPP::value * (ACC::PC::value + ACC::P2PB::value);
+        free -= ACC::BPP::value * (ACC::PC::value + ACC::S::value * ACC::H::value);
         constexpr size_t mX = cute::ceil_div(ACC::L::value, ACC::F::value) * ACC::BPP::value * 2UL *
             (ACC::P::value * ACC::H::value);
         dWa->memoryCapacity = free / mX;
@@ -94,7 +94,7 @@ namespace aristos{
 
     __host__ __forceinline__
     void discoverTopology(void* hAp, const uint& n, const uint& globalRank, const WorkerAttribute& lWa) {
-        #if ARISTOS_TRACE
+        #if ARISTOS_NVTX
         aristosRange discRange{__func__};
         #endif
         const auto aD = n * n;
@@ -132,7 +132,7 @@ namespace aristos{
     }
 
     __host__ __forceinline__
-    void runDecider(EPG* __restrict__ const& ePg,
+    bool runDecider(EPG* __restrict__ const& ePg,
         Expert* __restrict__ const& experts,
         Worker* __restrict__ const& wG,
         Worker* __restrict__ const& ePwG,
@@ -144,7 +144,7 @@ namespace aristos{
         const floatPair* __restrict__ const& aP,
         const WorkerAttribute* __restrict__ const& attributes,
         const uint& rank, const uint& world) {
-        #if ARISTOS_TRACE
+        #if ARISTOS_NVTX
         aristosRange decRange{__func__};
         #endif
         constexpr auto E = ACC::E::value;
@@ -155,7 +155,11 @@ namespace aristos{
         }
         const auto adj = make_tensor(aP, make_layout(cute::make_shape(world, world), cute::LayoutRight{}));
         constexpr Decider<ACC::JT::value> decider{};
-        decider(adj, wG, E, E, dTg);
+        if (!decider(adj, wG, E, E, dTg)) {
+            // this means there isn't enough device memory for the input model configuration.
+            // we propagate this information above
+            return false;
+        }
         auto epWorld = subsets(dTg, pT, world, rank);
         for (uint i = 0; i < E; ++i) {
             // assuming homogenous experts, where each has normalized compute cost of 1
@@ -189,7 +193,7 @@ namespace aristos{
         };
         if (epWorld == world) {
             // everyone is in one group; thus, we end early
-            return;
+            return true;
         }
         // Get other group ids
         std::unordered_set<uint> groups{};
@@ -226,12 +230,24 @@ namespace aristos{
         // across all PEs.
         ePg->expertSlots = expertSlots;
         ePg->epWorld = epWorld;
+        return true;
+    }
+
+    __host__ __forceinline__
+    void cleanup() {
+        #if ARISTOS_NVTX
+        aristosRange finalRange{__PRETTY_FUNCTION__};
+        #endif
+        reportError(isInitialized, "Not initialized!");
+        isInitialized = false;
+        CHECK_ERROR_EXIT(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
+        nvshmem_finalize();
     }
 
     template<EP e = EP::yes>
     __host__ __forceinline__
     void distributedInit() {
-        #if ARISTOS_TRACE
+        #if ARISTOS_NVTX
         aristosRange distRange{__PRETTY_FUNCTION__};
         #endif
         static_assert(e == EP::yes);
@@ -288,8 +304,12 @@ namespace aristos{
         discoverTopology(aP, globalWorld, rank, wAp[rank]);
 
         // The topology adjacency matrix is ready, let's map devices to optimal cooperative process groups
-        runDecider(ePg, experts, workers, ePWorkers, dTg, pT, ePs, ePsX,
+        const auto isFeasible = runDecider(ePg, experts, workers, ePWorkers, dTg, pT, ePs, ePsX,
             scratch, aP, wAp, rank, globalWorld);
+        if (!isFeasible) {
+            cleanup();
+            reportError(isFeasible, "Insufficient Memory for Experts");
+        }
         const auto ePgD = *ePg;
         /********EVALUATION************/
         /*const auto ePgD = EPG{
@@ -459,7 +479,7 @@ namespace aristos{
     // Should be called before loading the model
     __host__ __forceinline__
     void initialize() {
-        #if ARISTOS_TRACE
+        #if ARISTOS_NVTX
         aristosRange initRange{__PRETTY_FUNCTION__};
         #endif
         reportError(!isInitialized, "Already Initialized");
@@ -488,7 +508,7 @@ namespace aristos{
 
     __host__ __forceinline__
     void finalize(){
-        #if ARISTOS_TRACE
+        #if ARISTOS_NVTX
         aristosRange finalRange{__PRETTY_FUNCTION__};
         #endif
         reportError(isInitialized, "Not initialized!");

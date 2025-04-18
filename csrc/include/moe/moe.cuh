@@ -136,7 +136,7 @@ namespace aristos::moe{
     template<bool skip = true>
     __host__ __forceinline__
     void forwardHost(const void* __restrict__ iP, void* __restrict__ oP){
-        #if ARISTOS_TRACE
+        #if ARISTOS_NVTX
         aristosRange forwardRange{__PRETTY_FUNCTION__ + std::string(", seqNo: ") + std::to_string(seqBit)};
         #endif
         reportError(isInitialized, "Not initialized!");
