@@ -1,7 +1,7 @@
 {
   "capacity_factor": 1,
   "drop_tokens": 1,
-  "expert_top_k": 1,
+  "expert_top_k": 2,
   "global_batch": 256,
   "is_training": 0,
   "hidden_act": 0,
@@ -9,7 +9,7 @@
   "intermediate_size": 4096,
   "mini_batch": 1,
   "moe_frequency": 1,
-  "num_experts": 2,
+  "num_experts": 64,
   "num_layers": 1,
   "sequence_len": 8192,
   "torch_dtype": 3,

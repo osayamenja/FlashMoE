@@ -629,7 +629,7 @@ namespace aristos::gate {
             for (uint i = 0; i < abN; ++i) {
                 topK[i] = 0U;
             }
-            #pragma unroll
+
             for (uint i = 0; i < k; ++i) {
                 auto sV = -cuda::std::numeric_limits<ElementC>::infinity();
                 uint sIdx = 0U;
@@ -725,7 +725,7 @@ namespace aristos::gate {
         static_assert(cuda::std::is_same_v<mp_t, ElementC>);
         using ElementA = typename MatrixA::value_type;
         using ElementB = typename MatrixB::value_type;
-        using Operation = BlockMM<ACC::ActivationOp, ElementA, ElementB, ElementC>;
+        using Operation = BlockMM<cute::identity, ElementA, ElementB, ElementC>;
         using ctaTiler = typename Operation::BlockTiler; // (BLK_M, BLK_N, BLK_K)
         constexpr auto threads = Operation::GEMM::block_dim.x;
         constexpr auto bM = cute::get<0>(ctaTiler{});

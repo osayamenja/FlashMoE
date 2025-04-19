@@ -268,25 +268,6 @@ namespace aristos{
         tQHeadGroundState = 0
     };
 
-    template<
-        CombineMode c,
-        typename T
-    >
-    requires(aristos::TensorValueType<T>)
-    struct VCT {
-        static_assert(c == CombineMode::single);
-        using Element = T;
-    };
-    template<
-        typename T
-    >
-    requires(aristos::TensorValueType<T>)
-    struct VCT<CombineMode::multithreaded, T> {
-        // tf32 does not have device intrinsics for atomic operations, so we use float instead
-        using Element = cuda::std::conditional_t<cuda::std::is_same_v<T, cute::tfloat32_t>,
-            float, T>;
-    };
-
     struct __align__(4) WorkerAttribute{
         cute::half_t throughput; // expert per ms; could be fractional
         uint16_t memoryCapacity; // upper bound of experts that we can accommodate
@@ -469,8 +450,9 @@ namespace aristos{
         using TK = cute::C<E_TOP_K>;
         using CM = cute::C<(E_TOP_K > 1) ? CombineMode::multithreaded : CombineMode::single>;
         using ElementC = float;
-        using Element = VCT<CM::value, DType<DTYPE>::DT>::Element;
+        using Element = DType<DTYPE>::DT;
         using DTK = cute::C<DROP_TOKENS? DropTokens::yes : DropTokens::no>;
+        using HA = cute::C<HIDDEN_ACT>;
         using ActivationOp = AFunction<HIDDEN_ACT, GEA>::DT;
         using ActivationOpX = cute::identity;
         using PeakHardware = aristos::Hardware<ARISTOS_ARCH, 255>;

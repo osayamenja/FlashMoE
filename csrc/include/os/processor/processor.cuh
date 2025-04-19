@@ -85,15 +85,13 @@ namespace aristos::processor{
         static_assert(bM % elems == 0);
         // slice and dice token indices
         constexpr auto phases = bM / elems;
-        // all threads in a phase read the same token index
         const auto phaseIdx = threadIdx.x / elems;
         static_assert(elems % wS == 0);
         constexpr auto wE = elems / wS;
         auto* __restrict__ sTPS = CAST_TO(TPS, workspace + bM * elems);
-        #pragma unroll
-        for (uint i = threadIdx.x; i < bM; i += threads) {
-            sTPS[i] = tokenIndices[i];
-        }
+        static_assert(bM == threads);
+        sTPS[threadIdx.x] = tokenIndices[threadIdx.x];
+        __syncthreads();
         // Eagerly prefetch inputs to registers
         #pragma unroll
         for (uint i = 0; i < trips; ++i) {
@@ -109,46 +107,45 @@ namespace aristos::processor{
                 registers[j + i * elems] = sC(threadIdx.x, j);
             }
         }
-        __syncthreads();
         if constexpr (c == CombineMode::multithreaded) {
             TPS wT[wE];
+            Element rS[wE];
             #pragma unroll
             for (uint i = 0; i < wE; ++i) {
                 const auto tid = threadIdx.x % wS;
                 wT[i] = sTPS[phaseIdx + (tid + i * wS) * phases];
+                rS[i] = scale(wT[i].tokenIdx, expertIdx);
             }
-            cutlass::AlignedArray<TPS, elems> tIds{};
             __syncwarp();
+            cutlass::Array<uint, elems> tIds{};
+            using CDxT = typename ToCDx<Element>::T;
+            constexpr auto cTCx = cutlass::NumericConverter<CDxT, Element>{};
+            const auto rC = cute::make_tensor(cute::make_rmem_ptr(CAST_TO(CDxT, registers.data())),
+                cute::Layout<cute::Shape<cute::_1, cute::Int<bN>>, cute::Stride<cute::Int<bN>, cute::_1>>{});
             #pragma unroll
             for (uint j = 0; j < elems; ++j) {
                 const auto msg = wT[j / wS];
                 const auto* __restrict__ mP = CONST_CAST_TO(ull_t, &msg);
                 const auto rM = __shfl_sync(0xffffffff, *mP, j % wS);
-                tIds[j] = *CONST_CAST_TO(TPS, &rM);
+                const auto [tokenIdx, probability] = *CONST_CAST_TO(TPS, &rM);
+                tIds[j] = tokenIdx;
+                // apply division operation
+                #pragma unroll
+                for (uint i = 0; i < trips; ++i) {
+                    registers[i + j * elems] = mTe(__fdividef(eTm(registers[i + j * elems]), probability));
+                }
             }
-
-            using CDxT = typename ToCDx<Element>::T;
-            constexpr auto cTCx = cutlass::NumericConverter<CDxT, mp_t>{};
-            Element rS[wE];
-            #pragma unroll
-            for (uint i = 0; i < wE; ++i) {
-                rS[i] = scale(wT[i].tokenIdx, expertIdx);
-            }
-            cutlass::AlignedArray<Element, elems> sR{};
-            __syncwarp();
             #pragma unroll
             for (uint j = 0; j < elems; ++j) {
                 const auto msg = rS[j / wS];
                 const auto* __restrict__ mP = CONST_CAST_TO(CDxT, &msg);
                 const auto rM = __shfl_sync(0xffffffff, *mP, j % wS);
-                sR[j] = *CONST_CAST_TO(Element, &rM);
+                // apply scale
+                #pragma unroll
+                for (uint i = 0; i < trips; ++i) {
+                    rC(j + i * elems) = cTCx(*CONST_CAST_TO(Element, &rM) * registers[j + i * elems]);
+                }
             }
-            // apply scale
-            #pragma unroll
-            for (uint i = 0; i < elems; ++i) {
-                tIds[i].probability =__fdividef(eTm(sR[i]), tIds[i].probability);
-            }
-
             #pragma unroll
             for (uint i = 0; i < trips; ++i) {
                 // do atomic addition
@@ -157,8 +154,7 @@ namespace aristos::processor{
                     for (uint j = 0; j < elems; ++j) {
                         const auto cIdx = threadIdx.x % elems + i * elems;
                         if (phaseIdx + j * phases < tileSize) {
-                            atomicAdd(CAST_TO(CDxT, &gC(tIds[j].tokenIdx, cIdx)),
-                                cTCx(tIds[j].probability * eTm(registers[j + i * elems])));
+                            atomicAdd(CAST_TO(CDxT, &gC(tIds[j], cIdx)), rC(j + i * elems));
                         }
                     }
                 }
@@ -166,8 +162,7 @@ namespace aristos::processor{
                     #pragma unroll
                     for (uint j = 0; j < elems; ++j) {
                         const auto cIdx = threadIdx.x % elems + i * elems;
-                        atomicAdd(CAST_TO(CDxT, &gC(tIds[j].tokenIdx, cIdx)),
-                            cTCx(tIds[j].probability * eTm(registers[j + i * elems])));
+                        atomicAdd(CAST_TO(CDxT, &gC(tIds[j], cIdx)), rC(j + i * elems));
                     }
                 }
             }

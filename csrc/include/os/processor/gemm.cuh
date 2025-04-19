@@ -13,84 +13,6 @@
 #include "../../arch.cuh"
 
 namespace aristos {
-    /// Vector atomic add
-    template<unsigned int Arch, typename Element = float>
-    requires SupportedArch<Arch> && TensorValueType<Element>
-    struct VAA {
-        template<class Registers>
-        requires isRegisterV<Registers> &&
-            cuda::std::is_same_v<typename Registers::value_type, Element>
-        __device__ __forceinline__
-        void operator()(Element* __restrict__ const& gS, Registers const& registers) const {
-            static_assert(!cuda::std::is_same_v<Element, cute::tfloat32_t>,
-                "Currently VAA is not supported for types with native atomic intrinsics"
-                "We can circumvent this constraint but doing this is not a priority, currently");
-            #pragma unroll
-            for (uint i = 0; i < Registers::kElements; ++i) {
-                atomicAdd(gS + i, registers[i]);
-            }
-        }
-    };
-
-    // specialization for half-precision
-    template<unsigned int Arch>
-    struct VAA<Arch, cute::half_t> {
-        template<class Registers>
-        requires isRegisterV<Registers> &&
-            cuda::std::is_same_v<typename Registers::value_type, cute::half_t>
-        __device__ __forceinline__
-        void operator()(cute::half_t* __restrict__ const& gS, Registers const& registers) const {
-            using vType = cuda::std::conditional_t<Registers::kElements % 2 == 0, __half2, __half>;
-            constexpr auto len = Registers::kElements / (sizeof(vType) / sizeof(__half));
-            auto* __restrict__ gSv = CAST_TO(vType, gS);
-            const auto* __restrict__ vRegs = CONST_CAST_TO(vType, registers.data());
-            #pragma unroll
-            for (uint i = 0; i < len; ++i) {
-                atomicAdd(gSv + i, vRegs[i]);
-            }
-        }
-    };
-
-    // specialization for bfloat16
-    template<unsigned int Arch> requires(Arch >= 800)
-    struct VAA<Arch, cute::bfloat16_t> {
-        template<class Registers>
-        requires isRegisterV<Registers> &&
-            cuda::std::is_same_v<typename Registers::value_type, cute::bfloat16_t>
-        __device__ __forceinline__
-        void operator()(cute::bfloat16_t* __restrict__ const& gS, Registers const& registers) const {
-            using vType = cuda::std::conditional_t<Registers::kElements % 2 == 0, __nv_bfloat162, __nv_bfloat16>;
-            constexpr auto len = Registers::kElements / (sizeof(vType) / sizeof(__half));
-            auto* __restrict__ gSv = CAST_TO(vType, gS);
-            const auto* __restrict__ vRegs = CONST_CAST_TO(vType, registers.data());
-            #pragma unroll
-            for (uint i = 0; i < len; ++i) {
-                atomicAdd(gSv + i, vRegs[i]);
-            }
-        }
-    };
-
-    // specialization for float on Hopper
-    template<>
-    struct VAA<900, float> {
-        template<class Registers>
-        requires isRegisterV<Registers> &&
-            cuda::std::is_same_v<typename Registers::value_type, float>
-        __device__ __forceinline__
-        void operator()(float* __restrict__ const& gS, Registers const& registers) const {
-            static_assert(Registers::kElements % 2 == 0, "Register tensor does not vectorize");
-            using vType = cuda::std::conditional_t<Registers::kElements % 4 == 0, float4,
-                cuda::std::conditional_t<Registers::kElements % 2 == 0, float2, float>>;
-            constexpr auto len = Registers::kElements / (sizeof(vType) / sizeof(float));
-            auto* __restrict__ gSv = CAST_TO(vType, gS);
-            const auto* __restrict__ vRegs = CONST_CAST_TO(vType, registers.data());
-            #pragma unroll
-            for (uint i = 0; i < len; ++i) {
-                atomicAdd(gSv + i, vRegs[i]);
-            }
-        }
-    };
-
     /// Fused, Add, Activate
     template <typename Element, typename ActivationFunction>
     requires(aristos::TensorValueType<Element> && cuda::std::is_invocable_r_v<Element, ActivationFunction, Element>)
@@ -137,6 +59,10 @@ namespace aristos {
         unsigned int threads = ACC::PeakHardware::OS::threads::value,
         unsigned int pipeStages = ACC::PeakHardware::pipeStages::value
     >
+    requires(cuda::std::is_same_v<ElementC, ACC::ElementC> ||
+        (cuda::std::is_same_v<ElementC, cute::half_t> &&
+            cuda::std::is_same_v<ElementA, cute::half_t> &&
+            cuda::std::is_same_v<ElementB, cute::half_t>))
     struct BlockMM {
         // will clamp at Ampere for now, until we implement Hopper specific GEMM
         static_assert(BLOCK_M == THREADS && BLOCK_M == threads);
