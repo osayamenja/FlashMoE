@@ -118,7 +118,7 @@ CPMAddPackage(
 if(CUTLASS_ADDED)
     # header-only
     target_include_directories(csrc SYSTEM PRIVATE "${CUTLASS_SOURCE_DIR}/include")
-    set(cublasdx_CUTLASS_ROOT "${CUTLASS_SOURCE_DIR}")
+    # set(cublasdx_CUTLASS_ROOT "${CUTLASS_SOURCE_DIR}")
 endif ()
 
 set(FMT_SYSTEM_HEADERS, ON)

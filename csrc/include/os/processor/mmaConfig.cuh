@@ -43,7 +43,7 @@ namespace aristos {
         using mma = cute::TiledMMA<
           cute::MMA_Atom<cute::SM80_16x8x8_F16F16F16F16_TN>,
           cute::Layout<cute::Shape<cute::_2, cute::_2, cute::_1>>,
-        cute::Tile<cute::_32, cute::_32, cute::_8>
+        cute::Tile<cute::_32, cute::_32, cute::_16>
         >;
     };
 
@@ -52,7 +52,7 @@ namespace aristos {
         using mma = cute::TiledMMA<
           cute::MMA_Atom<cute::SM80_16x8x8_F32F16F16F32_TN>,
           cute::Layout<cute::Shape<cute::_2, cute::_2, cute::_1>>,
-        cute::Tile<cute::_32, cute::_32, cute::_8>
+        cute::Tile<cute::_32, cute::_32, cute::_16>
         >;
     };
 
@@ -61,7 +61,7 @@ namespace aristos {
         using mma = cute::TiledMMA<
           cute::MMA_Atom<cute::SM80_16x8x8_F32BF16BF16F32_TN>,
           cute::Layout<cute::Shape<cute::_2, cute::_2, cute::_1>>,
-        cute::Tile<cute::_32, cute::_32, cute::_8>
+        cute::Tile<cute::_32, cute::_32, cute::_16>
         >;
     };
 
@@ -94,40 +94,27 @@ namespace aristos {
     cute::UniversalCopy<float>, cuda::std::conditional_t<sizeof(Element) >= 4,
     cute::SM75_U32x4_LDSM_N, cute::SM75_U32x2_LDSM_N>>;
 
+    template<typename Element> requires(sizeof(Element) >= 2)
+    using VT = cuda::std::conditional_t<sizeof(Element) == 2, uint32_t, Element>;
     template<
         typename ElementA,
         typename ElementB,
-        unsigned int Arch,
-        cublasdx::arrangement a = cublasdx::arrangement::row_major, // T
-        cublasdx::arrangement b = cublasdx::arrangement::row_major  // N
+        unsigned int Arch
     >
     struct CopyOp {
-        using copyAT = decltype(cute::make_tiled_copy(
-            cute::Copy_Atom<copyArch<ElementA, Arch>, ElementA>{},
+        using VTA = VT<ElementA>;
+        using copyA = decltype(cute::make_tiled_copy(
+            cute::Copy_Atom<copyArch<VTA, Arch>, ElementA>{},
             cute::Layout<cute::Shape<cute::_16, cute::_8>,
                 cute::Stride<cute::_8, cute::_1>>{},
-            cute::Layout<cute::Shape<cute::_1, cute::_1>>{}));
+            cute::Layout<cute::Shape<cute::_1, cute::Int<sizeof(VTA) / sizeof(ElementA)>>>{}));
 
-        using copyBN = decltype(cute::make_tiled_copy(
-            cute::Copy_Atom<copyArch<ElementB, Arch>, ElementB>{},
+        using VTB = VT<ElementB>;
+        using copyB = decltype(cute::make_tiled_copy(
+            cute::Copy_Atom<copyArch<VTB, Arch>, ElementB>{},
             cute::Layout<cute::Shape<cute::_16, cute::_8>,
                 cute::Stride<cute::_8, cute::_1>>{},
-            cute::Layout<cute::Shape<cute::_1, cute::_1>>{}));
-
-        using copyAN = decltype(cute::make_tiled_copy(
-            cute::Copy_Atom<copyArch<ElementA, Arch>, ElementA>{},
-            cute::Layout<cute::Shape<cute::_16, cute::_8>>{},
-            cute::Layout<cute::Shape<cute::_1, cute::_1>>{}));
-
-        using copyBT = decltype(cute::make_tiled_copy(
-            cute::Copy_Atom<copyArch<ElementB, Arch>, ElementB>{},
-            cute::Layout<cute::Shape<cute::_16, cute::_8>>{},
-            cute::Layout<cute::Shape<cute::_1, cute::_1>>{}));
-
-        using copyA = cuda::std::conditional_t<(a == cublasdx::arrangement::row_major &&
-            b == cublasdx::arrangement::row_major), copyAT, copyAN>;
-        using copyB = cuda::std::conditional_t<(a == cublasdx::arrangement::row_major &&
-            b == cublasdx::arrangement::row_major), copyBN, copyBT>;
+            cute::Layout<cute::Shape<cute::_1, cute::Int<sizeof(VTB) / sizeof(ElementB)>>>{}));
     };
 
     enum class LayoutOptimization {
@@ -163,9 +150,7 @@ namespace aristos {
         using copyAB = CopyOp<
             ElementA,
             ElementB,
-            cublasdx::sm_of<GEMM>::value,
-            cublasdx::arrangement_of<GEMM>::a,
-            cublasdx::arrangement_of<GEMM>::b
+            cublasdx::sm_of<GEMM>::value
         >;
 
         using gCopyA = typename copyAB::copyA;
@@ -173,10 +158,10 @@ namespace aristos {
 
         using sCopyA = cute::Copy_Atom<cuda::std::conditional_t<cublasdx::sm_of<GEMM>::value < 800,
         cute::AutoVectorizingCopyWithAssumedAlignment<8 * cublasdx::alignment_of<GEMM>::a>,
-        sCopyLay<ElementA>>, ElementA>;
+        sCopyLay<VT<ElementA>>>, ElementA>;
         using sCopyB = cute::Copy_Atom<cuda::std::conditional_t<cublasdx::sm_of<GEMM>::value < 800,
         cute::AutoVectorizingCopyWithAssumedAlignment<8 * cublasdx::alignment_of<GEMM>::b>,
-        sCopyLay<ElementB>>, ElementB>;
+        sCopyLay<VT<ElementB>>>, ElementB>;
         using sCopyC = cute::Copy_Atom<cute::AutoVectorizingCopyWithAssumedAlignment<8 * cublasdx::alignment_of<GEMM>::c>, ElementC>;
 
         using vSLayA = cute::Layout<cute::Shape<cute::Int<cublasdx::size_of<GEMM>::m>, cute::Int<cublasdx::size_of<GEMM>::k>>,

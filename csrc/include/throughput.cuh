@@ -155,6 +155,7 @@ namespace aristos {
             cudaMemcpyDeviceToHost, aristosStream));
         CHECK_ERROR_EXIT(cudaStreamSynchronize(aristosStream));
         const float throughput = 1.0f / findMedian<trials>(latency);
+        fmt::println("Latency is {}ms", findMedian<trials>(latency));
         dWa->throughput = cute::half_t(throughput); // latency should be > 0
         CHECK_ERROR_EXIT(cudaFreeAsync(p, aristosStream));
         delete hB;

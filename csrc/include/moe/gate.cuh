@@ -172,7 +172,7 @@ namespace aristos::gate {
 
             // Transposed layout in shared memory to minimize bank conflicts
             constexpr auto sCLay = cute::make_layout(cute::Shape<cute::Int<bM>, cute::Int<elems>>{});
-            auto sC = cute::make_tensor(cute::make_smem_ptr(CAST_TO(Element, gateScratch)), sCLay);
+            auto sC = cute::make_tensor(cute::make_smem_ptr(CAST_TO(ElementC, gateScratch)), sCLay);
             typename BlockGEMM::MMA tiledMMA{};
             auto tCsC = tiledMMA.get_slice(threadIdx.x).partition_C(sC);
             constexpr auto gCStoreOp = cutlass::NumericConverter<typename decltype(gC)::value_type,
@@ -185,7 +185,7 @@ namespace aristos::gate {
             for (unsigned int i = 0; i < trips; ++i) {
                 #pragma unroll
                 for (unsigned int j = 0; j < elems; ++j) {
-                    tCsC(j) = gCStoreOp(accumulator(j + i * elems));
+                    tCsC(j) = accumulator(j + i * elems);
                 }
                 // Necessary to ensure THREADSxElems half-tile is ready as values are scattered across threads
                 __syncthreads();
@@ -193,7 +193,7 @@ namespace aristos::gate {
                 // Prefetch to registers
                 #pragma unroll
                 for (unsigned int j = 0; j < elems; ++j) {
-                    accumulator(j + i * elems) = gCLoadOp(sC(threadIdx.x, j));
+                    accumulator(j + i * elems) = sC(threadIdx.x, j);
                 }
             }
 
