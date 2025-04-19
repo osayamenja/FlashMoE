@@ -147,5 +147,15 @@ namespace aristos{
             atomicExch(CAST_TO(ull_t, addr), *CONST_CAST_TO(ull_t, payload));
         }
     }
+
+    __device__ __forceinline__
+    void gridBarrier() {
+        __syncthreads();
+        if (!threadIdx.x) {
+            __threadfence();
+            bookkeeping.dB()->arrive_and_wait();
+        }
+        __syncthreads();
+    }
 }
 #endif //CSRC_ATOMICS_CUH

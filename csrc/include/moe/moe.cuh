@@ -121,7 +121,7 @@ namespace aristos::moe{
                 cute::Stride<cute::Int<H>, cute::_1>>{});
 
         gate::forward(activations, gateWeights, gateOutput, CAST_TO(ElementC, workspace));
-        if (blockIdx.x + 1 < blocks) {
+        /*if (blockIdx.x + 1 < blocks) {
             constexpr auto cutoff = processors / ARISTOS_SUPER_BLOCK_SIZE * ARISTOS_SUPER_BLOCK_SIZE;
             if (blockIdx.x < cutoff) {
                 packet::encode<cutoff, d, ARISTOS_SUPER_BLOCK_SIZE>(activations, workspace, sb);
@@ -130,7 +130,7 @@ namespace aristos::moe{
         }
         else {
             os::start<processors, d>(workspace, moeOutput, expertsUp, expertsDown, biasUp, biasDown, sb);
-        }
+        }*/
     }
 
     template<bool skip = true>

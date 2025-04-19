@@ -119,7 +119,7 @@ namespace aristos::gate {
             constexpr auto tilesM = M / bM;
             // padded to fill bN
             constexpr auto tilesN = cute::ceil_div(E, bN);
-            static_assert(ACC::PeakHardware::OS::processorBlocks::value <= tilesN);
+            static_assert(ACC::PeakHardware::blocks::value >= tilesN);
             constexpr auto tilesK = H / bK;
 
             const auto tileCoord = idx2crd(tileIdx,
@@ -135,6 +135,7 @@ namespace aristos::gate {
 
             /// Pointers for flags needed in epilogue
             /// col-major indexing to facilitate coalescing
+            constexpr uint16_t phases = 2U;
             const auto myTileOffset = bM * (cute::get<0>(tileCoord) + cute::get<1>(tileCoord) * tilesM) + threadIdx.x;
             const auto nextTileOffset = bM * (cute::get<0>(tileCoord) +
                 (cute::get<1>(tileCoord) + 1 == tilesN ? 0 : cute::get<1>(tileCoord) + 1) * tilesM) + threadIdx.x;
@@ -148,11 +149,17 @@ namespace aristos::gate {
             RingSoftmaxPayload rSp{};
 
             // Block Ring top k pointers
-            auto* __restrict__ tkMailbox = gArg.rTp + myTileOffset;
+            const auto myTileOffsetP = bM * (cute::get<0>(tileCoord) + phases * cute::get<1>(tileCoord) * tilesM) +
+                threadIdx.x;
+            const auto nextTileOffsetP = bM * (cute::get<0>(tileCoord) +
+                phases * (cute::get<1>(tileCoord) + 1 == tilesN ? 0 : cute::get<1>(tileCoord) + 1) * tilesM) +
+                    threadIdx.x;
+            auto* __restrict__ tkMailbox = gArg.rTp + myTileOffsetP;
+            // incorrect due to double flags
             auto* __restrict__ tkXMailbox = gArg.rTp + nextTileOffset;
             RingTopKPayload rTp{};
 
-            auto k_tile_iter = cute::make_coord_iterator(tilesK);
+            const auto k_tile_iter = cute::make_coord_iterator(tilesK);
 
             mainLoop(
                 accumulator,
@@ -215,10 +222,13 @@ namespace aristos::gate {
             auto dI = ElementC(0);
             auto mI = -cuda::std::numeric_limits<ElementC>::infinity();
             // Begin Block-Ring softmax
+            constexpr uint16_t fB = 1U;
+            constexpr uint16_t sB = 1U;
             if (cute::get<1>(tileCoord) > 0) {
-                awaitPayload(brsMailbox, &rSp, 1U);
+                awaitPayload(brsMailbox, &rSp, fB);
                 // We quantize dI from mp_t to half, and this yields no loss in precision.
                 // We leave as an exercise to the reader to determine why this conversion is lossless.
+                // Hint: N <= UINT16_MAX ≈ FP16_MAX
                 dI = deQuantize(rSp.dI);
                 mI = rSp.mI;
             }
@@ -232,17 +242,17 @@ namespace aristos::gate {
             }
 
             if (cute::get<1>(tileCoord) + 1 < tilesN) {
-                const auto sP = RingSoftmaxPayload{mI, quantize(dI), 1U};
+                const auto sP = RingSoftmaxPayload{mI, quantize(dI), fB};
                 signalPayload(brsXMailbox, &sP);
-                awaitPayload(brsMailbox, &rSp, 2U);
+                awaitPayload(brsMailbox, &rSp, sB);
                 dI = deQuantize(rSp.dI);
                 mI = rSp.mI;
             }
             else {
                 // Ring ends with me, let's unblock everyone else
-                const auto sP = RingSoftmaxPayload{mI, quantize(dI), 2U};
+                const auto sP = RingSoftmaxPayload{mI, quantize(dI), sB};
                 #pragma unroll
-                for (uint j = 0; j < tilesM; ++j) {
+                for (uint j = 0; j < tilesN - 1; ++j) {
                     signalPayload(brsXMailbox + bM * j * tilesM, &sP);
                 }
             }
@@ -303,7 +313,6 @@ namespace aristos::gate {
 
             #pragma unroll
             for (uint16_t i = 0; i < ACC::TK::value; ++i) {
-                constexpr uint16_t phases = 2U;
                 const uint16_t batonPrefix = phases * (i / 2U); // needed as we alternate between two buffers
                 const uint16_t bPf = batonPrefix + 1U;
                 const uint16_t bPs = batonPrefix + 2U;
@@ -357,7 +366,7 @@ namespace aristos::gate {
                     const auto sP = RingTopKPayload{sV, sIdx, bPs};
                     auto* __restrict__ mailboxes = tkXMailbox;
                     #pragma unroll
-                    for (uint j = 0; j < tilesM; ++j) {
+                    for (uint j = 0; j < tilesN - 1; ++j) {
                         mailboxes += phases * j * bM * tilesM;
                         signalPayload(mailboxes + flagPrefix, &sP);
                     }
@@ -736,14 +745,9 @@ namespace aristos::gate {
         for (unsigned int i = blockIdx.x; i < nT; i += blocks) {
             fusedGate(activations, weights, routing, i, gArg, scratch);
         }
+        // Needed prior to packet dispatch
+        gridBarrier();
 
-        __syncthreads();
-        // Everyone syncs here prior to packet construction
-        if (!threadIdx.x) {
-            __threadfence();
-            bookkeeping.dB()->arrive_and_wait();
-        }
-        __syncthreads();
         if constexpr (jT == JobType::training) {
             auto* __restrict__ gML = bookkeeping.gML();
             auto* __restrict__ gMeC = bookkeeping.gMeC();

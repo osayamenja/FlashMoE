@@ -310,7 +310,7 @@ namespace aristos::packet {
             const auto wT = fTilesM * tN;
             const auto fS = wT / WARP_SIZE + (laneId < wT % WARP_SIZE);
             constexpr auto rT = tN % WARP_SIZE;
-            constexpr auto lS = tN / WARP_SIZE + (rT > 0 ? laneId < rT : 0);
+            const auto lS = tN / WARP_SIZE + (rT > 0 ? laneId < rT : 0);
             const auto tSlice = fS + (routedTokens % BLOCK_M == 0 ? 0 : lS);
 
             for (uint i = 0; i < fS; ++i) {
