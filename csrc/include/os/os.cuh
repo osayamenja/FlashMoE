@@ -15,7 +15,6 @@ namespace aristos::os {
     template<
         unsigned int processors,
         DropTokens d = DropTokens::yes,
-        typename Output,
         typename ExpertsUp,
         typename ExpertsDown,
         typename BiasUp,
@@ -23,7 +22,6 @@ namespace aristos::os {
     >
     __device__ __forceinline__
     void start(cuda::std::byte* __restrict__ const& workspace,
-        Output const& moeOutput,
         ExpertsUp const& expertsUp,
         ExpertsDown const& expertsDown,
         BiasUp const& biasUp,
@@ -149,7 +147,7 @@ namespace aristos::os {
             // subscriber
             subscriber::start<wSet>(bitSet, subscriberScratch, sSeqBit + tIdx,
                 interrupt, tQHeads + tIdx, pL, lX, eL, ssfC, status, taskBound,
-                moeOutput, expertsUp, expertsDown, biasUp, biasDown, lSeqBit, tIdx);
+                expertsUp, expertsDown, biasUp, biasDown, lSeqBit, tIdx);
         }
     }
 }

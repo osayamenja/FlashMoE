@@ -374,7 +374,6 @@ namespace aristos::packet {
             unsigned int& lTQHead,
             const cuda::std::byte* const& packet,
             const cuda::std::byte* const& tokenIndices,
-            cuda::std::byte* const& moeOutput,
             const unsigned int& nTokens,
             const unsigned int& tileIdx,
             unsigned int* __restrict__ const& tQHead,
@@ -384,7 +383,6 @@ namespace aristos::packet {
                 TaskType::combine,
                 tokenIndices,
                 cuda::std::array<const cuda::std::byte*, GEMMs>{packet},
-                cuda::std::array<cuda::std::byte*, GEMMs>{moeOutput},
                 nTokens,
                 tileIdx,
                 expertIdx
@@ -401,7 +399,6 @@ namespace aristos::packet {
         void operator()(const DecoderArg& dA,
             const cuda::std::byte* const& packet,
             const cuda::std::byte* const& tokenIndices,
-            cuda::std::byte* const& moeOutput,
             const unsigned int& nTokens,
             unsigned int& lTQHead,
             unsigned int* __restrict__ const& tQHead,
@@ -413,7 +410,6 @@ namespace aristos::packet {
                     TaskType::combine,
                     tokenIndices,
                     cuda::std::array<const cuda::std::byte*, GEMMs>{packet},
-                    cuda::std::array<cuda::std::byte*, GEMMs>{moeOutput},
                     nTokens,
                     i,
                     expertIdx

@@ -174,7 +174,6 @@ namespace aristos::subscriber{
             const packet::DecoderArg& dA,
             /// Task Arguments
             TokenIds const& tokenIds,
-            cuda::std::byte* const& mO,
             /// Data Structures
             const uint* __restrict__ const& tileIndices,
             /// Lookup Table
@@ -236,7 +235,7 @@ namespace aristos::subscriber{
                             if (lookup.isRemote) {
                                 // enforce memory consistency
                                 eMC(sSeqBit, localSeqBit);
-                                lRd(dA, packet, CONST_CAST_TO(cuda::std::byte, tI), mO, sP->tokensM,
+                                lRd(dA, packet, CONST_CAST_TO(cuda::std::byte, tI), sP->tokensM,
                                     ltQHead, tQHead, expertIdx);
                             }
                             else {
@@ -244,7 +243,7 @@ namespace aristos::subscriber{
                                 __threadfence_system();
                                 lPd(dA.tQ, ltQHead, packet,
                                     CONST_CAST_TO(cuda::std::byte, tI),
-                                    mO, sP->tokensM, flagIdx % TN, tQHead, expertIdx);
+                                    sP->tokensM, flagIdx % TN, tQHead, expertIdx);
                             }
                         }
                     }
@@ -287,7 +286,7 @@ namespace aristos::subscriber{
                                 if (lookup.isRemote) {
                                     // enforce memory consistency
                                     eMC(sSeqBit, localSeqBit);
-                                    lRd(dA, packet, CONST_CAST_TO(cuda::std::byte, tI), mO, sP->tokensM,
+                                    lRd(dA, packet, CONST_CAST_TO(cuda::std::byte, tI), sP->tokensM,
                                         ltQHead, tQHead, expertIdx);
                                 }
                                 else {
@@ -295,7 +294,7 @@ namespace aristos::subscriber{
                                     __threadfence_system();
                                     lPd(dA.tQ, ltQHead, packet,
                                         CONST_CAST_TO(cuda::std::byte, tI),
-                                        mO, sP->tokensM, flagIdx % TN, tQHead, expertIdx);
+                                        sP->tokensM, flagIdx % TN, tQHead, expertIdx);
                                 }
                             }
                         }
@@ -310,7 +309,6 @@ namespace aristos::subscriber{
     template<
         unsigned int wSet,
         unsigned int subscriberCount = SUBSCRIBERS,
-        typename Output,
         typename ExpertsUp,
         typename ExpertsDown,
         typename BiasUp,
@@ -329,7 +327,6 @@ namespace aristos::subscriber{
         const unsigned int& ssfC,
         unsigned int* __restrict__ const& status, // shared
         unsigned int* __restrict__ const& taskCount,
-        Output const& moeOutput,
         ExpertsUp const& expertsUp,
         ExpertsDown const& expertsDown,
         BiasUp const& biasUp,
@@ -354,7 +351,7 @@ namespace aristos::subscriber{
 
         // pointers
         auto* __restrict__ sFlags = bookkeeping.flags;
-        auto* __restrict__ pGB = bookkeeping.xM(); // post GEMM buffer
+        auto* __restrict__ pGB = CAST_TO(cuda::std::byte, bookkeeping.xM()); // post GEMM buffer
 
         // Constants
         const auto nLx = bookkeeping.nLx;
@@ -415,7 +412,6 @@ namespace aristos::subscriber{
                 bitSet,
                 dA,
                 tokenIds,
-                CAST_TO(cuda::std::byte, moeOutput.data().get()),
                 tileIndices,
                 eL,
                 workspace,

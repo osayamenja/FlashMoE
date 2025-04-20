@@ -632,11 +632,13 @@ namespace aristos::processor{
     }
 
     template<
-        typename ScaleWeights
+        typename ScaleWeights,
+        typename Output
     >
     __device__ __forceinline__
     void start(cuda::std::byte* const& workspace,
-        ScaleWeights const& sW, const uint16_t& _seqBit){
+        ScaleWeights const& sW, Output const& moeOutput,
+        const uint16_t& _seqBit){
         using Element = ACC::Element;
         static_assert(sizeof(SignalPayload<PacketStage::last>) == sizeof(flagsType)
             && alignof(SignalPayload<PacketStage::last>) == alignof(flagsType));
@@ -771,7 +773,7 @@ namespace aristos::processor{
                             CAST_TO(typename PostGEMM::MatrixDType, workspace),
                             CONST_CAST_TO(TPS, rCurrentTask.aData),
                             CONST_CAST_TO(typename PostGEMM::MatrixAType, rCurrentTask.bData[combineIndex]),
-                            CAST_TO(typename PostGEMM::MatrixDType, rCurrentTask.cData[combineIndex]),
+                            moeOutput.data().get(),
                             sW,
                             rCurrentTask.tileIdx,
                             rCurrentTask.tileSize,

@@ -607,11 +607,10 @@ namespace aristos{
         Task(const TaskType& _taskType,
         const cuda::std::byte*  const& _aData,
         const cuda::std::array<const cuda::std::byte*, GEMMs>& _bData,
-        const cuda::std::array<cuda::std::byte*, GEMMs>& _cData,
         const unsigned int& _size,
         const unsigned int& _tile,
         const unsigned int& _expertIdx):
-        aData(_aData), bData(_bData), cData(_cData), tileIdx(_tile), expertIdx(_expertIdx), taskType(_taskType),
+        aData(_aData), bData(_bData), tileIdx(_tile), expertIdx(_expertIdx), taskType(_taskType),
         tileSize(_size){}
 
         __device__ __forceinline__
@@ -715,8 +714,8 @@ namespace aristos{
                 gRl = tQXt + (ACC::JT::value == JobType::inference ? 0U :
                     sizeof(mp_t) * (2 * E + 1));
                 sBfC = gRl + sizeof(BookType) * (1 + (E * TCM * ACC::TNx::value) + blocks +
-                    2 * (E + world * nLx * TCM));
-                bookSize = sBfC + sizeof(ACC::Element) * (_world * _nLx * pEC * P);
+                    2 * (E + world * nLx * TCM) + 2 * ACC::S::value * ACC::TNx::value);
+                bookSize = sBfC + sizeof(ACC::Element) * (ACC::TK::value * S * ACC::H::value + _world * _nLx * pEC * P);
             }
         }
 
@@ -749,8 +748,8 @@ namespace aristos{
             const auto gRl = tQXt +
                 (ACC::JT::value == JobType::inference ? 0U : sizeof(mp_t) * (2 * E + 1));
             const auto sBfC = gRl + sizeof(BookType) * (1 + (E * TCM * ACC::TNx::value) + blocks +
-                2 * (E + _world * _nLx * TCM));
-            return sBfC + sizeof(ACC::Element) * (_world * _nLx * pEC * P);
+                2 * (E + _world * _nLx * TCM) + 2 * ACC::S::value * ACC::TNx::value);
+            return sBfC + sizeof(ACC::Element) * (ACC::TK::value * S * ACC::H::value + _world * _nLx * pEC * P);
         }
 
         __host__ __forceinline__

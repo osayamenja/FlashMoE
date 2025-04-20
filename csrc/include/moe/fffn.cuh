@@ -42,7 +42,7 @@ namespace aristos {
         const auto* __restrict__ pB2 = pB1 + N * K;
         const auto* __restrict__ pD1 = pB2 + N * K;
         const auto* __restrict__ pD2 = pD1 + K;
-        auto* __restrict__ pC1 = CAST_TO(Element, bookkeeping.xM());
+        auto* __restrict__ pC1 = bookkeeping.xM();
         auto* __restrict__ pC2 = CAST_TO(Element, oP);
 
         constexpr auto tSCl = cute::min(tilesK, blocks);
