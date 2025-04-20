@@ -115,9 +115,9 @@ void runOS() {
     aristos::finalize();
     /*const auto og = make_tensor(oH,
         make_layout(cute::make_shape(S, PX), cute::LayoutRight{}));
-    const auto o = make_tensor(oH + S * PX,
+    print_tensor(og);*/
+    /*const auto o = make_tensor(oH + S * PX,
         make_layout(cute::make_shape(S, H), cute::LayoutRight{}));
-    print_tensor(og);
     print_tensor(o);*/
     /*const auto o = make_tensor(eHp,
         cute::Layout<cute::Shape<cute::Int<S>, cute::Int<PX>>, cute::Stride<cute::Int<PX>, cute::_1>>{});

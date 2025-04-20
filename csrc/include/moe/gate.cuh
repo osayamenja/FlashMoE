@@ -155,8 +155,7 @@ namespace aristos::gate {
                 phases * (cute::get<1>(tileCoord) + 1 == tilesN ? 0 : cute::get<1>(tileCoord) + 1) * tilesM) +
                     threadIdx.x;
             auto* __restrict__ tkMailbox = gArg.rTp + myTileOffsetP;
-            // incorrect due to double flags
-            auto* __restrict__ tkXMailbox = gArg.rTp + nextTileOffset;
+            auto* __restrict__ tkXMailbox = gArg.rTp + nextTileOffsetP;
             RingTopKPayload rTp{};
 
             const auto k_tile_iter = cute::make_coord_iterator(tilesK);
@@ -327,13 +326,13 @@ namespace aristos::gate {
                     #pragma unroll
                     for (uint j = 0; j < bN; ++j) {
                         // local maximum
-                        if (accumulator(j) > lSV && !rTopK[j]) {
-                            lSIdx = cute::get<0>(tileCoord) * bN + j;
+                        if (!rTopK[j] && accumulator(j) > lSV) {
+                            lSIdx = cute::get<1>(tileCoord) * bN + j;
                             lSV = accumulator(j);
                         }
                         // proposal
-                        if (accumulator(j) > sV && !rTopK[j]) {
-                            sIdx = cute::get<0>(tileCoord) * bN + j;
+                        if (!rTopK[j] && accumulator(j) > sV) {
+                            sIdx = cute::get<1>(tileCoord) * bN + j;
                             sV = accumulator(j);
                         }
                     }
@@ -377,6 +376,7 @@ namespace aristos::gate {
                     topK[sIdx % bN] = 1U;
                     // We need to sweep in the next round
                     shouldSweep = true;
+                    lSV = -cuda::std::numeric_limits<ElementC>::infinity();
                 }
                 mCw += sV;
             }
@@ -434,7 +434,8 @@ namespace aristos::gate {
             }
 
             if (threadIdx.x < bN) {
-                startIndices[threadIdx.x] = atomicAdd(gArg.eC + threadIdx.x, cachedSelected);
+                startIndices[threadIdx.x] = atomicAdd(gArg.eC + (bN * cute::get<1>(tileCoord) + threadIdx.x),
+                    cachedSelected);
                 if constexpr (jT == JobType::training) {
                     atomicAdd(gArg.gMec + threadIdx.x, __fdividef(static_cast<ElementC>(cachedSelected),
                     static_cast<ElementC>(S)));
@@ -449,7 +450,8 @@ namespace aristos::gate {
             #pragma unroll
             for (uint i = 0; i < bN; ++i) {
                 if (rTopK[i] && myIndices[i] < EC) {
-                    tokenIds(i, myIndices[i]) = TPS{bM * cute::get<0>(tileCoord) + threadIdx.x, mCw};
+                    const auto expertIdx = bN * cute::get<1>(tileCoord) + i;
+                    tokenIds(expertIdx, myIndices[i]) = TPS{bM * cute::get<0>(tileCoord) + threadIdx.x, mCw};
                 }
             }
         }
