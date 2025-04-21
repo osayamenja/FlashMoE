@@ -9,7 +9,7 @@
   "intermediate_size": 4096,
   "mini_batch": 1,
   "moe_frequency": 1,
-  "num_experts": 2,
+  "num_experts": 8,
   "num_layers": 1,
   "sequence_len": 8192,
   "torch_dtype": 1,

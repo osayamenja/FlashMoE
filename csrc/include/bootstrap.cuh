@@ -28,12 +28,14 @@ namespace aristos{
         uint16_t expertSlots;
         uint16_t nLx;
         uint16_t epWorld;
+        uint epWorldM;
 
+        EPG() = default;
         EPG(const uint16_t& _epR,
             const uint16_t& _eS,
             const uint16_t& _nLx,
             const uint16_t& _epW):
-        epRank(_epR), expertSlots(_eS), nLx(_nLx), epWorld(_epW) {}
+        epRank(_epR), expertSlots(_eS), nLx(_nLx), epWorld(_epW), epWorldM(_epW) {}
 
         void dump() const {
             printf("{\n\t"
@@ -98,8 +100,11 @@ namespace aristos{
         aristosRange discRange{__func__};
         #endif
         const auto aD = n * n;
-        const size_t heapBytes = n * sizeof(flagsType) + aD * sizeof(floatPair)
-        + sizeof(uint) * (n + 2) + n * BETA_BUFFER;
+        const size_t heapBytes = n * sizeof(flagsType) +
+                aD * sizeof(floatPair) +
+                sizeof(WorkerAttribute) * n +
+                sizeof(uint) * 2 +
+                n * BETA_BUFFER;
         auto* symHeap = nvshmem_calloc(heapBytes, sizeof(cuda::std::byte));
         // Pointer orchestration
         // Starting index of flags array
@@ -138,6 +143,7 @@ namespace aristos{
         Worker* __restrict__ const& ePwG,
         uint* __restrict__ const& dTg,
         uint* __restrict__ const& pT,
+        uint* __restrict__ const& pTs,
         uint* __restrict__ const& ePs,
         uint* __restrict__ const& ePsX,
         uint16_t* __restrict__ const& scratch,
@@ -160,7 +166,7 @@ namespace aristos{
             // we propagate this information above
             return false;
         }
-        auto epWorld = subsets(dTg, pT, world, rank);
+        const auto epWorld = subsets(dTg, pT, world, dTg[rank]);
         for (uint i = 0; i < E; ++i) {
             // assuming homogenous experts, where each has normalized compute cost of 1
             experts[i] = Expert{i, 1};
@@ -185,51 +191,45 @@ namespace aristos{
             expertSlots = cuda::std::max(tally, expertSlots);
         }
         const auto numLocalExperts = scratch[epRank];
-        *ePg = EPG{
+        auto epg = EPG{
             epRank,
             expertSlots,
             numLocalExperts,
             epWorld
         };
-        if (epWorld == world) {
-            // everyone is in one group; thus, we end early
-            return true;
-        }
-        // Get other group ids
-        std::unordered_set<uint> groups{};
-        for (uint i = 0; i < world; ++i) {
-            groups.emplace(dTg[i]);
-        }
-        const auto myGroup = dTg[rank];
-
-        auto* __restrict__ pTs = pT + epWorld;
-
-        for (const auto& group : groups) {
-            if (group != myGroup) {
-                std::ranges::fill(scratch, scratch + world, 0U);
-                const auto ePw = subsets(dTg, pTs, world, group);
-                epWorld = cute::max(epWorld, ePw);
-                for (uint i = 0; i < ePw; ++i) {
-                    const auto wRank = pTs[i];
-                    ePwG[i] = Worker{
-                        static_cast<uint16_t>(wRank),
-                        wG[wRank].processingRate,
-                        wG[wRank].memoryCapacity
-                    };
-                }
-                assign(ePwG, epWorld, experts, E, ePsX);
-                for (uint16_t i = 0; i < E; ++i) {
-                    const auto wIdx = ePsX[i];
-                    const uint16_t tally = scratch[wIdx] + 1U;
-                    scratch[wIdx] = tally;
-                    expertSlots = cuda::std::max(tally, expertSlots);
+        if (epWorld < world) {
+            // Get other group ids
+            // The global maximum of epW and expertSlots is necessary for allocating a uniformly sized symmetric heap
+            // across all PEs.
+            std::unordered_set<uint> groups{};
+            for (uint i = 0; i < world; ++i) {
+                groups.emplace(dTg[i]);
+            }
+            const auto myGroup = dTg[rank];
+            for (const auto& group : groups) {
+                if (group != myGroup) {
+                    std::ranges::fill(scratch, scratch + world, 0U);
+                    const auto ePw = subsets(dTg, pTs, world, group);
+                    epg.epWorldM = cute::max(epg.epWorldM, ePw);
+                    for (uint i = 0; i < ePw; ++i) {
+                        const auto wRank = pTs[i];
+                        ePwG[i] = Worker{
+                            static_cast<uint16_t>(wRank),
+                            wG[wRank].processingRate,
+                            wG[wRank].memoryCapacity
+                        };
+                    }
+                    assign(ePwG, ePw, experts, E, ePsX);
+                    for (uint16_t i = 0; i < E; ++i) {
+                        const auto wIdx = ePsX[i];
+                        const uint16_t tally = scratch[wIdx] + 1U;
+                        scratch[wIdx] = tally;
+                        epg.expertSlots = cuda::std::max(tally, epg.expertSlots);
+                    }
                 }
             }
         }
-        // The global maximum of the below values is necessary for allocating a uniformly sized symmetric heap
-        // across all PEs.
-        ePg->expertSlots = expertSlots;
-        ePg->epWorld = epWorld;
+        *ePg = epg;
         return true;
     }
 
@@ -263,12 +263,11 @@ namespace aristos{
 
         // Pointer to adjacency matrix and throughput of all devices
         const auto aD = globalWorld * globalWorld;
-        const auto dZ = sizeof(EPG) +
-                2 * sizeof(Worker) * globalWorld +
+        const auto dZ = 2 * sizeof(Worker) * globalWorld +
                 sizeof(Expert) * E +
                 aD * sizeof(floatPair) +
                 globalWorld * sizeof(WorkerAttribute) +
-                sizeof(uint) * globalWorld;
+                2 * sizeof(uint) * globalWorld;
         const auto aXz = (sizeof(ELI) + sizeof(PEL)) * E +
             (sizeof(PLI) * globalWorld) + sizeof(LXI) * E +
                 (sizeof(uint) * (E * ACC::TCM::value * ACC::TNx::value));
@@ -279,9 +278,7 @@ namespace aristos{
         auto* mP = static_cast<cuda::std::byte*>(std::calloc(pZ + sZ, sizeof(cuda::std::byte)));
 
         // Pointer salami slicing
-        auto* ePg = CAST_TO(EPG, mP);
-        static_assert(alignof(EPG) % alignof(Expert) == 0);
-        auto* workers = CAST_TO(Worker, mP + sizeof(EPG));
+        auto* workers = CAST_TO(Worker, mP);
         auto* ePWorkers = workers + globalWorld;
         static_assert(alignof(Worker) % alignof(Expert) == 0);
         auto* experts = CAST_TO(Expert, ePWorkers + globalWorld);
@@ -291,26 +288,26 @@ namespace aristos{
         auto* wAp = CAST_TO(WorkerAttribute, aP + aD);
         static_assert(alignof(WorkerAttribute) % alignof(uint) == 0);
         auto* dTg = CAST_TO(uint, wAp + globalWorld);
+        auto* pTs = CAST_TO(uint, dTg + globalWorld);
 
         // Result buffers
         auto* pT = CAST_TO(uint, mP + pZ);
         auto* ePs = pT + globalWorld;
         auto* ePsX = ePs + E; // scratch
-        auto* scratch = CAST_TO(uint16_t, ePsX + 1);
+        auto* scratch = CAST_TO(uint16_t, ePsX + E);
 
         estimateMemory(&wAp[rank]);
         mT(wAp + rank);
 
         discoverTopology(aP, globalWorld, rank, wAp[rank]);
-
+        auto ePgD = EPG{};
         // The topology adjacency matrix is ready, let's map devices to optimal cooperative process groups
-        const auto isFeasible = runDecider(ePg, experts, workers, ePWorkers, dTg, pT, ePs, ePsX,
+        const auto isFeasible = runDecider(&ePgD, experts, workers, ePWorkers, dTg, pT, pTs, ePs, ePsX,
             scratch, aP, wAp, rank, globalWorld);
         if (!isFeasible) {
             cleanup();
             reportError(isFeasible, "Insufficient Memory for Experts");
         }
-        const auto ePgD = *ePg;
         /********EVALUATION************/
         /*const auto ePgD = EPG{
             static_cast<uint16_t>(rank),

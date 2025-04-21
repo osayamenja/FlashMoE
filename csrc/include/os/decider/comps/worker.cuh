@@ -12,7 +12,7 @@ namespace aristos{
         uint16_t memoryCapacity;
 
         Worker(const uint16_t& _id, const float& _processingRate, const uint16_t& memoryCapacity):
-                id(_id), processingRate(_processingRate), memoryCapacity(memoryCapacity){}
+                processingRate(_processingRate), id(_id), memoryCapacity(memoryCapacity){}
 
         __forceinline__
         bool operator==(const Worker& other) const {

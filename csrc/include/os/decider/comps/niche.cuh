@@ -12,9 +12,8 @@ namespace aristos{
     auto subsets(uint* __restrict__ const& parents,
         Element* __restrict__ const& platoon,
         const unsigned int& world,
-        const unsigned int& myRank){
+        const unsigned int& gID){
         uint16_t gSize = 0U;
-        const auto gID = parents[myRank];
         for(unsigned int i = 0; i < world; ++i){
             if (parents[i] == gID) {
                 platoon[gSize++] = i;

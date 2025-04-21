@@ -159,7 +159,7 @@ endif ()
 
 # libTorch
 set(USE_SYSTEM_NVTX ON)
-set(CAFFE2_USE_CUDNN ON)
+#set(CAFFE2_USE_CUDNN ON)
 find_package(Torch REQUIRED HINTS "$ENV{TORCH_ROOT}")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
 target_link_libraries(csrc PRIVATE "${TORCH_LIBRARIES}")
@@ -170,15 +170,6 @@ target_link_libraries(csrc PRIVATE atomic)
 ## NVSHMEM Business
 find_package(NVSHMEM REQUIRED HINTS "$ENV{NVSHMEM_HOME}/lib/cmake/nvshmem")
 target_link_libraries(csrc PRIVATE nvshmem::nvshmem)
-
-# Link Cray's GPU-accelerated MPICH
-if(DEFINED ENV{LINK_GTL} AND DEFINED ENV{NERSC_HOST} AND "$ENV{NERSC_HOST}" STREQUAL "perlmutter")
-    find_library(GTL
-            NAMES libmpi_gtl_cuda.so.0
-            HINTS /opt/cray/pe/lib64/
-            REQUIRED)
-    target_link_libraries(csrc PRIVATE "${GTL}")
-endif ()
 
 target_compile_options(csrc PRIVATE
         $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-Xfatbin -compress-all>
