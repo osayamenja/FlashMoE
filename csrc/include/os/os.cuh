@@ -37,7 +37,8 @@ namespace aristos::os {
         // each subscriber thread gets wSet * sizeof(uint) bytes of workspace
         constexpr auto uSfC = ACC::TCM::value * ACC::TNx::value / subscriberCount;
         constexpr auto wSet = uSfC >= 32 ? 32U : 16U;
-        const auto bSSI = nSI<sNW>(nLx * world) + nSI<subscriberCount>(ssfC);
+        const auto bSSI = nSI<sNW>(nLx * world) +
+            nSI<subscriberCount>(ssfC);
         constexpr auto E = ACC::E::value;
         constexpr auto TNx = ACC::TNx::value;
         constexpr auto EC = ACC::EC::value;
@@ -48,7 +49,9 @@ namespace aristos::os {
         auto* __restrict__ eL = CAST_TO(ELI, pL + world);
         static_assert(alignof(ELI) % alignof(uint) == 0);
         auto* __restrict__ lX = CAST_TO(LXI, eL + E);
-        const auto dZ = rTCL<LXI>(sizeof(ELI) * E + sizeof(PLI) * world + sizeof(LXI) * nLx);
+        const auto dZ = rTCL<LXI>(sizeof(ELI) * E +
+            sizeof(PLI) * world +
+            sizeof(LXI) * nLx);
         auto* __restrict__ bitSet = CAST_TO(BitSet, workspace + dZ);
         const auto bSSIz = bSSI * sizeof(uint);
         static_assert(alignof(BitSet) % alignof(uint) == 0);

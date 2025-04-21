@@ -101,7 +101,6 @@ namespace aristos::gate {
             const unsigned int& tileIdx,
             GArg const& gArg,
             ElementC* __restrict__ gateScratch) {
-            constexpr uint S = ACC::S::value;
             constexpr auto M = ACC::S::value;
             constexpr auto E = ACC::E::value;
             constexpr auto H = ACC::H::value;
@@ -263,8 +262,9 @@ namespace aristos::gate {
 
             // Online softmax is complete
             // Begin loss computation and global token ordering construction
-            constexpr auto wS = 32U; // warpSize
             if constexpr (jT == JobType::training) {
+                constexpr uint S = ACC::S::value;
+                constexpr auto wS = 32U; // warpSize
                 ElementC cache[bN / wS]; // |cache| == 2
                 using BlockReduce = cub::BlockReduce<ElementC, threads>;
                 auto* __restrict__ cS = CAST_TO(typename BlockReduce::TempStorage, gateScratch);
@@ -437,6 +437,7 @@ namespace aristos::gate {
                 startIndices[threadIdx.x] = atomicAdd(gArg.eC + (bN * cute::get<1>(tileCoord) + threadIdx.x),
                     cachedSelected);
                 if constexpr (jT == JobType::training) {
+                    constexpr uint S = ACC::S::value;
                     atomicAdd(gArg.gMec + threadIdx.x, __fdividef(static_cast<ElementC>(cachedSelected),
                     static_cast<ElementC>(S)));
                 }
