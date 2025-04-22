@@ -448,7 +448,7 @@ namespace aristos{
         CHECK_ERROR_EXIT(cudaMemcpyAsync(hostBookkeeping.lX(), lxI,
             sizeof(LXI) * ePgD.nLx,
             cudaMemcpyHostToDevice, aristosStream));
-        CHECK_ERROR_EXIT(cudaMemcpyAsync(hostBookkeeping.ssFc(), &tileIndex,
+        CHECK_ERROR_EXIT(cudaMemcpyAsync(hostBookkeeping.ssFc(), &current,
             sizeof(BookType), cudaMemcpyHostToDevice, aristosStream));
         CHECK_ERROR_EXIT(cudaMemcpyAsync(hostBookkeeping.tIx(), tileIndices,
             sizeof(uint) * current, cudaMemcpyHostToDevice, aristosStream));
