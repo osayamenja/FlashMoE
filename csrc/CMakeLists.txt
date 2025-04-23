@@ -169,7 +169,11 @@ target_link_libraries(csrc PRIVATE atomic)
 
 ## NVSHMEM Business
 find_package(NVSHMEM REQUIRED HINTS "$ENV{NVSHMEM_HOME}/lib/cmake/nvshmem")
-target_link_libraries(csrc PRIVATE nvshmem::nvshmem)
+if(DEFINED ENV{NERSC_HOST} AND "$ENV{NERSC_HOST}" STREQUAL "perlmutter")
+    target_link_libraries(csrc PRIVATE nvshmem::nvshmem_host nvshmem::nvshmem_device)
+else ()
+    target_link_libraries(csrc PRIVATE nvshmem::nvshmem)
+endif ()
 
 target_compile_options(csrc PRIVATE
         $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-Xfatbin -compress-all>
