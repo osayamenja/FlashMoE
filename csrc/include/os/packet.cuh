@@ -404,8 +404,8 @@ namespace aristos::packet {
             unsigned int* __restrict__ const& tQHead,
             const unsigned int& expertIdx) const {
             const auto qIdx = DQ::sNext(lTQHead);
-            constexpr auto tN = ACC::TN::value;
-            for (uint i = 0; i < tN; ++i) {
+            constexpr auto tNx = ACC::TNx::value;
+            for (uint i = 0; i < tNx; ++i) {
                 dA.tQ[DQ::next(qIdx, i)] = Task{
                     TaskType::combine,
                     tokenIndices,
@@ -415,10 +415,10 @@ namespace aristos::packet {
                     expertIdx
                 };
             }
-            lTQHead += tN;
+            lTQHead += tNx;
             __threadfence();
             // notifies scheduler
-            atomicAdd_block(tQHead, tN);
+            atomicAdd_block(tQHead, tNx);
         }
     };
 }

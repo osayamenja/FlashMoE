@@ -102,8 +102,7 @@ namespace aristos::subscriber{
                             Potentially, we may have received a signal in the meantime, so we only swap if the current
                             value is the ground state, which we previously stored.
                             */
-                            atomicCAS_system(CAST_TO(ull_t, flags + flagIdx),
-                                SignalConstants::ground, signal);
+                            atomicCAS_system(CAST_TO(ull_t, flags + flagIdx), SignalConstants::ground, signal);
                             const auto peer = flagIdx / nLx;
                             packet::sTB(taskCount, status, peer, nLx);
                             // set visited bit
@@ -227,7 +226,7 @@ namespace aristos::subscriber{
                             // set visited bit
                             sBS.set(bIdx);
                             const auto expertIdx = flagIdx / CS;
-                            const ELI lookup = eL[expertIdx];
+                            const auto lookup = eL[expertIdx];
                             const auto tokenIdx = sP->batchIdx * BLOCK_M;
                             const auto* tI = &tokenIds(expertIdx, tokenIdx);
                             const auto* packet = heap::advance<1, 1>(dA.sHeap, lookup.epRank,
@@ -241,8 +240,7 @@ namespace aristos::subscriber{
                             else {
                                 // enforce memory consistency
                                 __threadfence_system();
-                                lPd(dA.tQ, ltQHead, packet,
-                                    CONST_CAST_TO(cuda::std::byte, tI),
+                                lPd(dA.tQ, ltQHead, packet, CONST_CAST_TO(cuda::std::byte, tI),
                                     sP->tokensM, flagIdx % TN, tQHead, expertIdx);
                             }
                         }
@@ -278,7 +276,7 @@ namespace aristos::subscriber{
                                 sBS.set(bIdx);
                                 // let's decode this packet
                                 const auto expertIdx = flagIdx / CS;
-                                const ELI lookup = eL[expertIdx];
+                                const auto lookup = eL[expertIdx];
                                 const auto tokenIdx = sP->batchIdx * BLOCK_M;
                                 const auto* tI = &tokenIds(expertIdx, tokenIdx);
                                 const auto* packet = heap::advance<1, 1>(dA.sHeap, lookup.epRank,
