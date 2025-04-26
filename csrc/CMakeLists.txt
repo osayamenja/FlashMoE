@@ -133,15 +133,6 @@ if(FMT_ADDED)
     target_link_libraries(csrc PRIVATE fmt::fmt)
 endif ()
 
-# TODO Deprecate
-set(MATHDX_VER 25.01)
-CPMFindPackage(
-        NAME mathdx
-        VERSION "${MATHDX_VER}"
-        FIND_PACKAGE_ARGUMENTS "REQUIRED COMPONENTS cublasdx CONFIG"
-)
-target_link_libraries(csrc PRIVATE mathdx::cublasdx)
-
 CPMAddPackage(
         NAME NVTX3
         GITHUB_REPOSITORY NVIDIA/NVTX

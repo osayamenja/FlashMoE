@@ -5,7 +5,6 @@
 #ifndef GEMM_CUH
 #define GEMM_CUH
 
-#include <cublasdx.hpp>
 #include <cutlass/epilogue/thread/activation.h>
 #include <cutlass/gemm/collective/collective_mma.hpp>
 
@@ -68,27 +67,18 @@ namespace aristos {
         static_assert(BLOCK_M == THREADS && BLOCK_M == threads);
         static_assert(BLOCK_M == 128);
         static_assert(BLOCK_N == 64, "64 is a very good value for N, change it back!");
-        // TODO deprecate the below
-        using GEMM = decltype(cublasdx::Size<BLOCK_M, BLOCK_N, sizeK>()
-                              + cublasdx::Precision<typename ToCDx<ElementA>::T, typename ToCDx<ElementB>::T, typename ToCDx<ElementC>::T>()
-                              + cublasdx::Type<cublasdx::type::real>()
-                              + cublasdx::Arrangement<cublasdx::row_major, cublasdx::row_major, cublasdx::row_major>()
-                              + cublasdx::Function<cublasdx::function::MM>()
-                              + cublasdx::SM<cute::min(Arch, 800)>()
-                              + cublasdx::Block()
-                              + cublasdx::BlockDim<threads>());
+        using Threads = cute::C<threads>;
         using MatrixAType = ElementA;
         using MatrixBType = ElementB;
         using MatrixCType = ElementC;
         using MatrixDType = ElementA;
-        using BlockTiler = cute::Shape<cute::Int<cublasdx::size_of<GEMM>::m>,
-                                        cute::Int<cublasdx::size_of<GEMM>::n>,
-                                        cute::Int<cublasdx::size_of<GEMM>::k>>;
-        using TilerOut = cute::Shape<cute::Int<cublasdx::size_of<GEMM>::m>, cute::Int<cublasdx::size_of<GEMM>::n>>;
-        using Parameters = CollectiveMMAConfig<GEMM, ElementA, ElementB, ElementC, LayoutOptimization::UseSwizzle>;
+        using BlockTiler = cute::Shape<cute::Int<BLOCK_M>, cute::Int<BLOCK_N>, cute::Int<sizeK>>;
+        using TilerOut = cute::Shape<cute::Int<BLOCK_M>, cute::Int<BLOCK_N>>;
+        using Parameters = CollectiveMMAConfig<BLOCK_M, BLOCK_N, sizeK, Arch, ElementA, ElementB, ElementC,
+            LayoutOptimization::UseSwizzle>;
         using MMA = typename Parameters::mma_t;
         using CollectiveMainloop = cutlass::gemm::collective::CollectiveMma<
-            cuda::std::conditional_t<cublasdx::sm_of<GEMM>::value < 800,
+            cuda::std::conditional_t<Arch < 800,
                     cutlass::gemm::MainloopSm70TwoStageUnpredicated,
                         cutlass::gemm::MainloopSm80CpAsyncUnpredicated<pipeStages>>,
             BlockTiler,
@@ -106,7 +96,6 @@ namespace aristos {
             typename Parameters::sCopyB,
             cute::identity
         >;
-
         using FusedEpilogue = FAA<ElementC, ActivationOp>;
     };
 }

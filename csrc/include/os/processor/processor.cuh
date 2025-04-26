@@ -11,6 +11,7 @@
 #include <nvshmem.h>
 
 #include "gemm.cuh"
+#include "../../types.cuh"
 
 namespace aristos::processor{
     enum class ReleaseType {
@@ -24,7 +25,7 @@ namespace aristos::processor{
         unsigned int N = ACC::H::value,
         class ScaleWeights,
         typename Element,
-        unsigned int elems = ACC::PeakHardware::rScratch::value,
+        unsigned int elems = ACC::Elems::value,
         unsigned int threads = ACC::PeakHardware::OS::threads::value,
         unsigned int sharedSize = ACC::PeakHardware::sharedMemory::value + ACC::PeakHardware::spare::value,
         unsigned int wS = WARP_SIZE
@@ -210,7 +211,7 @@ namespace aristos::processor{
         unsigned int M = ACC::S::value,
         unsigned int N = ACC::H::value,
         unsigned int K = ACC::P::value,
-        unsigned int elems = ACC::PeakHardware::rScratch::value,
+        unsigned int elems = ACC::Elems::value,
         unsigned int threads = ACC::PeakHardware::OS::threads::value
     >
     __forceinline__ __device__
@@ -351,7 +352,7 @@ namespace aristos::processor{
         typename BlockGEMM,
         unsigned int N,
         unsigned int K,
-        unsigned int elems = ACC::PeakHardware::rScratch::value,
+        unsigned int elems = ACC::Elems::value,
         unsigned int threads = ACC::PeakHardware::OS::threads::value
     >
     __forceinline__ __device__

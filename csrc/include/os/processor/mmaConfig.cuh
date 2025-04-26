@@ -5,10 +5,8 @@
 #ifndef MMACONFIG_CUH
 #define MMACONFIG_CUH
 
-#include <cublasdx.hpp>
 #include <cute/arch/copy.hpp>
 #include <cute/arch/copy_sm80.hpp>
-#include "../../types.cuh"
 
 namespace aristos {
     template<unsigned int Arch, typename TC, typename TA=TC, typename TB=TA>
@@ -75,9 +73,8 @@ namespace aristos {
         >;
     };
 
-    template <cublasdx::arrangement a, unsigned int midSwizzle, unsigned int sizeK>
-    requires(a == cublasdx::arrangement::row_major
-        && (midSwizzle == 2 || midSwizzle == 3) && (sizeK >= 8 && sizeK <= 64))
+    template <unsigned int midSwizzle, unsigned int sizeK>
+    requires((midSwizzle == 2 || midSwizzle == 3) && (sizeK >= 8 && sizeK <= 64))
     struct SwizzleAtom {
         using swizzleAtom =  decltype(
         cute::composition(cute::Swizzle<3, midSwizzle, 3>{},
@@ -127,63 +124,43 @@ namespace aristos {
     using MiddleSwizzle = cute::Int<sizeof(T) == 2 ? 3 : 2>;
 
     template<
-        class GEMM,
+        unsigned int bM,
+        unsigned int bN,
+        unsigned int bK,
+        unsigned int Arch,
         typename ElementA,
         typename ElementB,
         typename ElementC,
         LayoutOptimization lOpt = LayoutOptimization::UseVanilla
     >
-    requires (cublasdx::is_complete_blas<GEMM>::value
-    && cublasdx::sm_of<GEMM>::value >= MIN_ARCH
-    && cublasdx::sm_of<GEMM>::value < 900)
     struct CollectiveMMAConfig{
-        static_assert(cublasdx::arrangement_of<GEMM>::a == cublasdx::arrangement::row_major &&
-            cublasdx::arrangement_of<GEMM>::b == cublasdx::arrangement::row_major,
-            "Only row-major is supported for either A or B");
-        using ldA = cuda::std::conditional_t<cublasdx::arrangement_of<GEMM>::a == cublasdx::row_major,
-        cute::Int<cublasdx::size_of<GEMM>::k>, cute::Int<cublasdx::size_of<GEMM>::m>>; // A: (m,k)
-        using ldB = cuda::std::conditional_t<cublasdx::arrangement_of<GEMM>::b == cublasdx::row_major,
-        cute::Int<cublasdx::size_of<GEMM>::k>, cute::Int<cublasdx::size_of<GEMM>::n>>; // B: (n,k)
-        using ldC = cuda::std::conditional_t<cublasdx::arrangement_of<GEMM>::c == cublasdx::row_major,
-        cute::Int<cublasdx::size_of<GEMM>::n>, cute::Int<cublasdx::size_of<GEMM>::m>>; //C: (m,n)
-
         using copyAB = CopyOp<
             ElementA,
             ElementB,
-            cublasdx::sm_of<GEMM>::value
+            Arch
         >;
 
         using gCopyA = typename copyAB::copyA;
         using gCopyB = typename copyAB::copyB;
 
-        using sCopyA = cute::Copy_Atom<cuda::std::conditional_t<cublasdx::sm_of<GEMM>::value < 800,
-        cute::AutoVectorizingCopyWithAssumedAlignment<8 * cublasdx::alignment_of<GEMM>::a>,
+        using sCopyA = cute::Copy_Atom<cuda::std::conditional_t<Arch < 800,
+        cute::AutoVectorizingCopyWithAssumedAlignment<8 * sizeof(ElementA)>,
         sCopyLay<VT<ElementA>>>, ElementA>;
-        using sCopyB = cute::Copy_Atom<cuda::std::conditional_t<cublasdx::sm_of<GEMM>::value < 800,
-        cute::AutoVectorizingCopyWithAssumedAlignment<8 * cublasdx::alignment_of<GEMM>::b>,
+        using sCopyB = cute::Copy_Atom<cuda::std::conditional_t<Arch < 800,
+        cute::AutoVectorizingCopyWithAssumedAlignment<8 * sizeof(ElementB)>,
         sCopyLay<VT<ElementB>>>, ElementB>;
-        using sCopyC = cute::Copy_Atom<cute::AutoVectorizingCopyWithAssumedAlignment<8 * cublasdx::alignment_of<GEMM>::c>, ElementC>;
 
-        using vSLayA = cute::Layout<cute::Shape<cute::Int<cublasdx::size_of<GEMM>::m>, cute::Int<cublasdx::size_of<GEMM>::k>>,
-        cuda::std::conditional_t<cublasdx::arrangement_of<GEMM>::a == cublasdx::arrangement::col_major,
-        cute::Stride<cute::_1, ldA>, cute::Stride<ldA, cute::_1>>>;
+        using vSLayA = cute::Layout<cute::Shape<cute::Int<bM>, cute::Int<bK>>,
+            cute::Stride<cute::Int<bK>, cute::_1>>;
         using sLayA = cuda::std::conditional_t<lOpt == LayoutOptimization::UseSwizzle,
-        typename SwizzleAtom<cublasdx::arrangement_of<GEMM>::a,
-        MiddleSwizzle<ElementA>{}, cublasdx::size_of<GEMM>::k>::swizzleAtom, vSLayA>;
+        typename SwizzleAtom<MiddleSwizzle<ElementA>{}, bK>::swizzleAtom, vSLayA>;
 
-        using vSLayB = cute::Layout<cute::Shape<cute::Int<cublasdx::size_of<GEMM>::n>, cute::Int<cublasdx::size_of<GEMM>::k>>,
-        cuda::std::conditional_t<cublasdx::arrangement_of<GEMM>::b == cublasdx::arrangement::col_major,
-        cute::Stride<cute::_1, ldB>, cute::Stride<ldB, cute::_1>>>;
+        using vSLayB = cute::Layout<cute::Shape<cute::Int<bN>, cute::Int<bK>>,
+            cute::Stride<cute::Int<bK>, cute::_1>>;
         using sLayB = cuda::std::conditional_t<lOpt == LayoutOptimization::UseSwizzle,
-        typename SwizzleAtom<cublasdx::arrangement_of<GEMM>::b,
-        MiddleSwizzle<ElementB>{}, cublasdx::size_of<GEMM>::k>::swizzleAtom, vSLayB>;
+        typename SwizzleAtom<MiddleSwizzle<ElementB>{}, bK>::swizzleAtom, vSLayB>;
 
-        using sLayC = cute::Layout<cute::Shape<cute::Int<cublasdx::size_of<GEMM>::m>, cute::Int<cublasdx::size_of<GEMM>::n>>,
-        cuda::std::conditional_t<cublasdx::arrangement_of<GEMM>::c == cublasdx::arrangement::col_major,
-        cute::Stride<cute::_1, ldC>, cute::Stride<ldC, cute::_1>>>;
-
-        using mma_t = typename MMAConfig<cublasdx::sm_of<GEMM>::value, ElementC, ElementA,
-        ElementB>::mma;
+        using mma_t = typename MMAConfig<Arch, ElementC, ElementA, ElementB>::mma;
     };
 }
 #endif //MMACONFIG_CUH

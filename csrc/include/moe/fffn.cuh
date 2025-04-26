@@ -35,7 +35,7 @@ namespace aristos {
         constexpr auto tilesK = K / cute::get<1>(typename Operation::TilerOut{});
         constexpr auto tiles = tilesM * tilesN;
         constexpr auto tiles2 = tilesM * tilesK;
-        constexpr auto threads = Operation::GEMM::block_dim.x;
+        constexpr auto threads = Operation::Threads::value;
 
         const auto* __restrict__ pA = CONST_CAST_TO(Element, iP);
         const auto* __restrict__ pB1 = pA + M * K;

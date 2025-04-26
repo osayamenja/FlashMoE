@@ -140,9 +140,18 @@ namespace aristos::packet {
                             auto* __restrict__ localPH = peerHeap + intraIdx * H * sizeof(Element);
                             const auto* __restrict__ aP = CONST_CAST_TO(NativeElement, &activations(tokenIdx, 0));
                             // coalesced copy
+                            constexpr auto tL = H / threads;
+                            auto* __restrict__ nPH = CAST_TO(NativeElement, localPH);
                             #pragma unroll
-                            for (uint l = threadIdx.x; l < H; l += threads) {
-                                CAST_TO(NativeElement, localPH)[l] = __ldg(aP + l);
+                            for (uint l = 0; l < tL; ++l) {
+                                const auto idx = threadIdx.x + l * threads;
+                                nPH[idx] = __ldg(aP + idx);
+                            }
+                            if constexpr (H % threads != 0) {
+                                if (threadIdx.x < H % threads) {
+                                    const auto idx = threadIdx.x + tL * threads;
+                                    nPH[idx] = __ldg(aP + idx);
+                                }
                             }
                         }
                     }
@@ -166,9 +175,18 @@ namespace aristos::packet {
                                 const auto intraIdx = lBid + (k + trips * batch) * superBlockSize;
                                 auto* __restrict__ localPH = peerHeap + intraIdx * H * sizeof(Element);
                                 const auto* __restrict__ aP = CONST_CAST_TO(NativeElement, &activations(tokenIdx, 0));
+                                auto* __restrict__ nPH = CAST_TO(NativeElement, localPH);
+                                constexpr auto tL = H / threads;
                                 #pragma unroll
-                                for (uint l = threadIdx.x; l < H; l += threads) {
-                                    CAST_TO(NativeElement, localPH)[l] = __ldg(aP + l);
+                                for (uint l = 0; l < tL; ++l) {
+                                    const auto idx = threadIdx.x + l * threads;
+                                    nPH[idx] = __ldg(aP + idx);
+                                }
+                                if constexpr (H % threads != 0) {
+                                    if (threadIdx.x < H % threads) {
+                                        const auto idx = threadIdx.x + tL * threads;
+                                        nPH[idx] = __ldg(aP + idx);
+                                    }
                                 }
                             }
                         }

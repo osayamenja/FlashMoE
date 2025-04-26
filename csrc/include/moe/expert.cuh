@@ -25,7 +25,7 @@ namespace aristos {
         typename Weights,
         typename Output,
         typename Bias,
-        unsigned int threads = BlockGEMM::GEMM::block_dim.x,
+        unsigned int threads = BlockGEMM::Threads::value,
         unsigned int wS = WARP_SIZE
     >
     __forceinline__ __device__
@@ -208,7 +208,7 @@ namespace aristos {
         __shared__ __align__(16) uint tQ[ACC::TMU::value];
         using Operation = BlockMM<ACC::ActivationOp, Element>;
         using OperationX = BlockMM<ACC::ActivationOpX, Element>;
-        constexpr auto threads = Operation::GEMM::block_dim.x;
+        constexpr auto threads = Operation::Threads::value;
         // we require M, N, K to be evenly divisible by corresponding block tiling dimensions
         const auto tilesM = M / cute::get<0>(typename Operation::TilerOut{});
         constexpr auto tilesN = N / cute::get<1>(typename Operation::TilerOut{});

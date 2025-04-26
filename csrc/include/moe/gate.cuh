@@ -113,7 +113,7 @@ namespace aristos::gate {
             constexpr auto bM = cute::get<0>(typename BlockGEMM::BlockTiler{});
             constexpr auto bN = cute::get<1>(typename BlockGEMM::BlockTiler{});
             constexpr auto bK = cute::get<2>(typename BlockGEMM::BlockTiler{});
-            constexpr auto threads = BlockGEMM::GEMM::block_dim.x;
+            constexpr auto threads = BlockGEMM::Threads::value;
 
             constexpr auto tilesM = M / bM;
             // padded to fill bN
@@ -493,7 +493,7 @@ namespace aristos::gate {
             constexpr auto bK = cute::get<2>(typename BlockGEMM::BlockTiler{});
             static_assert(ACC::E::value <= bN);
             static_assert(cute::size(accumulator) == bN);
-            constexpr auto threads = BlockGEMM::GEMM::block_dim.x;
+            constexpr auto threads = BlockGEMM::Threads::value;
             const auto tokenIds = make_tensor(cute::make_gmem_ptr(gArg.tP),
                 cute::Layout<cute::Shape<cute::Int<ACC::E::value>, cute::Int<ACC::pEC::value>>,
                     cute::Stride<cute::Int<ACC::pEC::value>, cute::_1>>{});
@@ -739,7 +739,7 @@ namespace aristos::gate {
         using ElementB = typename MatrixB::value_type;
         using Operation = BlockMM<cute::identity, ElementA, ElementB, ElementC>;
         using ctaTiler = typename Operation::BlockTiler; // (BLK_M, BLK_N, BLK_K)
-        constexpr auto threads = Operation::GEMM::block_dim.x;
+        constexpr auto threads = Operation::Threads::value;
         constexpr auto bM = cute::get<0>(ctaTiler{});
         constexpr auto bN = cute::get<1>(ctaTiler{});
         FusedGate<g, Operation> fusedGate{};
