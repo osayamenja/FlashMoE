@@ -133,9 +133,48 @@ namespace aristos::moe{
         }
     }
 
-    template<bool skip = true>
+    template<uint skip = 50, uint trials = 100>
     __host__ __forceinline__
-    void forwardHost(const void* __restrict__ iP, void* __restrict__ oP){
+    void forwardHostBench(const void* const& __restrict__ iP, void* __restrict__ const& oP, float& duration){
+        #if ARISTOS_NVTX
+        aristosRange forwardRange{__PRETTY_FUNCTION__ + std::string(", seqNo: ") + std::to_string(seqBit)};
+        #endif
+        reportError(isInitialized, "Not initialized!");
+        CHECK_ERROR_EXIT(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
+        /// Consume precompiled macros
+        constexpr auto blocks = ACC::PeakHardware::blocks::value;
+        constexpr auto threads = ACC::PeakHardware::OS::threads::value;
+        #pragma unroll
+        for (uint i = 0; i < skip; ++i) {
+            forward<<<blocks, threads, 0, aristosStream>>>(iP, oP, seqBit);
+            seqBit = sbs::next(seqBit);
+        }
+        cudaEvent_t start, stop;
+        CHECK_ERROR_EXIT(cudaEventCreate(&start));
+        CHECK_ERROR_EXIT(cudaEventCreate(&stop));
+        CHECK_ERROR_EXIT(cudaEventRecord(start, aristos::aristosStream));
+        // Call forward pass
+        if constexpr (ACC::E::value > 1) {
+            #pragma unroll
+            for (uint i = 0; i < trials; ++i) {
+                forward<<<blocks, threads, 0, aristosStream>>>(iP, oP, seqBit);
+                seqBit = sbs::next(seqBit);
+            }
+        }
+        else {
+            // regular FFN forward
+            fffn<<<blocks, threads, 0, aristosStream>>>(iP, oP);
+        }
+        CHECK_ERROR_EXIT(cudaEventRecord(stop, aristos::aristosStream));
+        CHECK_ERROR_EXIT(cudaStreamSynchronize(aristosStream));
+        CHECK_ERROR_EXIT(cudaEventElapsedTime(&duration, start, stop));
+        duration = duration / trials;
+        CHECK_ERROR_EXIT(cudaEventDestroy(start));
+        CHECK_ERROR_EXIT(cudaEventDestroy(stop));
+    }
+
+    __host__ __forceinline__
+    void forwardHost(const void* const& __restrict__ iP, void* const& __restrict__ oP){
         #if ARISTOS_NVTX
         aristosRange forwardRange{__PRETTY_FUNCTION__ + std::string(", seqNo: ") + std::to_string(seqBit)};
         #endif
@@ -146,28 +185,13 @@ namespace aristos::moe{
         constexpr auto threads = ACC::PeakHardware::OS::threads::value;
         // Call forward pass
         if constexpr (ACC::E::value > 1) {
-            cudaEvent_t start, stop;
-            if constexpr (!skip) {
-                CHECK_ERROR_EXIT(cudaEventCreate(&start));
-                CHECK_ERROR_EXIT(cudaEventCreate(&stop));
-                CHECK_ERROR_EXIT(cudaEventRecord(start, aristos::aristosStream));
-            }
             forward<<<blocks, threads, 0, aristosStream>>>(iP, oP, seqBit);
-            if constexpr (!skip) {
-                float duration;
-                CHECK_ERROR_EXIT(cudaEventRecord(stop, aristos::aristosStream));
-                CHECK_ERROR_EXIT(cudaStreamSynchronize(aristosStream));
-                CHECK_ERROR_EXIT(cudaEventElapsedTime(&duration, start, stop));
-                CHECK_ERROR_EXIT(cudaEventDestroy(start));
-                CHECK_ERROR_EXIT(cudaEventDestroy(stop));
-                printf("epR %u: Duration is %fms\n", hostBookkeeping.rank, duration);
-            }
+            seqBit = sbs::next(seqBit);
         }
         else {
             // regular FFN forward
             fffn<<<blocks, threads, 0, aristosStream>>>(iP, oP);
         }
-        seqBit = sbs::next(seqBit);
     }
 }
 #endif //ARISTOS_MOE_CUH

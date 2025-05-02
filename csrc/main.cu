@@ -88,10 +88,9 @@ void runOS() {
     CHECK_ERROR_EXIT(cudaMemcpyAsync(p, eHp, sizeof(Element) * dZ,
         cudaMemcpyHostToDevice,
         aristos::aristosStream));
-    for (uint i = 0; i < 1; ++i) {
-        aristos::moe::forwardHost(p, p + dZ * sizeof(Element));
-    }
-    aristos::moe::forwardHost<false>(p, p + dZ * sizeof(Element));
+    float timed = 0;
+    aristos::moe::forwardHostBench<50, 100>(p, p + dZ * sizeof(Element), timed);
+    printf("epRank: %u took %.2fms\n", aristos::hostBookkeeping.rank, timed);
     /*using clk = std::chrono::high_resolution_clock;
     std::chrono::duration<float> end {};
     const auto start = clk::now();*/
