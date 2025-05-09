@@ -110,10 +110,41 @@ namespace aristos::os {
             atomicAdd_block(taskBound, eCt * TNx);
         }
         __syncthreads();
-        #pragma unroll
-        for (uint i = threadIdx.x; i < processors; i += threads) {
-            rQ[i] = i; // initially, all processors are ready
+        // Pre-populate rQ under the assumption that all processors are initially ready.
+        // However, some processors are currently specialized for packet dispatch, while others are idle.
+        // To maximize utilization, we time-shift idle brethren to earlier slots in the rQ.
+        constexpr auto fL  = processors - ACC::DBZ::value;
+        constexpr auto sL = fL / threads;
+        constexpr auto rL = fL % threads;
+        if constexpr (sL > 0) {
+            #pragma unroll
+            for (uint i = 0; i < sL; ++i) {
+                const auto idx = i * threads + threadIdx.x;
+                rQ[idx] = ACC::DBZ::value + idx;
+            }
         }
+        if constexpr (fL % threads != 0) {
+            if (threadIdx.x < rL) {
+                const auto idx = sL * threads + threadIdx.x;
+                rQ[idx] = ACC::DBZ::value + idx;
+            }
+        }
+        constexpr auto psL = ACC::DBZ::value / threads;
+        constexpr auto prL = ACC::DBZ::value % threads;
+        if constexpr (psL > 0) {
+            #pragma unroll
+            for (uint i = 0; i < psL; ++i) {
+                const auto idx = i * threads + threadIdx.x;
+                rQ[fL + idx] = idx;
+            }
+        }
+        if constexpr (prL % threads != 0) {
+            if (threadIdx.x < prL) {
+                const auto idx = psL * threads + threadIdx.x;
+                rQ[fL + idx] = idx;
+            }
+        }
+
         const auto gtQCl = bookkeeping.gtQCl;
         #pragma unroll
         for (uint i = threadIdx.x; i < processors; i += threads) {

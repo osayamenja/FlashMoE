@@ -284,7 +284,8 @@ namespace aristos::gate {
                     // Only the first warp aggregates atomically, as other warps have garbage values
                     #pragma unroll
                     for (uint i = 0; i < bN / wS; ++i) {
-                        atomicAdd(gArg.gML + (threadIdx.x + i * wS), __fdividef(cache[i], S));
+                        const auto eIdx = bN * cute::get<1>(tileCoord) + (threadIdx.x + i * wS);
+                        atomicAdd(gArg.gML + eIdx, __fdividef(cache[i], S));
                     }
                 }
             }
@@ -438,7 +439,8 @@ namespace aristos::gate {
                     cachedSelected);
                 if constexpr (jT == JobType::training) {
                     constexpr uint S = ACC::S::value;
-                    atomicAdd(gArg.gMec + threadIdx.x, __fdividef(static_cast<ElementC>(cachedSelected),
+                    atomicAdd(gArg.gMec + (bN * cute::get<1>(tileCoord) + threadIdx.x),
+                        __fdividef(static_cast<ElementC>(cachedSelected),
                     static_cast<ElementC>(S)));
                 }
             }

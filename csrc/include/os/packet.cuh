@@ -13,18 +13,18 @@ namespace aristos::packet {
     template<
         unsigned int blocks,
         DropTokens d = DropTokens::yes,
-        unsigned int superBlockSize = ARISTOS_SUPER_BLOCK_SIZE,
+        unsigned int superBlockSize = ACC::SBZ::value,
         unsigned int H = ACC::H::value,
         unsigned int E = ACC::E::value,
         unsigned int EC = ACC::EC::value,
         unsigned int pEC = ACC::pEC::value,
         unsigned int threads = ACC::PeakHardware::OS::threads::value,
-        unsigned int batch = cute::min(cute::ceil_div(ACC::EC::value, superBlockSize), 32U),
+        unsigned int batch = cute::min(cute::ceil_div(ACC::EC::value, superBlockSize), 16U),
         typename Activations
     >
     requires (isTensor<Activations>::value && cutlass::is_pow2<batch>::value)
     __forceinline__ __device__
-    void encode(const Activations& activations,
+    void dispatch(const Activations& activations,
         cuda::std::byte* __restrict__ const& workspace, const uint16_t& rSeqBit) {
         static_assert(sizeof(SignalPayload<>) == sizeof(ull_t) && alignof(SignalPayload<>) == alignof(ull_t));
         static_assert(sizeof(flagsType) == sizeof(ull_t) && alignof(flagsType) == alignof(ull_t));

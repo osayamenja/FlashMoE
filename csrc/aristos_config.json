@@ -7,11 +7,11 @@
   "hidden_act": 0,
   "hidden_size": 1024,
   "intermediate_size": 4096,
-  "mini_batch": 4,
+  "mini_batch": 1,
   "moe_frequency": 1,
-  "num_experts": 128,
+  "num_experts": 256,
   "num_layers": 1,
-  "sequence_len": 2048,
+  "sequence_len": 8192,
   "torch_dtype": 1,
   "vocab_size": 32000
 }

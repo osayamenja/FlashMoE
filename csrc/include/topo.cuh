@@ -202,7 +202,7 @@ namespace aristos::topology{
     }
 
     /// Build Adjacency Matrix
-    template<unsigned int blocks = ARISTOS_SUPER_BLOCK_SIZE> requires(blocks > 0)
+    template<unsigned int blocks = ARISTOS_STATIC_SBZ> requires(blocks > 0)
     __global__ void discover(__grid_constant__ const int n, __grid_constant__ const int rank,
         __grid_constant__ const bool remotePresent, __grid_constant__ const WorkerAttribute self,
         cuda::std::byte* __restrict__ sHeap, uint64_t* flags,

@@ -127,7 +127,7 @@ namespace aristos{
         const auto isRemotePresent = remotePresent();
         const auto sharedSize = n * (sizeof(floatPair) + sizeof(unsigned int));
         constexpr auto seqNo = 1U;
-        topology::discover<<<ARISTOS_SUPER_BLOCK_SIZE, ARISTOS_BLOCK_SIZE, sharedSize, aristosStream>>>(n, globalRank,
+        topology::discover<<<ARISTOS_STATIC_SBZ, ARISTOS_BLOCK_SIZE, sharedSize, aristosStream>>>(n, globalRank,
             isRemotePresent, lWa, sHeap, flags, results, syncArray, attributes, seqNo);
         CHECK_ERROR_EXIT(cudaMemcpyAsync(hAp, adj, aD * sizeof(floatPair) + n * sizeof(uint),
             cudaMemcpyDeviceToHost, aristosStream));

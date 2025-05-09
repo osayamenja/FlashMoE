@@ -7,8 +7,7 @@
 
 #define ARISTOS_BLOCK_SIZE 128U
 #define ARISTOS_BLOCK_SIZE_WARP (128U / 32)
-// number of blocks
-#define ARISTOS_SUPER_BLOCK_SIZE 32U
+#define ARISTOS_STATIC_SBZ 32U
 
 #define CAST_TO(T, p) static_cast<T*>(static_cast<void*>(p))
 #define CONST_CAST_TO(T, p) static_cast<const T*>(static_cast<const void*>(p))
@@ -468,6 +467,9 @@ namespace aristos{
         using P = cute::C<I_SIZE>;
         using H = cute::C<HIDDEN_SIZE>;
         using E = cute::C<NUM_EXPERTS>;
+        // // number of blocks within a dispatch superblock
+        using SBZ = cute::C<cute::ceil_div(256U, cute::max(E::value, 4))>;
+        using DBZ = cute::C<PeakHardware::OS::processorBlocks::value / SBZ::value * SBZ::value>;
         static_assert(E::value <= cuda::std::numeric_limits<uint16_t>::max());
         // padded expert dimension
         using PX = cute::C<cute::ceil_div(E::value, BLOCK_N) * BLOCK_N>;
