@@ -66,9 +66,6 @@ namespace aristos::moe{
     __global__ __maxnreg__(ACC::PeakHardware::registers::value) void forward(
         const void* __restrict__ iP, /* A, G, B, D*/ void* __restrict__ oP /*G, O*/,
         const __grid_constant__ uint16_t sb) {
-        if (!threadIdx.x && !blockIdx.x) {
-            printf("Starting MoE\n");
-        }
         using GPUType = ACC::PeakHardware;
         constexpr auto blocks = GPUType::blocks::value;
         constexpr auto processors = GPUType::OS::processorBlocks::value;
@@ -124,9 +121,6 @@ namespace aristos::moe{
                 cute::Stride<cute::Int<H>, cute::_1>>{});
 
         gate::forward(activations, gateWeights, gateOutput, CAST_TO(ElementC, workspace));
-        if (!threadIdx.x && !blockIdx.x) {
-            printf("After Gate\n");
-        }
         if (blockIdx.x + 1 < blocks) {
             if (blockIdx.x < ACC::DBZ::value) {
                 packet::dispatch<ACC::DBZ::value, d, ACC::SBZ::value>(activations, workspace, sb);

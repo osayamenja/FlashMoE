@@ -300,12 +300,11 @@ namespace aristos{
        __device__ __forceinline__
        void dump() const {
             printf("{\n\t"
-                   "this: %p,\n\t"
                    "routedTokens: %u,\n\t"
                    "totalTilesM: %u,\n\t"
                    "seqBit: %u"
                    "\n}\n",
-                   this, routedTokens, totalTilesM, seqBit);
+                   routedTokens, totalTilesM, seqBit);
         }
     };
 
@@ -319,12 +318,11 @@ namespace aristos{
        __device__ __forceinline__
        void dump() const {
             printf("{\n\t"
-                   "this: %p,\n\t"
                    "batchIdx: %u,\n\t"
                    "tokensM: %u,\n\t"
                    "seqBit: %u"
                    "\n}\n",
-                   this, batchIdx, tokensM, seqBit);
+                   batchIdx, tokensM, seqBit);
         }
     };
 
@@ -355,8 +353,7 @@ namespace aristos{
         __host__ __device__ __forceinline__
         void dump() const {
             printf("{\n\t"
-                   "this: %p\n\t"
-                   "expertIndex: %u\n}\n", this, expertIndex);
+                   "expertIndex: %u\n}\n", expertIndex);
         }
     };
 

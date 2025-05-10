@@ -367,8 +367,8 @@ namespace aristos::gate {
                     auto* __restrict__ mailboxes = tkXMailbox;
                     #pragma unroll
                     for (uint j = 0; j < tilesN - 1; ++j) {
-                        mailboxes += phases * j * bM * tilesM;
                         signalPayload(mailboxes + flagPrefix, &sP);
+                        mailboxes += phases * bM * tilesM;
                     }
                 }
 

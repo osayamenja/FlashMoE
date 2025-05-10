@@ -5,7 +5,6 @@
 #ifndef ARISTOS_COMPUTE_CUH
 #define ARISTOS_COMPUTE_CUH
 
-#include <cub/cub.cuh>
 #include <cutlass/array.h>
 #include <cute/tensor.hpp>
 #include <nvshmem.h>

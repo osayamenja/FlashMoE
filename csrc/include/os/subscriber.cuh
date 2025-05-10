@@ -162,8 +162,7 @@ namespace aristos::subscriber{
             typename WorkSet,
             typename TokenIds,
             unsigned int TN = ACC::TNx::value,
-            unsigned int CS = ACC::TCM::value * TN,
-            unsigned int wS = WARP_SIZE
+            unsigned int CS = ACC::TCM::value * TN
         >
         requires(isRegisterV<WorkSet>)
         __device__ __forceinline__
@@ -201,7 +200,7 @@ namespace aristos::subscriber{
                 }
             }
             for (uint i = 0; i < stageTrips; ++i) {
-                const uint sBIdx = tIdx + (i * WorkSet::kElements / bSw) * wS;
+                const uint sBIdx = tIdx + (i * WorkSet::kElements / bSw) * subscriberCount;
                 auto sBS = bitSet[sBIdx];
                 // shared -> registers
                 #pragma unroll
@@ -254,7 +253,7 @@ namespace aristos::subscriber{
                     scratch[tIdx + j * subscriberCount] = tileIndices[tIdx +
                         (j + stageTrips * WorkSet::kElements) * subscriberCount];
                 }
-                const uint sBIdx = tIdx + (stageTrips * WorkSet::kElements / bSw) * wS;
+                const uint sBIdx = tIdx + (stageTrips * WorkSet::kElements / bSw) * subscriberCount;
                 auto sBS = bitSet[sBIdx];
                 #pragma unroll
                 for (uint j = 0; j < WorkSet::kElements; ++j) {
