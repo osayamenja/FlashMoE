@@ -87,7 +87,7 @@ set_target_properties(csrc PROPERTIES
 )
 
 string(SUBSTRING "${CMAKE_CUDA_ARCHITECTURES_NATIVE}" 0 2 COMPUTE_CAPABILITY) # xx-real -> xx
-math(EXPR GPU_ARCH "${COMPUTE_CAPABILITY} * 10U" OUTPUT_FORMAT DECIMAL)
+math(EXPR GPU_ARCH "${COMPUTE_CAPABILITY} * 10" OUTPUT_FORMAT DECIMAL)
 message(STATUS "GPU 0 Compute Capability: ${COMPUTE_CAPABILITY}")
 set(ENV{CUTLASS_NVCC_ARCHS} "${COMPUTE_CAPABILITY}")
 
@@ -118,7 +118,6 @@ CPMAddPackage(
 if(CUTLASS_ADDED)
     # header-only
     target_include_directories(csrc SYSTEM PRIVATE "${CUTLASS_SOURCE_DIR}/include")
-    # set(cublasdx_CUTLASS_ROOT "${CUTLASS_SOURCE_DIR}")
 endif ()
 
 set(FMT_SYSTEM_HEADERS, ON)

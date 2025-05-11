@@ -54,7 +54,7 @@ namespace aristos {
         typename ElementB = ElementA,
         typename ElementC = ACC::ElementC,
         unsigned int sizeK = ACC::PeakHardware::bKBase::value,
-        unsigned int Arch = ACC::PeakHardware::arch::value,
+        unsigned int Arch = cute::min(ACC::PeakHardware::arch::value,800), // clamp at 800 for now
         unsigned int threads = ACC::PeakHardware::OS::threads::value,
         unsigned int pipeStages = ACC::PeakHardware::pipeStages::value
     >

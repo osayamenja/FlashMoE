@@ -87,7 +87,7 @@ namespace aristos {
     template<
         unsigned int Arch,
         unsigned int maxRegisters = 128,
-        Board b = Board::pcie
+        Board b = Board::sxm
     >
     requires (SupportedArch<Arch>)
     struct Hardware {
