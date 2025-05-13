@@ -22,6 +22,18 @@ exit(1);                                                   \
 } while (0)
 #endif
 
+#define ARISTOS_CHECK_PREDICATE(predicate, errmsg)                  \
+do {                                                                \
+    if ((predicate) != 0) {                                         \
+        std::cerr   << "Error: " errmsg                             \
+                    << " [" << __PRETTY_FUNCTION__                  \
+                    << __FILE__ << ":" << __LINE__ << "]"           \
+                    << std::endl;                                   \
+        std::quick_exit(EXIT_FAILURE);                              \
+    }                                                               \
+} while (0)
+
+
 #if !defined(CHECK_LAST)
 # define CHECK_LAST() CHECK_ERROR_EXIT(cudaPeekAtLastError()); CHECK_ERROR_EXIT(cudaDeviceSynchronize())
 #endif
@@ -45,15 +57,6 @@ namespace aristos{
         }
         // Free the memory allocated by abi::__cxa_demangle
         free(demangledName);
-    }
-
-    __host__ __forceinline__
-    void reportError(const bool predicate, const std::string& msg) {
-        if (!predicate) {
-            fprintf(stderr, "<%s:%d>: %s", __FILE__, __LINE__, msg.c_str());
-            fflush(stderr);
-            std::quick_exit(EXIT_FAILURE);
-        }
     }
 
     __device__ __forceinline__

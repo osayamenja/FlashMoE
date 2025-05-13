@@ -76,7 +76,6 @@ add_executable(csrc main.cu
         include/os/os.cuh
         include/moe/expert.cuh
         include/throughput.cuh
-        correctness.cuh
         include/os/sync.cuh
         include/moe/fffn.cuh
         include/telemetry.cuh
@@ -146,13 +145,6 @@ if(NVTX3_ADDED)
         set(ENV{CMAKE_PREFIX_PATH} "$ENV{CMAKE_PREFIX_PATH}:${NVTX3_SOURCE_DIR}")
     endif()
 endif ()
-
-# libTorch
-#[[set(USE_SYSTEM_NVTX ON)
-#set(CAFFE2_USE_CUDNN ON)
-find_package(Torch REQUIRED HINTS "$ENV{TORCH_ROOT}")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
-target_link_libraries(csrc PRIVATE "${TORCH_LIBRARIES}")]]
 
 target_link_libraries(csrc PRIVATE CUDA::cudart CUDA::cuda_driver CUDA::nvml CUDA::cublas CUDA::nvtx3)
 target_link_libraries(csrc PRIVATE atomic)

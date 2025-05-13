@@ -138,7 +138,7 @@ namespace aristos::moe{
         #if ARISTOS_NVTX
         aristosRange forwardRange{__PRETTY_FUNCTION__ + std::string(", seqNo: ") + std::to_string(seqBit)};
         #endif
-        reportError(isInitialized, "Not initialized!");
+        ARISTOS_CHECK_PREDICATE(isInitialized, "Not initialized!");
         CHECK_ERROR_EXIT(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
         /// Consume precompiled macros
         constexpr auto blocks = ACC::PeakHardware::blocks::value;
@@ -177,7 +177,7 @@ namespace aristos::moe{
         #if ARISTOS_NVTX
         aristosRange forwardRange{__PRETTY_FUNCTION__ + std::string(", seqNo: ") + std::to_string(seqBit)};
         #endif
-        reportError(isInitialized, "Not initialized!");
+        ARISTOS_CHECK_PREDICATE(isInitialized, "Not initialized!");
         CHECK_ERROR_EXIT(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
         /// Consume precompiled macros
         constexpr auto blocks = ACC::PeakHardware::blocks::value;

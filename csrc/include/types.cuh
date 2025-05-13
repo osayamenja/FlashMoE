@@ -464,8 +464,9 @@ namespace aristos{
         using P = cute::C<I_SIZE>;
         using H = cute::C<HIDDEN_SIZE>;
         using E = cute::C<NUM_EXPERTS>;
-        // // number of blocks within a dispatch superblock
-        using SBZ = cute::C<cute::ceil_div(256U, cute::max(E::value, 4))>;
+        using SZD = cute::C<1024 * 1024 * 1024>;
+        //number of blocks within a dispatch superblock
+        using SBZ = cute::C<cute::max(cute::ceil_div(256U, cute::max(E::value, 4)), 2)>;
         using DBZ = cute::C<PeakHardware::OS::processorBlocks::value / SBZ::value * SBZ::value>;
         static_assert(E::value <= cuda::std::numeric_limits<uint16_t>::max());
         // padded expert dimension

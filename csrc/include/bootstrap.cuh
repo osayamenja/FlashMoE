@@ -5,6 +5,8 @@
 #ifndef BOOTSRAP_CUH
 #define BOOTSTRAP_CUH
 
+#include <cstdlib>
+
 #include <cute/layout.hpp>
 #include <cute/tensor.hpp>
 #include <fmt/ranges.h>
@@ -49,6 +51,21 @@ namespace aristos{
                    epRank, expertSlots, nLx, epWorld);
         }
     };
+
+    __host__ __forceinline__
+    auto gEI(const char* const& eV, const int& eVd) {
+        if (std::getenv(eV) == nullptr) {
+            return eVd;
+        }
+        return std::stoi(std::getenv(eV));
+    }
+
+    __host__ __forceinline__
+    void uEI(const char* const& eV, const int& v) {
+        if (setenv(eV, std::to_string(v).c_str(), 1)) {
+            perror(std::string("failed to set environment variable: " + std::string(eV)).c_str());
+        }
+    }
 
     __host__ __forceinline__
     void exportTopo(const floatPair* __restrict__ const& aP,
@@ -238,7 +255,7 @@ namespace aristos{
         #if ARISTOS_NVTX
         aristosRange finalRange{__PRETTY_FUNCTION__};
         #endif
-        reportError(isInitialized, "Not initialized!");
+        ARISTOS_CHECK_PREDICATE(isInitialized, "Not initialized!");
         isInitialized = false;
         CHECK_ERROR_EXIT(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
         nvshmem_finalize();
@@ -254,6 +271,7 @@ namespace aristos{
         constexpr auto blocks = ACC::PeakHardware::blocks::value;
         using Element = ACC::Element;
         constexpr uint E = ACC::E::value;
+        uEI("NVSHMEM_DISABLE_CUDA_VMM", 1);
         // initialize communication backend
         nvshmem_init();
         const uint devId = nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE);
@@ -306,7 +324,7 @@ namespace aristos{
             scratch, aP, wAp, rank, globalWorld);
         if (!isFeasible) {
             cleanup();
-            reportError(isFeasible, "Insufficient Memory for Experts");
+            ARISTOS_CHECK_PREDICATE(isFeasible, "Insufficient Memory for Experts");
         }
         /********EVALUATION************/
         /*const auto ePgD = EPG{
@@ -333,8 +351,15 @@ namespace aristos{
         const auto flagBytes = (ePgD.epWorld * ePgD.expertSlots + E * ACC::TCM::value * ACC::TNx::value) *
             sizeof(flagsType);
         // Note this allocation's size has to be identical across all PEs
-        auto* sHeap = nvshmem_calloc(syncArrayBytes + flagBytes + heapBytes, sizeof(cuda::std::byte));
-
+        auto tHB = syncArrayBytes + flagBytes + heapBytes;
+        // Required for large allocations
+        const auto nss = gEI("NVSHMEM_SYMMETRIC_SIZE", ACC::SZD::value); // default is 1GB
+        if (tHB >= nss) {
+            const auto nGB = cute::ceil_div(tHB, nss) * nss;
+            uEI("NVSHMEM_SYMMETRIC_SIZE", nGB);
+        }
+        auto* sHeap = nvshmem_calloc(tHB, sizeof(cuda::std::byte));
+        ARISTOS_CHECK_PREDICATE(sHeap != nullptr, "nvshmem_calloc failed");
         auto* sHb = static_cast<cuda::std::byte*>(sHeap);
 
         // local bookkeeping memory
@@ -479,7 +504,7 @@ namespace aristos{
         #if ARISTOS_NVTX
         aristosRange initRange{__PRETTY_FUNCTION__};
         #endif
-        reportError(!isInitialized, "Already Initialized");
+        ARISTOS_CHECK_PREDICATE(!isInitialized, "Already Initialized");
         using GPUType = aristos::Hardware<ARISTOS_ARCH, 255>;
         constexpr auto blocks = GPUType::OS::processorBlocks::value;
         static_assert(ARISTOS_ARCH >= 700, "Volta and above is required!");
@@ -493,13 +518,13 @@ namespace aristos{
 
     __host__ __forceinline__
     void setDevice() {
-        reportError(isInitialized, "Not initialized!");
+        ARISTOS_CHECK_PREDICATE(isInitialized, "Not initialized!");
         CHECK_ERROR_EXIT(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
     }
 
     __host__ __forceinline__
     auto getRank() {
-        reportError(isInitialized, "Not initialized!");
+        ARISTOS_CHECK_PREDICATE(isInitialized, "Not initialized!");
         return nvshmem_my_pe();
     }
 
@@ -508,7 +533,7 @@ namespace aristos{
         #if ARISTOS_NVTX
         aristosRange finalRange{__PRETTY_FUNCTION__};
         #endif
-        reportError(isInitialized, "Not initialized!");
+        ARISTOS_CHECK_PREDICATE(isInitialized, "Not initialized!");
         isInitialized = false;
         CHECK_ERROR_EXIT(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
         CHECK_ERROR_EXIT(cudaFreeAsync(hostBookkeeping.book, aristosStream));

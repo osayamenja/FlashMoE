@@ -59,6 +59,7 @@ namespace aristos::packet {
 
         #pragma unroll
         for (uint i = threadIdx.x; i < E; i += threads) {
+            // TODO eliminate bank conflicts
             CAST_TO(PEL, workspace)[i] = eL[i];
             seC[i] = eC[i];
         }
