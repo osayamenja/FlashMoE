@@ -91,7 +91,7 @@ namespace aristos {
     >
     requires (SupportedArch<Arch>)
     struct Hardware {
-        static_assert(Arch == 800 && maxRegisters == 128 && b == Board::pcie,
+        static_assert(Arch == 800 && maxRegisters == 128 && b == Board::sxm,
             "Unregistered Arch");
         using blocksPerSM = cute::C<4U>;
         using arch = cute::C<800U>;

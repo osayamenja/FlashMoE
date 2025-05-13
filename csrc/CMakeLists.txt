@@ -148,11 +148,11 @@ if(NVTX3_ADDED)
 endif ()
 
 # libTorch
-set(USE_SYSTEM_NVTX ON)
+#[[set(USE_SYSTEM_NVTX ON)
 #set(CAFFE2_USE_CUDNN ON)
 find_package(Torch REQUIRED HINTS "$ENV{TORCH_ROOT}")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
-target_link_libraries(csrc PRIVATE "${TORCH_LIBRARIES}")
+target_link_libraries(csrc PRIVATE "${TORCH_LIBRARIES}")]]
 
 target_link_libraries(csrc PRIVATE CUDA::cudart CUDA::cuda_driver CUDA::nvml CUDA::cublas CUDA::nvtx3)
 target_link_libraries(csrc PRIVATE atomic)

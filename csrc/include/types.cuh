@@ -713,9 +713,8 @@ namespace aristos{
                 tQXt = brs + sizeof(ELI) * E + sizeof(cuda::barrier<cuda::thread_scope_device>) + sizeof(LXI) * _nLx;
                 gRl = tQXt + (ACC::JT::value == JobType::inference ? 0U :
                     sizeof(mp_t) * (2 * E + 1));
-                sBfC = gRl + sizeof(BookType) * (1 + (E * TCM * ACC::TNx::value) + blocks +
-                    2 * (E + world * nLx * TCM) + 2 * ACC::S::value * ACC::TNx::value);
-                bookSize = sBfC + sizeof(ACC::Element) * (ACC::TK::value * S * ACC::H::value + _world * _nLx * pEC * P);
+                sBfC = gRl + sizeof(BookType) * (1 + (E * TCM * ACC::TNx::value) + blocks + 2 * (E + world * nLx * TCM));
+                bookSize = sBfC + sizeof(ACC::Element) * (_world * _nLx * pEC * P);
             }
         }
 
@@ -747,14 +746,14 @@ namespace aristos{
                 sizeof(LXI) * _nLx;
             const auto gRl = tQXt +
                 (ACC::JT::value == JobType::inference ? 0U : sizeof(mp_t) * (2 * E + 1));
-            const auto sBfC = gRl + sizeof(BookType) * (1 + (E * TCM * ACC::TNx::value) + blocks +
-                2 * (E + _world * _nLx * TCM) + 2 * ACC::S::value * ACC::TNx::value);
-            return sBfC + sizeof(ACC::Element) * (ACC::TK::value * S * ACC::H::value + _world * _nLx * pEC * P);
+            const auto sBfC = gRl + sizeof(BookType) * (1 + (E * TCM * ACC::TNx::value) +
+                blocks + 2 * (E + _world * _nLx * TCM));
+            return sBfC + sizeof(ACC::Element) * (_world * _nLx * pEC * P);
         }
 
         __host__ __forceinline__
         constexpr static unsigned long int bookLength() {
-            return ACC::TSZ::value * sizeof(BookType) + sizeof(ACC::Element) * (ACC::S::value * ACC::P::value);
+            return ACC::FZ::value;
         }
 
         template<unsigned int tileDimension>

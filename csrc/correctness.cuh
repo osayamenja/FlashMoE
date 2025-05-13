@@ -9,7 +9,7 @@
 #include "include/types.cuh"
 #include "include/debug.cuh"
 
-namespace aristos {
+/*namespace aristos {
     __host__ __forceinline__
     void evalExpert() {
         using GPUType = aristos::Hardware<ARISTOS_ARCH, 255>;
@@ -88,8 +88,8 @@ namespace aristos {
         << std::endl;
         std::cout << hT.index({0, torch::indexing::Slice(cZ, hZ)}).view({M, K}).
             index({1024, torch::indexing::Slice(256, 266)}).view({1, 10})
-        << std::endl;*/
+        << std::endl;#1#
         CHECK_LAST();
     }
-}
+}*/
 #endif //CORRECTNESS_CUH
