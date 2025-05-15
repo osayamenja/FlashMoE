@@ -24,33 +24,24 @@
 
 #define SUPPORTED = 1;
 namespace aristos{
-    // Expert Parallel Group details
-    struct __align__(8) EPG {
-        uint16_t epRank;
-        uint16_t expertSlots;
-        uint16_t nLx;
-        uint16_t epWorld;
-        uint epWorldM;
-
-        EPG() = default;
-        EPG(const uint16_t& _epR,
-            const uint16_t& _eS,
-            const uint16_t& _nLx,
-            const uint16_t& _epW):
-        epRank(_epR), expertSlots(_eS), nLx(_nLx), epWorld(_epW), epWorldM(_epW) {}
-
-        void dump() const {
-            printf("{\n\t"
-                   "gRank: %d,\n\t"
-                   "epRank: %u,\n\t"
-                   "expertSlots: %u,\n\t"
-                   "nLx: %u,\n\t"
-                   "epWorld: %u"
-                   "\n}\n",
-                   nvshmem_my_pe(),
-                   epRank, expertSlots, nLx, epWorld);
+    __host__ __forceinline__
+    void imposeStrategy(EPG* __restrict__ const& ePg,
+        uint* __restrict__ const& pT, uint* __restrict__ const& ePs, const uint& rank, const uint& globalWorld) {
+        constexpr auto E = ACC::E::value;
+        *ePg = EPG{
+            static_cast<uint16_t>(rank),
+            static_cast<uint16_t>(E / globalWorld),
+            static_cast<uint16_t>(E / globalWorld),
+            static_cast<uint16_t>(globalWorld)
+        };
+        for (uint i = 0; i < globalWorld; ++i) {
+            pT[i] = i;
         }
-    };
+        const auto split = E / globalWorld;
+        for (uint i = 0; i < E; ++i) {
+            ePs[i] = i / split;
+        }
+    }
 
     __host__ __forceinline__
     auto gEI(const char* const& eV, const int& eVd) {
@@ -326,32 +317,14 @@ namespace aristos{
             cleanup();
             ARISTOS_CHECK_PREDICATE(isFeasible, "Insufficient Memory for Experts");
         }
-        /********EVALUATION************/
-        /*const auto ePgD = EPG{
-            static_cast<uint16_t>(rank),
-            static_cast<uint16_t>(E / globalWorld),
-            static_cast<uint16_t>(E / globalWorld),
-            static_cast<uint16_t>(globalWorld)
-        };
-        for (uint i = 0; i < globalWorld; ++i) {
-            pT[i] = i;
-        }
-        const auto split = E / globalWorld;
-        for (uint i = 0; i < E; ++i) {
-            ePs[i] = i / split;
-        }
-        ePgD.dump();*/
-        //exportTopo(aP, wAp, globalWorld, rank);
-        /********EVALUATION************/
         // Now allocate memory
         /// Symmetric memory
-        const auto heapBytes = STAGES * CELLS * ePgD.epWorld * ePgD.expertSlots * ACC::pEC::value *
+        const auto heapBytes = STAGES * CELLS * ePgD.epWorldM * ePgD.expertSlots * ACC::pEC::value *
             ACC::H::value * sizeof(Element);
-        const auto syncArrayBytes = sizeof(flagsType) * (ePgD.epWorld + 1);
-        const auto flagBytes = (ePgD.epWorld * ePgD.expertSlots + E * ACC::TCM::value * ACC::TNx::value) *
+        const auto flagBytes = (ePgD.epWorldM * ePgD.expertSlots + E * ACC::TCM::value * ACC::TNx::value) *
             sizeof(flagsType);
         // Note this allocation's size has to be identical across all PEs
-        auto tHB = syncArrayBytes + flagBytes + heapBytes;
+        auto tHB = flagBytes + heapBytes;
         // Required for large allocations
         const auto nss = gEI("NVSHMEM_SYMMETRIC_SIZE", ACC::SZD::value); // default is 1GB
         if (tHB >= nss) {
@@ -368,20 +341,15 @@ namespace aristos{
         CHECK_ERROR_EXIT(cudaMallocAsync(&book, bookSize, aristosStream));
         CHECK_ERROR_EXIT(cudaMemsetAsync(book, 0, bookSize, aristosStream));
         // Initialize bookkeeping
-        auto* sA = static_cast<flagsType*>(sHeap);
-        auto* flags = CAST_TO(flagsType, sHb + syncArrayBytes);
+        auto* flags = static_cast<flagsType*>(sHeap);
         static_assert(alignof(flagsType) % alignof(ACC::Element) == 0);
-        auto* wSHeap = sHb + flagBytes + syncArrayBytes;
+        auto* wSHeap = sHb + flagBytes;
         hostBookkeeping = Bookkeeping{
             sHb,
-            sA,
             flags,
             wSHeap,
             book,
-            ePgD.nLx,
-            ePgD.epRank,
-            ePgD.epWorld,
-            ePgD.expertSlots,
+            ePgD
         };
         // copy device-wide barrier
         const auto hB = new cuda::barrier<cuda::thread_scope_device>{blocks};

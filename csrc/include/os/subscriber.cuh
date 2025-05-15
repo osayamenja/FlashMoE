@@ -369,7 +369,7 @@ namespace aristos::subscriber{
         const auto pSI = nSI<subscriberCount>(ssfC);
 
         // Register allocation
-        const auto gfSfC = bookkeeping.world * bookkeeping.xs;
+        const auto gfSfC = bookkeeping.gfSfC;
         const auto dA = packet::DecoderArg{
             bookkeeping.sHeap,
             bookkeeping.tQ() + tIdx, // coalesced accessing

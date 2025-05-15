@@ -9,7 +9,6 @@
 #include "../debug.cuh"
 #include "../os/os.cuh"
 #include "../os/processor/processor.cuh"
-#include "../os/sync.cuh"
 #include "fffn.cuh"
 #include "gate.cuh"
 #include "../telemetry.cuh"

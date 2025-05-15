@@ -34,7 +34,7 @@ namespace aristos::processor{
             aristos::isMatrix<ScaleWeights> &&
             cuda::std::is_same_v<typename ScaleWeights::value_type, Element>)
     __device__ __forceinline__
-    void combine(Element* __restrict__ const& workspace,
+    void combine(cuda::std::byte* __restrict__ const& workspace,
             const TPS* __restrict__ const& tokenIndices,
             const Element* __restrict__ const& inputs,
             Element* __restrict__ const& moeOutput,
@@ -77,9 +77,6 @@ namespace aristos::processor{
                     cute::get<1>(tileCoordOut)));
         static_assert(bN % elems == 0);
         constexpr auto trips = bN / elems;
-        // Transposed layout
-        constexpr auto sCLay = make_layout(cute::Shape<cute::Int<bM>, cute::Int<elems>>{});
-        const auto sC = cute::make_tensor(cute::make_smem_ptr(workspace), sCLay);
         // ensures we have enough shared memory
         static_assert(sizeof(Element) * bM * (elems + 1) + sizeof(TPS) * bM <= sharedSize);
         static_assert(bM % elems == 0);
@@ -88,7 +85,10 @@ namespace aristos::processor{
         const auto phaseIdx = threadIdx.x / elems;
         static_assert(elems % wS == 0);
         constexpr auto wE = elems / wS;
-        auto* __restrict__ sTPS = CAST_TO(TPS, workspace + bM * elems);
+        auto* __restrict__ sTPS = CAST_TO(TPS, workspace);
+        // Transposed layout
+        constexpr auto sCLay = make_layout(cute::Shape<cute::Int<bM>, cute::Int<elems>>{});
+        const auto sC = cute::make_tensor(cute::make_smem_ptr(CAST_TO(Element, sTPS + bM)), sCLay);
         static_assert(bM == threads);
         sTPS[threadIdx.x] = tokenIndices[threadIdx.x];
         __syncthreads();
@@ -770,7 +770,7 @@ namespace aristos::processor{
                     case TaskType::combine: {
                         constexpr unsigned int combineIndex = 0;
                         combine<ACC::CM::value>(
-                            CAST_TO(typename PostGEMM::MatrixDType, workspace),
+                            workspace,
                             CONST_CAST_TO(TPS, rCurrentTask.aData),
                             CONST_CAST_TO(typename PostGEMM::MatrixAType, rCurrentTask.bData[combineIndex]),
                             moeOutput.data().get(),

@@ -76,7 +76,6 @@ add_executable(csrc main.cu
         include/os/os.cuh
         include/moe/expert.cuh
         include/throughput.cuh
-        include/os/sync.cuh
         include/moe/fffn.cuh
         include/telemetry.cuh
 )

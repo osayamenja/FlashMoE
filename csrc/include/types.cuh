@@ -464,7 +464,7 @@ namespace aristos{
         using P = cute::C<I_SIZE>;
         using H = cute::C<HIDDEN_SIZE>;
         using E = cute::C<NUM_EXPERTS>;
-        using SZD = cute::C<1024 * 1024 * 1024>;
+        using SZD = cute::C<1024 * 1024 * 1024UL>;
         //number of blocks within a dispatch superblock
         using SBZ = cute::C<cute::max(cute::ceil_div(256U, cute::max(E::value, 4)), 2)>;
         using DBZ = cute::C<PeakHardware::OS::processorBlocks::value / SBZ::value * SBZ::value>;
@@ -645,25 +645,61 @@ namespace aristos{
     };
     static_assert(sizeof(Task) == 128);
 
+    // Expert Parallel Group details
+    struct __align__(8) EPG {
+        uint16_t epRank;
+        uint16_t expertSlots;
+        uint16_t nLx;
+        uint16_t epWorld;
+        uint epWorldM;
+
+        EPG() = default;
+        EPG(const uint16_t& _epR,
+            const uint16_t& _eS,
+            const uint16_t& _nLx,
+            const uint16_t& _epW):
+        epRank(_epR), expertSlots(_eS), nLx(_nLx), epWorld(_epW), epWorldM(_epW) {}
+
+        void dump() const {
+            printf("{\n\t"
+                   "epRank: %u,\n\t"
+                   "expertSlots: %u,\n\t"
+                   "nLx: %u,\n\t"
+                   "epWorld: %u"
+                   "\n}\n",
+                   epRank, expertSlots, nLx, epWorld);
+        }
+
+        void dump(const int& gRank) const {
+            printf("{\n\t"
+                   "gRank: %d,\n\t"
+                   "epRank: %u,\n\t"
+                   "expertSlots: %u,\n\t"
+                   "nLx: %u,\n\t"
+                   "epWorld: %u"
+                   "\n}\n",
+                   gRank,
+                   epRank, expertSlots, nLx, epWorld);
+        }
+    };
+
     /// Information about auxiliary data structures comprising bookkeeping state
     /// Includes length of data structures (arrays) and pointer arithmetic functions
     using BookType = unsigned int;
     struct __align__(16) Bookkeeping {
         /// needed for free
         cuda::std::byte* symHeap = nullptr;
-        flagsType* syncArray = nullptr;
-        flagsType* syncCount = nullptr;
         flagsType* flags = nullptr;
         cuda::std::byte* sHeap = nullptr;
         /// default type for bookkeeping data structures
         cuda::std::byte *book = nullptr;
         /// gRl + gB + eDsA + sBfC + brs
         unsigned long int bookSize = ACC::FZ::value;
+        /// Block Ring Softmax flags in bytes, non-cumulative
+        unsigned long int brs = 0UL;
         /// length of gTQHeads
         unsigned int gtQCl = 0U;
         unsigned int sT = 0U;
-        /// Block Ring Softmax flags in bytes, non-cumulative
-        unsigned int brs = 0UL;
         /// EP rank
         uint rank = 0U;
         /// EP world
@@ -672,22 +708,19 @@ namespace aristos{
         uint nLx = 0U;
         /// expert slots
         uint xs = 0U;
+        uint gfSfC = 0U;
 
         __host__ __device__ __forceinline__
         Bookkeeping() = default;
 
         __host__ __forceinline__
         explicit Bookkeeping(cuda::std::byte* const& _symHeap,
-            flagsType* const& _sA,
             flagsType* const& _flags,
             cuda::std::byte* const& _sHeap,
             cuda::std::byte* const& _book,
-            const uint& _nLx, // dynamically decided by an optimization algorithm
-            const uint& _rank,
-            const uint& _world,
-            const uint& _xS) : symHeap(_symHeap),
-            syncArray(_sA), syncCount(_sA + _world), flags(_flags), sHeap(_sHeap), book(_book), rank(_rank),
-            world(_world), nLx(_nLx), xs(_xS){
+            const EPG& ePgD) :
+            symHeap(_symHeap), flags(_flags), sHeap(_sHeap), book(_book), rank(ePgD.epRank),
+            world(ePgD.epWorld), nLx(ePgD.nLx), xs(ePgD.expertSlots), gfSfC(ePgD.epWorldM * ePgD.expertSlots){
             constexpr auto TCM = ACC::TCM::value;
             constexpr auto TN = ACC::TN::value;
             constexpr auto blocks = ACC::PeakHardware::OS::processorBlocks::value;
@@ -711,11 +744,11 @@ namespace aristos{
                     sizeof(TPS) * (E * pEC);
                 brs = tQml + (ACC::GRL::value == GateReductionLevel::singleBlock ? 0U : S * TPX *
                     (sizeof(RingSoftmaxPayload) + 2 * sizeof(RingTopKPayload)));
-                tQXt = brs + sizeof(ELI) * E + sizeof(cuda::barrier<cuda::thread_scope_device>) + sizeof(LXI) * _nLx;
+                tQXt = brs + sizeof(ELI) * E + sizeof(cuda::barrier<cuda::thread_scope_device>) + sizeof(LXI) * nLx;
                 gRl = tQXt + (ACC::JT::value == JobType::inference ? 0U :
                     sizeof(mp_t) * (2 * E + 1));
                 sBfC = gRl + sizeof(BookType) * (1 + (E * TCM * ACC::TNx::value) + blocks + 2 * (E + world * nLx * TCM));
-                bookSize = sBfC + sizeof(ACC::Element) * (_world * _nLx * pEC * P);
+                bookSize = sBfC + sizeof(ACC::Element) * (world * nLx * pEC * P);
             }
         }
 
@@ -944,9 +977,9 @@ namespace aristos{
             /// gate routing and loss vectors in bytes
             unsigned long int gRl = 0U;
             /// Task Q maximum length
-            unsigned int tQml = 0U;
+            unsigned long int tQml = 0U;
             /// Task Q length
-            unsigned int tQl = 0U;
+            unsigned long int tQl = 0U;
     };
 
     __constant__ __inline__ Bookkeeping bookkeeping{};
