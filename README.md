@@ -9,6 +9,6 @@
 - mkdir `cmake-build-release` && cd `cmake-build-release`
 - Configure `aristos_config.json` as needed.
 - Run `cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_MAKE_PROGRAM=<path to ninja> -Wno-dev -G Ninja -S .. -B .`
-- Run `cmake --build . --target csrc -j`
+- Run `cmake --build . --target aristos -j`
 ### Single Node
-- Run `nvshmrun -n <number of processes> -ppn <processes per node> ./csrc`
+- Run `nvshmrun -n <number of processes> -ppn <processes per node> ./aristos`
