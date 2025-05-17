@@ -7,35 +7,11 @@
 
 #include "include/bootstrap.cuh"
 #include "include/moe/moe.cuh"
-template<unsigned int M, unsigned int N = M>
-requires(M > 0 && cutlass::is_pow2<M>::value && M == N)
-__host__ __forceinline__
-void makeIdentity(float* const& __restrict__ p, const bool print = false) {
-    // we assume row major
-    const auto t = cute::make_tensor(p,
-        cute::Layout<cute::Shape<cute::Int<M>, cute::Int<N>>,
-            cute::Stride<cute::Int<N>, cute::_1>>{});
-    for (uint i = 0; i < M; ++i) {
-        for (uint j = 0; j < N; ++j) {
-            if (i == j) {
-                t(i, j) = 1.0f;
-            }
-            else {
-                t(i, j) = 0.0f;
-            }
-        }
-    }
-
-    if (print) {
-        print_tensor(t);
-    }
-}
 
 __host__ __forceinline__
 void runOS() {
     aristos::initialize();
     const auto rank = aristos::getRank();
-    // device should already be set from above
     // generate random input tile and eye weights
     constexpr auto S = aristos::ACC::S::value;
     constexpr auto H = aristos::ACC::H::value;
@@ -61,10 +37,8 @@ void runOS() {
     thrust::default_random_engine rng(47 * (rank + 42));
     thrust::normal_distribution<float> dist(0, 5);
     // Activations
-    //std::ranges::fill(fHp, fHp + aZ, 1.0f);
     thrust::generate(fHp, fHp + aZ, [&] { return dist(rng); });
     // gate weights
-    //std::ranges::fill(fHp + aZ, fHp + aZ + E * H, 1.0f);
     thrust::generate(fHp + aZ, fHp + aZ + E * H, [&] { return dist(rng); });
     // Expert weights
     // loop for number of experts
@@ -72,9 +46,6 @@ void runOS() {
         // expert up
         thrust::generate(fHp + gwZ + i * (P * H), fHp + gwZ + (i + 1) * (P * H),
             [&] { return dist(rng); });
-        //makeIdentity<P, H>(fHp + gwZ + i * (P * H));
-        // expert down
-        //makeIdentity<P, H>(fHp + bZ +  i * (P * H));
         thrust::generate(fHp + bZ + i * (P * H), fHp + bZ + (i + 1) * (P * H),
             [&] { return dist(rng); });
     }
@@ -91,47 +62,8 @@ void runOS() {
     float timed = 0;
     aristos::moe::forwardHostBench<1, 1>(p, p + dZ * sizeof(Element), timed);
     printf("epRank: %u took %.2fms\n", aristos::hostBookkeeping.rank, timed);
-    /*using clk = std::chrono::high_resolution_clock;
-    std::chrono::duration<float> end {};
-    const auto start = clk::now();*/
-    //aristos::moe::forwardHost(p, p + dZ * sizeof(Element));
-    /*end = clk::now() - start;
-    printf("Initialize takes %fms\n", end.count() * 1000);*/
-
     ARISTOS_CHECK_CUDA(cudaPeekAtLastError());
-    auto* __restrict__ oH = eHp + dZ;
-    ARISTOS_CHECK_CUDA(cudaMemcpyAsync(oH, p + dZ * sizeof(Element),
-        sizeof(Element) * S * (PX + H),
-        cudaMemcpyDeviceToHost, aristos::aristosStream));
-    /*if (rank == 1) {
-        const auto o = make_tensor(oH + S * PX,
-            make_layout(cute::make_shape(S, H), cute::LayoutRight{}));
-        using Tiler = cute::Shape<cute::Int<BLOCK_M>, cute::_8>;
-        print_tensor(local_tile(o, Tiler{}, 0));
-        //print_tensor(o);
-    }*/
-    ARISTOS_CHECK_CUDA(cudaFreeAsync(p, aristos::aristosStream));
     aristos::finalize();
-    /*const auto og = make_tensor(oH,
-        make_layout(cute::make_shape(S, PX), cute::LayoutRight{}));
-    print_tensor(og);*/
-    /*const auto o = make_tensor(oH + S * PX,
-        make_layout(cute::make_shape(S, H), cute::LayoutRight{}));
-    print_tensor(o);*/
-    /*const auto o = make_tensor(eHp,
-        cute::Layout<cute::Shape<cute::Int<S>, cute::Int<PX>>, cute::Stride<cute::Int<PX>, cute::_1>>{});
-    print_tensor(o);
-    for (const auto &[idx, p] : b) {
-        printf("{idx: %u, p: %f}\n", idx, p);
-    }*/
-    /*using clk = std::chrono::high_resolution_clock;
-    std::chrono::duration<float> end {};
-    const auto start = clk::now();
-    aristos::initialize();
-    printf("Number of local experts is %u\n", aristos::hostBookkeeping.nLx);
-    end = clk::now() - start;
-    printf("Initialize takes %fms\n", end.count() * 1000);
-    aristos::finalize();*/
     std::free(hP);
 }
 

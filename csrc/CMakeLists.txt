@@ -78,6 +78,7 @@ add_executable(csrc main.cu
         include/throughput.cuh
         include/moe/fffn.cuh
         include/telemetry.cuh
+        correctness.cuh
 )
 set_target_properties(csrc PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
@@ -92,13 +93,14 @@ set(ENV{CUTLASS_NVCC_ARCHS} "${COMPUTE_CAPABILITY}")
 set(ENV{CPM_SOURCE_CACHE} "./cmake/cache")
 set(CCCL_ENABLE_UNSTABLE ON)
 include(cmake/CPM.cmake)
-
+target_link_libraries(csrc PRIVATE CUDA::cudart CUDA::cuda_driver CUDA::nvml CUDA::cublas CUDA::nvtx3)
+target_link_libraries(csrc PRIVATE atomic)
 # add dependencies
 ## This will automatically clone CCCL from GitHub and make the exported cmake targets available
 CPMAddPackage(
         NAME CCCL
         GITHUB_REPOSITORY nvidia/cccl
-        GIT_TAG main # Fetches the latest commit on the main branch
+        VERSION 2.8.4
 )
 if(CCCL_ADDED)
     target_link_libraries(csrc PRIVATE CCCL::CCCL)
@@ -145,10 +147,20 @@ if(NVTX3_ADDED)
     endif()
 endif ()
 
-target_link_libraries(csrc PRIVATE CUDA::cudart CUDA::cuda_driver CUDA::nvml CUDA::cublas CUDA::nvtx3)
-target_link_libraries(csrc PRIVATE atomic)
+# MatX
+set(MATX_NVTX_FLAGS ON)
+set(MATX_ENABLE_FILEIO ON)
+CPMAddPackage(
+        NAME MATX
+        GITHUB_REPOSITORY NVIDIA/MatX
+        GIT_TAG v0.9.1
+        OPTIONS
+)
+if(MATX_ADDED)
+    target_link_libraries(csrc PRIVATE matx::matx)
+endif ()
 
-## NVSHMEM Business
+## NVSHMEM
 find_package(NVSHMEM REQUIRED HINTS "$ENV{NVSHMEM_HOME}/lib/cmake/nvshmem")
 if(DEFINED ENV{NERSC_HOST} AND "$ENV{NERSC_HOST}" STREQUAL "perlmutter")
     target_link_libraries(csrc PRIVATE nvshmem::nvshmem_host nvshmem::nvshmem_device)
