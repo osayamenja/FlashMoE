@@ -26,34 +26,42 @@ namespace aristos::moe{
     __device__ __forceinline__
     void clearState(Element* __restrict__ const& outP) {
         // A barrier must occur after below otherwise, undefined behavior results.
-        auto* __restrict__ sBp = bookkeeping.sBp();
-        const auto sBz = bookkeeping.sBz();
         auto* __restrict__ pDB = bookkeeping.pDB();
         auto* __restrict__ sQ = bookkeeping.sQ();
         auto* __restrict__ gBp = bookkeeping.gBp();
+        const auto gtQCl = bookkeeping.gtQCl;
+        auto* __restrict__ tQH = bookkeeping.tQH();
+        auto* __restrict__ tSA = bookkeeping.tSA();
+        auto* __restrict__ pSA = bookkeeping.pSA();
         constexpr auto gBz = Bookkeeping::gBz();
+        auto* __restrict__ eCSync = bookkeeping.eCSync();
+        const auto idx = threads * blockIdx.x + threadIdx.x;
         if constexpr (c == CombineMode::multithreaded) {
             // clear output buffer
-            for (uint i = threads * blockIdx.x + threadIdx.x; i < OZ; i += blocks * threads) {
+            for (uint i = idx; i < OZ; i += blocks * threads) {
                 outP[i] = Element(0.0f);
             }
         }
         if constexpr (jT == JobType::training) {
             // clear loss buffers
-            for (uint i = threads * blockIdx.x + threadIdx.x; i < gBz; i += blocks * threads) {
+            for (uint i = idx; i < gBz; i += blocks * threads) {
                 gBp[i] = 0.0f;
             }
         }
         // clear processor doorbells
-        for (uint i = threads * blockIdx.x + threadIdx.x; i < processors; i += blocks * threads) {
+        for (uint i = idx; i < processors; i += blocks * threads) {
             pDB[i] = TQSignal{0U, 0U};
             sQ[i] = observed;
         }
-
-        // clear sB
-        static_assert(tQHeadGroundState == 0U);
-        for (uint i = threads * blockIdx.x + threadIdx.x; i < sBz; i += blocks * threads) {
-            sBp[i] = 0U;
+        for (uint i = idx; i < gtQCl; i += blocks * threads) {
+            tQH[i] = tQHeadGroundState;
+            tSA[i] = 0U;
+        }
+        for (uint i = idx; i < ACC::E::value; i += blocks * threads) {
+            pSA[i] = 0U;
+        }
+        if (!idx) {
+            *eCSync = 0U;
         }
     }
     template<
@@ -137,8 +145,8 @@ namespace aristos::moe{
         #if ARISTOS_NVTX
         aristosRange forwardRange{__PRETTY_FUNCTION__ + std::string(", seqNo: ") + std::to_string(seqBit)};
         #endif
-        ARISTOS_CHECK_PREDICATE(isInitialized, "Not initialized!");
-        CHECK_ERROR_EXIT(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
+        ARISTOS_ASSERT(isInitialized, "Not initialized!");
+        ARISTOS_CHECK_CUDA(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
         /// Consume precompiled macros
         constexpr auto blocks = ACC::PeakHardware::blocks::value;
         constexpr auto threads = ACC::PeakHardware::OS::threads::value;
@@ -148,9 +156,9 @@ namespace aristos::moe{
             seqBit = sbs::next(seqBit);
         }
         cudaEvent_t start, stop;
-        CHECK_ERROR_EXIT(cudaEventCreate(&start));
-        CHECK_ERROR_EXIT(cudaEventCreate(&stop));
-        CHECK_ERROR_EXIT(cudaEventRecord(start, aristos::aristosStream));
+        ARISTOS_CHECK_CUDA(cudaEventCreate(&start));
+        ARISTOS_CHECK_CUDA(cudaEventCreate(&stop));
+        ARISTOS_CHECK_CUDA(cudaEventRecord(start, aristos::aristosStream));
         // Call forward pass
         if constexpr (ACC::E::value > 1) {
             #pragma unroll
@@ -163,12 +171,12 @@ namespace aristos::moe{
             // regular FFN forward
             fffn<<<blocks, threads, 0, aristosStream>>>(iP, oP);
         }
-        CHECK_ERROR_EXIT(cudaEventRecord(stop, aristos::aristosStream));
-        CHECK_ERROR_EXIT(cudaStreamSynchronize(aristosStream));
-        CHECK_ERROR_EXIT(cudaEventElapsedTime(&duration, start, stop));
+        ARISTOS_CHECK_CUDA(cudaEventRecord(stop, aristos::aristosStream));
+        ARISTOS_CHECK_CUDA(cudaStreamSynchronize(aristosStream));
+        ARISTOS_CHECK_CUDA(cudaEventElapsedTime(&duration, start, stop));
         duration = duration / trials;
-        CHECK_ERROR_EXIT(cudaEventDestroy(start));
-        CHECK_ERROR_EXIT(cudaEventDestroy(stop));
+        ARISTOS_CHECK_CUDA(cudaEventDestroy(start));
+        ARISTOS_CHECK_CUDA(cudaEventDestroy(stop));
     }
 
     __host__ __forceinline__
@@ -176,8 +184,8 @@ namespace aristos::moe{
         #if ARISTOS_NVTX
         aristosRange forwardRange{__PRETTY_FUNCTION__ + std::string(", seqNo: ") + std::to_string(seqBit)};
         #endif
-        ARISTOS_CHECK_PREDICATE(isInitialized, "Not initialized!");
-        CHECK_ERROR_EXIT(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
+        ARISTOS_ASSERT(isInitialized, "Not initialized!");
+        ARISTOS_CHECK_CUDA(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
         /// Consume precompiled macros
         constexpr auto blocks = ACC::PeakHardware::blocks::value;
         constexpr auto threads = ACC::PeakHardware::OS::threads::value;

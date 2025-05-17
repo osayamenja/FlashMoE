@@ -767,10 +767,16 @@ namespace aristos::gate {
 
         if constexpr (ACC::GRL::value == GateReductionLevel::multiBlock) {
             // asynchronously wipe flags clean for the next iteration
-            auto* __restrict__ gBK = bookkeeping.gateBk();
-            constexpr auto gateBkz = Bookkeeping::gateBkz();
-            for (unsigned int i = threads * blockIdx.x + threadIdx.x; i < gateBkz; i += threads * blocks) {
-                gBK[i] = uint2{0U, 0U};
+            auto* __restrict__ bRsP = bookkeeping.bRsP();
+            constexpr auto rSlt = bookkeeping.rSlt();
+            auto* __restrict__ rTp = bookkeeping.rTp();
+            constexpr auto rTlt = bookkeeping.rTlt();
+            const auto idx = threads * blockIdx.x + threadIdx.x;
+            for (unsigned int i = idx; i < rSlt; i += threads * blocks) {
+                bRsP[i] = RingSoftmaxPayload{};
+            }
+            for (unsigned int i = idx; i < rTlt; i += threads * blocks) {
+                rTp[i] = RingTopKPayload{};
             }
         }
     }

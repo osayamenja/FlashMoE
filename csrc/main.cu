@@ -52,8 +52,8 @@ void runOS() {
     const auto gZ = dZ + S * PX;
     const auto cZ = gZ + S * H;
     cuda::std::byte* p;
-    CHECK_ERROR_EXIT(cudaMallocAsync(&p, cZ * sizeof(float), aristos::aristosStream));
-    CHECK_ERROR_EXIT(cudaMemsetAsync(p, 0, cZ * sizeof(float), aristos::aristosStream));
+    ARISTOS_CHECK_CUDA(cudaMallocAsync(&p, cZ * sizeof(float), aristos::aristosStream));
+    ARISTOS_CHECK_CUDA(cudaMemsetAsync(p, 0, cZ * sizeof(float), aristos::aristosStream));
     auto* hP = std::calloc(cZ, sizeof(float));
     auto* fHp = static_cast<float*>(hP);
     using Element = aristos::ACC::Element;
@@ -85,11 +85,11 @@ void runOS() {
     for (uint i = 0; i < dZ; ++i) {
         eHp[i] = conv(fHp[i]);
     }
-    CHECK_ERROR_EXIT(cudaMemcpyAsync(p, eHp, sizeof(Element) * dZ,
+    ARISTOS_CHECK_CUDA(cudaMemcpyAsync(p, eHp, sizeof(Element) * dZ,
         cudaMemcpyHostToDevice,
         aristos::aristosStream));
     float timed = 0;
-    aristos::moe::forwardHostBench<50, 100>(p, p + dZ * sizeof(Element), timed);
+    aristos::moe::forwardHostBench<1, 1>(p, p + dZ * sizeof(Element), timed);
     printf("epRank: %u took %.2fms\n", aristos::hostBookkeeping.rank, timed);
     /*using clk = std::chrono::high_resolution_clock;
     std::chrono::duration<float> end {};
@@ -98,9 +98,9 @@ void runOS() {
     /*end = clk::now() - start;
     printf("Initialize takes %fms\n", end.count() * 1000);*/
 
-    CHECK_ERROR_EXIT(cudaPeekAtLastError());
+    ARISTOS_CHECK_CUDA(cudaPeekAtLastError());
     auto* __restrict__ oH = eHp + dZ;
-    CHECK_ERROR_EXIT(cudaMemcpyAsync(oH, p + dZ * sizeof(Element),
+    ARISTOS_CHECK_CUDA(cudaMemcpyAsync(oH, p + dZ * sizeof(Element),
         sizeof(Element) * S * (PX + H),
         cudaMemcpyDeviceToHost, aristos::aristosStream));
     /*if (rank == 1) {
@@ -110,7 +110,7 @@ void runOS() {
         print_tensor(local_tile(o, Tiler{}, 0));
         //print_tensor(o);
     }*/
-    CHECK_ERROR_EXIT(cudaFreeAsync(p, aristos::aristosStream));
+    ARISTOS_CHECK_CUDA(cudaFreeAsync(p, aristos::aristosStream));
     aristos::finalize();
     /*const auto og = make_tensor(oH,
         make_layout(cute::make_shape(S, PX), cute::LayoutRight{}));

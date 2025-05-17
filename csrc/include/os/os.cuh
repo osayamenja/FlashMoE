@@ -101,6 +101,28 @@ namespace aristos::os {
             eCs[i] = __ldg(eC + i);
         }
         __syncthreads();
+        if (threadIdx.x / WARP_SIZE == 0) {
+            uint clearEC = 0U;
+            if (!threadIdx.x) {
+                constexpr auto expected = ACC::DBZ::value + 1;
+                __threadfence();
+                clearEC = atomicIncrement(bookkeeping.eCSync()) + 1 == expected;
+            }
+            __syncwarp();
+            clearEC = __shfl_sync(0xffffffff, clearEC, 0);
+            if (clearEC) {
+                auto* __restrict__ bEC = bookkeeping.eC();
+                constexpr auto tL = ACC::E::value / WARP_SIZE;
+                for (uint i = 0; i < tL; ++i) {
+                    bEC[threadIdx.x + i * WARP_SIZE] = 0U;
+                }
+                if constexpr (ACC::E::value % WARP_SIZE != 0) {
+                    if (threadIdx.x < ACC::E::value % WARP_SIZE) {
+                        bEC[threadIdx.x + tL * WARP_SIZE] = 0U;
+                    }
+                }
+            }
+        }
         // Combine tasks
         // known a priori
         #pragma unroll

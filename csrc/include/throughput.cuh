@@ -65,11 +65,11 @@ namespace aristos {
         for (uint i = 0; i < skip; ++i) {
             expert<u, N, K><<<blocks, threads, 0, aristosStream>>>(M, dB, deviceThroughput, tileSync, iP, oP);
             if constexpr (u == UseBarrier::no) {
-                CHECK_ERROR_EXIT(cudaMemsetAsync(tileSync, 0, tSz, aristosStream));
+                ARISTOS_CHECK_CUDA(cudaMemsetAsync(tileSync, 0, tSz, aristosStream));
             }
             // Needed to clear accumulator buffer
             if constexpr (c == CombineMode::multithreaded) {
-                CHECK_ERROR_EXIT(cudaMemsetAsync(oP + M * N, 0, sizeof(Element) * (M * K),
+                ARISTOS_CHECK_CUDA(cudaMemsetAsync(oP + M * N, 0, sizeof(Element) * (M * K),
                     aristosStream));
             }
         }
@@ -78,15 +78,15 @@ namespace aristos {
             expert<u, N, K><<<blocks, threads, 0, aristosStream>>>(M, dB,
                 deviceThroughput + i, tileSync, iP, oP, false);
             if constexpr (u == UseBarrier::no) {
-                CHECK_ERROR_EXIT(cudaMemsetAsync(tileSync, 0, tSz, aristosStream));
+                ARISTOS_CHECK_CUDA(cudaMemsetAsync(tileSync, 0, tSz, aristosStream));
             }
             // Needed to clear accumulator buffer
             if constexpr (c == CombineMode::multithreaded) {
-                CHECK_ERROR_EXIT(cudaMemsetAsync(oP + M * N, 0, sizeof(Element) * (M * K),
+                ARISTOS_CHECK_CUDA(cudaMemsetAsync(oP + M * N, 0, sizeof(Element) * (M * K),
                     aristosStream));
             }
         }
-        CHECK_ERROR_EXIT(cudaPeekAtLastError());
+        ARISTOS_CHECK_CUDA(cudaPeekAtLastError());
     }
     template<
         UseBarrier u = UseBarrier::no,
@@ -120,10 +120,10 @@ namespace aristos {
         constexpr auto stateSize = sizeof(cuda::barrier<cuda::thread_scope_device>) +
             sizeof(float) * trials + tSz;
         constexpr auto dMz = stateSize + hZ * sizeof(Element);
-        CHECK_ERROR_EXIT(cudaMallocAsync(&p, dMz, aristosStream));
-        CHECK_ERROR_EXIT(cudaMemsetAsync(p, 0, stateSize, aristosStream));
+        ARISTOS_CHECK_CUDA(cudaMallocAsync(&p, dMz, aristosStream));
+        ARISTOS_CHECK_CUDA(cudaMemsetAsync(p, 0, stateSize, aristosStream));
         const auto hB = new cuda::barrier<cuda::thread_scope_device>{blocks};
-        CHECK_ERROR_EXIT(cudaMemcpyAsync(p, hB,
+        ARISTOS_CHECK_CUDA(cudaMemcpyAsync(p, hB,
             sizeof(cuda::barrier<cuda::thread_scope_device>),
             cudaMemcpyHostToDevice, aristosStream));
 
@@ -137,7 +137,7 @@ namespace aristos {
         for (uint i = 0; i < cWz; ++i) {
             hVd[i] = conv(hV[i]);
         }
-        CHECK_ERROR_EXIT(cudaMemcpyAsync(p + stateSize, hVd,
+        ARISTOS_CHECK_CUDA(cudaMemcpyAsync(p + stateSize, hVd,
             cWz * sizeof(Element), cudaMemcpyHostToDevice, aristosStream));
 
         auto* __restrict__ dB = CAST_TO(cuda::barrier<cuda::thread_scope_device>, p);
@@ -150,14 +150,14 @@ namespace aristos {
         auto* __restrict__ oP = CAST_TO(Element, p + stateSize) + cWz;
         mFT<u, trials>(M, dB, deviceThroughput, tileSync, iP, oP);
         std::array<float, trials> latency{};
-        CHECK_ERROR_EXIT(cudaMemcpyAsync(latency.data(), deviceThroughput,
+        ARISTOS_CHECK_CUDA(cudaMemcpyAsync(latency.data(), deviceThroughput,
             sizeof(float) * trials,
             cudaMemcpyDeviceToHost, aristosStream));
-        CHECK_ERROR_EXIT(cudaStreamSynchronize(aristosStream));
+        ARISTOS_CHECK_CUDA(cudaStreamSynchronize(aristosStream));
         const float throughput = 1.0f / findMedian<trials>(latency);
         //fmt::println("Latency is {}ms", findMedian<trials>(latency));
         dWa->throughput = cute::half_t(throughput); // latency should be > 0
-        CHECK_ERROR_EXIT(cudaFreeAsync(p, aristosStream));
+        ARISTOS_CHECK_CUDA(cudaFreeAsync(p, aristosStream));
         delete hB;
     }
 }

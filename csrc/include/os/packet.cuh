@@ -115,7 +115,8 @@ namespace aristos::packet {
                         // global -> shared
                         #pragma unroll
                         for (uint k = 0; k < batch; ++k) {
-                            sC(threadIdx.x, k) = __ldg(&tokenIds(expertIdx, lBid + k * superBlockSize).tokenIdx);
+                            const auto [tokenIdx, _] = tokenIds(expertIdx, lBid + k * superBlockSize);
+                            sC(threadIdx.x, k) = tokenIdx;
                         }
                     }
                     for (uint j = 0; j < trips; ++j) {
@@ -129,8 +130,9 @@ namespace aristos::packet {
                             // global -> shared
                             #pragma unroll
                             for (uint k = 0; k < batch; ++k) {
-                                sC(threadIdx.x, k) = __ldg(&tokenIds(expertIdx,
-                                    lBid + (k + (j + 1) * batch) * superBlockSize).tokenIdx);
+                                const auto [tokenIdx, _] = tokenIds(expertIdx,
+                                    lBid + (k + (j + 1) * batch) * superBlockSize);
+                                sC(threadIdx.x, k) = tokenIdx;
                             }
                         }
                         // Communicate these tokens
@@ -160,7 +162,8 @@ namespace aristos::packet {
                     if (const auto residue = partition - trips * batch; residue) {
                         // global -> shared
                         for (uint k = 0; k < residue; ++k) {
-                            sC(threadIdx.x, k) = __ldg(&tokenIds(expertIdx, lBid + (k + trips * batch) * superBlockSize).tokenIdx);
+                            const auto [tokenIdx, _] = tokenIds(expertIdx, lBid + (k + trips * batch) * superBlockSize);
+                            sC(threadIdx.x, k) = tokenIdx;
                         }
                         // shared -> registers
                         #pragma unroll
@@ -244,6 +247,30 @@ namespace aristos::packet {
                         // write operation used in the public-facing API
                         atomicExch_system(CAST_TO(ull_t, lI.remoteSFlags + flagOffset),
                             *CONST_CAST_TO(ull_t, &sigPayload));
+                    }
+                }
+            }
+        }
+        __syncthreads();
+        if (threadIdx.x / WARP_SIZE == 1) {
+            uint clearEC = 0U;
+            const auto laneID = threadIdx.x % WARP_SIZE;
+            if (!laneID) {
+                constexpr auto expected = ACC::DBZ::value + 1;
+                __threadfence();
+                clearEC = atomicIncrement(bookkeeping.eCSync()) + 1 == expected;
+            }
+            __syncwarp();
+            clearEC = __shfl_sync(0xffffffff, clearEC, 0);
+            if (clearEC) {
+                auto* __restrict__ bEC = bookkeeping.eC();
+                constexpr auto tL = ACC::E::value / WARP_SIZE;
+                for (uint i = 0; i < tL; ++i) {
+                    bEC[laneID + i * WARP_SIZE] = 0U;
+                }
+                if constexpr (ACC::E::value % WARP_SIZE != 0) {
+                    if (laneID < ACC::E::value % WARP_SIZE) {
+                        bEC[laneID + tL * WARP_SIZE] = 0U;
                     }
                 }
             }

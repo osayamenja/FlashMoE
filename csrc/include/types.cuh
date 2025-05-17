@@ -278,15 +278,15 @@ namespace aristos{
 
     __device__
     struct __align__(8) RingSoftmaxPayload {
-        mp_t mI;
-        cute::half_t dI;
-        uint16_t signal;
+        mp_t mI = -cuda::std::numeric_limits<mp_t>::infinity();
+        cute::half_t dI = cute::half_t(0.0f);
+        uint16_t signal = 0U;
     };
     __device__
     struct __align__(8) RingTopKPayload {
-        mp_t sV;
-        uint16_t sIdx;
-        uint16_t signal;
+        mp_t sV = -cuda::std::numeric_limits<mp_t>::infinity();
+        uint16_t sIdx = 0U;
+        uint16_t signal = 0U;
     };
     
     template<PacketStage p = PacketStage::initial>
@@ -688,16 +688,20 @@ namespace aristos{
     using BookType = unsigned int;
     struct __align__(16) Bookkeeping {
         /// needed for free
-        cuda::std::byte* symHeap = nullptr;
         flagsType* flags = nullptr;
         cuda::std::byte* sHeap = nullptr;
-        /// default type for bookkeeping data structures
-        cuda::std::byte *book = nullptr;
-        /// gRl + gB + eDsA + sBfC + brs
-        unsigned long int bookSize = ACC::FZ::value;
-        /// Block Ring Softmax flags in bytes, non-cumulative
-        unsigned long int brs = 0UL;
-        /// length of gTQHeads
+        Task* bookTask = nullptr;
+        PEL* bookPEL = nullptr;
+        PLI* bookPLI = nullptr;
+        TPS* bookTPS = nullptr;
+        cuda::barrier<cuda::thread_scope_device>* bookDB = nullptr;
+        TQSignal* bookTQS = nullptr;
+        RingSoftmaxPayload* bookRSP = nullptr;
+        RingTopKPayload* bookRTP = nullptr;
+        ELI* bookELI = nullptr;
+        BookType* book = nullptr;
+        cuda::std::byte* bookElement = nullptr;
+        unsigned long int ilt = 0U;
         unsigned int gtQCl = 0U;
         unsigned int sT = 0U;
         /// EP rank
@@ -714,80 +718,53 @@ namespace aristos{
         Bookkeeping() = default;
 
         __host__ __forceinline__
-        explicit Bookkeeping(cuda::std::byte* const& _symHeap,
-            flagsType* const& _flags,
+        explicit Bookkeeping(flagsType* const& _flags,
             cuda::std::byte* const& _sHeap,
-            cuda::std::byte* const& _book,
+            Task* const& _bookTask,
+            PEL* const& _bookPEL,
+            PLI* const& _bookPLI,
+            TPS* const& _bookTPS,
+            cuda::barrier<cuda::thread_scope_device>* const& _bookDB,
+            TQSignal* const& _bookTQS,
+            RingSoftmaxPayload* const& _bookRSP,
+            RingTopKPayload* const& _bookRTP,
+            ELI* const& _bookELI,
+            BookType* const& _book,
+            cuda::std::byte* const& _bookElement,
             const EPG& ePgD) :
-            symHeap(_symHeap), flags(_flags), sHeap(_sHeap), book(_book), rank(ePgD.epRank),
-            world(ePgD.epWorld), nLx(ePgD.nLx), xs(ePgD.expertSlots), gfSfC(ePgD.epWorldM * ePgD.expertSlots){
+                flags(_flags),
+                sHeap(_sHeap),
+                bookTask(_bookTask),
+                bookPEL(_bookPEL),
+                bookPLI(_bookPLI),
+                bookTPS(_bookTPS),
+                bookDB(_bookDB),
+                bookTQS(_bookTQS),
+                bookRSP(_bookRSP),
+                bookRTP(_bookRTP),
+                bookELI(_bookELI),
+                book(_book),
+                bookElement(_bookElement),
+                rank(ePgD.epRank),
+                world(ePgD.epWorld),
+                nLx(ePgD.nLx),
+                xs(ePgD.expertSlots),
+                gfSfC(ePgD.epWorldM * ePgD.expertSlots){
             constexpr auto TCM = ACC::TCM::value;
             constexpr auto TN = ACC::TN::value;
+            constexpr auto TNx = ACC::TNx::value;
             constexpr auto blocks = ACC::PeakHardware::OS::processorBlocks::value;
             constexpr auto E = ACC::E::value;
-            constexpr auto S = ACC::S::value;
-            constexpr auto pEC = ACC::pEC::value;
-            constexpr auto P = ACC::P::value;
-            constexpr auto TPX = ACC::TPX::value;
             if constexpr (E > 1) {
                 gtQCl = world * nLx * TCM;
-                // maximum gemm tiles/tasks scheduled by processors
-                const auto prT = world * nLx * TCM * ACC::TNx::value;
                 // maximum gemm tiles/tasks scheduled by subscriber threads
                 static_assert(SUBSCRIBERS % WARP_SIZE == 0);
                 const auto tPS = cute::ceil_div(world * nLx, SUBSCRIBERS / WARP_SIZE) *
                         cute::ceil_div(TCM * TN, WARP_SIZE) +
                         cute::ceil_div(TCM * E, SUBSCRIBERS) * ACC::TNx::value;
                 sT = tPS * SUBSCRIBERS;
-                tQl = sizeof(Task) * (sT + prT);
-                tQml = tQl + blocks * sizeof(TQSignal) + E * sizeof(PEL) + sizeof(PLI) * world +
-                    sizeof(TPS) * (E * pEC);
-                brs = tQml + (ACC::GRL::value == GateReductionLevel::singleBlock ? 0U : S * TPX *
-                    (sizeof(RingSoftmaxPayload) + 2 * sizeof(RingTopKPayload)));
-                tQXt = brs + sizeof(ELI) * E + sizeof(cuda::barrier<cuda::thread_scope_device>) + sizeof(LXI) * nLx;
-                gRl = tQXt + (ACC::JT::value == JobType::inference ? 0U :
-                    sizeof(mp_t) * (2 * E + 1));
-                sBfC = gRl + sizeof(BookType) * (1 + (E * TCM * ACC::TNx::value) + blocks + 2 * (E + world * nLx * TCM));
-                bookSize = sBfC + sizeof(ACC::Element) * (world * nLx * pEC * P);
+                ilt = 1 + nLx + blocks + 2 * (gtQCl + E) + E * TCM * TNx;
             }
-        }
-
-        /// Needed for malloc
-        __host__ __forceinline__
-        constexpr static unsigned long int bookLength(const unsigned int& _nLx, const unsigned int& _world) {
-            constexpr auto TCM = ACC::TCM::value;
-            constexpr auto TN = ACC::TN::value;
-            constexpr auto blocks = ACC::PeakHardware::OS::processorBlocks::value;
-            constexpr auto E = ACC::E::value;
-            constexpr auto S = ACC::S::value;
-            constexpr auto pEC = ACC::pEC::value;
-            constexpr auto P = ACC::P::value;
-            constexpr auto TPX = ACC::TPX::value;
-            // maximum gemm tiles/tasks scheduled by processors
-            const auto prT = _world * _nLx * TCM * ACC::TNx::value;
-            static_assert(SUBSCRIBERS % WARP_SIZE == 0);
-            // maximum gemm tiles/tasks scheduled by subscriber threads
-            const auto tPS = cute::ceil_div(_world * _nLx, SUBSCRIBERS / WARP_SIZE) *
-                    cute::ceil_div(TCM * TN, WARP_SIZE) +
-                    cute::ceil_div(TCM * E, SUBSCRIBERS) * ACC::TNx::value;
-            const auto sT = tPS * SUBSCRIBERS;
-            const auto tQl = sizeof(Task) * (sT + prT);
-            const auto tQml = tQl + blocks * sizeof(TQSignal) + E * sizeof(PEL) + sizeof(PLI) * _world +
-                sizeof(TPS) * (E * pEC);
-            const auto brs = tQml + (ACC::GRL::value == GateReductionLevel::singleBlock ? 0U :
-                S * TPX * (sizeof(RingSoftmaxPayload) + 2 * sizeof(RingTopKPayload)));
-            const auto tQXt = brs + sizeof(ELI) * E + sizeof(cuda::barrier<cuda::thread_scope_device>) +
-                sizeof(LXI) * _nLx;
-            const auto gRl = tQXt +
-                (ACC::JT::value == JobType::inference ? 0U : sizeof(mp_t) * (2 * E + 1));
-            const auto sBfC = gRl + sizeof(BookType) * (1 + (E * TCM * ACC::TNx::value) +
-                blocks + 2 * (E + _world * _nLx * TCM));
-            return sBfC + sizeof(ACC::Element) * (_world * _nLx * pEC * P);
-        }
-
-        __host__ __forceinline__
-        constexpr static unsigned long int bookLength() {
-            return ACC::FZ::value;
         }
 
         template<unsigned int tileDimension>
@@ -808,90 +785,144 @@ namespace aristos{
         /// stride task queue
         __device__ __forceinline__
         auto* tQ() const {
-            return CAST_TO(Task, book);
+            return bookTask;
         }
         /// blocked
         __device__ __forceinline__
         auto* ptQ() const {
-            return tQ() + sT;
+            return bookTask + sT;
         }
-        static_assert(alignof(Task) % alignof(PEL) == 0);
+        __host__ __forceinline__
+        constexpr static auto tQlt(const unsigned int& _nLx, const unsigned int& _world) {
+            // maximum gemm tiles/tasks scheduled by processors
+            constexpr auto TCM = ACC::TCM::value;
+            const auto prT = _world * _nLx * TCM * ACC::TNx::value;
+            static_assert(SUBSCRIBERS % WARP_SIZE == 0);
+            // maximum gemm tiles/tasks scheduled by subscriber threads
+            const auto tPS = cute::ceil_div(_world * _nLx, SUBSCRIBERS / WARP_SIZE) *
+                    cute::ceil_div(TCM * ACC::TN::value, WARP_SIZE) +
+                    cute::ceil_div(TCM * ACC::E::value, SUBSCRIBERS) * ACC::TNx::value;
+            const auto sT = tPS * SUBSCRIBERS;
+            return sizeof(Task) * (sT + prT);
+        }
         __host__ __device__ __forceinline__
         auto* pEL() const {
-            return CAST_TO(PEL, book + tQl);
+            return bookPEL;
         }
-        static_assert(alignof(PEL) % alignof(PLI) == 0);
+        __host__ __forceinline__
+        constexpr static auto pELlt() {
+            return sizeof(PEL) * ACC::E::value;
+        }
         __host__ __device__ __forceinline__
         auto* pL() const {
-            return CAST_TO(PLI, pEL() + ACC::E::value);
+            return bookPLI;
         }
-        static_assert(alignof(PLI) % alignof(TPS) == 0);
-        __host__ __device__ __forceinline__
+        __host__ __forceinline__
+        constexpr static auto pLlt(const unsigned int& _world) {
+            return _world * sizeof(PLI);
+        }
+        __device__ __forceinline__
         auto* tP() const {
-            return CAST_TO(TPS, pL() + world);
+            return bookTPS;
         }
-        static_assert(alignof(TPS) % alignof(TQSignal) == 0);
+        __host__ __forceinline__
+        constexpr static auto tPlt() {
+            return sizeof(TPS) * ACC::E::value * ACC::pEC::value;
+        }
+        /// Device-wide barrier
+        __host__ __device__ __forceinline__
+        auto* dB() const {
+            return bookDB;
+        }
+        __host__ __forceinline__
+        constexpr static auto dBlt() {
+            return sizeof(cuda::barrier<cuda::thread_scope_device>);
+        }
+
         /// processors' doorbell
         __device__ __forceinline__
         auto* pDB() const {
-            return CAST_TO(TQSignal, tP() + ACC::E::value * ACC::pEC::value);
+            return bookTQS;
+        }
+        __host__ __forceinline__
+        constexpr static auto pDBlt() {
+            return sizeof(TQSignal) * ACC::PeakHardware::OS::processorBlocks::value;
         }
 
-        static_assert(alignof(ull_t) % alignof(RingSoftmaxPayload) == 0
-            && alignof(ull_t) % alignof(RingTopKPayload) == 0
-            && alignof(RingSoftmaxPayload) % alignof(RingTopKPayload) == 0);
-        /***********CONTIGUOUS**************/
-        __device__ __forceinline__
-        auto* gateBk() const {
-            static_assert(sizeof(uint2) == sizeof(RingSoftmaxPayload) &&
-                sizeof(uint2) == sizeof(RingTopKPayload) &&
-                alignof(uint2) % alignof(RingSoftmaxPayload) == 0 &&
-                sizeof(uint2) % sizeof(RingTopKPayload) == 0);
-            // Entrypoint for vectorized memory cleaning
-            return CAST_TO(uint2, book + tQml);
-        }
-        __device__ __forceinline__
-        static constexpr auto gateBkz() {
-            // Entrypoint for vectorized memory cleaning
-            return 3 * ACC::S::value * ACC::TPX::value;
-        }
         __device__ __forceinline__
         auto* bRsP() const {
-            return CAST_TO(RingSoftmaxPayload, gateBk());
+            return bookRSP;
+        }
+        __host__ __forceinline__
+        constexpr static auto rSlt() {
+            return sizeof(RingSoftmaxPayload) * ACC::S::value * ACC::TPX::value;
         }
         /// Ring top k flags
         /// Two sets for pipelining termination phase of round i and initial phase of round i + 1
         __device__ __forceinline__
         auto* rTp() const {
-            return CAST_TO(RingTopKPayload, bRsP() + ACC::S::value * ACC::TPX::value);
+            return bookRTP;
         }
-        /***********CONTIGUOUS**************/
-
-        static_assert(alignof(RingTopKPayload) % alignof(cuda::barrier<cuda::thread_scope_device>) == 0);
-        /// Device-wide barrier
-        __host__ __device__ __forceinline__
-        auto* dB() const {
-            return CAST_TO(cuda::barrier<cuda::thread_scope_device>, book + brs);
+        __host__ __forceinline__
+        constexpr static auto rTlt() {
+            return sizeof(RingTopKPayload) * 2 * ACC::S::value * ACC::TPX::value;
         }
-        static_assert(alignof(cuda::barrier<cuda::thread_scope_device>) % alignof(ELI) == 0);
         /// Expert Lookup
         /// expert index -> ELI
         __host__ __device__ __forceinline__
         auto* eL() const {
-            return CAST_TO(ELI, dB() + 1);
+            return bookELI;
         }
-
-        static_assert(alignof(ELI) % alignof(LXI) == 0);
+        __host__ __forceinline__
+        constexpr static auto eLlt() {
+            return sizeof(ELI) * ACC::E::value;
+        }
+        static_assert(sizeof(LXI) == sizeof(BookType) && alignof(LXI) == alignof(BookType));
+        __host__ __device__ __forceinline__
+        auto* tIx() const {
+            return book;
+        }
+        /// second stage flag count
+        __host__ __device__ __forceinline__
+        auto* ssFc() const {
+            return tIx() + ACC::E::value * ACC::TCM::value * ACC::TNx::value;
+        }
         __host__ __device__ __forceinline__
         auto* lX() const {
-            return CAST_TO(LXI, eL() + ACC::E::value);
+            return CAST_TO(LXI, ssFc() + 1);
         }
-
-        static_assert(alignof(PLI) % alignof(mp_t) == 0);
+        __device__ __forceinline__
+        auto* eCSync() const {
+            return CAST_TO(BookType, lX() + nLx);
+        }
+        __device__ __forceinline__
+        auto* tQH() const {
+            return eCSync() + 1;
+        }
+        /// tile sync array
+        __device__ __forceinline__
+        auto* tSA() const {
+            return tQH() + gtQCl;
+        }
+        __device__ __forceinline__
+        auto* sQ() const {
+            return tSA() + gtQCl;
+        }
+        /// expert counts
+        __device__ __forceinline__
+        auto* eC() const {
+            return sQ() + ACC::PeakHardware::OS::processorBlocks::value;
+        }
+        __device__ __forceinline__
+        auto* pSA() const {
+            return eC() + ACC::E::value;
+        }
+        static_assert(alignof(mp_t) == alignof(BookType) &&
+            sizeof(BookType) == sizeof(mp_t));
         /// entrypoint for clearing
         __device__ __forceinline__
         auto* gBp() const {
-            return CAST_TO(mp_t, book + tQXt);
+            return CAST_TO(mp_t, book + ilt);
         }
         __device__ __forceinline__
         static constexpr auto gBz() {
@@ -901,7 +932,7 @@ namespace aristos{
         /// Gate mean logits
         __device__ __forceinline__
         auto* gML() const {
-            return CAST_TO(mp_t, book + tQXt);
+            return gBp();
         }
         /// Gate mean expert counts
         __device__ __forceinline__
@@ -914,72 +945,45 @@ namespace aristos{
             return gMeC() + ACC::E::value;
         }
         /***********CONTIGUOUS**************/
-
-        static_assert(alignof(mp_t) % alignof(BookType) == 0);
-        /// second stage flag count
-        __host__ __device__ __forceinline__
-        auto* ssFc() const {
-            return CAST_TO(BookType, book + gRl);
+        constexpr static auto b4lt(const unsigned int& _nLx, const unsigned int& _world) {
+            constexpr auto blocks = ACC::PeakHardware::OS::processorBlocks::value;
+            const auto gtQCl = _world * _nLx * ACC::TCM::value;
+            constexpr auto flt = 2 * ACC::E::value + 1;
+            static_assert(sizeof(LXI) == sizeof(BookType) && alignof(LXI) == alignof(BookType));
+            const auto ilt = 1 + 1 + _nLx + blocks + 2 * (gtQCl + ACC::E::value) +
+                ACC::E::value * ACC::TCM::value * ACC::TNx::value;
+            static_assert(sizeof(mp_t) == sizeof(BookType) && alignof(mp_t) == alignof(BookType));
+            return sizeof(BookType) * (flt + ilt);
         }
-
-        /// Scheduler buffers and flag checkpoints
-        __host__ __device__ __forceinline__
-        auto* tIx() const {
-            return ssFc() + 1;
+        constexpr static auto b4lt() {
+            return ACC::TSZ::value * sizeof(BookType);
         }
-
-        __host__ __device__ __forceinline__
-        auto* sQ() const {
-            return tIx() + ACC::E::value * ACC::TCM::value * ACC::TNx::value;
-        }
-
-        /// entrypoint for clearing
-        __device__ __forceinline__
-        auto* sBp() const {
-            return sQ() + ACC::PeakHardware::OS::processorBlocks::value;
-        }
-        __device__ __forceinline__
-        constexpr auto sBz() const {
-            return 2 * (ACC::E::value + world * nLx * ACC::TCM::value);
-        }
-        /***********CONTIGUOUS**************/
-        __host__ __device__ __forceinline__
-        auto* eC() const {
-            return sQ() + ACC::PeakHardware::OS::processorBlocks::value;
-        }
-        __device__ __forceinline__
-        auto* tQH() const {
-            return eC() + ACC::E::value;
-        }
-        /// Packet Sync array
-        __device__ __forceinline__
-        auto* pSA() const {
-            return tQH() + world * nLx * ACC::TCM::value;
-        }
-        /// tile sync array
-        __device__ __forceinline__
-        auto* tSA() const {
-            return pSA() + ACC::E::value;
-        }
-        /***********CONTIGUOUS**************/
 
         // Intermediate buffer
-        static_assert(alignof(BookType) % alignof(ACC::Element) == 0);
         __device__ __forceinline__
         auto* xM() const {
-            return book + sBfC;
+            return bookElement;
+        }
+        constexpr static auto xMlt(const unsigned int& _nLx, const unsigned int& _world) {
+            return sizeof(ACC::Element) * (_world * _nLx * ACC::pEC::value * ACC::P::value);
+        }
+        constexpr static auto xMlt() {
+            return sizeof(ACC::Element) * (ACC::S::value * ACC::P::value);
         }
 
-        private:
-            /// Scheduler buffers in bytes
-            unsigned long int sBfC = ACC::FZ::value;
-            unsigned long int tQXt = 0UL;
-            /// gate routing and loss vectors in bytes
-            unsigned long int gRl = 0U;
-            /// Task Q maximum length
-            unsigned long int tQml = 0U;
-            /// Task Q length
-            unsigned long int tQl = 0U;
+        /// Expository purposes
+        __host__ __forceinline__
+        constexpr static unsigned long int bookLength(const unsigned int& _nLx, const unsigned int& _world) {
+            return tQlt(_nLx, _world) + pELlt() + pLlt(_world) +
+                tPlt() + dBlt() + pDBlt() + rSlt() + rTlt() + eLlt() +
+                    b4lt(_nLx, _world) + xMlt(_nLx, _world);
+        }
+
+        /// For fffn
+        __host__ __forceinline__
+        constexpr static unsigned long int bookLength() {
+            return ACC::FZ::value;
+        }
     };
 
     __constant__ __inline__ Bookkeeping bookkeeping{};

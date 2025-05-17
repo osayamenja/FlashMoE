@@ -94,7 +94,7 @@ namespace aristos{
         #endif
         // estimate available device memory
         size_t free = 0, total = 0;
-        CHECK_ERROR_EXIT(cudaMemGetInfo(&free, &total));
+        ARISTOS_CHECK_CUDA(cudaMemGetInfo(&free, &total));
         // Deduct cost for the dense case, assuming at least one expert per device
         free -= ACC::BPP::value * (ACC::PC::value + ACC::S::value * ACC::H::value);
         constexpr size_t mX = cute::ceil_div(ACC::L::value, ACC::F::value) * ACC::BPP::value * 2UL *
@@ -137,10 +137,10 @@ namespace aristos{
         constexpr auto seqNo = 1U;
         topology::discover<<<ARISTOS_STATIC_SBZ, ARISTOS_BLOCK_SIZE, sharedSize, aristosStream>>>(n, globalRank,
             isRemotePresent, lWa, sHeap, flags, results, syncArray, attributes, seqNo);
-        CHECK_ERROR_EXIT(cudaMemcpyAsync(hAp, adj, aD * sizeof(floatPair) + n * sizeof(uint),
+        ARISTOS_CHECK_CUDA(cudaMemcpyAsync(hAp, adj, aD * sizeof(floatPair) + n * sizeof(uint),
             cudaMemcpyDeviceToHost, aristosStream));
-        CHECK_ERROR_EXIT(cudaPeekAtLastError());
-        CHECK_ERROR_EXIT(cudaStreamSynchronize(aristosStream));
+        ARISTOS_CHECK_CUDA(cudaPeekAtLastError());
+        ARISTOS_CHECK_CUDA(cudaStreamSynchronize(aristosStream));
         nvshmem_free(symHeap);
     }
 
@@ -246,9 +246,9 @@ namespace aristos{
         #if ARISTOS_NVTX
         aristosRange finalRange{__PRETTY_FUNCTION__};
         #endif
-        ARISTOS_CHECK_PREDICATE(isInitialized, "Not initialized!");
+        ARISTOS_ASSERT(isInitialized, "Not initialized!");
         isInitialized = false;
-        CHECK_ERROR_EXIT(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
+        ARISTOS_CHECK_CUDA(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
         nvshmem_finalize();
     }
 
@@ -266,7 +266,7 @@ namespace aristos{
         // initialize communication backend
         nvshmem_init();
         const uint devId = nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE);
-        CHECK_ERROR_EXIT(cudaSetDevice(devId));
+        ARISTOS_CHECK_CUDA(cudaSetDevice(devId));
         const auto globalWorld = nvshmem_n_pes();
         const auto rank = nvshmem_my_pe();
 
@@ -315,48 +315,77 @@ namespace aristos{
             scratch, aP, wAp, rank, globalWorld);
         if (!isFeasible) {
             cleanup();
-            ARISTOS_CHECK_PREDICATE(isFeasible, "Insufficient Memory for Experts");
+            ARISTOS_ASSERT(isFeasible, "Insufficient Memory for Experts");
         }
         // Now allocate memory
-        /// Symmetric memory
-        const auto heapBytes = STAGES * CELLS * ePgD.epWorldM * ePgD.expertSlots * ACC::pEC::value *
-            ACC::H::value * sizeof(Element);
-        const auto flagBytes = (ePgD.epWorldM * ePgD.expertSlots + E * ACC::TCM::value * ACC::TNx::value) *
-            sizeof(flagsType);
-        // Note this allocation's size has to be identical across all PEs
-        auto tHB = flagBytes + heapBytes;
+        const auto heapElems = STAGES * CELLS * ePgD.epWorldM * ePgD.expertSlots * ACC::pEC::value *
+            ACC::H::value;
+        const auto flagElems = (ePgD.epWorldM * ePgD.expertSlots + E * ACC::TCM::value * ACC::TNx::value);
+        auto tHB = flagElems * sizeof(flagsType) + heapElems * sizeof(Element);
         // Required for large allocations
         const auto nss = gEI("NVSHMEM_SYMMETRIC_SIZE", ACC::SZD::value); // default is 1GB
         if (tHB >= nss) {
             const auto nGB = cute::ceil_div(tHB, nss) * nss;
             uEI("NVSHMEM_SYMMETRIC_SIZE", nGB);
         }
-        auto* sHeap = nvshmem_calloc(tHB, sizeof(cuda::std::byte));
-        ARISTOS_CHECK_PREDICATE(sHeap != nullptr, "nvshmem_calloc failed");
-        auto* sHb = static_cast<cuda::std::byte*>(sHeap);
+        // Note every symmetric memory allocation's size has to be identical across all PEs
+        auto* flags = static_cast<flagsType*>(nvshmem_calloc(flagElems, sizeof(flagsType)));
+        auto* sHeap = static_cast<cuda::std::byte*>(nvshmem_calloc(heapElems, sizeof(Element)));
+        ARISTOS_ASSERT(flags != nullptr, "nvshmem_calloc failed");
+        ARISTOS_ASSERT(sHeap != nullptr, "nvshmem_calloc failed");
 
         // local bookkeeping memory
-        const auto bookSize = Bookkeeping::bookLength(ePgD.nLx, ePgD.epWorld);
-        cuda::std::byte* book;
-        CHECK_ERROR_EXIT(cudaMallocAsync(&book, bookSize, aristosStream));
-        CHECK_ERROR_EXIT(cudaMemsetAsync(book, 0, bookSize, aristosStream));
+        Task* bookTask = nullptr;
+        PEL* bookPEL = nullptr;
+        PLI* bookPLI = nullptr;
+        TPS* bookTPS = nullptr;
+        cuda::barrier<cuda::thread_scope_device>* bookDB = nullptr;
+        TQSignal* bookTQS = nullptr;
+        RingSoftmaxPayload* bookRSP = nullptr;
+        RingTopKPayload* bookRTP = nullptr;
+        ELI* bookELI = nullptr;
+        BookType* book = nullptr;
+        cuda::std::byte* bookElement = nullptr;
+
+        ARISTOS_CHECK_CUDA(cudaMallocAsync(&bookTask, Bookkeeping::tQlt(ePgD.nLx, ePgD.epWorld), aristosStream));
+        ARISTOS_CHECK_CUDA(cudaMallocAsync(&bookPEL, sizeof(PEL) * ACC::E::value, aristosStream));
+        ARISTOS_CHECK_CUDA(cudaMallocAsync(&bookPLI, sizeof(PLI) * ePgD.epWorld, aristosStream));
+        ARISTOS_CHECK_CUDA(cudaMallocAsync(&bookTPS, Bookkeeping::tPlt(), aristosStream));
+        ARISTOS_CHECK_CUDA(cudaMallocAsync(&bookDB, Bookkeeping::dBlt(), aristosStream));
+        ARISTOS_CHECK_CUDA(cudaMallocAsync(&bookTQS, Bookkeeping::pDBlt(), aristosStream));
+        ARISTOS_CHECK_CUDA(cudaMallocAsync(&bookRSP, Bookkeeping::rSlt(), aristosStream));
+        ARISTOS_CHECK_CUDA(cudaMallocAsync(&bookRTP, Bookkeeping::rTlt(), aristosStream));
+        ARISTOS_CHECK_CUDA(cudaMallocAsync(&bookELI, Bookkeeping::eLlt(), aristosStream));
+        ARISTOS_CHECK_CUDA(cudaMallocAsync(&book, Bookkeeping::b4lt(ePgD.nLx, ePgD.epWorld), aristosStream));
+        ARISTOS_CHECK_CUDA(cudaMallocAsync(&bookElement, Bookkeeping::xMlt(ePgD.nLx, ePgD.epWorld), aristosStream));
         // Initialize bookkeeping
-        auto* flags = static_cast<flagsType*>(sHeap);
-        static_assert(alignof(flagsType) % alignof(ACC::Element) == 0);
-        auto* wSHeap = sHb + flagBytes;
+        ARISTOS_CHECK_CUDA(cudaMemsetAsync(book, 0, Bookkeeping::b4lt(ePgD.nLx, ePgD.epWorld),
+            aristosStream));
+        ARISTOS_CHECK_CUDA(cudaMemsetAsync(bookTQS, 0, Bookkeeping::pDBlt(), aristosStream));
+        ARISTOS_CHECK_CUDA(cudaMemsetAsync(bookRSP, 0, Bookkeeping::rSlt(), aristosStream));
+        ARISTOS_CHECK_CUDA(cudaMemsetAsync(bookRTP, 0, Bookkeeping::rTlt(), aristosStream));
         hostBookkeeping = Bookkeeping{
-            sHb,
             flags,
-            wSHeap,
+            sHeap,
+            bookTask,
+            bookPEL,
+            bookPLI,
+            bookTPS,
+            bookDB,
+            bookTQS,
+            bookRSP,
+            bookRTP,
+            bookELI,
             book,
+            bookElement,
             ePgD
         };
         // copy device-wide barrier
         const auto hB = new cuda::barrier<cuda::thread_scope_device>{blocks};
-        CHECK_ERROR_EXIT(cudaMemcpyAsync(hostBookkeeping.dB(), hB,
+        ARISTOS_CHECK_CUDA(cudaMemcpyAsync(hostBookkeeping.dB(), hB,
             sizeof(cuda::barrier<cuda::thread_scope_device>),
             cudaMemcpyHostToDevice, aristosStream));
-        CHECK_ERROR_EXIT(cudaMemcpyToSymbolAsync(bookkeeping, &hostBookkeeping, sizeof(Bookkeeping), 0,
+        ARISTOS_CHECK_CUDA(cudaMemcpyToSymbolAsync(bookkeeping, &hostBookkeeping, sizeof(Bookkeeping), 0,
             cudaMemcpyHostToDevice, aristosStream));
 
         // reuse pre-allocated memory for device data structures
@@ -379,7 +408,7 @@ namespace aristos{
         for (uint i = 0; i < E; ++i) {
             const auto ePrank = ePs[i];
             const auto gRank = pT[ePrank];
-            auto* rSHeap = CAST_TO(cuda::std::byte, nvshmem_ptr(wSHeap, gRank));
+            auto* rSHeap = CAST_TO(cuda::std::byte, nvshmem_ptr(sHeap, gRank));
             auto* rFlags = CAST_TO(flagsType, nvshmem_ptr(flags, gRank));
             rFlags = rFlags == nullptr ? flags : rFlags;
             const auto xLi = scratch[ePrank]++;
@@ -430,23 +459,23 @@ namespace aristos{
             pEL[i] = pel;
         }
 
-        CHECK_ERROR_EXIT(cudaMemcpyAsync(hostBookkeeping.pEL(), pEL,
+        ARISTOS_CHECK_CUDA(cudaMemcpyAsync(hostBookkeeping.pEL(), pEL,
             sizeof(PEL) * E, cudaMemcpyHostToDevice, aristosStream));
-        CHECK_ERROR_EXIT(cudaMemcpyAsync(hostBookkeeping.pL(), pLI,
+        ARISTOS_CHECK_CUDA(cudaMemcpyAsync(hostBookkeeping.pL(), pLI,
             sizeof(PLI) * ePgD.epWorld,
             cudaMemcpyHostToDevice, aristosStream));
-        CHECK_ERROR_EXIT(cudaMemcpyAsync(hostBookkeeping.eL(), eLI,
+        ARISTOS_CHECK_CUDA(cudaMemcpyAsync(hostBookkeeping.eL(), eLI,
             sizeof(ELI) * E,
             cudaMemcpyHostToDevice, aristosStream));
-        CHECK_ERROR_EXIT(cudaMemcpyAsync(hostBookkeeping.lX(), lxI,
+        ARISTOS_CHECK_CUDA(cudaMemcpyAsync(hostBookkeeping.lX(), lxI,
             sizeof(LXI) * ePgD.nLx,
             cudaMemcpyHostToDevice, aristosStream));
-        CHECK_ERROR_EXIT(cudaMemcpyAsync(hostBookkeeping.ssFc(), &current,
+        ARISTOS_CHECK_CUDA(cudaMemcpyAsync(hostBookkeeping.ssFc(), &current,
             sizeof(BookType), cudaMemcpyHostToDevice, aristosStream));
-        CHECK_ERROR_EXIT(cudaMemcpyAsync(hostBookkeeping.tIx(), tileIndices,
+        ARISTOS_CHECK_CUDA(cudaMemcpyAsync(hostBookkeeping.tIx(), tileIndices,
             sizeof(uint) * current, cudaMemcpyHostToDevice, aristosStream));
-        CHECK_ERROR_EXIT(cudaPeekAtLastError());
-        CHECK_ERROR_EXIT(cudaStreamSynchronize(aristosStream));
+        ARISTOS_CHECK_CUDA(cudaPeekAtLastError());
+        ARISTOS_CHECK_CUDA(cudaStreamSynchronize(aristosStream));
         delete hB;
         std::free(mP);
     }
@@ -456,14 +485,14 @@ namespace aristos{
     void distributedInit<EP::no>() {
         constexpr auto bookSize = Bookkeeping::bookLength();
         cuda::std::byte* book;
-        CHECK_ERROR_EXIT(cudaMallocAsync(&book, bookSize, aristosStream));
-        CHECK_ERROR_EXIT(cudaMemsetAsync(&book, 0, bookSize, aristosStream));
+        ARISTOS_CHECK_CUDA(cudaMallocAsync(&book, bookSize, aristosStream));
+        ARISTOS_CHECK_CUDA(cudaMemsetAsync(&book, 0, bookSize, aristosStream));
         hostBookkeeping = Bookkeeping{};
-        CHECK_ERROR_EXIT(cudaMemcpyToSymbolAsync(bookkeeping, &hostBookkeeping,
+        ARISTOS_CHECK_CUDA(cudaMemcpyToSymbolAsync(bookkeeping, &hostBookkeeping,
             sizeof(Bookkeeping), 0,
             cudaMemcpyHostToDevice, aristosStream));
-        CHECK_ERROR_EXIT(cudaPeekAtLastError());
-        CHECK_ERROR_EXIT(cudaStreamSynchronize(aristosStream));
+        ARISTOS_CHECK_CUDA(cudaPeekAtLastError());
+        ARISTOS_CHECK_CUDA(cudaStreamSynchronize(aristosStream));
     }
 
     // Should be called before loading the model
@@ -472,7 +501,7 @@ namespace aristos{
         #if ARISTOS_NVTX
         aristosRange initRange{__PRETTY_FUNCTION__};
         #endif
-        ARISTOS_CHECK_PREDICATE(!isInitialized, "Already Initialized");
+        ARISTOS_ASSERT(!isInitialized, "Already Initialized");
         using GPUType = aristos::Hardware<ARISTOS_ARCH, 255>;
         constexpr auto blocks = GPUType::OS::processorBlocks::value;
         static_assert(ARISTOS_ARCH >= 700, "Volta and above is required!");
@@ -486,13 +515,13 @@ namespace aristos{
 
     __host__ __forceinline__
     void setDevice() {
-        ARISTOS_CHECK_PREDICATE(isInitialized, "Not initialized!");
-        CHECK_ERROR_EXIT(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
+        ARISTOS_ASSERT(isInitialized, "Not initialized!");
+        ARISTOS_CHECK_CUDA(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
     }
 
     __host__ __forceinline__
     auto getRank() {
-        ARISTOS_CHECK_PREDICATE(isInitialized, "Not initialized!");
+        ARISTOS_ASSERT(isInitialized, "Not initialized!");
         return nvshmem_my_pe();
     }
 
@@ -501,16 +530,28 @@ namespace aristos{
         #if ARISTOS_NVTX
         aristosRange finalRange{__PRETTY_FUNCTION__};
         #endif
-        ARISTOS_CHECK_PREDICATE(isInitialized, "Not initialized!");
+        ARISTOS_ASSERT(isInitialized, "Not initialized!");
         isInitialized = false;
-        CHECK_ERROR_EXIT(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
-        CHECK_ERROR_EXIT(cudaFreeAsync(hostBookkeeping.book, aristosStream));
+        ARISTOS_CHECK_CUDA(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
+        ARISTOS_CHECK_CUDA(cudaFreeAsync(hostBookkeeping.bookTask, aristosStream));
+        ARISTOS_CHECK_CUDA(cudaFreeAsync(hostBookkeeping.bookPEL, aristosStream));
+        ARISTOS_CHECK_CUDA(cudaFreeAsync(hostBookkeeping.bookPLI, aristosStream));
+        ARISTOS_CHECK_CUDA(cudaFreeAsync(hostBookkeeping.bookTPS, aristosStream));
+        ARISTOS_CHECK_CUDA(cudaFreeAsync(hostBookkeeping.bookDB, aristosStream));
+        ARISTOS_CHECK_CUDA(cudaFreeAsync(hostBookkeeping.bookTQS, aristosStream));
+        ARISTOS_CHECK_CUDA(cudaFreeAsync(hostBookkeeping.bookRSP, aristosStream));
+        ARISTOS_CHECK_CUDA(cudaFreeAsync(hostBookkeeping.bookRTP, aristosStream));
+        ARISTOS_CHECK_CUDA(cudaFreeAsync(hostBookkeeping.bookELI, aristosStream));
+        ARISTOS_CHECK_CUDA(cudaFreeAsync(hostBookkeeping.book, aristosStream));
+        ARISTOS_CHECK_CUDA(cudaPeekAtLastError());
+        ARISTOS_CHECK_CUDA(cudaFreeAsync(hostBookkeeping.bookElement, aristosStream));
         // Below ensures all work is done before deallocating via the external API
-        CHECK_ERROR_EXIT(cudaStreamSynchronize(aristosStream));
-        nvshmem_free(hostBookkeeping.symHeap);
+        ARISTOS_CHECK_CUDA(cudaStreamSynchronize(aristosStream));
+        nvshmem_free(hostBookkeeping.flags);
+        nvshmem_free(hostBookkeeping.sHeap);
         nvshmem_finalize();
-        CHECK_ERROR_EXIT(cudaPeekAtLastError());
-        CHECK_ERROR_EXIT(cudaStreamSynchronize(aristosStream));
+        ARISTOS_CHECK_CUDA(cudaPeekAtLastError());
+        ARISTOS_CHECK_CUDA(cudaStreamSynchronize(aristosStream));
     }
 }
 #endif //BOOTSTRAP_CUH

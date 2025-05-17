@@ -34,15 +34,15 @@ namespace aristos {
         /// Logging
         cudaDeviceProp prop{};
         int dev_count = 0;
-        CHECK_ERROR_EXIT(cudaGetDeviceCount(&dev_count));
-        CHECK_ERROR_EXIT(cudaGetDeviceProperties(&prop, localRank));
+        ARISTOS_CHECK_CUDA(cudaGetDeviceCount(&dev_count));
+        ARISTOS_CHECK_CUDA(cudaGetDeviceProperties(&prop, localRank));
         if (globalRank == 0) {
             fmt::println("Starting Topology Discovery...");
         }
         fmt::println("GlobalRank: {}, LocalRank: {}, Device: {}, Bus ID: {}, Devices: {}",
             globalRank, localRank, prop.name, prop.pciBusID, dev_count);
 
-        CHECK_ERROR_EXIT(cudaSetDevice(localRank));
+        ARISTOS_CHECK_CUDA(cudaSetDevice(localRank));
         const size_t heapBytes = n * sizeof(flagsType) + ax * sizeof(floatPair) + sizeof(WorkerAttribute) * n +
             sizeof(uint) * 2 + n * BETA_BUFFER;
         auto* symHeap = nvshmem_calloc(heapBytes, sizeof(cuda::std::byte));
@@ -82,13 +82,13 @@ namespace aristos {
             self, sHeap, flags, results, syncArray, workerAttributes, seqNo);
             seqNo++;
         }
-        CHECK_ERROR_EXIT(cudaMemsetAsync(results, 0, sizeof(floatPair) * n, aristosStream));
-        CHECK_ERROR_EXIT(cudaEventRecord(start, aristos::aristosStream));
+        ARISTOS_CHECK_CUDA(cudaMemsetAsync(results, 0, sizeof(floatPair) * n, aristosStream));
+        ARISTOS_CHECK_CUDA(cudaEventRecord(start, aristos::aristosStream));
         topology::discover<<<blocks, threads, sharedSize, aristosStream>>>(n, globalRank, isRemotePresent,
             self, sHeap, flags, results, syncArray, workerAttributes, seqNo);
-        CHECK_ERROR_EXIT(cudaEventRecord(stop, aristos::aristosStream));
-        CHECK_ERROR_EXIT(cudaPeekAtLastError());
-        CHECK_ERROR_EXIT(cudaStreamSynchronize(aristosStream));
+        ARISTOS_CHECK_CUDA(cudaEventRecord(stop, aristos::aristosStream));
+        ARISTOS_CHECK_CUDA(cudaPeekAtLastError());
+        ARISTOS_CHECK_CUDA(cudaStreamSynchronize(aristosStream));
         cudaEventElapsedTime(&duration, start, stop);
         auto* aP = std::calloc(ax * sizeof(floatPair) + n * sizeof(WorkerAttribute),
             sizeof(cuda::std::byte));
@@ -97,10 +97,10 @@ namespace aristos {
         auto* attributesPtr = CAST_TO(WorkerAttribute, adjMatrix + ax);
 
         /// Epilogue
-        CHECK_ERROR_EXIT(cudaMemcpyAsync(aP, adj, ax * sizeof(floatPair) + n * sizeof(WorkerAttribute),
+        ARISTOS_CHECK_CUDA(cudaMemcpyAsync(aP, adj, ax * sizeof(floatPair) + n * sizeof(WorkerAttribute),
             cudaMemcpyDeviceToHost, aristosStream));
-        CHECK_ERROR_EXIT(cudaPeekAtLastError());
-        CHECK_ERROR_EXIT(cudaStreamSynchronize(aristosStream));
+        ARISTOS_CHECK_CUDA(cudaPeekAtLastError());
+        ARISTOS_CHECK_CUDA(cudaStreamSynchronize(aristosStream));
 
         std::vector<std::array<float, 2>> temp(n);
         std::vector<float> aT(n);
