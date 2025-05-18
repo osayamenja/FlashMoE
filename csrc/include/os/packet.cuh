@@ -268,8 +268,8 @@ namespace aristos::packet {
                 for (uint i = 0; i < tL; ++i) {
                     bEC[laneID + i * WARP_SIZE] = 0U;
                 }
-                if constexpr (ACC::E::value % WARP_SIZE != 0) {
-                    if (laneID < ACC::E::value % WARP_SIZE) {
+                if constexpr (constexpr auto residue = ACC::E::value % WARP_SIZE; residue != 0) {
+                    if (laneID < residue) {
                         bEC[laneID + tL * WARP_SIZE] = 0U;
                     }
                 }

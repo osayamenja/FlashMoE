@@ -803,7 +803,7 @@ namespace aristos{
                     cute::ceil_div(TCM * ACC::TN::value, WARP_SIZE) +
                     cute::ceil_div(TCM * ACC::E::value, SUBSCRIBERS) * ACC::TNx::value;
             const auto sT = tPS * SUBSCRIBERS;
-            return sizeof(Task) * (sT + prT);
+            return sT + prT;
         }
         __host__ __device__ __forceinline__
         auto* pEL() const {
@@ -811,7 +811,7 @@ namespace aristos{
         }
         __host__ __forceinline__
         constexpr static auto pELlt() {
-            return sizeof(PEL) * ACC::E::value;
+            return ACC::E::value;
         }
         __host__ __device__ __forceinline__
         auto* pL() const {
@@ -819,7 +819,7 @@ namespace aristos{
         }
         __host__ __forceinline__
         constexpr static auto pLlt(const unsigned int& _world) {
-            return _world * sizeof(PLI);
+            return _world;
         }
         __device__ __forceinline__
         auto* tP() const {
@@ -827,7 +827,7 @@ namespace aristos{
         }
         __host__ __forceinline__
         constexpr static auto tPlt() {
-            return sizeof(TPS) * ACC::E::value * ACC::pEC::value;
+            return ACC::E::value * ACC::pEC::value;
         }
         /// Device-wide barrier
         __host__ __device__ __forceinline__
@@ -836,7 +836,7 @@ namespace aristos{
         }
         __host__ __forceinline__
         constexpr static auto dBlt() {
-            return sizeof(cuda::barrier<cuda::thread_scope_device>);
+            return 1;
         }
 
         /// processors' doorbell
@@ -846,7 +846,7 @@ namespace aristos{
         }
         __host__ __forceinline__
         constexpr static auto pDBlt() {
-            return sizeof(TQSignal) * ACC::PeakHardware::OS::processorBlocks::value;
+            return ACC::PeakHardware::OS::processorBlocks::value;
         }
 
         __device__ __forceinline__
@@ -855,7 +855,8 @@ namespace aristos{
         }
         __host__ __forceinline__
         constexpr static auto rSlt() {
-            return sizeof(RingSoftmaxPayload) * ACC::S::value * ACC::TPX::value;
+            return ACC::GRL::value == GateReductionLevel::multiBlock ?
+                ACC::S::value * ACC::TPX::value : 0U;
         }
         /// Ring top k flags
         /// Two sets for pipelining termination phase of round i and initial phase of round i + 1
@@ -865,7 +866,8 @@ namespace aristos{
         }
         __host__ __forceinline__
         constexpr static auto rTlt() {
-            return sizeof(RingTopKPayload) * 2 * ACC::S::value * ACC::TPX::value;
+            return ACC::GRL::value == GateReductionLevel::multiBlock ?
+                2 * ACC::S::value * ACC::TPX::value : 0U;
         }
         /// Expert Lookup
         /// expert index -> ELI
@@ -875,7 +877,7 @@ namespace aristos{
         }
         __host__ __forceinline__
         constexpr static auto eLlt() {
-            return sizeof(ELI) * ACC::E::value;
+            return ACC::E::value;
         }
         static_assert(sizeof(LXI) == sizeof(BookType) && alignof(LXI) == alignof(BookType));
         __host__ __device__ __forceinline__
@@ -953,10 +955,10 @@ namespace aristos{
             const auto ilt = 1 + 1 + _nLx + blocks + 2 * (gtQCl + ACC::E::value) +
                 ACC::E::value * ACC::TCM::value * ACC::TNx::value;
             static_assert(sizeof(mp_t) == sizeof(BookType) && alignof(mp_t) == alignof(BookType));
-            return sizeof(BookType) * (flt + ilt);
+            return flt + ilt;
         }
         constexpr static auto b4lt() {
-            return ACC::TSZ::value * sizeof(BookType);
+            return ACC::TSZ::value;
         }
 
         // Intermediate buffer
@@ -965,18 +967,26 @@ namespace aristos{
             return bookElement;
         }
         constexpr static auto xMlt(const unsigned int& _nLx, const unsigned int& _world) {
-            return sizeof(ACC::Element) * (_world * _nLx * ACC::pEC::value * ACC::P::value);
+            return _world * _nLx * ACC::pEC::value * ACC::P::value;
         }
         constexpr static auto xMlt() {
-            return sizeof(ACC::Element) * (ACC::S::value * ACC::P::value);
+            return ACC::S::value * ACC::P::value;
         }
 
         /// Expository purposes
         __host__ __forceinline__
         constexpr static unsigned long int bookLength(const unsigned int& _nLx, const unsigned int& _world) {
-            return tQlt(_nLx, _world) + pELlt() + pLlt(_world) +
-                tPlt() + dBlt() + pDBlt() + rSlt() + rTlt() + eLlt() +
-                    b4lt(_nLx, _world) + xMlt(_nLx, _world);
+            return  sizeof(Task) * tQlt(_nLx, _world) +
+                    sizeof(PEL) * pELlt() +
+                    sizeof(PLI) * pLlt(_world) +
+                    sizeof(TPS) * tPlt() +
+                    sizeof(cuda::barrier<cuda::thread_scope_device>) * dBlt() +
+                    sizeof(TQSignal) * pDBlt() +
+                    sizeof(RingSoftmaxPayload) * rSlt() +
+                    sizeof(RingTopKPayload) * rTlt() +
+                    sizeof(ELI) * eLlt() +
+                    sizeof(BookType) * b4lt(_nLx, _world) +
+                    sizeof(ACC::Element) * xMlt(_nLx, _world);
         }
 
         /// For fffn

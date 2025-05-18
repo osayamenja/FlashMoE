@@ -347,23 +347,27 @@ namespace aristos{
         BookType* book = nullptr;
         cuda::std::byte* bookElement = nullptr;
 
-        ARISTOS_CHECK_CUDA(cudaMallocAsync(&bookTask, Bookkeeping::tQlt(ePgD.nLx, ePgD.epWorld), aristosStream));
+        ARISTOS_CHECK_CUDA(cudaMallocAsync(&bookTask, sizeof(Task) * Bookkeeping::tQlt(ePgD.nLx, ePgD.epWorld), aristosStream));
         ARISTOS_CHECK_CUDA(cudaMallocAsync(&bookPEL, sizeof(PEL) * ACC::E::value, aristosStream));
         ARISTOS_CHECK_CUDA(cudaMallocAsync(&bookPLI, sizeof(PLI) * ePgD.epWorld, aristosStream));
-        ARISTOS_CHECK_CUDA(cudaMallocAsync(&bookTPS, Bookkeeping::tPlt(), aristosStream));
-        ARISTOS_CHECK_CUDA(cudaMallocAsync(&bookDB, Bookkeeping::dBlt(), aristosStream));
-        ARISTOS_CHECK_CUDA(cudaMallocAsync(&bookTQS, Bookkeeping::pDBlt(), aristosStream));
-        ARISTOS_CHECK_CUDA(cudaMallocAsync(&bookRSP, Bookkeeping::rSlt(), aristosStream));
-        ARISTOS_CHECK_CUDA(cudaMallocAsync(&bookRTP, Bookkeeping::rTlt(), aristosStream));
-        ARISTOS_CHECK_CUDA(cudaMallocAsync(&bookELI, Bookkeeping::eLlt(), aristosStream));
-        ARISTOS_CHECK_CUDA(cudaMallocAsync(&book, Bookkeeping::b4lt(ePgD.nLx, ePgD.epWorld), aristosStream));
-        ARISTOS_CHECK_CUDA(cudaMallocAsync(&bookElement, Bookkeeping::xMlt(ePgD.nLx, ePgD.epWorld), aristosStream));
-        // Initialize bookkeeping
-        ARISTOS_CHECK_CUDA(cudaMemsetAsync(book, 0, Bookkeeping::b4lt(ePgD.nLx, ePgD.epWorld),
+        ARISTOS_CHECK_CUDA(cudaMallocAsync(&bookTPS, sizeof(TPS) * Bookkeeping::tPlt(), aristosStream));
+        ARISTOS_CHECK_CUDA(cudaMallocAsync(&bookDB, sizeof(cuda::barrier<cuda::thread_scope_device>) *
+            Bookkeeping::dBlt(), aristosStream));
+        ARISTOS_CHECK_CUDA(cudaMallocAsync(&bookTQS, sizeof(TQSignal) * Bookkeeping::pDBlt(),
             aristosStream));
-        ARISTOS_CHECK_CUDA(cudaMemsetAsync(bookTQS, 0, Bookkeeping::pDBlt(), aristosStream));
-        ARISTOS_CHECK_CUDA(cudaMemsetAsync(bookRSP, 0, Bookkeeping::rSlt(), aristosStream));
-        ARISTOS_CHECK_CUDA(cudaMemsetAsync(bookRTP, 0, Bookkeeping::rTlt(), aristosStream));
+        ARISTOS_CHECK_CUDA(cudaMallocAsync(&bookRSP, sizeof(RingSoftmaxPayload) * Bookkeeping::rSlt(),
+            aristosStream));
+        ARISTOS_CHECK_CUDA(cudaMallocAsync(&bookRTP, sizeof(RingTopKPayload) * Bookkeeping::rTlt(),
+            aristosStream));
+        ARISTOS_CHECK_CUDA(cudaMallocAsync(&bookELI, sizeof(ELI) * Bookkeeping::eLlt(), aristosStream));
+        ARISTOS_CHECK_CUDA(cudaMallocAsync(&book, sizeof(BookType) * Bookkeeping::b4lt(ePgD.nLx, ePgD.epWorld), aristosStream));
+        ARISTOS_CHECK_CUDA(cudaMallocAsync(&bookElement, sizeof(ACC::Element) * Bookkeeping::xMlt(ePgD.nLx, ePgD.epWorld), aristosStream));
+        // Initialize bookkeeping
+        ARISTOS_CHECK_CUDA(cudaMemsetAsync(book, 0, sizeof(BookType) * Bookkeeping::b4lt(ePgD.nLx, ePgD.epWorld),
+            aristosStream));
+        ARISTOS_CHECK_CUDA(cudaMemsetAsync(bookTQS, 0, sizeof(TQSignal) * Bookkeeping::pDBlt(), aristosStream));
+        ARISTOS_CHECK_CUDA(cudaMemsetAsync(bookRSP, 0, sizeof(RingSoftmaxPayload) * Bookkeeping::rSlt(), aristosStream));
+        ARISTOS_CHECK_CUDA(cudaMemsetAsync(bookRTP, 0, sizeof(RingTopKPayload) * Bookkeeping::rTlt(), aristosStream));
         hostBookkeeping = Bookkeeping{
             flags,
             sHeap,

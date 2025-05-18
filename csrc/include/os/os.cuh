@@ -116,8 +116,8 @@ namespace aristos::os {
                 for (uint i = 0; i < tL; ++i) {
                     bEC[threadIdx.x + i * WARP_SIZE] = 0U;
                 }
-                if constexpr (ACC::E::value % WARP_SIZE != 0) {
-                    if (threadIdx.x < ACC::E::value % WARP_SIZE) {
+                if constexpr (constexpr auto residue = ACC::E::value % WARP_SIZE; residue != 0) {
+                    if (threadIdx.x < residue) {
                         bEC[threadIdx.x + tL * WARP_SIZE] = 0U;
                     }
                 }

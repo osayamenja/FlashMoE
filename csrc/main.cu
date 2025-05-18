@@ -60,7 +60,7 @@ void runOS() {
         cudaMemcpyHostToDevice,
         aristos::aristosStream));
     float timed = 0;
-    aristos::moe::forwardHostBench<1, 1>(p, p + dZ * sizeof(Element), timed);
+    aristos::moe::forwardHostBench<50, 100>(p, p + dZ * sizeof(Element), timed);
     printf("epRank: %u took %.2fms\n", aristos::hostBookkeeping.rank, timed);
     ARISTOS_CHECK_CUDA(cudaPeekAtLastError());
     aristos::finalize();
