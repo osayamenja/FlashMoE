@@ -103,29 +103,36 @@ namespace aristos{
     }
 
     __host__ __forceinline__
-    void discoverTopology(void* hAp, const uint& n, const uint& globalRank, const WorkerAttribute& lWa) {
+    void discoverTopology(void* const& hAp, const uint& n, const uint& globalRank,
+        const WorkerAttribute& lWa, WorkerAttribute* __restrict__ const& wAp) {
         #if ARISTOS_NVTX
         aristosRange discRange{__func__};
         #endif
         const auto aD = n * n;
-        const size_t heapBytes = n * sizeof(flagsType) +
-                aD * sizeof(floatPair) +
-                sizeof(WorkerAttribute) * n +
-                sizeof(uint) * 2 +
-                n * BETA_BUFFER;
-        auto* symHeap = nvshmem_calloc(heapBytes, sizeof(cuda::std::byte));
+        const auto heapBytes = n * BETA_BUFFER;
+        const auto sBkz =  n + aD;
+        WorkerAttribute* attributes;
+        cuda::barrier<cuda::thread_scope_device>* dvB;
+        ARISTOS_CHECK_CUDA(cudaMallocAsync(&attributes, sizeof(WorkerAttribute) * n,
+            aristosStream));
+        ARISTOS_CHECK_CUDA(cudaMallocAsync(&dvB,
+            sizeof(cuda::barrier<cuda::thread_scope_device>), aristosStream));
+        const auto hB = new cuda::barrier<cuda::thread_scope_device>{ARISTOS_STATIC_SBZ};
+        ARISTOS_CHECK_CUDA(cudaMemcpyAsync(dvB, hB,
+            sizeof(cuda::barrier<cuda::thread_scope_device>),
+            cudaMemcpyHostToDevice, aristosStream));
+        static_assert(sizeof(floatPair) == sizeof(flagsType) &&
+            alignof(floatPair) == sizeof(flagsType));
+        auto* symBook = nvshmem_calloc(sBkz, sizeof(flagsType));
+        auto* symHeap = nvshmem_align(16, heapBytes);
+        ARISTOS_ASSERT(symBook != nullptr, "nvshmem_calloc failed");
+        ARISTOS_ASSERT(symHeap != nullptr, "nvshmem_align failed");
         // Pointer orchestration
         // Starting index of flags array
-        auto* flags = CAST_TO(flagsType, symHeap);
+        auto* flags = static_cast<flagsType*>(symBook);
         auto* adj = CAST_TO(floatPair, flags + n);
         // Navigate to our slice of the adjacency matrix
         auto* results = adj + globalRank * n;
-        // Repurpose a subset of the symmetric heap for local storage.
-        auto* attributes = CAST_TO(WorkerAttribute, adj + aD);
-        static_assert(sizeof(WorkerAttribute) >= sizeof(uint));
-        auto* syncArray = CAST_TO(uint, attributes + n);
-        // Starting index of heap
-        auto* sHeap = CAST_TO(cuda::std::byte, syncArray + 2);
         const auto remotePresent = [&n, &results] {
             for (int i = 0; i < n; ++i) {
                 if (nvshmem_ptr(results, i) == nullptr) return true;
@@ -136,12 +143,20 @@ namespace aristos{
         const auto sharedSize = n * (sizeof(floatPair) + sizeof(unsigned int));
         constexpr auto seqNo = 1U;
         topology::discover<<<ARISTOS_STATIC_SBZ, ARISTOS_BLOCK_SIZE, sharedSize, aristosStream>>>(n, globalRank,
-            isRemotePresent, lWa, sHeap, flags, results, syncArray, attributes, seqNo);
-        ARISTOS_CHECK_CUDA(cudaMemcpyAsync(hAp, adj, aD * sizeof(floatPair) + n * sizeof(uint),
+            isRemotePresent, lWa,
+            static_cast<cuda::std::byte*>(symHeap),
+            flags, results, dvB, attributes, seqNo);
+        ARISTOS_CHECK_CUDA(cudaMemcpyAsync(hAp, adj, aD * sizeof(floatPair),
             cudaMemcpyDeviceToHost, aristosStream));
+        ARISTOS_CHECK_CUDA(cudaMemcpyAsync(wAp, attributes, n * sizeof(WorkerAttribute),
+            cudaMemcpyDeviceToHost, aristosStream));
+        ARISTOS_CHECK_CUDA(cudaFreeAsync(attributes, aristosStream));
+        ARISTOS_CHECK_CUDA(cudaFreeAsync(dvB, aristosStream));
         ARISTOS_CHECK_CUDA(cudaPeekAtLastError());
         ARISTOS_CHECK_CUDA(cudaStreamSynchronize(aristosStream));
+        delete hB;
         nvshmem_free(symHeap);
+        nvshmem_free(symBook);
     }
 
     __host__ __forceinline__
@@ -262,9 +277,15 @@ namespace aristos{
         constexpr auto blocks = ACC::PeakHardware::blocks::value;
         using Element = ACC::Element;
         constexpr uint E = ACC::E::value;
+        // Below forces NVSHMEM to statically allocate memory, which is desirable
         uEI("NVSHMEM_DISABLE_CUDA_VMM", 1);
         // initialize communication backend
-        nvshmem_init();
+        {
+            #if ARISTOS_NVTX
+            aristosRange cR{"distributedInit::nvshmem_init()"};
+            #endif
+            nvshmem_init();
+        }
         const uint devId = nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE);
         ARISTOS_CHECK_CUDA(cudaSetDevice(devId));
         const auto globalWorld = nvshmem_n_pes();
@@ -282,9 +303,7 @@ namespace aristos{
                 (sizeof(uint) * (E * ACC::TCM::value * ACC::TNx::value));
         const auto pZ = cuda::std::max(dZ, aXz);
         const auto sZ = sizeof(uint) * (globalWorld + 2 * E) + sizeof(uint16_t) * globalWorld;
-
-        // allocate all memory in one go
-        auto* mP = static_cast<cuda::std::byte*>(std::calloc(pZ + sZ, sizeof(cuda::std::byte)));
+        auto* mP = static_cast<cuda::std::byte*>(std::calloc(pZ + sZ, sizeof(cuda::std::byte)));;
 
         // Pointer salami slicing
         auto* workers = CAST_TO(Worker, mP);
@@ -308,7 +327,7 @@ namespace aristos{
         estimateMemory(&wAp[rank]);
         mT(wAp + rank);
 
-        discoverTopology(aP, globalWorld, rank, wAp[rank]);
+        discoverTopology(aP, globalWorld, rank, wAp[rank], wAp);
         auto ePgD = EPG{};
         // The topology adjacency matrix is ready, let's map devices to optimal cooperative process groups
         const auto isFeasible = runDecider(&ePgD, experts, workers, ePWorkers, dTg, pT, pTs, ePs, ePsX,
@@ -330,9 +349,9 @@ namespace aristos{
         }
         // Note every symmetric memory allocation's size has to be identical across all PEs
         auto* flags = static_cast<flagsType*>(nvshmem_calloc(flagElems, sizeof(flagsType)));
-        auto* sHeap = static_cast<cuda::std::byte*>(nvshmem_calloc(heapElems, sizeof(Element)));
+        auto* sHeap = static_cast<cuda::std::byte*>(nvshmem_align(16, heapElems * sizeof(Element)));
         ARISTOS_ASSERT(flags != nullptr, "nvshmem_calloc failed");
-        ARISTOS_ASSERT(sHeap != nullptr, "nvshmem_calloc failed");
+        ARISTOS_ASSERT(sHeap != nullptr, "nvshmem_align failed");
 
         // local bookkeeping memory
         Task* bookTask = nullptr;
@@ -487,11 +506,13 @@ namespace aristos{
     template<>
     __host__ __forceinline__
     void distributedInit<EP::no>() {
-        constexpr auto bookSize = Bookkeeping::bookLength();
-        cuda::std::byte* book;
-        ARISTOS_CHECK_CUDA(cudaMallocAsync(&book, bookSize, aristosStream));
-        ARISTOS_CHECK_CUDA(cudaMemsetAsync(&book, 0, bookSize, aristosStream));
-        hostBookkeeping = Bookkeeping{};
+        BookType* book = nullptr;
+        cuda::std::byte* bookElement = nullptr;
+        ARISTOS_CHECK_CUDA(cudaMallocAsync(&book,
+            sizeof(BookType) * Bookkeeping::b4lt(), aristosStream));
+        ARISTOS_CHECK_CUDA(cudaMallocAsync(&bookElement,
+            sizeof(ACC::Element) * Bookkeeping::xMlt(), aristosStream));
+        hostBookkeeping = Bookkeeping{book, bookElement};
         ARISTOS_CHECK_CUDA(cudaMemcpyToSymbolAsync(bookkeeping, &hostBookkeeping,
             sizeof(Bookkeeping), 0,
             cudaMemcpyHostToDevice, aristosStream));

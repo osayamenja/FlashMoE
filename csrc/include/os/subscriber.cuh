@@ -16,6 +16,23 @@ namespace aristos::subscriber{
         final
     };
 
+    // Self-correct Termination Bound
+    template<
+        unsigned int TN = ACC::TN::value,
+        unsigned int TNx = ACC::TNx::value,
+        unsigned int TCM = ACC::TCM::value
+    >
+    __device__ __forceinline__
+    void sTB(unsigned int* __restrict__ const& taskCount,
+        unsigned int* __restrict__ const& status,
+        const unsigned int& peer, const unsigned int& nLx,
+        const unsigned int& peerTaskTiles = 0U) {
+        if (!atomicTAS<cuda::thread_scope_block>(status + peer)) {
+            const auto superfluous = (TN + TNx) * (nLx * TCM - peerTaskTiles);
+            atomicSub_block(taskCount, superfluous);
+        }
+    }
+
     // Below enforces consistency
     // We cannot decouple the API, unfortunately,
     // as the memory ordering mechanism is internal.
@@ -104,7 +121,7 @@ namespace aristos::subscriber{
                             */
                             atomicCAS_system(CAST_TO(ull_t, flags + flagIdx), SignalConstants::ground, signal);
                             const auto peer = flagIdx / nLx;
-                            packet::sTB(taskCount, status, peer, nLx);
+                            sTB(taskCount, status, peer, nLx);
                             // set visited bit
                             visitedSet.set(vIdx);
                         }
@@ -132,24 +149,27 @@ namespace aristos::subscriber{
                     const auto* packet = heap::advance<0, 1>(dA.sHeap, peerIdx, myLocalExIdx);
                     if (!pLI.isRemote) {
                         if (!laneId) {
+                            // self-correct the termination bound
+                            sTB(taskCount, status, peerIdx, nLx, sP->totalTilesM);
                             __threadfence_system();
                         }
                         __syncwarp();
                         auto* nFlags = pLI.remoteSFlags + gfSfC +
                             lXI.expertIndex * (ACC::TCM::value * ACC::TNx::value);
-                        fPd(dA, pLI.remoteSHeap, nFlags, packet, status, taskCount, sP->routedTokens,
-                                sP->totalTilesM, myLocalExIdx, pGB, weights, bias, peerIdx, pLI.pe,
-                                nLx, laneId, ltQHead, tQHead);
+                        fPd(dA, pLI.remoteSHeap, nFlags, packet, sP->routedTokens,
+                                myLocalExIdx, pGB, weights, bias, peerIdx, pLI.pe,
+                                laneId, ltQHead, tQHead);
                     }
                     else {
                         if (!laneId) {
+                            sTB(taskCount, status, peerIdx, nLx, sP->totalTilesM);
                             eMC(sSeqBit, localSeqBit);
                         }
                         __syncwarp();
                         auto* nFlags = dA.sFlags + gfSfC +
                                 lXI.expertIndex * (ACC::TCM::value * ACC::TNx::value);
-                        fRd(dA, dA.sHeap, nFlags, packet, status, taskCount, sP->routedTokens, sP->totalTilesM,
-                                myLocalExIdx, pGB, weights, bias, peerIdx, pLI.pe, nLx, laneId, ltQHead, tQHead);
+                        fRd(dA, dA.sHeap, nFlags, packet, sP->routedTokens,
+                                myLocalExIdx, pGB, weights, bias, peerIdx, pLI.pe, laneId, ltQHead, tQHead);
                     }
                 }
             }

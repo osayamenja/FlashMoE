@@ -767,6 +767,9 @@ namespace aristos{
             }
         }
 
+        Bookkeeping(BookType* const& _book, cuda::std::byte* const& _bookElement) :
+        book(_book), bookElement(_bookElement){}
+
         template<unsigned int tileDimension>
         __host__ __device__ __forceinline__
         static constexpr unsigned int pad(const unsigned int& dimension) {

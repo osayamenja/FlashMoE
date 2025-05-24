@@ -292,23 +292,6 @@ namespace aristos::packet {
         sHeap(_sHeap), tQ(_tQ), sFlags(_flags),
         nLx(bookkeeping.nLx), epRank(bookkeeping.rank) {}
     };
-
-    // Self-correct Termination Bound
-    template<
-        unsigned int TN = ACC::TN::value,
-        unsigned int TNx = ACC::TNx::value,
-        unsigned int TCM = ACC::TCM::value
-    >
-    __device__ __forceinline__
-    void sTB(unsigned int* __restrict__ const& taskCount,
-        unsigned int* __restrict__ const& status,
-        const unsigned int& peer, const unsigned int& nLx,
-        const unsigned int& peerTaskTiles = 0U) {
-        if (!atomicTAS<cuda::thread_scope_block>(status + peer)) {
-            const auto superfluous = (TN + TNx) * (nLx * TCM - peerTaskTiles);
-            atomicSub_block(taskCount, superfluous);
-        }
-    }
     /// Decodes a single packet from the initial stage
     template<
         PacketStage s,
@@ -323,16 +306,13 @@ namespace aristos::packet {
             cuda::std::byte* const& sHeap,
             flagsType* const& flags,
             const cuda::std::byte* const& packet,
-            unsigned int* __restrict__ const& status,
-            unsigned int* __restrict__ const& taskCount,
-            uint const& routedTokens, uint16_t const& globalTaskTiles,
+            uint const& routedTokens,
             unsigned int const& localExpertIdx,
             cuda::std::byte* __restrict__ const& pGB, //postGEMM buffer
             const cuda::std::array<const cuda::std::byte*, GEMMs>& weights,
             const cuda::std::array<const cuda::std::byte*, GEMMs>& bias,
             unsigned int const& peer, // relative to the EP group
             unsigned int const& gPeer, // relative to the global group, needed for network operations
-            const unsigned int& nLx,
             const uint& laneId,
             unsigned int& lTQHead,
             unsigned int* __restrict__ const& tQHead) const {
@@ -341,9 +321,6 @@ namespace aristos::packet {
             const auto fTilesM = routedTokens / BLOCK_M;
             // pad here to meet tile requirements
             const auto padM = Bookkeeping::pad<BLOCK_M>(routedTokens);
-            // self-correct termination condition
-            sTB(taskCount, status, peer, nLx, globalTaskTiles);
-
             // expert, peer offset
             const auto sO = ACC::TCM::value * (peer * dA.nLx + localExpertIdx);
             cuda::std::array<cuda::std::byte*, GEMMs> taskResults{};
