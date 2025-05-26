@@ -40,7 +40,8 @@ namespace aristos::topology{
         const unsigned int& id, const Put& put, const unsigned int& peerIdx,
         const unsigned int& lBid = 0, const unsigned int& nb = 1) {
         ull_t start, end;
-        float duration = 0.0;
+        float t0 = 0.0f;
+        float t1 = 0.0f;
         bool isResidual = alphaBuf % nb != 0 && alphaBuf > nb && lBid == nb - 1 ;
         size_t buf = (lBid * cute::ceil_div(alphaBuf, nb) < alphaBuf) *
                 (!isResidual * cute::ceil_div(alphaBuf, nb)
@@ -51,12 +52,8 @@ namespace aristos::topology{
             asm volatile("mov.u64 %0, %%globaltimer;": "=l"(start)::);
             put(advancePtr(sHeap, rank) + (lBid * buf), advancePtr(sHeap, rank) + (lBid * buf), buf, peer);
             asm volatile("mov.u64 %0, %%globaltimer;": "=l"(end)::);
-            duration += static_cast<float>(end - start) / static_cast<float>(TOPO_LOOP_TRIP*NANO_TO_MILLI);
+            t0 += static_cast<float>(end - start) / static_cast<float>(TOPO_LOOP_TRIP*NANO_TO_MILLI);
         }
-        if(!id) {
-            remoteDurations[peerIdx].alpha = duration;
-        }
-        duration = 0.0;
         isResidual = betaBuf % nb != 0 && betaBuf > nb && lBid == nb - 1;
         buf = (lBid * cute::ceil_div(betaBuf, nb) < betaBuf) * (!isResidual * cute::ceil_div(betaBuf, nb)
                + isResidual * (betaBuf - (cute::ceil_div(betaBuf, nb) * (nb - 1))));
@@ -66,15 +63,17 @@ namespace aristos::topology{
             asm volatile("mov.u64 %0, %%globaltimer;": "=l"(start)::);
             put(advancePtr(sHeap, rank) + (lBid * buf), advancePtr(sHeap, rank) + (lBid * buf), buf, peer);
             asm volatile("mov.u64 %0, %%globaltimer;": "=l"(end)::);
-            duration += static_cast<float>(end - start) / static_cast<float>(TOPO_LOOP_TRIP*NANO_TO_MILLI);
+            t1 += static_cast<float>(end - start) / static_cast<float>(TOPO_LOOP_TRIP*NANO_TO_MILLI);
         }
         if(!id) {
             // Compute beta using slope intercept equation
-            remoteDurations[peerIdx].beta = ((duration - remoteDurations[peerIdx].alpha) / (TO_MB(betaBuf) - TO_MB(alphaBuf)));
-            remoteDurations[peerIdx].alpha = remoteDurations[peerIdx].alpha - (TO_MB(alphaBuf) * remoteDurations[peerIdx].beta);
+            const auto beta = ((t1 - t0) / (TO_MB(betaBuf) - TO_MB(alphaBuf)));
+            remoteDurations[peerIdx].beta = beta;
+            remoteDurations[peerIdx].alpha = t0 - (TO_MB(alphaBuf) * beta);
         }
     }
 
+    /// Expository purposes
     __device__ __forceinline__
     void singularBuilder(floatPair* __restrict__ const& scratchpad, const unsigned int& n,
         const unsigned int& rank,
@@ -82,7 +81,6 @@ namespace aristos::topology{
         uint64_t* __restrict__ const& flags,
         WorkerAttribute* __restrict__ const& workerAttributes, const WorkerAttribute& self, const uint seqNo) {
         for (unsigned int i = 1U; i < n; ++i) {
-            // TODO Parallelize across warps
             const auto peer = (rank + i) % n;
             measureTransfer(rank, sHeap, scratchpad, peer, threadIdx.x, nvshmemx_putmem_block, peer);
         }
@@ -110,10 +108,13 @@ namespace aristos::topology{
         const unsigned int numPeers, cuda::std::byte* __restrict__ const& sHeap,
         floatPair* __restrict__ const& results, uint64_t* __restrict__ const& flags,
         cuda::barrier<cuda::thread_scope_device>* const& dvB, const WorkerAttribute& self, const uint seqNo) {
-        for (unsigned int i = 0U; i < numPeers; ++i) {
-            // TODO Parallelize across warps
+        constexpr auto nW = 4;
+        const auto warpId = threadIdx.x / WARP_SIZE;
+        const auto laneId = threadIdx.x % WARP_SIZE;
+        for (unsigned int i = warpId; i < numPeers; i += nW) {
             const auto idx = (i + rank) % numPeers;
-            measureTransfer(rank, sHeap, scratchpad, peers[idx], threadIdx.x, nvshmemx_putmem_block, idx);
+            // use warp to get peak performance when the transport is IBGDA
+            measureTransfer(rank, sHeap, scratchpad, peers[idx], laneId, nvshmemx_putmem_warp, idx);
         }
         __syncthreads();
 
