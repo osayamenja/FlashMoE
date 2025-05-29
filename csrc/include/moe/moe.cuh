@@ -147,6 +147,9 @@ namespace aristos::moe{
         #endif
         ARISTOS_ASSERT(isInitialized, "Not initialized!");
         ARISTOS_CHECK_CUDA(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
+        cudaEvent_t start, stop;
+        ARISTOS_CHECK_CUDA(cudaEventCreate(&start));
+        ARISTOS_CHECK_CUDA(cudaEventCreate(&stop));
         /// Consume precompiled macros
         constexpr auto blocks = ACC::PeakHardware::blocks::value;
         constexpr auto threads = ACC::PeakHardware::OS::threads::value;
@@ -155,11 +158,8 @@ namespace aristos::moe{
             forward<<<blocks, threads, 0, aristosStream>>>(iP, oP, seqBit);
             seqBit = sbs::next(seqBit);
         }
-        cudaEvent_t start, stop;
-        ARISTOS_CHECK_CUDA(cudaEventCreate(&start));
-        ARISTOS_CHECK_CUDA(cudaEventCreate(&stop));
-        ARISTOS_CHECK_CUDA(cudaEventRecord(start, aristos::aristosStream));
         // Call forward pass
+        ARISTOS_CHECK_CUDA(cudaEventRecord(start, aristos::aristosStream));
         if constexpr (ACC::E::value > 1) {
             #pragma unroll
             for (uint i = 0; i < trials; ++i) {
