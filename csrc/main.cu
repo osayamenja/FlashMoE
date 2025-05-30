@@ -65,7 +65,7 @@ void runOS() {
         cudaMemcpyHostToDevice,
         aristos::aristosStream));
     float timed = 0;
-    aristos::moe::forwardHostBench<50, 100>(p, p + dZ * sizeof(Element), timed);
+    aristos::moe::forwardHostBench<32, 32>(p, p + dZ * sizeof(Element), timed);
     printf("epRank: %u took %.2fms\n", aristos::hostBookkeeping.rank, timed);
     ARISTOS_CHECK_CUDA(cudaPeekAtLastError());
     aristos::finalize();
@@ -93,7 +93,7 @@ void runReference() {
     ARISTOS_CHECK_CUDA(cudaMemsetAsync(p, 0, cZ * sizeof(float), aristos::aristosStream));
     auto* hP = std::calloc(cZ, sizeof(float));
     auto* fHp = static_cast<float*>(hP);
-    using ET = typename aristos::ToCDx<aristos::ACC::Element>::T;
+    using ET = float;
     auto* __restrict__ eHp = static_cast<ET*>(hP);
     auto* __restrict__ dP = static_cast<ET*>(p);
     {

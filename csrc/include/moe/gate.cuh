@@ -311,7 +311,6 @@ namespace aristos::gate {
             auto lSIdx = sIdx;
             bool shouldSweep = true;
 
-            #pragma unroll
             for (uint16_t i = 0; i < ACC::TK::value; ++i) {
                 const uint16_t batonPrefix = phases * (i / 2U); // needed as we alternate between two buffers
                 const uint16_t bPf = batonPrefix + 1U;

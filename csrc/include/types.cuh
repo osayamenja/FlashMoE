@@ -452,7 +452,7 @@ namespace aristos{
         using ActivationOp = AFunction<HIDDEN_ACT, GEA>::DT;
         using ActivationOpX = cute::identity;
         using PeakHardware = aristos::Hardware<ARISTOS_ARCH, 255>;
-        using Elems = cute::C<cute::max(BLOCK_N, PeakHardware::rScratch::value * sizeof(mp_t) / sizeof(Element))>;
+        using Elems = cute::C<cute::min(BLOCK_N, PeakHardware::rScratch::value * sizeof(mp_t) / sizeof(Element))>;
         using sharedSize = cute::C<PeakHardware::sharedMemory::value +
             (PeakHardware::spare::value > 2048 ? PeakHardware::spare::value - 2048 : PeakHardware::spare::value)>;
         using GSM = cute::C<cute::max(BLOCK_M * BLOCK_N * 2,

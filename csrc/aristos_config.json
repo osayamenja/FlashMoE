@@ -5,13 +5,13 @@
   "global_batch": 256,
   "is_training": 0,
   "hidden_act": 0,
-  "hidden_size": 1024,
-  "intermediate_size": 4096,
+  "hidden_size": 2048,
+  "intermediate_size": 2048,
   "mini_batch": 1,
   "moe_frequency": 1,
-  "num_experts": 64,
+  "num_experts": 128,
   "num_layers": 1,
-  "sequence_len": 1024,
+  "sequence_len": 16384,
   "torch_dtype": 1,
   "vocab_size": 32000
 }
