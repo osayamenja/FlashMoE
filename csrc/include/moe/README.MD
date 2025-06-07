@@ -5,6 +5,7 @@
 🚧 Under active research
 
 ---
+
 # Run
 ## Requirements
 - Install NVSHMEM from [here](https://docs.nvidia.com/nvshmem/release-notes-install-guide/install-guide/nvshmem-install-proc.html). This installation also includes `nvshmrun`, which is needed for running within a node.
@@ -19,3 +20,19 @@
 - Run `cmake --build . --target aristos -j`
 ### Single Node
 - Run `nvshmrun -n <number of processes> -ppn <processes per node> ./aristos`
+
+---
+
+# 📖 Citation
+If you use any part of FlashDMoE in your research, please cite:
+```
+@misc{aimuyo2025flashdmoefastdistributedmoe,
+      title={FlashDMoE: Fast Distributed MoE in a Single Kernel}, 
+      author={Osayamen Jonathan Aimuyo and Byungsoo Oh and Rachee Singh},
+      year={2025},
+      eprint={2506.04667},
+      archivePrefix={arXiv},
+      primaryClass={cs.DC},
+      url={https://arxiv.org/abs/2506.04667}, 
+}
+```
