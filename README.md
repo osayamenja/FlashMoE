@@ -6,7 +6,7 @@
 
 ---
 
-## 🌌 Kleos: GPU-Resident Runtime for ML
+## 🌹Kleos: GPU-Resident Runtime for ML
 
 **Kleos** is an ongoing research project exploring the design of a GPU-native operating system for distributed machine learning workloads.  
 The goal is to eliminate CPU bottlenecks by fusing scheduling, communication, and compute **directly on the GPU** using lightweight, persistent runtime primitives.
