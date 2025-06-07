@@ -2,14 +2,13 @@
   <img src="logow.png" alt="Kleos Conceptual Overview" width="200"/>
 </p>
 
-<p align="center"><i>Complete, efficient GPU residency for Machine Learning workloads</i></p>
+<p align="center"><i>Complete, efficient GPU residency for Disitrbuted Machine Learning.</i></p>
 
 ---
 
 ## 🌹Kleos: GPU-Resident Runtime for ML
 
-**Kleos** is an ongoing research project exploring the design of a GPU-native operating system for distributed machine learning workloads.  
-The goal is to eliminate CPU bottlenecks by fusing scheduling, communication, and compute **directly on the GPU** using lightweight, persistent runtime primitives.
+**Kleos** is an ongoing research project exploring the design of a GPU-native operating system for distributed machine learning workloads. The goal is to eliminate CPU bottlenecks by fusing scheduling, communication, and compute **directly on the GPU** using lightweight, asynchronous primitives. We seek to acheive *complete, efficient GPU residency*.
 
 Kleos targets distributed ML workloads where conventional bulk-synchronous, CPU-driven orchestration is a limiting factor.
 
