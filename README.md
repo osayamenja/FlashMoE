@@ -20,7 +20,7 @@ Kleos targets irregular and sparse workloads such as **Mixture-of-Experts (MoE)*
 ## 🗞️ News
 
 - **June 2025** — ⚡️Excited to release **FlashDMoE**, a fused GPU kernel for distributed MoE execution.  
-  ➤ See [`this README.md`](./csrc/include/moe/README.md) for details, benchmarks, and usage.
+  ➤ See [`this README`](./csrc/include/moe/README.MD) for details, benchmarks, and usage.
 
 ---
 
