@@ -26,4 +26,4 @@ Kleos targets irregular and sparse workloads such as **Mixture-of-Experts (MoE)*
 
 ## ⚖️ License
 
-This project is licensed under the BSD 3-Clause License with an academic attribution requirement. See [`LICENSE`](./LICENSE) for full terms.
+This project is licensed under the BSD 3-Clause License. See [`LICENSE`](./LICENSE) for full terms.
