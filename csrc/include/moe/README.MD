@@ -17,12 +17,11 @@
 ...into a *single, tile-pipelined, persistent kernel*.
 
 It is written entirely in **pure CUDA**, with no host-device roundtrips, and is part of the **Kleos** runtime.
-We use [`CUTLASS`](https://github.com/NVIDIA/cutlass) and [`NVSHMEM`](https://developer.nvidia.com/nvshmem) 
 
 ### 🏎️ Portability
 
 Out-of-the box, Flash supports 
-- >= SM70 GPUs
+- $\geq$ SM70 GPUs
 - RDMA (EFA, libfabric, ibverbs, Slingshot) and NVLink.
 - TF32 (peak performance) 
 - FP16/BF16 (functionality is complete *but* acheving peak performance is still a work in progress)
@@ -43,7 +42,10 @@ FlashDMoE addresses this by:
 - Pipelining across fine-grained tiles,
 - Overlapping communication and computation within a fused kernel.
 
-These optimiztions increades GPU utilization by up to **9x**, and reduces E2E layer latency by up to **6x** for DMoE workloads.
+Compared to SOTA baselines, Flash: 
+1. increases GPU utilization by up to **9x**, 
+2. reduces E2E layer latency by up to **6x**, 
+3. attains **4x** better weak scaling efficiency
 
 ---
 
