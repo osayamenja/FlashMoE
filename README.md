@@ -19,7 +19,7 @@ Kleos targets distributed ML workloads where conventional bulk-synchronous, CPU-
 
 ## 🗞️ News
 
-- **June 2025** — ⚡️Introducing **FlashDMoE**, a fused GPU kernel for distributed MoE execution.  
+- **June 5, 2025** — ⚡️Introducing **FlashDMoE**, a fused GPU kernel for distributed MoE execution.  
   ➤ See [`this README`](./csrc/include/moe/README.MD) for details, benchmarks, and usage.
 
 ---
