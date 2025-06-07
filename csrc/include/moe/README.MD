@@ -63,19 +63,35 @@ See [paper](https://arxiv.org/abs/2506.04667) for more details.
 
 # Run
 ## Requirements
-- Install NVSHMEM from [here](https://docs.nvidia.com/nvshmem/release-notes-install-guide/install-guide/nvshmem-install-proc.html). This installation also includes `nvshmrun`, which is needed for running within a node.
 - Install CPM as [so](https://github.com/cpm-cmake/CPM.cmake?tab=readme-ov-file#adding-cpm). Make sure to create the `cmake` directory as they recommend.
 - Install CMake.
 - (Optional but recommended) Install ninja
+
+### Building NVSHMEM
+For peak performance, (see [here](https://www.nvidia.com/en-us/on-demand/session/gtc24-s61339/)) we *highly* recommend building NVSHMEM from scratch and setting `-DNVSHMEM_ENABLE_ALL_DEVICE_INLINING=1`. The prepackaged deb binary available [here](https://docs.nvidia.com/nvshmem/release-notes-install-guide/install-guide/nvshmem-install-proc.html) does not have that variable set.
+- For multi-node: install these software dependencies [here](https://docs.nvidia.com/nvshmem/release-notes-install-guide/install-guide/abstract.html#software-requirements)
+- Go to the NVSHMEM Download page and get the `Open Source Packages`.
+- Decompress the file appropriately
+- `cd nvshmem && mkdir build && cd build`
+- `export NVHSMEM_PREFIX=<to the installation directory>`
+- For multi-node: Set other appropriate transport environment variables from [here](https://docs.nvidia.com/nvshmem/release-notes-install-guide/install-guide/nvshmem-install-proc.html#other-distributions)
+- To fix a build bug: `export CUDAFLAGS='-fpermissive' CXXFLAGS='-fpermissive'`
+- Run `cmake -S.. -B. -DNVSHMEM_ENABLE_ALL_DEVICE_INLINING=1 -Wno-dev`
+- Run `make -j install`
+
 ## CMake Build
 - cd `csrc`
 - mkdir `cmake-build-release` && cd `cmake-build-release`
 - Configure `aristos_config.json` as needed.
 - Run `cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_MAKE_PROGRAM=<path to ninja> -Wno-dev -G Ninja -S .. -B .`
 - Run `cmake --build . --target flash -j`
-### Single Node
+## Single Node
 - Run `nvshmrun -n <number of processes> -ppn <processes per node> ./flash`
-
+## Multi node
+### SLURM
+```
+srun -n <number of processes> ./flash
+```
 ---
 
 # 📖 Citation
