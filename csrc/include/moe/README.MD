@@ -42,23 +42,23 @@ FlashDMoE addresses this by:
 - Pipelining across fine-grained tiles,
 - Overlapping communication and computation within a fused kernel.
 
+---
+
+## 📊 Performance Results
+
 Compared to SOTA baselines, Flash: 
 1. increases GPU utilization by up to **9x**, 
 2. reduces E2E layer latency by up to **6x**, 
 3. attains **4x** better weak scaling efficiency
 
----
-
-## 📊 Performance Results
-
-See [`paper`](https://arxiv.org/abs/2506.04667)
+See [paper](https://arxiv.org/abs/2506.04667) for more details.
 
 ---
 
 ## 🛣️ Next Steps
-- [] Leverage TMA for SM90 and above
-- [] Tune FP16 for SM70 and above
-- [] Add comprehensive benchmark suite, including FP16 and multi-node results against baselines.
+- [ ] Leverage TMA for SM90 and above
+- [ ] Tune FP16 for SM70 and above
+- [ ] Add comprehensive benchmark suite, including FP16 and multi-node results against baselines.
 
 
 # Run
