@@ -1,14 +1,29 @@
-# Run
-## Requirements
-- Install NVSHMEM from [here](https://docs.nvidia.com/nvshmem/release-notes-install-guide/install-guide/nvshmem-install-proc.html). This installation also includes `nvshmrun`, which is needed for running within a node.
-- Install CPM as [so](https://github.com/cpm-cmake/CPM.cmake?tab=readme-ov-file#adding-cpm). Make sure to create the `cmake` directory as they recommend.
-- Install CMake.
-- (Optional but recommended) Install ninja
-## CMake Build
-- cd `csrc`
-- mkdir `cmake-build-release` && cd `cmake-build-release`
-- Configure `aristos_config.json` as needed.
-- Run `cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_MAKE_PROGRAM=<path to ninja> -Wno-dev -G Ninja -S .. -B .`
-- Run `cmake --build . --target aristos -j`
-### Single Node
-- Run `nvshmrun -n <number of processes> -ppn <processes per node> ./aristos`
+<p align="center">
+  <img src="logow.png" alt="Kleos Conceptual Overview" width="200"/>
+</p>
+
+<p align="center"><i>Complete, efficient GPU residency for Machine Learning workloads</i></p>
+
+---
+
+## 🌌 Kleos: GPU-Resident Runtime for ML
+
+**Kleos** is an ongoing research project exploring the design of a GPU-native operating system for distributed machine learning workloads.  
+The goal is to eliminate CPU bottlenecks by fusing scheduling, communication, and compute **directly on the GPU** using lightweight, persistent runtime primitives.
+
+Kleos targets irregular and sparse workloads such as **Mixture-of-Experts (MoE)**, where conventional bulk-synchronous, CPU-driven orchestration becomes a limiting factor.
+
+> This repository represents a *very* early-stage release of Kleos infrastructure.
+
+---
+
+## 🗞️ News
+
+- **June 2025** — ⚡️Excited to release **FlashDMoE**, a fused GPU kernel for distributed MoE execution.  
+  ➤ See [`this README.md`](./csrc/include/moe/README.md) for details, benchmarks, and usage.
+
+---
+
+## ⚖️ License
+
+This project is licensed under the BSD 3-Clause License with an academic attribution requirement. See [`LICENSE`](./LICENSE) for full terms.
