@@ -6,6 +6,59 @@
 
 ---
 
+## 🧠 Overview
+
+**FlashDMoE**, Flash for short, is a high-throughput, portable GPU kernel that fuses the following **Distributed Mixture-of-Experts (DMoE)** operations:
+- Gate
+- MoE Dispatch
+- Expert FFN (GEMM),
+- MoE Combine
+
+...into a *single, tile-pipelined, persistent kernel*.
+
+It is written entirely in **pure CUDA**, with no host-device roundtrips, and is part of the **Kleos** runtime.
+We use [`CUTLASS`](https://github.com/NVIDIA/cutlass) and [`NVSHMEM`](https://developer.nvidia.com/nvshmem) 
+
+### 🏎️ Portability
+
+Out-of-the box, Flash supports 
+- >= SM70 GPUs
+- RDMA (EFA, libfabric, ibverbs, Slingshot) and NVLink.
+- TF32 (peak performance) 
+- FP16/BF16 (functionality is complete *but* acheving peak performance is still a work in progress)
+
+---
+
+## 🚨 Problem: Why This Kernel?
+
+Conventional CPU-driven Distributed MoE execution suffers from:
+- Kernel launch overhead,
+- Network latency due to bulk-synchronous `AllToAll`,
+- Straggler effects
+- Payload inefficiency (padding) due to rigid communication or compute interfaces,
+- Lack of task locality
+
+FlashDMoE addresses this by:
+- Performing dispatch, expert compute, and combine **entirely on the GPU**,
+- Pipelining across fine-grained tiles,
+- Overlapping communication and computation within a fused kernel.
+
+These optimiztions increades GPU utilization by up to **9x**, and reduces E2E layer latency by up to **6x** for DMoE workloads.
+
+---
+
+## 📊 Performance Results
+
+See [`paper`](https://arxiv.org/abs/2506.04667)
+
+---
+
+## 🛣️ Next Steps
+- [] Leverage TMA for SM90 and above
+- [] Tune FP16 for SM70 and above
+- [] Add comprehensive benchmark suite, including FP16 and multi-node results against baselines.
+
+
 # Run
 ## Requirements
 - Install NVSHMEM from [here](https://docs.nvidia.com/nvshmem/release-notes-install-guide/install-guide/nvshmem-install-proc.html). This installation also includes `nvshmrun`, which is needed for running within a node.
