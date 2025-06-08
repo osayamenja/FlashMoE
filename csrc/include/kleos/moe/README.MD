@@ -84,14 +84,19 @@ For peak performance, (see [here](https://www.nvidia.com/en-us/on-demand/session
 - mkdir `cmake-build-release` && cd `cmake-build-release`
 - Configure `kleos_config.json` as needed.
 - Run `cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_MAKE_PROGRAM=<path to ninja> -Wno-dev -G Ninja -S .. -B .`
-- Run `cmake --build . --target flash -j`
+- Run `cmake --build . --target csrc -j`
 ## Single Node
-- Run `nvshmrun -n <number of processes> -ppn <processes per node> ./flash`
+- Run `nvshmrun -n <number of processes> -ppn <processes per node> ./csrc`
 ## Multi node
 ### SLURM
 ```
-srun -n <number of processes> ./flash
+srun -n <number of processes> ./csrc
 ```
+
+## IDEs
+Alternatively, the codebase integrates well with CLion, which automates the build and run processes. 
+Just open the project at `csrc` and CLion will automatically detect the `CMakeLists.txt` file.
+
 ---
 
 # 📖 Citation
