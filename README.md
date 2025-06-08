@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="logow.png" alt="Kleos Conceptual Overview" width="200"/>
+  <img src="logow.png" alt="Kleos Conceptual Overview" width="150"/>
 </p>
 
 <p align="center"><i>Complete, efficient GPU residency for Distributed Machine Learning.</i></p>
@@ -12,7 +12,7 @@
 
 ### 🎯 Vision and Methods
 We aim to achieve *complete, efficient GPU residency*. We investigate optimizations that approach hardware peak performance for both distributed and single GPU workloads, where bulk-synchronous, CPU-driven orchestration is a limiting factor.
-To attain this vision, we employ *kernel fusion* enabled by (1) algorithmic innovations with strong theoretical footing and (2) principled systems design and implmentation. 
+To attain this vision, we employ *kernel fusion* enabled by (1) algorithmic innovations with strong theoretical footing and (2) principled systems design and implementation. 
 
 > This repository represents a *very* early-stage release of Kleos infrastructure.
 
