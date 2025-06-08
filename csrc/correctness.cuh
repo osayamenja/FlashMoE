@@ -1,3 +1,11 @@
+/*
+ * Copyright (c) 2025, Osayamen Jonathan Aimuyo
+ * All rights reserved.
+ *
+ * This file is part of the Kleos Project and is licensed under the BSD 3-Clause License.
+ * See the LICENSE file in the root directory for full terms.
+ */
+
 //
 // Created by oja7 on 5/17/25.
 //
@@ -5,7 +13,7 @@
 #ifndef CORRECTNESS_CUH
 #define CORRECTNESS_CUH
 #include <matx.h>
-#include "include/types.cuh"
+#include "include/kleos/types.cuh"
 
 namespace kleos {
     // reference expert

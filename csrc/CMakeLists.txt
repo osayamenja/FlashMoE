@@ -1,3 +1,9 @@
+#Copyright (c) 2025, Osayamen Jonathan Aimuyo
+#All rights reserved.
+#
+#This file is part of the Kleos Project and is licensed under the BSD 3-Clause License.
+#See the LICENSE file in the root directory for full terms.
+
 cmake_minimum_required(VERSION 3.27)
 
 # Add COMMAND_ECHO STDOUT to see the commands in standard out
@@ -48,36 +54,36 @@ check_compiler_flag(CUDA -t4 NVCC_THREADS)
 find_package(CUDAToolkit REQUIRED)
 
 add_executable(csrc main.cu
-        include/os/subscriber.cuh
-        include/moe/moe.cuh
-        include/kleos.cuh
-        include/os/processor/processor.cuh
-        include/indexing.cuh
-        include/types.cuh
-        include/atomics.cuh
-        include/os/decider/decider.cuh
-        include/os/decider/comps/edge.cuh
-        include/os/decider/comps/expert.cuh
-        include/os/decider/comps/group.cuh
-        include/os/decider/comps/worker.cuh
-        include/os/decider/comps/args.cuh
-        include/os/decider/comps/functions.cuh
-        include/debug.cuh
-        include/os/decider/comps/niche.cuh
-        include/topo.cuh
-        include/os/processor/mmaConfig.cuh
-        include/bootstrap.cuh
-        include/os/scheduler.cuh
-        include/moe/gate.cuh
-        include/os/processor/gemm.cuh
-        include/os/packet.cuh
+        include/kleos/os/subscriber.cuh
+        include/kleos/moe/moe.cuh
+        include/kleos/kleos.cuh
+        include/kleos/os/processor/processor.cuh
+        include/kleos/indexing.cuh
+        include/kleos/types.cuh
+        include/kleos/atomics.cuh
+        include/kleos/os/decider/decider.cuh
+        include/kleos/os/decider/comps/edge.cuh
+        include/kleos/os/decider/comps/expert.cuh
+        include/kleos/os/decider/comps/group.cuh
+        include/kleos/os/decider/comps/worker.cuh
+        include/kleos/os/decider/comps/args.cuh
+        include/kleos/os/decider/comps/functions.cuh
+        include/kleos/debug.cuh
+        include/kleos/os/decider/comps/niche.cuh
+        include/kleos/topo.cuh
+        include/kleos/os/processor/mmaConfig.cuh
+        include/kleos/bootstrap.cuh
+        include/kleos/os/scheduler.cuh
+        include/kleos/moe/gate.cuh
+        include/kleos/os/processor/gemm.cuh
+        include/kleos/os/packet.cuh
         eval.cuh
-        include/arch.cuh
-        include/os/os.cuh
-        include/moe/expert.cuh
-        include/throughput.cuh
-        include/moe/fffn.cuh
-        include/telemetry.cuh
+        include/kleos/arch.cuh
+        include/kleos/os/os.cuh
+        include/kleos/moe/expert.cuh
+        include/kleos/throughput.cuh
+        include/kleos/moe/fffn.cuh
+        include/kleos/telemetry.cuh
         correctness.cuh
 )
 set_target_properties(csrc PROPERTIES

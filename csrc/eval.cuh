@@ -1,3 +1,11 @@
+/*
+ * Copyright (c) 2025, Jonathan Aimuyo
+ * All rights reserved.
+ *
+ * This file is part of the Kleos Project and is licensed under the BSD 3-Clause License.
+ * See the LICENSE file in the root directory for full terms.
+ */
+
 //
 // Created by oja7 on 12/20/24.
 //
@@ -14,10 +22,10 @@
 #include <fmt/core.h>
 #include <nvshmem.h>
 
-#include "include/debug.cuh"
+#include "include/kleos/debug.cuh"
 #include "include/os/decider/decider.cuh"
-#include "include/types.cuh"
-#include "include/topo.cuh"
+#include "include/kleos/types.cuh"
+#include "include/kleos/topo.cuh"
 
 namespace kleos {
     __forceinline__ __host__

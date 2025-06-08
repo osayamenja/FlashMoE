@@ -6,8 +6,8 @@
 #include <thrust/random.h>
 
 #include "correctness.cuh"
-#include "include/bootstrap.cuh"
-#include "include/moe/moe.cuh"
+#include "include/kleos/bootstrap.cuh"
+#include "include/kleos/moe/moe.cuh"
 
 __host__ __forceinline__
 void runOS() {
