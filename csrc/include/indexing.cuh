@@ -2,10 +2,10 @@
 // Created by Jonathan on 7/13/24.
 //
 
-#ifndef ARISTOS_INDEXING_CUH
-#define ARISTOS_INDEXING_CUH
+#ifndef KLEOS_INDEXING_CUH
+#define KLEOS_INDEXING_CUH
 
-namespace aristos{
+namespace kleos{
     namespace block{
         /// Block-scoped thread id
         decltype(auto)
@@ -47,4 +47,4 @@ namespace aristos{
     }
 }
 
-#endif //ARISTOS_INDEXING_CUH
+#endif //KLEOS_INDEXING_CUH

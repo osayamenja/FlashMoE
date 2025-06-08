@@ -11,10 +11,10 @@
 #include "mmaConfig.cuh"
 #include "../../arch.cuh"
 
-namespace aristos {
+namespace kleos {
     /// Fused, Add, Activate
     template <typename Element, typename ActivationFunction>
-    requires(aristos::TensorValueType<Element> && cuda::std::is_invocable_r_v<Element, ActivationFunction, Element>)
+    requires(kleos::TensorValueType<Element> && cuda::std::is_invocable_r_v<Element, ActivationFunction, Element>)
     struct FAA {
         __forceinline__ __device__
         Element operator()(const Element& accumulator, const Element& term) const {

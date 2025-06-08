@@ -6,7 +6,7 @@
 #define CSRC_EDGE_CUH
 
 #include <cstdlib>
-namespace aristos{
+namespace kleos{
     // Source for floatEqual: https://stackoverflow.com/a/253874
     template<typename F> requires cuda::std::is_floating_point_v<F>
     __forceinline__
@@ -32,17 +32,17 @@ namespace aristos{
         }
 
         __forceinline__
-        bool operator==(const aristos::Edge& other) const {
+        bool operator==(const kleos::Edge& other) const {
             return this->node1 == other.node1 && this->node2 == other.node2;
         }
 
         __forceinline__
-        bool operator!=(const aristos::Edge& other) const {
+        bool operator!=(const kleos::Edge& other) const {
             return !(*this == other);
         }
 
         __forceinline__
-        bool operator<(const aristos::Edge& other) const {
+        bool operator<(const kleos::Edge& other) const {
             if(floatEqual(this->weight, other.weight)){
                 if(this->node1 == other.node1){
                     return this->node2 < other.node2;
@@ -55,17 +55,17 @@ namespace aristos{
         }
 
         __forceinline__
-        bool operator<=(const aristos::Edge& other) const {
+        bool operator<=(const kleos::Edge& other) const {
             return *this < other || *this == other;
         }
 
         __forceinline__
-        bool operator>(const aristos::Edge& other) const {
+        bool operator>(const kleos::Edge& other) const {
             return !(*this <= other);
         }
 
         __forceinline__
-        bool operator>=(const aristos::Edge& other) const {
+        bool operator>=(const kleos::Edge& other) const {
             return *this > other || *this == other;
         }
 
@@ -91,10 +91,10 @@ namespace aristos{
 }
 
 template<>
-struct std::hash<aristos::Edge>
+struct std::hash<kleos::Edge>
 {
     __forceinline__
-    std::size_t operator()(const aristos::Edge& e) const noexcept
+    std::size_t operator()(const kleos::Edge& e) const noexcept
     {
         return e.node1 ^ e.node2 << 1;
     }

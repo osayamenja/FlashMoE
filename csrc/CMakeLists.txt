@@ -17,21 +17,21 @@ endif ()
 project(csrc CUDA CXX)
 
 # flags
-set(ARISTOS_CUDA_CXX_FLAGS "${ARISTOS_CUDA_CXX_FLAGS} -Wall -Wextra")
-set(ARISTOS_CUDA_CXX_FLAGS "${ARISTOS_CUDA_CXX_FLAGS} -fno-strict-aliasing")
+set(KLEOS_CUDA_CXX_FLAGS "${KLEOS_CUDA_CXX_FLAGS} -Wall -Wextra")
+set(KLEOS_CUDA_CXX_FLAGS "${KLEOS_CUDA_CXX_FLAGS} -fno-strict-aliasing")
 if(NOT ${CMAKE_SYSTEM_PROCESSOR} MATCHES "^aarch64")
-    set(ARISTOS_CUDA_CXX_FLAGS "${ARISTOS_CUDA_CXX_FLAGS} -m64")
+    set(KLEOS_CUDA_CXX_FLAGS "${KLEOS_CUDA_CXX_FLAGS} -m64")
 endif ()
-set(ARISTOS_CUDA_CXX_FLAGS "${ARISTOS_CUDA_CXX_FLAGS} -Wno-unknown-pragmas -Wnull-dereference -Wnarrowing")
-set(ARISTOS_CUDA_CXX_FLAGS "${ARISTOS_CUDA_CXX_FLAGS} -Wno-switch -Wduplicated-branches -Wformat=2")
-set(ARISTOS_CUDA_CXX_FLAGS "${ARISTOS_CUDA_CXX_FLAGS} -Wno-unused-but-set-parameter")
-set(ARISTOS_CUDA_CXX_FLAGS "${ARISTOS_CUDA_CXX_FLAGS} -Wno-sign-compare -v")
+set(KLEOS_CUDA_CXX_FLAGS "${KLEOS_CUDA_CXX_FLAGS} -Wno-unknown-pragmas -Wnull-dereference -Wnarrowing")
+set(KLEOS_CUDA_CXX_FLAGS "${KLEOS_CUDA_CXX_FLAGS} -Wno-switch -Wduplicated-branches -Wformat=2")
+set(KLEOS_CUDA_CXX_FLAGS "${KLEOS_CUDA_CXX_FLAGS} -Wno-unused-but-set-parameter")
+set(KLEOS_CUDA_CXX_FLAGS "${KLEOS_CUDA_CXX_FLAGS} -Wno-sign-compare -v")
 # Silence nvtx deprecation warning from legacy version used in libtorch
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${ARISTOS_CUDA_CXX_FLAGS}")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${KLEOS_CUDA_CXX_FLAGS}")
 
 set(CUDA_HOST_COMPILER ${CMAKE_CXX_COMPILER})
 set(CMAKE_CUDA_ARCHITECTURES "native")
@@ -40,7 +40,7 @@ set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_EXTENSIONS OFF)
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xfatbin -compress-all") # Compress all fatbins
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcudafe --display_error_number") # Show error/warning numbers
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler \"${ARISTOS_CUDA_CXX_FLAGS}\"")
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler \"${KLEOS_CUDA_CXX_FLAGS}\"")
 
 include(CheckCompilerFlag)
 check_compiler_flag(CUDA -t4 NVCC_THREADS)
@@ -50,7 +50,7 @@ find_package(CUDAToolkit REQUIRED)
 add_executable(csrc main.cu
         include/os/subscriber.cuh
         include/moe/moe.cuh
-        include/aristos.cuh
+        include/kleos.cuh
         include/os/processor/processor.cuh
         include/indexing.cuh
         include/types.cuh
@@ -177,56 +177,56 @@ target_compile_options(csrc PRIVATE
 
 # Pre-compile constants
 # Read JSON file content
-file(READ "aristos_config.json" ARISTOS_CONFIG)
+file(READ "kleos_config.json" KLEOS_CONFIG)
 
-string(JSON CAP_FACTOR_V GET ${ARISTOS_CONFIG} "capacity_factor")
+string(JSON CAP_FACTOR_V GET ${KLEOS_CONFIG} "capacity_factor")
 message(STATUS "capacity_factor: ${CAP_FACTOR_V}")
 
-string(JSON DROP_TOKENS_V GET ${ARISTOS_CONFIG} "drop_tokens")
+string(JSON DROP_TOKENS_V GET ${KLEOS_CONFIG} "drop_tokens")
 message(STATUS "drop_tokens: ${DROP_TOKENS_V}")
 
-string(JSON E_TOP_K_V GET ${ARISTOS_CONFIG} "expert_top_k")
+string(JSON E_TOP_K_V GET ${KLEOS_CONFIG} "expert_top_k")
 message(STATUS "expert_top_k: ${E_TOP_K_V}")
 
-string(JSON GLOBAL_BATCH_V GET ${ARISTOS_CONFIG} "global_batch")
+string(JSON GLOBAL_BATCH_V GET ${KLEOS_CONFIG} "global_batch")
 message(STATUS "global_batch: ${GLOBAL_BATCH_V}")
 
-string(JSON IS_TRAINING_V GET ${ARISTOS_CONFIG} "is_training")
+string(JSON IS_TRAINING_V GET ${KLEOS_CONFIG} "is_training")
 message(STATUS "is_training: ${IS_TRAINING_V}")
 
-string(JSON HIDDEN_ACT_V GET ${ARISTOS_CONFIG} "hidden_act")
+string(JSON HIDDEN_ACT_V GET ${KLEOS_CONFIG} "hidden_act")
 message(STATUS "hidden_act: ${HIDDEN_ACT_V}")
 
-string(JSON HIDDEN_SIZE_V GET ${ARISTOS_CONFIG} "hidden_size")
+string(JSON HIDDEN_SIZE_V GET ${KLEOS_CONFIG} "hidden_size")
 message(STATUS "hidden_size: ${HIDDEN_SIZE_V}")
 
-string(JSON I_SIZE_V GET ${ARISTOS_CONFIG} "intermediate_size")
+string(JSON I_SIZE_V GET ${KLEOS_CONFIG} "intermediate_size")
 message(STATUS "intermediate_size: ${I_SIZE_V}")
 
-string(JSON MINI_BATCH_V GET ${ARISTOS_CONFIG} "mini_batch")
+string(JSON MINI_BATCH_V GET ${KLEOS_CONFIG} "mini_batch")
 message(STATUS "mini_batch: ${MINI_BATCH_V}")
 
-string(JSON MOE_FREQ_V GET ${ARISTOS_CONFIG} "moe_frequency")
+string(JSON MOE_FREQ_V GET ${KLEOS_CONFIG} "moe_frequency")
 message(STATUS "moe_frequency: ${MOE_FREQ_V}")
 
-string(JSON NUM_EXPERTS_V GET ${ARISTOS_CONFIG} "num_experts")
+string(JSON NUM_EXPERTS_V GET ${KLEOS_CONFIG} "num_experts")
 message(STATUS "num_experts: ${NUM_EXPERTS_V}")
 
-string(JSON NUM_LAYERS_V GET ${ARISTOS_CONFIG} "num_layers")
+string(JSON NUM_LAYERS_V GET ${KLEOS_CONFIG} "num_layers")
 message(STATUS "num_layers: ${NUM_LAYERS_V}")
 
-string(JSON SEQ_LEN_V GET ${ARISTOS_CONFIG} "sequence_len")
+string(JSON SEQ_LEN_V GET ${KLEOS_CONFIG} "sequence_len")
 message(STATUS "sequence_len: ${SEQ_LEN_V}")
 
-string(JSON DTYPE_V GET ${ARISTOS_CONFIG} "torch_dtype")
+string(JSON DTYPE_V GET ${KLEOS_CONFIG} "torch_dtype")
 message(STATUS "torch_dtype: ${DTYPE_V}")
 
-string(JSON VOCAB_SIZE_V GET ${ARISTOS_CONFIG} "vocab_size")
+string(JSON VOCAB_SIZE_V GET ${KLEOS_CONFIG} "vocab_size")
 message(STATUS "vocab_size: ${VOCAB_SIZE_V}")
 
 target_compile_definitions(csrc
         PRIVATE
-        ARISTOS_ARCH=${GPU_ARCH}
+        KLEOS_ARCH=${GPU_ARCH}
         CAP_FACTOR=${CAP_FACTOR_V}
         DROP_TOKENS=${DROP_TOKENS_V}
         E_TOP_K=${E_TOP_K_V}
@@ -242,7 +242,7 @@ target_compile_definitions(csrc
         SEQ_LEN=${SEQ_LEN_V}
         DTYPE=${DTYPE_V}
         VOCAB_SIZE=${VOCAB_SIZE_V}
-        ARISTOS_NVTX=1
+        KLEOS_NVTX=1
 )
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_compile_options(csrc PRIVATE

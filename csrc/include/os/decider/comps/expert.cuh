@@ -6,7 +6,7 @@
 #define CSRC_EXPERT_CUH
 #include <ostream>
 
-namespace aristos{
+namespace kleos{
     struct __align__(8) Expert{
         unsigned int id;
         uint16_t cost;

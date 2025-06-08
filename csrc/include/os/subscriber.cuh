@@ -2,14 +2,14 @@
 // Created by Jonathan on 7/4/24.
 //
 
-#ifndef ARISTOS_QUEUE_CUH
-#define ARISTOS_QUEUE_CUH
+#ifndef KLEOS_QUEUE_CUH
+#define KLEOS_QUEUE_CUH
 #include <nvshmem.h>
 
 #include "../types.cuh"
 #include "packet.cuh"
 
-namespace aristos::subscriber{
+namespace kleos::subscriber{
     __device__
     enum class SubscriberStage {
         initial,
@@ -442,4 +442,4 @@ namespace aristos::subscriber{
         }
     }
 }
-#endif //ARISTOS_QUEUE_CUH
+#endif //KLEOS_QUEUE_CUH

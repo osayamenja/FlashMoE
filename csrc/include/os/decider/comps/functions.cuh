@@ -6,7 +6,7 @@
 #define CSRC_FUNCTIONS_CUH
 #include "args.cuh"
 #include <limits>
-namespace aristos{
+namespace kleos{
     __inline__ float clamp;
     __forceinline__
     float obj(const ObjArgs& a){
@@ -23,7 +23,7 @@ namespace aristos{
         return 2.0 * (a.numGroups - 1) * a.bottleneckTime;
     }
 
-    template<aristos::Stability s=STABLE>
+    template<kleos::Stability s=STABLE>
     __forceinline__
     bool optimizingPolicy(const float& obj1, const float& obj2, const float& obj1_2){
         return (std::isinf(obj1) && std::isinf(obj2))? true :

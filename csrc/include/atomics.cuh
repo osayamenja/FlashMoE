@@ -7,7 +7,7 @@
 
 #include "types.cuh"
 
-namespace aristos{
+namespace kleos{
     template<typename B>
     concept AtomicType = cuda::std::same_as<B, int> || cuda::std::same_as<B, unsigned int>
     || cuda::std::same_as<B, ull_t>;

@@ -12,7 +12,7 @@
 #include "../types.cuh"
 #include "../os/processor/gemm.cuh"
 #include "../os/processor/processor.cuh"
-namespace aristos {
+namespace kleos {
     /// fused ffn with on-demand tile scheduling
     template<
         unsigned int M = ACC::S::value,

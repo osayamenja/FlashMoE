@@ -8,8 +8,8 @@
 #include <iostream>
 #include <typeinfo>
 #include <cxxabi.h>
-#if !defined(ARISTOS_CHECK_CUDA)
-#  define ARISTOS_CHECK_CUDA(e)                                \
+#if !defined(KLEOS_CHECK_CUDA)
+#  define KLEOS_CHECK_CUDA(e)                                \
 do {                                                         \
     cudaError_t code = (e);                                  \
     if (code != cudaSuccess) {                               \
@@ -23,7 +23,7 @@ do {                                                         \
 } while (0)
 #endif
 
-#define ARISTOS_ASSERT(predicate, errmsg)                    \
+#define KLEOS_ASSERT(predicate, errmsg)                    \
 do {                                                         \
     if (!(predicate)) {                                      \
         std::cerr   << "Error: " errmsg                      \
@@ -36,10 +36,10 @@ do {                                                         \
 
 
 #if !defined(CHECK_LAST)
-# define CHECK_LAST() ARISTOS_CHECK_CUDA(cudaPeekAtLastError()); ARISTOS_CHECK_CUDA(cudaDeviceSynchronize())
+# define CHECK_LAST() KLEOS_CHECK_CUDA(cudaPeekAtLastError()); KLEOS_CHECK_CUDA(cudaDeviceSynchronize())
 #endif
 
-namespace aristos{
+namespace kleos{
     template<typename T>
     __host__ __forceinline__
     void printType() {

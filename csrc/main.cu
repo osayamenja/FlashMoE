@@ -11,15 +11,15 @@
 
 __host__ __forceinline__
 void runOS() {
-    aristos::initialize();
-    const auto rank = aristos::getRank();
+    kleos::initialize();
+    const auto rank = kleos::getRank();
     // generate random input tile and eye weights
-    constexpr auto S = aristos::ACC::S::value;
-    constexpr auto H = aristos::ACC::H::value;
-    constexpr auto E = aristos::ACC::E::value;
-    constexpr auto P = aristos::ACC::P::value;
-    constexpr auto PX = aristos::ACC::PX::value;
-    const auto nLx = aristos::hostBookkeeping.nLx;
+    constexpr auto S = kleos::ACC::S::value;
+    constexpr auto H = kleos::ACC::H::value;
+    constexpr auto E = kleos::ACC::E::value;
+    constexpr auto P = kleos::ACC::P::value;
+    constexpr auto PX = kleos::ACC::PX::value;
+    const auto nLx = kleos::hostBookkeeping.nLx;
     constexpr unsigned long aZ =  S * H;
     constexpr auto gwZ = aZ + PX * H;
     // scale this to number of experts
@@ -29,15 +29,15 @@ void runOS() {
     const auto gZ = dZ + S * PX;
     const auto cZ = gZ + S * H;
     cuda::std::byte* p;
-    ARISTOS_CHECK_CUDA(cudaMallocAsync(&p, cZ * sizeof(float), aristos::aristosStream));
-    ARISTOS_CHECK_CUDA(cudaMemsetAsync(p, 0, cZ * sizeof(float), aristos::aristosStream));
+    KLEOS_CHECK_CUDA(cudaMallocAsync(&p, cZ * sizeof(float), kleos::kleosStream));
+    KLEOS_CHECK_CUDA(cudaMemsetAsync(p, 0, cZ * sizeof(float), kleos::kleosStream));
     auto* hP = std::calloc(cZ, sizeof(float));
     auto* fHp = static_cast<float*>(hP);
-    using Element = aristos::ACC::Element;
+    using Element = kleos::ACC::Element;
     auto* __restrict__ eHp = static_cast<Element*>(hP);
     {
-        #if ARISTOS_NVTX
-        aristos::aristosRange forwardRange{"Host Data Prep"};
+        #if KLEOS_NVTX
+        kleos::kleosRange forwardRange{"Host Data Prep"};
         #endif
         thrust::default_random_engine rng(47 * (rank + 42));
         thrust::normal_distribution<float> dist(0, 5);
@@ -61,14 +61,14 @@ void runOS() {
             eHp[i] = conv(fHp[i]);
         }
     }
-    ARISTOS_CHECK_CUDA(cudaMemcpyAsync(p, eHp, sizeof(Element) * dZ,
+    KLEOS_CHECK_CUDA(cudaMemcpyAsync(p, eHp, sizeof(Element) * dZ,
         cudaMemcpyHostToDevice,
-        aristos::aristosStream));
+        kleos::kleosStream));
     float timed = 0;
-    aristos::moe::forwardHostBench<32, 32>(p, p + dZ * sizeof(Element), timed);
-    printf("epRank: %u took %.2fms\n", aristos::hostBookkeeping.rank, timed);
-    ARISTOS_CHECK_CUDA(cudaPeekAtLastError());
-    aristos::finalize();
+    kleos::moe::forwardHostBench<32, 32>(p, p + dZ * sizeof(Element), timed);
+    printf("epRank: %u took %.2fms\n", kleos::hostBookkeeping.rank, timed);
+    KLEOS_CHECK_CUDA(cudaPeekAtLastError());
+    kleos::finalize();
     std::free(hP);
 }
 
@@ -89,16 +89,16 @@ void runReference() {
     constexpr auto gZ = dZ + S * PX;
     constexpr auto cZ = gZ + S * H;
     void* p;
-    ARISTOS_CHECK_CUDA(cudaMallocAsync(&p, cZ * sizeof(float), aristos::aristosStream));
-    ARISTOS_CHECK_CUDA(cudaMemsetAsync(p, 0, cZ * sizeof(float), aristos::aristosStream));
+    KLEOS_CHECK_CUDA(cudaMallocAsync(&p, cZ * sizeof(float), kleos::kleosStream));
+    KLEOS_CHECK_CUDA(cudaMemsetAsync(p, 0, cZ * sizeof(float), kleos::kleosStream));
     auto* hP = std::calloc(cZ, sizeof(float));
     auto* fHp = static_cast<float*>(hP);
     using ET = float;
     auto* __restrict__ eHp = static_cast<ET*>(hP);
     auto* __restrict__ dP = static_cast<ET*>(p);
     {
-        #if ARISTOS_NVTX
-        aristos::aristosRange forwardRange{"Host Data Prep"};
+        #if KLEOS_NVTX
+        kleos::kleosRange forwardRange{"Host Data Prep"};
         #endif
         thrust::default_random_engine rng(47 * 42);
         thrust::normal_distribution<float> dist(0, 5);
@@ -111,20 +111,20 @@ void runReference() {
             }
         }
     }
-    ARISTOS_CHECK_CUDA(cudaMemcpyAsync(p, eHp, sizeof(ET) * dZ,
+    KLEOS_CHECK_CUDA(cudaMemcpyAsync(p, eHp, sizeof(ET) * dZ,
         cudaMemcpyHostToDevice,
-        aristos::aristosStream));
+        kleos::kleosStream));
     auto* __restrict__ act = dP;
     auto* __restrict__ gateWeights = dP + aZ;
     auto* __restrict__ expertWeights = dP + gwZ;
     auto* __restrict__ bias = dP + b2Z;
     auto* __restrict__ gateOutput = dP + dZ;
     auto* __restrict__ moeOutput = dP + gZ;
-    aristos::rExpert<S, H, P, E>(act,
+    kleos::rExpert<S, H, P, E>(act,
         gateWeights, expertWeights, bias, gateOutput, moeOutput, nLx);
-    ARISTOS_CHECK_CUDA(cudaMemcpyAsync(eHp, gateOutput, sizeof(ET) * S * PX, cudaMemcpyDeviceToHost,
-        aristos::aristosStream));
-    ARISTOS_CHECK_CUDA(cudaStreamSynchronize(aristos::aristosStream));
+    KLEOS_CHECK_CUDA(cudaMemcpyAsync(eHp, gateOutput, sizeof(ET) * S * PX, cudaMemcpyDeviceToHost,
+        kleos::kleosStream));
+    KLEOS_CHECK_CUDA(cudaStreamSynchronize(kleos::kleosStream));
     const auto cGo = make_tensor(eHp,
             cute::Layout<cute::Shape<cute::Int<S>, cute::Int<E>>,
             cute::Stride<cute::Int<E>, cute::_1>>{});

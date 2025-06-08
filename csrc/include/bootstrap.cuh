@@ -23,7 +23,7 @@
 #include "os/decider/comps/worker.cuh"
 
 #define SUPPORTED = 1;
-namespace aristos{
+namespace kleos{
     __host__ __forceinline__
     void imposeStrategy(EPG* __restrict__ const& ePg,
         uint* __restrict__ const& pT, uint* __restrict__ const& ePs, const uint& rank, const uint& globalWorld) {
@@ -89,12 +89,12 @@ namespace aristos{
 
     __host__ __forceinline__
     void estimateMemory(WorkerAttribute* __restrict__ const& dWa) {
-        #if ARISTOS_NVTX
-        aristosRange estRange{__PRETTY_FUNCTION__};
+        #if KLEOS_NVTX
+        kleosRange estRange{__PRETTY_FUNCTION__};
         #endif
         // estimate available device memory
         size_t free = 0, total = 0;
-        ARISTOS_CHECK_CUDA(cudaMemGetInfo(&free, &total));
+        KLEOS_CHECK_CUDA(cudaMemGetInfo(&free, &total));
         // Deduct cost for the dense case, assuming at least one expert per device
         free -= ACC::BPP::value * (ACC::PC::value + ACC::S::value * ACC::H::value);
         constexpr size_t mX = cute::ceil_div(ACC::L::value, ACC::F::value) * ACC::BPP::value * 2UL *
@@ -105,28 +105,28 @@ namespace aristos{
     __host__ __forceinline__
     void discoverTopology(void* const& hAp, const uint& n, const uint& globalRank,
         const WorkerAttribute& lWa, WorkerAttribute* __restrict__ const& wAp) {
-        #if ARISTOS_NVTX
-        aristosRange discRange{__func__};
+        #if KLEOS_NVTX
+        kleosRange discRange{__func__};
         #endif
         const auto aD = n * n;
         const auto heapBytes = n * BETA_BUFFER;
         const auto sBkz =  n + aD;
         WorkerAttribute* attributes;
         cuda::barrier<cuda::thread_scope_device>* dvB;
-        ARISTOS_CHECK_CUDA(cudaMallocAsync(&attributes, sizeof(WorkerAttribute) * n,
-            aristosStream));
-        ARISTOS_CHECK_CUDA(cudaMallocAsync(&dvB,
-            sizeof(cuda::barrier<cuda::thread_scope_device>), aristosStream));
-        const auto hB = new cuda::barrier<cuda::thread_scope_device>{ARISTOS_STATIC_SBZ};
-        ARISTOS_CHECK_CUDA(cudaMemcpyAsync(dvB, hB,
+        KLEOS_CHECK_CUDA(cudaMallocAsync(&attributes, sizeof(WorkerAttribute) * n,
+            kleosStream));
+        KLEOS_CHECK_CUDA(cudaMallocAsync(&dvB,
+            sizeof(cuda::barrier<cuda::thread_scope_device>), kleosStream));
+        const auto hB = new cuda::barrier<cuda::thread_scope_device>{KLEOS_STATIC_SBZ};
+        KLEOS_CHECK_CUDA(cudaMemcpyAsync(dvB, hB,
             sizeof(cuda::barrier<cuda::thread_scope_device>),
-            cudaMemcpyHostToDevice, aristosStream));
+            cudaMemcpyHostToDevice, kleosStream));
         static_assert(sizeof(floatPair) == sizeof(flagsType) &&
             alignof(floatPair) == sizeof(flagsType));
         auto* symBook = nvshmem_calloc(sBkz, sizeof(flagsType));
         auto* symHeap = nvshmem_align(16, heapBytes);
-        ARISTOS_ASSERT(symBook != nullptr, "nvshmem_calloc failed");
-        ARISTOS_ASSERT(symHeap != nullptr, "nvshmem_align failed");
+        KLEOS_ASSERT(symBook != nullptr, "nvshmem_calloc failed");
+        KLEOS_ASSERT(symHeap != nullptr, "nvshmem_align failed");
         // Pointer orchestration
         // Starting index of flags array
         auto* flags = static_cast<flagsType*>(symBook);
@@ -142,18 +142,18 @@ namespace aristos{
         const auto isRemotePresent = remotePresent();
         const auto sharedSize = n * (sizeof(floatPair) + sizeof(unsigned int));
         constexpr auto seqNo = 1U;
-        topology::discover<<<ARISTOS_STATIC_SBZ, ARISTOS_BLOCK_SIZE, sharedSize, aristosStream>>>(n, globalRank,
+        topology::discover<<<KLEOS_STATIC_SBZ, KLEOS_BLOCK_SIZE, sharedSize, kleosStream>>>(n, globalRank,
             isRemotePresent, lWa,
             static_cast<cuda::std::byte*>(symHeap),
             flags, results, dvB, attributes, seqNo);
-        ARISTOS_CHECK_CUDA(cudaMemcpyAsync(hAp, adj, aD * sizeof(floatPair),
-            cudaMemcpyDeviceToHost, aristosStream));
-        ARISTOS_CHECK_CUDA(cudaMemcpyAsync(wAp, attributes, n * sizeof(WorkerAttribute),
-            cudaMemcpyDeviceToHost, aristosStream));
-        ARISTOS_CHECK_CUDA(cudaFreeAsync(attributes, aristosStream));
-        ARISTOS_CHECK_CUDA(cudaFreeAsync(dvB, aristosStream));
-        ARISTOS_CHECK_CUDA(cudaPeekAtLastError());
-        ARISTOS_CHECK_CUDA(cudaStreamSynchronize(aristosStream));
+        KLEOS_CHECK_CUDA(cudaMemcpyAsync(hAp, adj, aD * sizeof(floatPair),
+            cudaMemcpyDeviceToHost, kleosStream));
+        KLEOS_CHECK_CUDA(cudaMemcpyAsync(wAp, attributes, n * sizeof(WorkerAttribute),
+            cudaMemcpyDeviceToHost, kleosStream));
+        KLEOS_CHECK_CUDA(cudaFreeAsync(attributes, kleosStream));
+        KLEOS_CHECK_CUDA(cudaFreeAsync(dvB, kleosStream));
+        KLEOS_CHECK_CUDA(cudaPeekAtLastError());
+        KLEOS_CHECK_CUDA(cudaStreamSynchronize(kleosStream));
         delete hB;
         nvshmem_free(symHeap);
         nvshmem_free(symBook);
@@ -173,8 +173,8 @@ namespace aristos{
         const floatPair* __restrict__ const& aP,
         const WorkerAttribute* __restrict__ const& attributes,
         const uint& rank, const uint& world) {
-        #if ARISTOS_NVTX
-        aristosRange decRange{__func__};
+        #if KLEOS_NVTX
+        kleosRange decRange{__func__};
         #endif
         constexpr auto E = ACC::E::value;
         constexpr cutlass::NumericConverter<float, cute::half_t> h2f{};
@@ -258,20 +258,20 @@ namespace aristos{
 
     __host__ __forceinline__
     void cleanup() {
-        #if ARISTOS_NVTX
-        aristosRange finalRange{__PRETTY_FUNCTION__};
+        #if KLEOS_NVTX
+        kleosRange finalRange{__PRETTY_FUNCTION__};
         #endif
-        ARISTOS_ASSERT(isInitialized, "Not initialized!");
+        KLEOS_ASSERT(isInitialized, "Not initialized!");
         isInitialized = false;
-        ARISTOS_CHECK_CUDA(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
+        KLEOS_CHECK_CUDA(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
         nvshmem_finalize();
     }
 
     template<EP e = EP::yes>
     __host__ __forceinline__
     void distributedInit() {
-        #if ARISTOS_NVTX
-        aristosRange distRange{__PRETTY_FUNCTION__};
+        #if KLEOS_NVTX
+        kleosRange distRange{__PRETTY_FUNCTION__};
         #endif
         static_assert(e == EP::yes);
         constexpr auto blocks = ACC::PeakHardware::blocks::value;
@@ -281,13 +281,13 @@ namespace aristos{
         uEI("NVSHMEM_DISABLE_CUDA_VMM", 1);
         // initialize communication backend
         {
-            #if ARISTOS_NVTX
-            aristosRange cR{"distributedInit::nvshmem_init()"};
+            #if KLEOS_NVTX
+            kleosRange cR{"distributedInit::nvshmem_init()"};
             #endif
             nvshmem_init();
         }
         const uint devId = nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE);
-        ARISTOS_CHECK_CUDA(cudaSetDevice(devId));
+        KLEOS_CHECK_CUDA(cudaSetDevice(devId));
         const auto globalWorld = nvshmem_n_pes();
         const auto rank = nvshmem_my_pe();
 
@@ -334,7 +334,7 @@ namespace aristos{
             scratch, aP, wAp, rank, globalWorld);
         if (!isFeasible) {
             cleanup();
-            ARISTOS_ASSERT(isFeasible, "Insufficient Memory for Experts");
+            KLEOS_ASSERT(isFeasible, "Insufficient Memory for Experts");
         }
         // Now allocate memory
         const auto heapElems = STAGES * CELLS * ePgD.epWorldM * ePgD.expertSlots * ACC::pEC::value *
@@ -350,8 +350,8 @@ namespace aristos{
         // Note every symmetric memory allocation's size has to be identical across all PEs
         auto* flags = static_cast<flagsType*>(nvshmem_calloc(flagElems, sizeof(flagsType)));
         auto* sHeap = static_cast<cuda::std::byte*>(nvshmem_align(16, heapElems * sizeof(Element)));
-        ARISTOS_ASSERT(flags != nullptr, "nvshmem_calloc failed");
-        ARISTOS_ASSERT(sHeap != nullptr, "nvshmem_align failed");
+        KLEOS_ASSERT(flags != nullptr, "nvshmem_calloc failed");
+        KLEOS_ASSERT(sHeap != nullptr, "nvshmem_align failed");
 
         // local bookkeeping memory
         Task* bookTask = nullptr;
@@ -366,27 +366,27 @@ namespace aristos{
         BookType* book = nullptr;
         cuda::std::byte* bookElement = nullptr;
 
-        ARISTOS_CHECK_CUDA(cudaMallocAsync(&bookTask, sizeof(Task) * Bookkeeping::tQlt(ePgD.nLx, ePgD.epWorld), aristosStream));
-        ARISTOS_CHECK_CUDA(cudaMallocAsync(&bookPEL, sizeof(PEL) * ACC::E::value, aristosStream));
-        ARISTOS_CHECK_CUDA(cudaMallocAsync(&bookPLI, sizeof(PLI) * ePgD.epWorld, aristosStream));
-        ARISTOS_CHECK_CUDA(cudaMallocAsync(&bookTPS, sizeof(TPS) * Bookkeeping::tPlt(), aristosStream));
-        ARISTOS_CHECK_CUDA(cudaMallocAsync(&bookDB, sizeof(cuda::barrier<cuda::thread_scope_device>) *
-            Bookkeeping::dBlt(), aristosStream));
-        ARISTOS_CHECK_CUDA(cudaMallocAsync(&bookTQS, sizeof(TQSignal) * Bookkeeping::pDBlt(),
-            aristosStream));
-        ARISTOS_CHECK_CUDA(cudaMallocAsync(&bookRSP, sizeof(RingSoftmaxPayload) * Bookkeeping::rSlt(),
-            aristosStream));
-        ARISTOS_CHECK_CUDA(cudaMallocAsync(&bookRTP, sizeof(RingTopKPayload) * Bookkeeping::rTlt(),
-            aristosStream));
-        ARISTOS_CHECK_CUDA(cudaMallocAsync(&bookELI, sizeof(ELI) * Bookkeeping::eLlt(), aristosStream));
-        ARISTOS_CHECK_CUDA(cudaMallocAsync(&book, sizeof(BookType) * Bookkeeping::b4lt(ePgD.nLx, ePgD.epWorld), aristosStream));
-        ARISTOS_CHECK_CUDA(cudaMallocAsync(&bookElement, sizeof(ACC::Element) * Bookkeeping::xMlt(ePgD.nLx, ePgD.epWorld), aristosStream));
+        KLEOS_CHECK_CUDA(cudaMallocAsync(&bookTask, sizeof(Task) * Bookkeeping::tQlt(ePgD.nLx, ePgD.epWorld), kleosStream));
+        KLEOS_CHECK_CUDA(cudaMallocAsync(&bookPEL, sizeof(PEL) * ACC::E::value, kleosStream));
+        KLEOS_CHECK_CUDA(cudaMallocAsync(&bookPLI, sizeof(PLI) * ePgD.epWorld, kleosStream));
+        KLEOS_CHECK_CUDA(cudaMallocAsync(&bookTPS, sizeof(TPS) * Bookkeeping::tPlt(), kleosStream));
+        KLEOS_CHECK_CUDA(cudaMallocAsync(&bookDB, sizeof(cuda::barrier<cuda::thread_scope_device>) *
+            Bookkeeping::dBlt(), kleosStream));
+        KLEOS_CHECK_CUDA(cudaMallocAsync(&bookTQS, sizeof(TQSignal) * Bookkeeping::pDBlt(),
+            kleosStream));
+        KLEOS_CHECK_CUDA(cudaMallocAsync(&bookRSP, sizeof(RingSoftmaxPayload) * Bookkeeping::rSlt(),
+            kleosStream));
+        KLEOS_CHECK_CUDA(cudaMallocAsync(&bookRTP, sizeof(RingTopKPayload) * Bookkeeping::rTlt(),
+            kleosStream));
+        KLEOS_CHECK_CUDA(cudaMallocAsync(&bookELI, sizeof(ELI) * Bookkeeping::eLlt(), kleosStream));
+        KLEOS_CHECK_CUDA(cudaMallocAsync(&book, sizeof(BookType) * Bookkeeping::b4lt(ePgD.nLx, ePgD.epWorld), kleosStream));
+        KLEOS_CHECK_CUDA(cudaMallocAsync(&bookElement, sizeof(ACC::Element) * Bookkeeping::xMlt(ePgD.nLx, ePgD.epWorld), kleosStream));
         // Initialize bookkeeping
-        ARISTOS_CHECK_CUDA(cudaMemsetAsync(book, 0, sizeof(BookType) * Bookkeeping::b4lt(ePgD.nLx, ePgD.epWorld),
-            aristosStream));
-        ARISTOS_CHECK_CUDA(cudaMemsetAsync(bookTQS, 0, sizeof(TQSignal) * Bookkeeping::pDBlt(), aristosStream));
-        ARISTOS_CHECK_CUDA(cudaMemsetAsync(bookRSP, 0, sizeof(RingSoftmaxPayload) * Bookkeeping::rSlt(), aristosStream));
-        ARISTOS_CHECK_CUDA(cudaMemsetAsync(bookRTP, 0, sizeof(RingTopKPayload) * Bookkeeping::rTlt(), aristosStream));
+        KLEOS_CHECK_CUDA(cudaMemsetAsync(book, 0, sizeof(BookType) * Bookkeeping::b4lt(ePgD.nLx, ePgD.epWorld),
+            kleosStream));
+        KLEOS_CHECK_CUDA(cudaMemsetAsync(bookTQS, 0, sizeof(TQSignal) * Bookkeeping::pDBlt(), kleosStream));
+        KLEOS_CHECK_CUDA(cudaMemsetAsync(bookRSP, 0, sizeof(RingSoftmaxPayload) * Bookkeeping::rSlt(), kleosStream));
+        KLEOS_CHECK_CUDA(cudaMemsetAsync(bookRTP, 0, sizeof(RingTopKPayload) * Bookkeeping::rTlt(), kleosStream));
         hostBookkeeping = Bookkeeping{
             flags,
             sHeap,
@@ -405,11 +405,11 @@ namespace aristos{
         };
         // copy device-wide barrier
         const auto hB = new cuda::barrier<cuda::thread_scope_device>{blocks};
-        ARISTOS_CHECK_CUDA(cudaMemcpyAsync(hostBookkeeping.dB(), hB,
+        KLEOS_CHECK_CUDA(cudaMemcpyAsync(hostBookkeeping.dB(), hB,
             sizeof(cuda::barrier<cuda::thread_scope_device>),
-            cudaMemcpyHostToDevice, aristosStream));
-        ARISTOS_CHECK_CUDA(cudaMemcpyToSymbolAsync(bookkeeping, &hostBookkeeping, sizeof(Bookkeeping), 0,
-            cudaMemcpyHostToDevice, aristosStream));
+            cudaMemcpyHostToDevice, kleosStream));
+        KLEOS_CHECK_CUDA(cudaMemcpyToSymbolAsync(bookkeeping, &hostBookkeeping, sizeof(Bookkeeping), 0,
+            cudaMemcpyHostToDevice, kleosStream));
 
         // reuse pre-allocated memory for device data structures
         auto* __restrict__ pEL = CAST_TO(PEL, mP);
@@ -482,23 +482,23 @@ namespace aristos{
             pEL[i] = pel;
         }
 
-        ARISTOS_CHECK_CUDA(cudaMemcpyAsync(hostBookkeeping.pEL(), pEL,
-            sizeof(PEL) * E, cudaMemcpyHostToDevice, aristosStream));
-        ARISTOS_CHECK_CUDA(cudaMemcpyAsync(hostBookkeeping.pL(), pLI,
+        KLEOS_CHECK_CUDA(cudaMemcpyAsync(hostBookkeeping.pEL(), pEL,
+            sizeof(PEL) * E, cudaMemcpyHostToDevice, kleosStream));
+        KLEOS_CHECK_CUDA(cudaMemcpyAsync(hostBookkeeping.pL(), pLI,
             sizeof(PLI) * ePgD.epWorld,
-            cudaMemcpyHostToDevice, aristosStream));
-        ARISTOS_CHECK_CUDA(cudaMemcpyAsync(hostBookkeeping.eL(), eLI,
+            cudaMemcpyHostToDevice, kleosStream));
+        KLEOS_CHECK_CUDA(cudaMemcpyAsync(hostBookkeeping.eL(), eLI,
             sizeof(ELI) * E,
-            cudaMemcpyHostToDevice, aristosStream));
-        ARISTOS_CHECK_CUDA(cudaMemcpyAsync(hostBookkeeping.lX(), lxI,
+            cudaMemcpyHostToDevice, kleosStream));
+        KLEOS_CHECK_CUDA(cudaMemcpyAsync(hostBookkeeping.lX(), lxI,
             sizeof(LXI) * ePgD.nLx,
-            cudaMemcpyHostToDevice, aristosStream));
-        ARISTOS_CHECK_CUDA(cudaMemcpyAsync(hostBookkeeping.ssFc(), &current,
-            sizeof(BookType), cudaMemcpyHostToDevice, aristosStream));
-        ARISTOS_CHECK_CUDA(cudaMemcpyAsync(hostBookkeeping.tIx(), tileIndices,
-            sizeof(uint) * current, cudaMemcpyHostToDevice, aristosStream));
-        ARISTOS_CHECK_CUDA(cudaPeekAtLastError());
-        ARISTOS_CHECK_CUDA(cudaStreamSynchronize(aristosStream));
+            cudaMemcpyHostToDevice, kleosStream));
+        KLEOS_CHECK_CUDA(cudaMemcpyAsync(hostBookkeeping.ssFc(), &current,
+            sizeof(BookType), cudaMemcpyHostToDevice, kleosStream));
+        KLEOS_CHECK_CUDA(cudaMemcpyAsync(hostBookkeeping.tIx(), tileIndices,
+            sizeof(uint) * current, cudaMemcpyHostToDevice, kleosStream));
+        KLEOS_CHECK_CUDA(cudaPeekAtLastError());
+        KLEOS_CHECK_CUDA(cudaStreamSynchronize(kleosStream));
         delete hB;
         std::free(mP);
     }
@@ -508,28 +508,28 @@ namespace aristos{
     void distributedInit<EP::no>() {
         BookType* book = nullptr;
         cuda::std::byte* bookElement = nullptr;
-        ARISTOS_CHECK_CUDA(cudaMallocAsync(&book,
-            sizeof(BookType) * Bookkeeping::b4lt(), aristosStream));
-        ARISTOS_CHECK_CUDA(cudaMallocAsync(&bookElement,
-            sizeof(ACC::Element) * Bookkeeping::xMlt(), aristosStream));
+        KLEOS_CHECK_CUDA(cudaMallocAsync(&book,
+            sizeof(BookType) * Bookkeeping::b4lt(), kleosStream));
+        KLEOS_CHECK_CUDA(cudaMallocAsync(&bookElement,
+            sizeof(ACC::Element) * Bookkeeping::xMlt(), kleosStream));
         hostBookkeeping = Bookkeeping{book, bookElement};
-        ARISTOS_CHECK_CUDA(cudaMemcpyToSymbolAsync(bookkeeping, &hostBookkeeping,
+        KLEOS_CHECK_CUDA(cudaMemcpyToSymbolAsync(bookkeeping, &hostBookkeeping,
             sizeof(Bookkeeping), 0,
-            cudaMemcpyHostToDevice, aristosStream));
-        ARISTOS_CHECK_CUDA(cudaPeekAtLastError());
-        ARISTOS_CHECK_CUDA(cudaStreamSynchronize(aristosStream));
+            cudaMemcpyHostToDevice, kleosStream));
+        KLEOS_CHECK_CUDA(cudaPeekAtLastError());
+        KLEOS_CHECK_CUDA(cudaStreamSynchronize(kleosStream));
     }
 
     // Should be called before loading the model
     __host__ __forceinline__
     void initialize() {
-        #if ARISTOS_NVTX
-        aristosRange initRange{__PRETTY_FUNCTION__};
+        #if KLEOS_NVTX
+        kleosRange initRange{__PRETTY_FUNCTION__};
         #endif
-        ARISTOS_ASSERT(!isInitialized, "Already Initialized");
-        using GPUType = aristos::Hardware<ARISTOS_ARCH, 255>;
+        KLEOS_ASSERT(!isInitialized, "Already Initialized");
+        using GPUType = kleos::Hardware<KLEOS_ARCH, 255>;
         constexpr auto blocks = GPUType::OS::processorBlocks::value;
-        static_assert(ARISTOS_ARCH >= 700, "Volta and above is required!");
+        static_assert(KLEOS_ARCH >= 700, "Volta and above is required!");
         isInitialized = true;
         static_assert(ACC::S::value % BLOCK_M == 0 && ACC::S::value < BLOCK_M * blocks * ACC::TMU::value &&
         ACC::P::value % BLOCK_N == 0 && ACC::H::value % BLOCK_N == 0);
@@ -540,43 +540,43 @@ namespace aristos{
 
     __host__ __forceinline__
     void setDevice() {
-        ARISTOS_ASSERT(isInitialized, "Not initialized!");
-        ARISTOS_CHECK_CUDA(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
+        KLEOS_ASSERT(isInitialized, "Not initialized!");
+        KLEOS_CHECK_CUDA(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
     }
 
     __host__ __forceinline__
     auto getRank() {
-        ARISTOS_ASSERT(isInitialized, "Not initialized!");
+        KLEOS_ASSERT(isInitialized, "Not initialized!");
         return nvshmem_my_pe();
     }
 
     __host__ __forceinline__
     void finalize(){
-        #if ARISTOS_NVTX
-        aristosRange finalRange{__PRETTY_FUNCTION__};
+        #if KLEOS_NVTX
+        kleosRange finalRange{__PRETTY_FUNCTION__};
         #endif
-        ARISTOS_ASSERT(isInitialized, "Not initialized!");
+        KLEOS_ASSERT(isInitialized, "Not initialized!");
         isInitialized = false;
-        ARISTOS_CHECK_CUDA(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
-        ARISTOS_CHECK_CUDA(cudaFreeAsync(hostBookkeeping.bookTask, aristosStream));
-        ARISTOS_CHECK_CUDA(cudaFreeAsync(hostBookkeeping.bookPEL, aristosStream));
-        ARISTOS_CHECK_CUDA(cudaFreeAsync(hostBookkeeping.bookPLI, aristosStream));
-        ARISTOS_CHECK_CUDA(cudaFreeAsync(hostBookkeeping.bookTPS, aristosStream));
-        ARISTOS_CHECK_CUDA(cudaFreeAsync(hostBookkeeping.bookDB, aristosStream));
-        ARISTOS_CHECK_CUDA(cudaFreeAsync(hostBookkeeping.bookTQS, aristosStream));
-        ARISTOS_CHECK_CUDA(cudaFreeAsync(hostBookkeeping.bookRSP, aristosStream));
-        ARISTOS_CHECK_CUDA(cudaFreeAsync(hostBookkeeping.bookRTP, aristosStream));
-        ARISTOS_CHECK_CUDA(cudaFreeAsync(hostBookkeeping.bookELI, aristosStream));
-        ARISTOS_CHECK_CUDA(cudaFreeAsync(hostBookkeeping.book, aristosStream));
-        ARISTOS_CHECK_CUDA(cudaPeekAtLastError());
-        ARISTOS_CHECK_CUDA(cudaFreeAsync(hostBookkeeping.bookElement, aristosStream));
+        KLEOS_CHECK_CUDA(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
+        KLEOS_CHECK_CUDA(cudaFreeAsync(hostBookkeeping.bookTask, kleosStream));
+        KLEOS_CHECK_CUDA(cudaFreeAsync(hostBookkeeping.bookPEL, kleosStream));
+        KLEOS_CHECK_CUDA(cudaFreeAsync(hostBookkeeping.bookPLI, kleosStream));
+        KLEOS_CHECK_CUDA(cudaFreeAsync(hostBookkeeping.bookTPS, kleosStream));
+        KLEOS_CHECK_CUDA(cudaFreeAsync(hostBookkeeping.bookDB, kleosStream));
+        KLEOS_CHECK_CUDA(cudaFreeAsync(hostBookkeeping.bookTQS, kleosStream));
+        KLEOS_CHECK_CUDA(cudaFreeAsync(hostBookkeeping.bookRSP, kleosStream));
+        KLEOS_CHECK_CUDA(cudaFreeAsync(hostBookkeeping.bookRTP, kleosStream));
+        KLEOS_CHECK_CUDA(cudaFreeAsync(hostBookkeeping.bookELI, kleosStream));
+        KLEOS_CHECK_CUDA(cudaFreeAsync(hostBookkeeping.book, kleosStream));
+        KLEOS_CHECK_CUDA(cudaPeekAtLastError());
+        KLEOS_CHECK_CUDA(cudaFreeAsync(hostBookkeeping.bookElement, kleosStream));
         // Below ensures all work is done before deallocating via the external API
-        ARISTOS_CHECK_CUDA(cudaStreamSynchronize(aristosStream));
+        KLEOS_CHECK_CUDA(cudaStreamSynchronize(kleosStream));
         nvshmem_free(hostBookkeeping.flags);
         nvshmem_free(hostBookkeeping.sHeap);
         nvshmem_finalize();
-        ARISTOS_CHECK_CUDA(cudaPeekAtLastError());
-        ARISTOS_CHECK_CUDA(cudaStreamSynchronize(aristosStream));
+        KLEOS_CHECK_CUDA(cudaPeekAtLastError());
+        KLEOS_CHECK_CUDA(cudaStreamSynchronize(kleosStream));
     }
 }
 #endif //BOOTSTRAP_CUH

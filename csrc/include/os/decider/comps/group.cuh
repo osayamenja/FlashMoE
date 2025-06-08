@@ -6,7 +6,7 @@
 #include <unordered_set>
 #include "args.cuh"
 #include "functions.cuh"
-namespace aristos{
+namespace kleos{
     struct Group{
         std::unordered_map<unsigned int, std::pair<unsigned int, unsigned int>> visited{};
         /// Dynamic Programming State

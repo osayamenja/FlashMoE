@@ -7,7 +7,7 @@
 #include <matx.h>
 #include "include/types.cuh"
 
-namespace aristos {
+namespace kleos {
     // reference expert
     template<
         unsigned int S,
@@ -29,7 +29,7 @@ namespace aristos {
         auto gO = matx::make_tensor<Element>(gateOutput, {S, E});
         auto t0 = matx::make_tensor<Element>({});
         auto t0i = matx::make_tensor<matx::index_t>({});
-        matx::cudaExecutor exec{aristosStream};
+        matx::cudaExecutor exec{kleosStream};
         // do Gate
         // 1) GEMM + Softmax
         (gO = matx::softmax(matx::matmul(a, gW), {1})).run(exec);

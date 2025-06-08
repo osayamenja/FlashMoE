@@ -8,7 +8,7 @@
 #include <cute/arch/copy.hpp>
 #include <cute/arch/copy_sm80.hpp>
 
-namespace aristos {
+namespace kleos {
     template<unsigned int Arch, typename TC, typename TA=TC, typename TB=TA>
     requires (Arch >= 700)
     struct MMAConfig {

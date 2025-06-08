@@ -9,7 +9,7 @@
 #include "../types.cuh"
 #include "../atomics.cuh"
 
-namespace aristos::packet {
+namespace kleos::packet {
     template<
         unsigned int blocks,
         DropTokens d = DropTokens::yes,
@@ -299,7 +299,7 @@ namespace aristos::packet {
         typename Element = void
     >
     struct Decoder {
-        static_assert(aristos::TensorValueType<Element>);
+        static_assert(kleos::TensorValueType<Element>);
         static_assert(s == PacketStage::initial);
         __device__ __forceinline__
         void operator()(const DecoderArg& dA,

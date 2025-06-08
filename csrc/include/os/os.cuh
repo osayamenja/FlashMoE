@@ -11,7 +11,7 @@
 #include "scheduler.cuh"
 #include "subscriber.cuh"
 
-namespace aristos::os {
+namespace kleos::os {
     template<
         unsigned int processors,
         DropTokens d = DropTokens::yes,

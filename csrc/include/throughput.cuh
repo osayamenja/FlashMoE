@@ -16,7 +16,7 @@
 #include "telemetry.cuh"
 #include "types.cuh"
 #define TIME_EXPERT 0
-namespace aristos {
+namespace kleos {
     template<unsigned int n, typename Container>
     requires(std::is_floating_point_v<typename Container::value_type> ||
         std::is_integral_v<typename Container::value_type> ||
@@ -57,36 +57,36 @@ namespace aristos {
         cuda::barrier<cuda::thread_scope_device>* __restrict__ const& dB,
         float* __restrict__ const& deviceThroughput, uint* __restrict__ const& tileSync,
         const Element* __restrict__ const& iP /* A, B, D, S, W*/, Element* __restrict__ const& oP /*C*/) {
-        #if ARISTOS_NVTX
-        aristosRange mFTRange{__func__};
+        #if KLEOS_NVTX
+        kleosRange mFTRange{__func__};
         #endif
         const auto tSz = sizeof(uint) * (M / BLOCK_M) * cute::min(K / BLOCK_N, blocks);
         #pragma unroll
         for (uint i = 0; i < skip; ++i) {
-            expert<u, N, K><<<blocks, threads, 0, aristosStream>>>(M, dB, deviceThroughput, tileSync, iP, oP);
+            expert<u, N, K><<<blocks, threads, 0, kleosStream>>>(M, dB, deviceThroughput, tileSync, iP, oP);
             if constexpr (u == UseBarrier::no) {
-                ARISTOS_CHECK_CUDA(cudaMemsetAsync(tileSync, 0, tSz, aristosStream));
+                KLEOS_CHECK_CUDA(cudaMemsetAsync(tileSync, 0, tSz, kleosStream));
             }
             // Needed to clear accumulator buffer
             if constexpr (c == CombineMode::multithreaded) {
-                ARISTOS_CHECK_CUDA(cudaMemsetAsync(oP + M * N, 0, sizeof(Element) * (M * K),
-                    aristosStream));
+                KLEOS_CHECK_CUDA(cudaMemsetAsync(oP + M * N, 0, sizeof(Element) * (M * K),
+                    kleosStream));
             }
         }
         #pragma unroll
         for (uint i = 0; i < trials; ++i) {
-            expert<u, N, K><<<blocks, threads, 0, aristosStream>>>(M, dB,
+            expert<u, N, K><<<blocks, threads, 0, kleosStream>>>(M, dB,
                 deviceThroughput + i, tileSync, iP, oP, false);
             if constexpr (u == UseBarrier::no) {
-                ARISTOS_CHECK_CUDA(cudaMemsetAsync(tileSync, 0, tSz, aristosStream));
+                KLEOS_CHECK_CUDA(cudaMemsetAsync(tileSync, 0, tSz, kleosStream));
             }
             // Needed to clear accumulator buffer
             if constexpr (c == CombineMode::multithreaded) {
-                ARISTOS_CHECK_CUDA(cudaMemsetAsync(oP + M * N, 0, sizeof(Element) * (M * K),
-                    aristosStream));
+                KLEOS_CHECK_CUDA(cudaMemsetAsync(oP + M * N, 0, sizeof(Element) * (M * K),
+                    kleosStream));
             }
         }
-        ARISTOS_CHECK_CUDA(cudaPeekAtLastError());
+        KLEOS_CHECK_CUDA(cudaPeekAtLastError());
     }
     template<
         UseBarrier u = UseBarrier::no,
@@ -94,8 +94,8 @@ namespace aristos {
     >
     __host__ __forceinline__
     void mT(WorkerAttribute* __restrict__ const& dWa) {
-        #if ARISTOS_NVTX
-        aristosRange mTRange{__PRETTY_FUNCTION__};
+        #if KLEOS_NVTX
+        kleosRange mTRange{__PRETTY_FUNCTION__};
         #endif
         constexpr unsigned int M = ACC::pEC::value;
         constexpr unsigned int N = ACC::P::value;
@@ -120,12 +120,12 @@ namespace aristos {
         constexpr auto stateSize = sizeof(cuda::barrier<cuda::thread_scope_device>) +
             sizeof(float) * trials + tSz;
         constexpr auto dMz = stateSize + hZ * sizeof(Element);
-        ARISTOS_CHECK_CUDA(cudaMallocAsync(&p, dMz, aristosStream));
-        ARISTOS_CHECK_CUDA(cudaMemsetAsync(p, 0, stateSize, aristosStream));
+        KLEOS_CHECK_CUDA(cudaMallocAsync(&p, dMz, kleosStream));
+        KLEOS_CHECK_CUDA(cudaMemsetAsync(p, 0, stateSize, kleosStream));
         const auto hB = new cuda::barrier<cuda::thread_scope_device>{blocks};
-        ARISTOS_CHECK_CUDA(cudaMemcpyAsync(p, hB,
+        KLEOS_CHECK_CUDA(cudaMemcpyAsync(p, hB,
             sizeof(cuda::barrier<cuda::thread_scope_device>),
-            cudaMemcpyHostToDevice, aristosStream));
+            cudaMemcpyHostToDevice, kleosStream));
 
         thrust::default_random_engine rng(42);
         thrust::normal_distribution<float> dist(2,3);
@@ -137,8 +137,8 @@ namespace aristos {
         for (uint i = 0; i < cWz; ++i) {
             hVd[i] = conv(hV[i]);
         }
-        ARISTOS_CHECK_CUDA(cudaMemcpyAsync(p + stateSize, hVd,
-            cWz * sizeof(Element), cudaMemcpyHostToDevice, aristosStream));
+        KLEOS_CHECK_CUDA(cudaMemcpyAsync(p + stateSize, hVd,
+            cWz * sizeof(Element), cudaMemcpyHostToDevice, kleosStream));
 
         auto* __restrict__ dB = CAST_TO(cuda::barrier<cuda::thread_scope_device>, p);
         static_assert(alignof(cuda::barrier<cuda::thread_scope_device>) % alignof(float) == 0);
@@ -150,14 +150,14 @@ namespace aristos {
         auto* __restrict__ oP = CAST_TO(Element, p + stateSize) + cWz;
         mFT<u, trials>(M, dB, deviceThroughput, tileSync, iP, oP);
         std::array<float, trials> latency{};
-        ARISTOS_CHECK_CUDA(cudaMemcpyAsync(latency.data(), deviceThroughput,
+        KLEOS_CHECK_CUDA(cudaMemcpyAsync(latency.data(), deviceThroughput,
             sizeof(float) * trials,
-            cudaMemcpyDeviceToHost, aristosStream));
-        ARISTOS_CHECK_CUDA(cudaStreamSynchronize(aristosStream));
+            cudaMemcpyDeviceToHost, kleosStream));
+        KLEOS_CHECK_CUDA(cudaStreamSynchronize(kleosStream));
         const float throughput = 1.0f / findMedian<trials>(latency);
         //fmt::println("Latency is {}ms", findMedian<trials>(latency));
         dWa->throughput = cute::half_t(throughput); // latency should be > 0
-        ARISTOS_CHECK_CUDA(cudaFreeAsync(p, aristosStream));
+        KLEOS_CHECK_CUDA(cudaFreeAsync(p, kleosStream));
         delete hB;
     }
 }

@@ -2,8 +2,8 @@
 // Created by Jonathan on 7/8/24.
 //
 
-#ifndef ARISTOS_CUH
-#define ARISTOS_CUH
+#ifndef KLEOS_CUH
+#define KLEOS_CUH
 
 #include "types.cuh"
 #include "atomics.cuh"
@@ -21,4 +21,4 @@
 #include "topo.cuh"
 #include "bootstrap.cuh"
 
-#endif //ARISTOS_CUH
+#endif //KLEOS_CUH

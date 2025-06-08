@@ -2,8 +2,8 @@
  * Copyright (c) 2024, Osayamen Jonathan Aimuyo.
  ******************************************************************************/
 
-#ifndef ARISTOS_MOE_CUH
-#define ARISTOS_MOE_CUH
+#ifndef KLEOS_MOE_CUH
+#define KLEOS_MOE_CUH
 
 #include "../arch.cuh"
 #include "../debug.cuh"
@@ -13,7 +13,7 @@
 #include "gate.cuh"
 #include "../telemetry.cuh"
 
-namespace aristos::moe{
+namespace kleos::moe{
     template<
         uint threads,
         uint blocks,
@@ -142,62 +142,62 @@ namespace aristos::moe{
     template<uint skip = 50, uint trials = 100>
     __host__ __forceinline__
     void forwardHostBench(const void* const& __restrict__ iP, void* __restrict__ const& oP, float& duration){
-        #if ARISTOS_NVTX
-        aristosRange forwardRange{__PRETTY_FUNCTION__ + std::string(", seqNo: ") + std::to_string(seqBit)};
+        #if KLEOS_NVTX
+        kleosRange forwardRange{__PRETTY_FUNCTION__ + std::string(", seqNo: ") + std::to_string(seqBit)};
         #endif
-        ARISTOS_ASSERT(isInitialized, "Not initialized!");
-        ARISTOS_CHECK_CUDA(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
+        KLEOS_ASSERT(isInitialized, "Not initialized!");
+        KLEOS_CHECK_CUDA(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
         cudaEvent_t start, stop;
-        ARISTOS_CHECK_CUDA(cudaEventCreate(&start));
-        ARISTOS_CHECK_CUDA(cudaEventCreate(&stop));
+        KLEOS_CHECK_CUDA(cudaEventCreate(&start));
+        KLEOS_CHECK_CUDA(cudaEventCreate(&stop));
         /// Consume precompiled macros
         constexpr auto blocks = ACC::PeakHardware::blocks::value;
         constexpr auto threads = ACC::PeakHardware::OS::threads::value;
         #pragma unroll
         for (uint i = 0; i < skip; ++i) {
-            forward<<<blocks, threads, 0, aristosStream>>>(iP, oP, seqBit);
+            forward<<<blocks, threads, 0, kleosStream>>>(iP, oP, seqBit);
             seqBit = sbs::next(seqBit);
         }
         // Call forward pass
-        ARISTOS_CHECK_CUDA(cudaEventRecord(start, aristos::aristosStream));
+        KLEOS_CHECK_CUDA(cudaEventRecord(start, kleos::kleosStream));
         if constexpr (ACC::E::value > 1) {
             #pragma unroll
             for (uint i = 0; i < trials; ++i) {
-                forward<<<blocks, threads, 0, aristosStream>>>(iP, oP, seqBit);
+                forward<<<blocks, threads, 0, kleosStream>>>(iP, oP, seqBit);
                 seqBit = sbs::next(seqBit);
             }
         }
         else {
             // regular FFN forward
-            fffn<<<blocks, threads, 0, aristosStream>>>(iP, oP);
+            fffn<<<blocks, threads, 0, kleosStream>>>(iP, oP);
         }
-        ARISTOS_CHECK_CUDA(cudaEventRecord(stop, aristos::aristosStream));
-        ARISTOS_CHECK_CUDA(cudaStreamSynchronize(aristosStream));
-        ARISTOS_CHECK_CUDA(cudaEventElapsedTime(&duration, start, stop));
+        KLEOS_CHECK_CUDA(cudaEventRecord(stop, kleos::kleosStream));
+        KLEOS_CHECK_CUDA(cudaStreamSynchronize(kleosStream));
+        KLEOS_CHECK_CUDA(cudaEventElapsedTime(&duration, start, stop));
         duration = duration / trials;
-        ARISTOS_CHECK_CUDA(cudaEventDestroy(start));
-        ARISTOS_CHECK_CUDA(cudaEventDestroy(stop));
+        KLEOS_CHECK_CUDA(cudaEventDestroy(start));
+        KLEOS_CHECK_CUDA(cudaEventDestroy(stop));
     }
 
     __host__ __forceinline__
     void forwardHost(const void* const& __restrict__ iP, void* const& __restrict__ oP){
-        #if ARISTOS_NVTX
-        aristosRange forwardRange{__PRETTY_FUNCTION__ + std::string(", seqNo: ") + std::to_string(seqBit)};
+        #if KLEOS_NVTX
+        kleosRange forwardRange{__PRETTY_FUNCTION__ + std::string(", seqNo: ") + std::to_string(seqBit)};
         #endif
-        ARISTOS_ASSERT(isInitialized, "Not initialized!");
-        ARISTOS_CHECK_CUDA(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
+        KLEOS_ASSERT(isInitialized, "Not initialized!");
+        KLEOS_CHECK_CUDA(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
         /// Consume precompiled macros
         constexpr auto blocks = ACC::PeakHardware::blocks::value;
         constexpr auto threads = ACC::PeakHardware::OS::threads::value;
         // Call forward pass
         if constexpr (ACC::E::value > 1) {
-            forward<<<blocks, threads, 0, aristosStream>>>(iP, oP, seqBit);
+            forward<<<blocks, threads, 0, kleosStream>>>(iP, oP, seqBit);
             seqBit = sbs::next(seqBit);
         }
         else {
             // regular FFN forward
-            fffn<<<blocks, threads, 0, aristosStream>>>(iP, oP);
+            fffn<<<blocks, threads, 0, kleosStream>>>(iP, oP);
         }
     }
 }
-#endif //ARISTOS_MOE_CUH
+#endif //KLEOS_MOE_CUH

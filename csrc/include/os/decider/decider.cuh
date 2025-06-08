@@ -20,7 +20,7 @@
 #include "comps/group.cuh"
 #include "comps/worker.cuh"
 
-namespace aristos{
+namespace kleos{
     /// Necessary to use path halving to ensure amortized "practical constant" time
     using DisjointSet = boost::disjoint_sets_with_storage<boost::identity_property_map,
             boost::identity_property_map, boost::find_with_path_halving>;

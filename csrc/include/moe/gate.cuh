@@ -12,7 +12,7 @@
 #include "../types.cuh"
 #include "../atomics.cuh"
 
-namespace aristos::gate {
+namespace kleos::gate {
     template<
         GateReductionLevel g = GateReductionLevel::singleBlock,
         JobType j = JobType::inference

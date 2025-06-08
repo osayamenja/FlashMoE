@@ -5,10 +5,10 @@
 #ifndef TELEMETRY_CUH
 #define TELEMETRY_CUH
 #include <nvtx3/nvtx3.hpp>
-namespace aristos {
-    struct aristosDomain {
-        static constexpr auto const* name{"Aristos"};
+namespace kleos {
+    struct kleosDomain {
+        static constexpr auto const* name{"Kleos"};
     };
-    using aristosRange = nvtx3::scoped_range_in<aristosDomain>;
+    using kleosRange = nvtx3::scoped_range_in<kleosDomain>;
 }
 #endif //TELEMETRY_CUH

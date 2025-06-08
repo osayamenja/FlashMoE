@@ -14,7 +14,7 @@
 #include "../types.cuh"
 #include "../os/processor/gemm.cuh"
 #include "../os/processor/processor.cuh"
-namespace aristos {
+namespace kleos {
     template<
         typename BlockGEMM,
         unsigned int N,

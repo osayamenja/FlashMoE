@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Schema for Aristos configuration",
+  "title": "Schema for Kleos configuration",
   "type": "object",
   "properties": {
     "capacity_factor": {

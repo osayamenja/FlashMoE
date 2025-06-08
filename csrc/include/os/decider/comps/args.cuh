@@ -5,7 +5,7 @@
 #ifndef CSRC_ARGS_CUH
 #define CSRC_ARGS_CUH
 #include "../../../types.cuh"
-namespace aristos{
+namespace kleos{
     struct ARArgs{
         // units is MB
         constexpr static unsigned int gradBuffer = ACC::GRB::value;

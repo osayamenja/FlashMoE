@@ -9,7 +9,7 @@
 #include "types.cuh"
 #include "atomics.cuh"
 
-namespace aristos::topology{
+namespace kleos::topology{
     __device__ __forceinline__
     auto* advancePtr(cuda::std::byte* __restrict__ const& buffer, const unsigned int& slot) {
         return buffer + slot * BETA_BUFFER;
@@ -24,7 +24,7 @@ namespace aristos::topology{
         if (!threadIdx.x) {
             workerAttributes[rank] = self;
         }
-        for (int i = threadIdx.x; i < n; i += ARISTOS_BLOCK_SIZE) {
+        for (int i = threadIdx.x; i < n; i += KLEOS_BLOCK_SIZE) {
             if (i != rank) {
                 awaitBarrier<cuda::thread_scope_system>(CAST_TO(Payload, flags + i), &result, seqNo);
                 workerAttributes[i] = result.wA;
@@ -87,7 +87,7 @@ namespace aristos::topology{
         __syncthreads();
 
         /// Stage my row on the symmetric heap
-        for (unsigned int i = threadIdx.x; i < n; i += ARISTOS_BLOCK_SIZE) {
+        for (unsigned int i = threadIdx.x; i < n; i += KLEOS_BLOCK_SIZE) {
             results[i] = scratchpad[i];
         }
 
@@ -119,7 +119,7 @@ namespace aristos::topology{
         __syncthreads();
 
         /// Stage my row to the symmetric heap
-        for (unsigned int i = threadIdx.x; i < numPeers; i += ARISTOS_BLOCK_SIZE) {
+        for (unsigned int i = threadIdx.x; i < numPeers; i += KLEOS_BLOCK_SIZE) {
             results[peers[i]] = scratchpad[i];
         }
         __syncthreads();
@@ -133,7 +133,7 @@ namespace aristos::topology{
         __syncthreads();
         auto signal = TopologySignal{seqNo, self};
         // Signal our vector, including FLOPs, to others
-        for (unsigned int i = threadIdx.x; i < numPeers; i += ARISTOS_BLOCK_SIZE) {
+        for (unsigned int i = threadIdx.x; i < numPeers; i += KLEOS_BLOCK_SIZE) {
             nvshmem_putmem_signal_nbi(results, results, n * sizeof(floatPair), flags + rank,
                     *CAST_TO(uint64_t, &signal), NVSHMEM_SIGNAL_SET, peers[i]);
         }
@@ -164,7 +164,7 @@ namespace aristos::topology{
         /// All-Reduce to get max transfer time across blocks
         /// Update the global buffer with my values via max reduction
         /// Intra-block slicing
-        for (unsigned int i = threadIdx.x; i < numPeers; i += ARISTOS_BLOCK_SIZE) {
+        for (unsigned int i = threadIdx.x; i < numPeers; i += KLEOS_BLOCK_SIZE) {
             cuda::std::ignore = cuda::atomic_ref<floatPair, cuda::thread_scope_device>{results[peers[i]]}
                 .fetch_max(scratchpad[i]);
         }
@@ -196,13 +196,13 @@ namespace aristos::topology{
     }
 
     /// Build Adjacency Matrix
-    template<unsigned int blocks = ARISTOS_STATIC_SBZ> requires(blocks > 0)
+    template<unsigned int blocks = KLEOS_STATIC_SBZ> requires(blocks > 0)
     __global__ void discover(__grid_constant__ const int n, __grid_constant__ const int rank,
         __grid_constant__ const bool remotePresent, __grid_constant__ const WorkerAttribute self,
         cuda::std::byte* __restrict__ sHeap, uint64_t* flags,
         floatPair* __restrict__ results, cuda::barrier<cuda::thread_scope_device>* dvB,
         WorkerAttribute* __restrict__ workerAttributes, const __grid_constant__ uint seqNo) {
-        assert(blockDim.x == ARISTOS_BLOCK_SIZE);
+        assert(blockDim.x == KLEOS_BLOCK_SIZE);
         assert(blockDim.y * blockDim.z == 1);
         assert(gridDim.x <= blocks + remotePresent);
         assert(gridDim.y * gridDim.z == 1);
@@ -211,7 +211,7 @@ namespace aristos::topology{
         // However, empirical results show identical performance (1.024 𝜇s) for 128 threads copying 256 floats,
         // which is a likely practical upper bound for n.
         extern __shared__ __align__(16) floatPair scratchpad[];
-        for (uint i = threadIdx.x; i < n; i += ARISTOS_BLOCK_SIZE) {
+        for (uint i = threadIdx.x; i < n; i += KLEOS_BLOCK_SIZE) {
             scratchpad[i] = floatPair{0, 0};
         }
         __syncthreads();

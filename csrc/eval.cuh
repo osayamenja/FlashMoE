@@ -19,7 +19,7 @@
 #include "include/types.cuh"
 #include "include/topo.cuh"
 
-namespace aristos {
+namespace kleos {
     __forceinline__ __host__
     void testTopologyDiscovery() {
         char hostname[HOST_NAME_MAX];
@@ -34,15 +34,15 @@ namespace aristos {
         /// Logging
         cudaDeviceProp prop{};
         int dev_count = 0;
-        ARISTOS_CHECK_CUDA(cudaGetDeviceCount(&dev_count));
-        ARISTOS_CHECK_CUDA(cudaGetDeviceProperties(&prop, localRank));
+        KLEOS_CHECK_CUDA(cudaGetDeviceCount(&dev_count));
+        KLEOS_CHECK_CUDA(cudaGetDeviceProperties(&prop, localRank));
         if (globalRank == 0) {
             fmt::println("Starting Topology Discovery...");
         }
         fmt::println("GlobalRank: {}, LocalRank: {}, Device: {}, Bus ID: {}, Devices: {}",
             globalRank, localRank, prop.name, prop.pciBusID, dev_count);
 
-        ARISTOS_CHECK_CUDA(cudaSetDevice(localRank));
+        KLEOS_CHECK_CUDA(cudaSetDevice(localRank));
         const size_t heapBytes = n * sizeof(flagsType) + ax * sizeof(floatPair) + sizeof(WorkerAttribute) * n +
             sizeof(uint) * 2 + n * BETA_BUFFER;
         auto* symHeap = nvshmem_calloc(heapBytes, sizeof(cuda::std::byte));
@@ -69,7 +69,7 @@ namespace aristos {
         const auto sharedSize = n * (sizeof(floatPair) + sizeof(unsigned int));
         constexpr auto skip = 256U;
         constexpr auto blocks = 32U;
-        constexpr auto threads = ARISTOS_BLOCK_SIZE;
+        constexpr auto threads = KLEOS_BLOCK_SIZE;
         cudaEvent_t start, stop;
         cudaEventCreate(&start);
         cudaEventCreate(&stop);
@@ -78,17 +78,17 @@ namespace aristos {
         auto seqNo = 1U;
         #pragma unroll
         for (uint i = 0; i < skip; ++i) {
-            topology::discover<<<blocks, threads, sharedSize, aristosStream>>>(n, globalRank, isRemotePresent,
+            topology::discover<<<blocks, threads, sharedSize, kleosStream>>>(n, globalRank, isRemotePresent,
             self, sHeap, flags, results, syncArray, workerAttributes, seqNo);
             seqNo++;
         }
-        ARISTOS_CHECK_CUDA(cudaMemsetAsync(results, 0, sizeof(floatPair) * n, aristosStream));
-        ARISTOS_CHECK_CUDA(cudaEventRecord(start, aristos::aristosStream));
-        topology::discover<<<blocks, threads, sharedSize, aristosStream>>>(n, globalRank, isRemotePresent,
+        KLEOS_CHECK_CUDA(cudaMemsetAsync(results, 0, sizeof(floatPair) * n, kleosStream));
+        KLEOS_CHECK_CUDA(cudaEventRecord(start, kleos::kleosStream));
+        topology::discover<<<blocks, threads, sharedSize, kleosStream>>>(n, globalRank, isRemotePresent,
             self, sHeap, flags, results, syncArray, workerAttributes, seqNo);
-        ARISTOS_CHECK_CUDA(cudaEventRecord(stop, aristos::aristosStream));
-        ARISTOS_CHECK_CUDA(cudaPeekAtLastError());
-        ARISTOS_CHECK_CUDA(cudaStreamSynchronize(aristosStream));
+        KLEOS_CHECK_CUDA(cudaEventRecord(stop, kleos::kleosStream));
+        KLEOS_CHECK_CUDA(cudaPeekAtLastError());
+        KLEOS_CHECK_CUDA(cudaStreamSynchronize(kleosStream));
         cudaEventElapsedTime(&duration, start, stop);
         auto* aP = std::calloc(ax * sizeof(floatPair) + n * sizeof(WorkerAttribute),
             sizeof(cuda::std::byte));
@@ -97,10 +97,10 @@ namespace aristos {
         auto* attributesPtr = CAST_TO(WorkerAttribute, adjMatrix + ax);
 
         /// Epilogue
-        ARISTOS_CHECK_CUDA(cudaMemcpyAsync(aP, adj, ax * sizeof(floatPair) + n * sizeof(WorkerAttribute),
-            cudaMemcpyDeviceToHost, aristosStream));
-        ARISTOS_CHECK_CUDA(cudaPeekAtLastError());
-        ARISTOS_CHECK_CUDA(cudaStreamSynchronize(aristosStream));
+        KLEOS_CHECK_CUDA(cudaMemcpyAsync(aP, adj, ax * sizeof(floatPair) + n * sizeof(WorkerAttribute),
+            cudaMemcpyDeviceToHost, kleosStream));
+        KLEOS_CHECK_CUDA(cudaPeekAtLastError());
+        KLEOS_CHECK_CUDA(cudaStreamSynchronize(kleosStream));
 
         std::vector<std::array<float, 2>> temp(n);
         std::vector<float> aT(n);

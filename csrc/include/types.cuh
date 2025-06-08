@@ -2,12 +2,12 @@
 // Created by Jonathan on 7/18/24.
 //
 
-#ifndef ARISTOS_TYPES_CUH
-#define ARISTOS_TYPES_CUH
+#ifndef KLEOS_TYPES_CUH
+#define KLEOS_TYPES_CUH
 
-#define ARISTOS_BLOCK_SIZE 128U
-#define ARISTOS_BLOCK_SIZE_WARP (128U / 32)
-#define ARISTOS_STATIC_SBZ 32U
+#define KLEOS_BLOCK_SIZE 128U
+#define KLEOS_BLOCK_SIZE_WARP (128U / 32)
+#define KLEOS_STATIC_SBZ 32U
 
 #define CAST_TO(T, p) static_cast<T*>(static_cast<void*>(p))
 #define CONST_CAST_TO(T, p) static_cast<const T*>(static_cast<const void*>(p))
@@ -43,7 +43,7 @@
 #define BYTE_MAX cuda::std::numeric_limits<cuda::std::underlying_type_t<cuda::std::byte>>::max()
 #define TO_MB(b) (static_cast<float>(b) / (1024.0f*1024.0f))
 #define BETA_MB 1024.0f // 1GB
-#define ARISTOS_DEBUG 1
+#define KLEOS_DEBUG 1
 #define NOOP_SIGNAL 0
 
 #include <cuda/barrier>
@@ -54,7 +54,7 @@
 
 #include "arch.cuh"
 
-namespace aristos{
+namespace kleos{
     template<typename V>
         concept TensorValueType = cuda::std::is_same_v<V, cute::half_t> ||
             cuda::std::is_same_v<V, cute::bfloat16_t> ||
@@ -78,7 +78,7 @@ namespace aristos{
     template<typename S>
     struct ToCute {
         using T = S;
-        static_assert(aristos::TensorValueType<T>);
+        static_assert(kleos::TensorValueType<T>);
     };
     template<>
     struct ToCute<__half> {
@@ -90,7 +90,7 @@ namespace aristos{
     };
 
     template<typename S>
-    requires(aristos::TensorValueType<S>)
+    requires(kleos::TensorValueType<S>)
     struct ToCDx {
         using T = S;
     };
@@ -430,7 +430,7 @@ namespace aristos{
         sequenceStart = 1U,
     };
     __inline__ uint16_t seqBit = sequenceStart;
-    /// Aristos Compile-time Config
+    /// Kleos Compile-time Config
     struct ACC {
         // Upper bound of allowable early exits
         using AEE = cute::C<0U>;
@@ -451,7 +451,7 @@ namespace aristos{
         using HA = cute::C<HIDDEN_ACT>;
         using ActivationOp = AFunction<HIDDEN_ACT, GEA>::DT;
         using ActivationOpX = cute::identity;
-        using PeakHardware = aristos::Hardware<ARISTOS_ARCH, 255>;
+        using PeakHardware = kleos::Hardware<KLEOS_ARCH, 255>;
         using Elems = cute::C<cute::min(BLOCK_N, PeakHardware::rScratch::value * sizeof(mp_t) / sizeof(Element))>;
         using sharedSize = cute::C<PeakHardware::sharedMemory::value +
             (PeakHardware::spare::value > 2048 ? PeakHardware::spare::value - 2048 : PeakHardware::spare::value)>;
@@ -1002,7 +1002,7 @@ namespace aristos{
     __constant__ __inline__ Bookkeeping bookkeeping{};
     __inline__ Bookkeeping hostBookkeeping{};
     __inline__ bool isInitialized = false;
-    __inline__ auto aristosStream = cudaStreamPerThread;
+    __inline__ auto kleosStream = cudaStreamPerThread;
 
     namespace heap {
         /// The symmetric heap is a 5-D tensor (P, S, C, E, EC) of tokens,
@@ -1081,4 +1081,4 @@ namespace aristos{
         }
     }
 }
-#endif //ARISTOS_TYPES_CUH
+#endif //KLEOS_TYPES_CUH

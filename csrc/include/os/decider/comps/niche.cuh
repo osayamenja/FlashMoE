@@ -5,7 +5,7 @@
 #ifndef CSRC_NICHE_CUH
 #define CSRC_NICHE_CUH
 
-namespace aristos{
+namespace kleos{
     template<typename  Element>
     requires(std::is_integral_v<Element>)
     __host__ __forceinline__

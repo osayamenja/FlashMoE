@@ -2,8 +2,8 @@
 // Created by osayamen on 7/13/24.
 //
 
-#ifndef ARISTOS_COMPUTE_CUH
-#define ARISTOS_COMPUTE_CUH
+#ifndef KLEOS_COMPUTE_CUH
+#define KLEOS_COMPUTE_CUH
 
 #include <cutlass/array.h>
 #include <cute/tensor.hpp>
@@ -12,7 +12,7 @@
 #include "gemm.cuh"
 #include "../../types.cuh"
 
-namespace aristos::processor{
+namespace kleos::processor{
     enum class ReleaseType {
         stable,
         experimental
@@ -31,7 +31,7 @@ namespace aristos::processor{
     >
     requires(TensorValueType<Element> &&
             elems % wS == 0 && // guarantees warp convergence
-            aristos::isMatrix<ScaleWeights> &&
+            kleos::isMatrix<ScaleWeights> &&
             cuda::std::is_same_v<typename ScaleWeights::value_type, Element>)
     __device__ __forceinline__
     void combine(cuda::std::byte* __restrict__ const& workspace,
@@ -785,4 +785,4 @@ namespace aristos::processor{
         }
     }
 }
-#endif //ARISTOS_COMPUTE_CUH
+#endif //KLEOS_COMPUTE_CUH

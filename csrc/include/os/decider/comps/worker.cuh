@@ -5,7 +5,7 @@
 #ifndef CSRC_WORKER_CUH
 #define CSRC_WORKER_CUH
 
-namespace aristos{
+namespace kleos{
     struct __align__(8) Worker{
         float processingRate; // ms per expert
         uint16_t id;

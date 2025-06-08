@@ -11,7 +11,7 @@
 #include "../atomics.cuh"
 #include "../types.cuh"
 
-namespace aristos::scheduler {
+namespace kleos::scheduler {
     template<
         unsigned int processors,
         DQType dqt = DQType::stride,
