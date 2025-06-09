@@ -5,16 +5,6 @@
  * This file is part of the Kleos Project and is licensed under the BSD 3-Clause License.
  * See the LICENSE file in the root directory for full terms.
  */
-
-/*
- * Copyright (c) 2025, Jonathan Aimuyo
- * All rights reserved.
- *
- * This file is part of the Kleos Project and is licensed under the
- * BSD 3-Clause License with an Academic Attribution Requirement.
- * See the LICENSE file in the root directory for full terms.
- */
-
 //
 // Created by oja7 on 11/25/24.
 //

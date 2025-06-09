@@ -1,8 +1,8 @@
-#Copyright (c) 2025, Osayamen Jonathan Aimuyo
-#All rights reserved.
+# Copyright (c) 2025, Osayamen Jonathan Aimuyo
+# All rights reserved.
 #
-#This file is part of the Kleos Project and is licensed under the BSD 3-Clause License.
-#See the LICENSE file in the root directory for full terms.
+# This file is part of the Kleos Project and is licensed under the BSD 3-Clause License.
+# See the LICENSE file in the root directory for full terms.
 
 cmake_minimum_required(VERSION 3.27)
 

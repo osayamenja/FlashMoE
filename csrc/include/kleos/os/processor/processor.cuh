@@ -5,16 +5,6 @@
  * This file is part of the Kleos Project and is licensed under the BSD 3-Clause License.
  * See the LICENSE file in the root directory for full terms.
  */
-
-/*
- * Copyright (c) 2025, Jonathan Aimuyo
- * All rights reserved.
- *
- * This file is part of the Kleos Project and is licensed under the
- * BSD 3-Clause License with an Academic Attribution Requirement.
- * See the LICENSE file in the root directory for full terms.
- */
-
 //
 // Created by osayamen on 7/13/24.
 //
@@ -95,7 +85,7 @@ namespace kleos::processor{
         static_assert(bN % elems == 0);
         constexpr auto trips = bN / elems;
         // ensures we have enough shared memory
-        static_assert(sizeof(Element) * bM * (elems + 1) + sizeof(TPS) * bM <= sharedSize);
+        static_assert(sizeof(TPS) * bM <= sharedSize);
         static_assert(bM % elems == 0);
         // slice and dice token indices
         constexpr auto phases = bM / elems;
@@ -103,25 +93,18 @@ namespace kleos::processor{
         static_assert(elems % wS == 0);
         constexpr auto wE = elems / wS;
         auto* __restrict__ sTPS = CAST_TO(TPS, workspace);
-        // Transposed layout
-        constexpr auto sCLay = make_layout(cute::Shape<cute::Int<bM>, cute::Int<elems>>{});
-        const auto sC = cute::make_tensor(cute::make_smem_ptr(CAST_TO(Element, sTPS + bM)), sCLay);
         static_assert(bM == threads);
         sTPS[threadIdx.x] = tokenIndices[threadIdx.x];
         __syncthreads();
         // Eagerly prefetch inputs to registers
         #pragma unroll
         for (uint i = 0; i < trips; ++i) {
-            // global -> shared
+            // global -> registers
             #pragma unroll
             for (uint j = 0; j < elems; ++j) {
                 const auto rIdx = phaseIdx + j * phases;
                 const auto cIdx =  threadIdx.x % elems + i * elems;
-                sC(threadIdx.x, j) = gA(rIdx, cIdx);
-            }
-            #pragma unroll
-            for (uint j = 0; j < elems; ++j) {
-                registers[j + i * elems] = sC(threadIdx.x, j);
+                registers[j + i * elems] = gA(rIdx, cIdx);
             }
         }
         if constexpr (c == CombineMode::multithreaded) {
@@ -465,6 +448,10 @@ namespace kleos::processor{
         const auto tCsC = tiledMMA.get_slice(threadIdx.x).partition_C(sC);
 
         // Reorder to striped arrangement
+        // TODO(Jonathan): Do the below reordering without shared memory. It would make my day (decade actually) to solve this.
+        // A lot of performance badness happens down there.
+        // I haven't sat down to think about a solution yet.
+        // First idea that comes to mind is some form of warp register shuffling.
         #pragma unroll
         for (unsigned int i = 0; i < trips; ++i) {
             #pragma unroll
