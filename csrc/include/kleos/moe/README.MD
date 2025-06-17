@@ -80,11 +80,12 @@ For peak performance, (see [here](https://www.nvidia.com/en-us/on-demand/session
 - Run `make -j install`
 
 ## CMake Build
-- cd `csrc`
-- mkdir `cmake-build-release` && cd `cmake-build-release`
-- Configure `kleos_config.json` as needed.
-- Run `cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_MAKE_PROGRAM=<path to ninja> -Wno-dev -G Ninja -S .. -B .`
-- Run `cmake --build . --target csrc -j`
+1. cd `csrc`
+2. mkdir `cmake-build-release` && cd `cmake-build-release`
+3. Configure `kleos_config.json` as needed.
+4. Run `cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_MAKE_PROGRAM=<path to ninja> -Wno-dev -G Ninja -S .. -B .`
+5. Run `cmake --build . --target csrc -j`
+- 💡Note you must build the application (4 and 5) again to propagate any changes to `kleos_config.json`. This is a compilation and performance optimization as we expose those parameters in the json file as _static_ constants within the application. This reduces build times by about 60x (1 hour → ~1 min).
 ## Single Node
 - Run `nvshmrun -n <number of processes> -ppn <processes per node> ./csrc`
 ## Multi node
