@@ -85,7 +85,7 @@ For peak performance, (see [here](https://www.nvidia.com/en-us/on-demand/session
 3. Configure `kleos_config.json` as needed.
 4. Run `cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_MAKE_PROGRAM=<path to ninja> -Wno-dev -G Ninja -S .. -B .`
 5. Run `cmake --build . --target csrc -j`
-> 💡 Note you must build the application (4 and 5) again to propagate any changes to `kleos_config.json`. This is a compilation and performance optimization as we expose those parameters in the json file as _static_ constants within the application. This reduces build times by about 60x (1 hour → ~1 min).
+> 💡 Note you must rebuild the application (4 and 5) to propagate any subsequent changes made to `kleos_config.json`. This intermediate stage is a compilation and performance optimization, as it exposes those parameters in the json file as _static_ constants within the application. Doing so reduces build times by about 60x (1 hour → ~1 min) as it allows for sidestepping exhaustive template instantiations, given the template parameters are known a priori. On the other hand, static constants allows for (1) loop unrolling, which we heavily adopt, (2) optimized mathematical operations, modular arithmetic for example, (3) code path elimination via `if constexpr` and (4) compile-time computations for address calculations which present recurrently in tensor indexing. We leverage all of these and some more additional compile-time optimizations in Flash.
 ## Single Node
 - Run `nvshmrun -n <number of processes> -ppn <processes per node> ./csrc`
 ## Multi node
