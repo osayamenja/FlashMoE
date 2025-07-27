@@ -48,6 +48,10 @@ set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xfatbin -compress-all") # Compress al
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcudafe --display_error_number") # Show error/warning numbers
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler \"${KLEOS_CUDA_CXX_FLAGS}\"")
 
+# Query number of SMs
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
+include(SM)
+
 include(CheckCompilerFlag)
 check_compiler_flag(CUDA -t4 NVCC_THREADS)
 
@@ -174,6 +178,10 @@ else ()
     target_link_libraries(csrc PRIVATE nvshmem::nvshmem)
 endif ()
 
+# cuBLASDx
+find_package(mathdx REQUIRED COMPONENTS cublasdx CONFIG)
+target_link_libraries(csrc PRIVATE mathdx::cublasdx)
+
 target_compile_options(csrc PRIVATE
         $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-Xfatbin -compress-all>
         $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
@@ -248,6 +256,7 @@ target_compile_definitions(csrc
         SEQ_LEN=${SEQ_LEN_V}
         DTYPE=${DTYPE_V}
         VOCAB_SIZE=${VOCAB_SIZE_V}
+        NUM_SMS=${CUDA_NUM_SMS}
         KLEOS_NVTX=1
 )
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")

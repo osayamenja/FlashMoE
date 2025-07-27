@@ -28,11 +28,6 @@ namespace kleos {
         yes,
         no
     };
-    __host__ __device__
-    enum class Board {
-        pcie,
-        sxm,
-    };
 
     template<
         unsigned int Arch,
@@ -94,17 +89,16 @@ namespace kleos {
     // Data center GPUs only
     template<
         unsigned int Arch,
-        unsigned int maxRegisters = 128,
-        Board b = Board::sxm
+        unsigned int maxRegisters = 128
     >
     requires (SupportedArch<Arch>)
     struct Hardware {
-        static_assert(Arch == 800 && maxRegisters == 128 && b == Board::sxm,
+        static_assert(Arch == 800 && maxRegisters == 128,
             "Unregistered Arch");
         using blocksPerSM = cute::C<4U>;
         using arch = cute::C<800U>;
         using registers = cute::C<128U>;
-        using blocks = cute::C<blocksPerSM::value * 108>;
+        using blocks = cute::C<blocksPerSM::value * NUM_SMS>;
         using bKBase = cute::C<8U>;
         using rScratch = cute::C<32U>;
         using pipeStages = cute::C<BASE_PIPE_STAGES * 2>;
@@ -118,7 +112,7 @@ namespace kleos {
         using blocksPerSM = cute::C<5U>;
         using arch = cute::C<800U>;
         using registers = cute::C<96U>;
-        using blocks = cute::C<blocksPerSM::value * 108>;
+        using blocks = cute::C<blocksPerSM::value * NUM_SMS>;
         using bKBase = cute::C<8U>;
         using rScratch = cute::C<32U>;
         using sharedMemory = cute::C<BASE_SHARED_SIZE>;
@@ -132,7 +126,7 @@ namespace kleos {
         using blocksPerSM = cute::C<2U>;
         using arch = cute::C<800U>;
         using registers = cute::C<255U>;
-        using blocks = cute::C<blocksPerSM::value * 108>;
+        using blocks = cute::C<blocksPerSM::value * NUM_SMS>;
         using bKBase = cute::C<8U>;
         using rScratch = cute::C<64U>;
         using pipeStages = cute::C<BASE_PIPE_STAGES * 2>;
@@ -146,7 +140,7 @@ namespace kleos {
         using blocksPerSM = cute::C<4U>;
         using arch = cute::C<700U>;
         using registers = cute::C<128U>;
-        using blocks = cute::C<blocksPerSM::value * 80>;
+        using blocks = cute::C<blocksPerSM::value * NUM_SMS>;
         using bKBase = cute::C<16U>;
         using rScratch = cute::C<32U>;
         using pipeStages = cute::C<1U>;
@@ -160,7 +154,7 @@ namespace kleos {
         using blocksPerSM = cute::C<5U>;
         using arch = cute::C<700U>;
         using registers = cute::C<96U>;
-        using blocks = cute::C<blocksPerSM::value * 80>;
+        using blocks = cute::C<blocksPerSM::value * NUM_SMS>;
         using pipeStages = cute::C<1U>;
         using bKBase = cute::C<16U>;
         using rScratch = cute::C<32U>;
@@ -175,7 +169,7 @@ namespace kleos {
         using blocksPerSM = cute::C<2U>;
         using arch = cute::C<700U>;
         using registers = cute::C<255U>;
-        using blocks = cute::C<blocksPerSM::value * 80>;
+        using blocks = cute::C<blocksPerSM::value * NUM_SMS>;
         using pipeStages = cute::C<1U>;
         using bKBase = cute::C<32U>;
         using rScratch = cute::C<64U>;
@@ -186,11 +180,11 @@ namespace kleos {
 
     // Hopper
     template<>
-    struct Hardware<900, 128, Board::sxm> {
+    struct Hardware<900, 128> {
         using blocksPerSM = cute::C<4U>;
         using arch = cute::C<900U>;
         using registers = cute::C<128U>;
-        using blocks = cute::C<blocksPerSM::value * 132>;
+        using blocks = cute::C<blocksPerSM::value * NUM_SMS>;
         using bKBase = cute::C<8U>;
         using rScratch = cute::C<32U>;
         using pipeStages = cute::C<BASE_PIPE_STAGES * 2>;
@@ -200,67 +194,25 @@ namespace kleos {
     };
 
     template<>
-    struct Hardware<900, 128, Board::pcie> {
-        using blocksPerSM = cute::C<4U>;
-        using arch = cute::C<900U>;
-        using registers = cute::C<128U>;
-        using blocks = cute::C<blocksPerSM::value * 114>;
-        using bKBase = cute::C<8U>;
-        using rScratch = cute::C<32U>;
-        using pipeStages = cute::C<BASE_PIPE_STAGES * 2>;
-        using sharedMemory = cute::C<BASE_SHARED_SIZE * 2>;
-        using spare = ArchShared<900U, blocksPerSM::value, sharedMemory::value, UseSharedBound::yes>::Spare;
-        using OS = OSD<blocks::value>;
-    };
-
-    template<>
-    struct Hardware<900, 255, Board::sxm> {
+    struct Hardware<900, 255> {
         using blocksPerSM = cute::C<2U>;
         using arch = cute::C<900U>;
         using registers = cute::C<255U>;
-        using blocks = cute::C<blocksPerSM::value * 132>;
+        using blocks = cute::C<blocksPerSM::value * NUM_SMS>;
         using bKBase = cute::C<8U>;
         using rScratch = cute::C<64U>;
-        using pipeStages = cute::C<BASE_PIPE_STAGES * 2>;
+        using pipeStages = cute::C<BASE_PIPE_STAGES>;
         using sharedMemory = cute::C<BASE_SHARED_SIZE * 2>;
         using spare = ArchShared<900U, blocksPerSM::value, sharedMemory::value, UseSharedBound::yes>::Spare;
         using OS = OSD<blocks::value>;
     };
 
     template<>
-    struct Hardware<900, 255, Board::pcie> {
-        using blocksPerSM = cute::C<2U>;
-        using arch = cute::C<900U>;
-        using registers = cute::C<255U>;
-        using blocks = cute::C<blocksPerSM::value * 114>;
-        using bKBase = cute::C<8U>;
-        using rScratch = cute::C<64U>;
-        using pipeStages = cute::C<BASE_PIPE_STAGES * 2>;
-        using sharedMemory = cute::C<BASE_SHARED_SIZE * 2>;
-        using spare = ArchShared<900U, blocksPerSM::value, sharedMemory::value, UseSharedBound::yes>::Spare;
-        using OS = OSD<blocks::value>;
-    };
-
-    template<>
-    struct Hardware<900, 96, Board::sxm> {
+    struct Hardware<900, 96> {
         using blocksPerSM = cute::C<5U>;
         using arch = cute::C<900U>;
         using registers = cute::C<96U>;
-        using blocks = cute::C<blocksPerSM::value * 132>;
-        using bKBase = cute::C<8U>;
-        using rScratch = cute::C<64U>;
-        using pipeStages = cute::C<BASE_PIPE_STAGES * 2>;
-        using sharedMemory = cute::C<BASE_SHARED_SIZE * 2>;
-        using spare = ArchShared<900U, blocksPerSM::value, sharedMemory::value, UseSharedBound::yes>::Spare;
-        using OS = OSD<blocks::value>;
-    };
-
-    template<>
-    struct Hardware<900, 96, Board::pcie> {
-        using blocksPerSM = cute::C<5U>;
-        using arch = cute::C<900U>;
-        using registers = cute::C<96U>;
-        using blocks = cute::C<blocksPerSM::value * 114>;
+        using blocks = cute::C<blocksPerSM::value * NUM_SMS>;
         using bKBase = cute::C<8U>;
         using rScratch = cute::C<64U>;
         using pipeStages = cute::C<BASE_PIPE_STAGES * 2>;
