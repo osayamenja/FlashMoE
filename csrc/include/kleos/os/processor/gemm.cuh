@@ -62,27 +62,31 @@ namespace kleos {
         cute::cp_async_wait<N>();
         __syncthreads();
     }
-    // GEMM Mainloop like that of CUTLASS
+    // GEMM Mainloop
     template<
         typename BLAS,
-        int N,
-        int K,
-        int pipeStages,
-        typename Accumulator
+        int N = ACC::P::value,
+        int K = ACC::H::value,
+        int pipeStages = 2
     >
     requires(cutlass::is_pow2<pipeStages>::value)
     struct GM {
+        template<
+            typename ElementA, typename ElementB, typename ElementOut,
+            typename Accumulator>
+        requires(cuda::std::is_same_v<ElementA, typename BLAS::a_value_type> &&
+            cuda::std::is_same_v<ElementB, typename BLAS::b_value_type> &&
+            cuda::std::is_same_v<ElementOut, typename BLAS::a_value_type>)
         __forceinline__ __device__
         void operator()(void* __restrict__ const& workspace,
             Accumulator& accumulator,
-            const typename BLAS::a_value_type* __restrict__ const& a,
-            const typename BLAS::b_value_type* __restrict__ const& b,
-            typename BLAS::a_value_type* __restrict__ const& c,
+            const ElementA* __restrict__ const& a,
+            const ElementB* __restrict__ const& b,
+            ElementOut* __restrict__ const& c,
             const int& M, const int& tileIdx) const {
             using BM = cute::Int<cublasdx::size_of<BLAS>::m>;
             using BN = cute::Int<cublasdx::size_of<BLAS>::n>;
             using BK = cute::Int<cublasdx::size_of<BLAS>::k>;
-            using BT = cute::Shape<BM, BN, BK>;
 
             const auto tilesM = M / BM{};
             using KT = cute::Int<K>;
@@ -100,23 +104,22 @@ namespace kleos {
             using StrideB = cuda::std::conditional_t<cublasdx::arrangement_of_v_b<BLAS> == cublasdx::row_major,
             cute::Stride<NT, cute::_1>, cute::Stride<cute::_1, KT>>;
             using ShapeB = cute::Shape<KT, NT>;
-            const auto mB = cute::make_tensor(cute::make_gmem_ptr(a),
+            const auto mB = cute::make_tensor(cute::make_gmem_ptr(b),
                 cute::Layout<ShapeB, StrideB>{});
             const auto strideC = cute::conditional_return<cublasdx::arrangement_of_v_c<BLAS> == cublasdx::row_major>
             (cute::Stride<NT, cute::_1>{}, cute::make_stride(cute::_1{}, M));
-            const auto mC = make_tensor(cute::make_gmem_ptr(c),
-            make_layout(cute::make_shape(M, N), strideC));
+            const auto mC = cute::make_tensor(cute::make_gmem_ptr(c),
+                cute::make_layout(cute::make_shape(M, N), strideC));
 
-            const auto gA = cute::local_tile(mA, BT{}, ctaCoord, cute::Step<cute::_1, cute::X,cute::_1>{});
-            const auto gB = cute::local_tile(mB, BT{}, ctaCoord, cute::Step<cute::_1, cute::X,cute::_1>{});
-            const auto gC = cute::local_tile(mC, BT{}, ctaCoord, cute::Step<cute::_1, cute::X,cute::_1>{});
+            const auto gA = cute::local_tile(mA, cute::Shape<BM, BK>{}, cute::select<0, 2>(ctaCoord));
+            const auto gB = cute::local_tile(mB, cute::Shape<BK, BN>{}, cute::select<2, 1>(ctaCoord));
 
             // shared layouts
             constexpr auto sALay = cute::tile_to_shape(BLAS::suggest_layout_smem_a().layout,
                 cute::Shape<BM, BK, cute::Int<pipeStages>>{});
             constexpr auto sBLay = cute::tile_to_shape(BLAS::suggest_layout_smem_b().layout,
                 cute::Shape<BK, BN, cute::Int<pipeStages>>{});
-            const auto [sA, sB] = cublasdx::shared_memory::slice<typename BLAS::a_value_type, typename BLAS::b_value_type>(
+            const auto [sA, sB] = cublasdx::shared_memory::slice<ElementA, ElementB>(
                 workspace, cublasdx::alignment_of_v_a<BLAS>, sALay, cublasdx::alignment_of_v_b<BLAS>, sBLay);
             cute::for_each(cute::make_int_sequence<pipeStages>{}, [&](auto stage) {
                 cublasdx::copy<BLAS, cublasdx::alignment_of_v_a<BLAS>>(gA(cute::_, cute::_, stage), sA(cute::_, cute::_, stage));
@@ -140,6 +143,40 @@ namespace kleos {
                 BLAS().execute(sA(cute::_, cute::_, ps), sB(cute::_, cute::_, ps), accumulator);
             });
         }
+    };
+    template<typename BLAS, int pipeStages, int AlignmentBytes>
+    constexpr auto getSharedSize() {
+        using BM = cute::Int<cublasdx::size_of<BLAS>::m>;
+        using BN = cute::Int<cublasdx::size_of<BLAS>::n>;
+        using BK = cute::Int<cublasdx::size_of<BLAS>::k>;
+        constexpr auto sALay = cute::tile_to_shape(BLAS::suggest_layout_smem_a().layout,
+                    cute::Shape<BM, BK, cute::Int<pipeStages>>{});
+        constexpr auto sBLay = cute::tile_to_shape(BLAS::suggest_layout_smem_b().layout,
+            cute::Shape<BK, BN, cute::Int<pipeStages>>{});
+        return cutlass::round_up(AlignmentBytes,
+            cosize(sALay) * sizeof(typename BLAS::a_value_type) +
+            cosize(sBLay) * sizeof(typename BLAS::b_value_type));
+    }
+    // GEMM Operator
+    template<int N, int K, typename Element = ACC::Element>
+    struct GO {
+        using BLAS = decltype(
+            cublasdx::Size<BLOCK_M, BLOCK_N * 4 / sizeof(ACC::Element), 32>() +
+            cublasdx::Precision<ACC::Element, ACC::Element, ACC::ElementC>() +
+            cublasdx::Type<cublasdx::type::real>() +
+            cublasdx::Function<cublasdx::function::MM>() +
+            cublasdx::Arrangement<cublasdx::row_major, cublasdx::col_major, cublasdx::row_major>() +
+            cublasdx::Block() +
+            cublasdx::BlockDim<THREADS>() +
+            cublasdx::MaxAlignment() +
+            cublasdx::experimental::StaticBlockDim() +
+            cublasdx::SM<KLEOS_ARCH>());
+        using BM = cute::Int<cublasdx::size_of<BLAS>::m>;
+        using BN = cute::Int<cublasdx::size_of<BLAS>::m>;
+        using BK = cute::Int<cublasdx::size_of<BLAS>::m>;
+        using NT = cute::Int<N>;
+        using ValueType = Element;
+        using Mainloop = GM<BLAS, N, K>;
     };
     template<
         typename ActivationOp,
