@@ -20,6 +20,7 @@ To attain this vision, we employ *kernel fusion* enabled by (1) algorithmic inno
 
 ## 🗞️ News
 
+- **Spet 18, 2025** — **FlashDMoE** will appear at NeurIPS'25 (main track)! 
 - **June 5, 2025** — ⚡️Introducing **FlashDMoE**, a fused GPU kernel for distributed MoE execution.  
   ➤ See [`this README`](./csrc/include/kleos/moe/README.MD) for details, benchmarks, and usage.
 
