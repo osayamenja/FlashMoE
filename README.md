@@ -7,7 +7,7 @@
 
 ## 🗞️ News
 
-- **Spet 18, 2025** — **FlashDMoE** will appear at NeurIPS'25 (main track)! 
+- **Sept 18, 2025** — **FlashDMoE** will appear at NeurIPS'25 (main track)! 
 - **June 5, 2025** — ⚡️Introducing **FlashDMoE**, a fused GPU kernel for distributed MoE execution.  
 
 ---
@@ -30,7 +30,7 @@ Out-of-the box, Flash supports
 - $\geq$ SM70 GPUs
 - RDMA (EFA, libfabric, ibverbs, Slingshot) and NVLink.
 - TF32 (peak performance) 
-- FP16/BF16 (functionality is complete *but* acheving peak performance is still a work in progress)
+- FP16/BF16 (functionality is complete *but* achieving peak performance is still a work in progress)
 
 ---
 
@@ -51,11 +51,21 @@ FlashDMoE addresses this by:
 ---
 
 ## 📊 Performance Results
-| Plot 1 | Plot 2 |
-|--------|--------|
-| <img src="plots/plot1.png" width="400"/> | <img src="plots/plot2.png" width="400"/> |
-| Plot 3 | Plot 4 |
-| <img src="plots/plot3.png" width="400"/> | <img src="plots/plot4.png" width="400"/> |
+We compare against [COMET](https://github.com/bytedance/flux) (MLSys '25), [FasterMoE](https://github.com/laekov/fastmoe) (PPoPP '22), [Megatron-CUTLASS, and Megatron-TE](https://github.com/NVIDIA/Megatron-LM/tree/f32b2731acddfb9fe9a91198b27d947286d9d629/megatron/core/transformer/moe).
+<div align="center">
+  <img src="plots/sm_util.png" alt="Figure 1" width="500"/>
+  <p><em>GPU SM Utilization</em></p>
+</div>
+
+| Weak Scaling | Overlap Efficiency |
+|:------:|:------:|
+| <img src="plots/scaling_gpus_8.png" width="400"/> | <img src="plots/overlap_efficiency_8.png" width="400"/> |
+
+| Expert Scalability on 4 H100s | Expert Scalability on 8 H100s |
+|:------:|:------:|
+| <img src="plots/scaling_experts.png" width="400"/> | <img src="plots/scaling_experts_8.png" width="400"/> |
+| **Token Scaling on 4 H100s** | **Token Scaling on 8 H100s** |
+| <img src="plots/scaling_tokens.png" width="400"/> | <img src="plots/scaling_tokens_8.png" width="400"/> |
 
 Compared to SOTA baselines, Flash: 
 1. increases GPU utilization by up to **9x**, 
