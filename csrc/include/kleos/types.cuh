@@ -1007,7 +1007,7 @@ namespace kleos{
         }
     };
 
-    __constant__ __inline__ Bookkeeping bookkeeping{};
+    __constant__ static __inline__ Bookkeeping bookkeeping{};
     __inline__ Bookkeeping hostBookkeeping{};
     __inline__ bool isInitialized = false;
     __inline__ auto kleosStream = cudaStreamPerThread;

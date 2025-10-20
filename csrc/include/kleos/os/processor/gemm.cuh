@@ -35,7 +35,7 @@ namespace kleos {
     struct FAA<cute::half_t, cutlass::epilogue::thread::ReLU<cute::half_t>> {
         __forceinline__ __device__
         cute::half_t operator()(const cute::half_t& accumulator, const cute::half_t& term) const {
-            return cute::half_t(__hfma_relu(__half(1.0f),accumulator.to_half(), term.to_half()));
+            return cute::half_t(__hfma_relu(__float2half(1.0f), accumulator.to_half(), term.to_half()));
         }
     };
 
@@ -44,8 +44,21 @@ namespace kleos {
     struct FAA<cute::bfloat16_t, cutlass::epilogue::thread::ReLU<cute::bfloat16_t>> {
         __forceinline__ __device__
         cute::bfloat16_t operator()(const cute::bfloat16_t& accumulator, const cute::bfloat16_t& term) const {
-            return cute::bfloat16_t(__hfma_relu(__nv_bfloat16(1.0f),
-                accumulator.to_nv_bfloat16(), term.to_nv_bfloat16()));
+            // Manual FMA + ReLU for bfloat16 (no __hfma_relu_bf16 intrinsic exists)
+            // #if __CUDA_ARCH__ >= 800
+            // auto result = __hfma_bf16(accumulator.to_nv_bfloat16(), __float2bfloat16(1.0f), term.to_nv_bfloat16());
+            // return cute::bfloat16_t(__hmax_bf16(result, __float2bfloat16(0.0f)));
+            // #else
+            // // Fallback for older architectures
+            // float result = __bfloat162float(accumulator.to_nv_bfloat16()) * 1.0f + __bfloat162float(term.to_nv_bfloat16());
+            // return cute::bfloat16_t(__float2bfloat16(result > 0.0f ? result : 0.0f));
+            // #endif
+            // FMA + ReLU using float conversion (no native bfloat16 fma+relu intrinsic)
+            float acc_f = __bfloat162float(accumulator.to_nv_bfloat16());
+            float term_f = __bfloat162float(term.to_nv_bfloat16());
+            float result = acc_f * 1.0f + term_f;
+            result = result > 0.0f ? result : 0.0f;  // ReLU
+            return cute::bfloat16_t(__float2bfloat16(result));
         }
     };
 
