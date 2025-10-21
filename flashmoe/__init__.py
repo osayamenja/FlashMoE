@@ -1,43 +1,42 @@
 """
 FlashMoE: Fast Distributed MoE in a Single Kernel
 
+NOTE: Config is compile-time! Tensor shapes must match what was built.
+To change dimensions, edit csrc/kleos_config.json and rebuild.
+
 Usage:
-    from flashmoe import run_moe
+    import torch
+    import flashmoe
     
-    # Single GPU (direct call, no nvshmrun needed)
-    config = {
-        "capacity_factor": 1,
-        "drop_tokens": 1,
-        "expert_top_k": 2,
-        "global_batch": 256,
-        "is_training": 0,
-        "hidden_act": 0,
-        "hidden_size": 2048,
-        "intermediate_size": 2048,
-        "mini_batch": 1,
-        "moe_frequency": 1,
-        "num_experts": 64,
-        "num_layers": 1,
-        "sequence_len": 8192,
-        "torch_dtype": 1,
-        "vocab_size": 32000
-    }
+    # Check compiled configuration
+    config = flashmoe._C.get_compiled_config()
+    print(config)  # {'S': 8192, 'H': 2048, 'E': 64, 'P': 2048, 'PX': 64}
     
-    output = run_moe(config)
+    # Create tensors matching compiled dimensions
+    # For default config: mini_batch=1, seq_len=8192, hidden=2048, experts=64
+    input_tensor = torch.randn(1, 8192, 2048, dtype=torch.float32, device='cuda')
+    gate_weights = torch.randn(2048, 64, dtype=torch.float32, device='cuda')
+    expert_weights = torch.randn(64, 2, 2048, 2048, dtype=torch.float32, device='cuda')
     
-    # Or from config file (just like: ./csrc with kleos_config.json)
-    output = run_moe("csrc/kleos_config.json")
+    # Single GPU forward pass
+    output = flashmoe.run_moe(input_tensor, gate_weights, expert_weights)
     
-    # Multi-GPU (just like: nvshmrun -n 4 -ppn 4 ./csrc)
-    output = run_moe(
-        config="csrc/kleos_config.json",
-        n_processes=4,
-        processes_per_node=4
-    )
+    # Multi-GPU (via nvshmrun launcher with random tensors for testing)
+    # output = flashmoe.run_moe_from_config("csrc/kleos_config.json", n_processes=4)
+    
+To rebuild with different dimensions:
+    1. Edit csrc/kleos_config.json
+    2. pip install -e . --no-build-isolation
+    3. Create tensors with new dimensions
 """
 
-from .ops import run_moe, FlashMoEConfig
+from .ops import run_moe, run_moe_from_config, FlashMoEConfig
 
 __version__ = '0.1.0'
 
-__all__ = ['run_moe', 'FlashMoEConfig']
+__all__ = [
+    'run_moe',
+    'run_moe_from_config',
+    'get_compiled_config',
+    'FlashMoEConfig',
+]
