@@ -1,11 +1,11 @@
 """
 Core FlashMoE functionality
 """
-import json
-import os
 from pathlib import Path
-from typing import Union, Dict, Any, Optional
+from typing import Optional
 import torch
+
+from .launcher import nvshmrun_launcher
 
 # Import compiled C++ extension
 try:
@@ -17,145 +17,101 @@ except ImportError:
     warnings.warn("FlashMoE CUDA extension not found. Install with: pip install -e .")
 
 
-class FlashMoEConfig:
-    """
-    Configuration for FlashMoE - matches kleos_config.json structure
-    
-    NOTE: Config values are compile-time constants. This class is used
-    to help create properly-sized tensors for testing. To change config,
-    you must edit csrc/kleos_config.json and rebuild.
-    """
-    
-    REQUIRED_KEYS = {
-        "capacity_factor", "drop_tokens", "expert_top_k", "global_batch",
-        "is_training", "hidden_act", "hidden_size", "intermediate_size",
-        "mini_batch", "moe_frequency", "num_experts", "num_layers",
-        "sequence_len", "torch_dtype", "vocab_size"
-    }
-    
-    def __init__(self, config: Union[str, Dict[str, Any]]):
-        """
-        Initialize config from dict or JSON file path
-        
-        Args:
-            config: Either a dict with config params or path to kleos_config.json
-        """
-        if isinstance(config, str):
-            config = Path(config)
-            if not config.exists():
-                raise FileNotFoundError(f"Config file not found: {config}")
-            with open(config, 'r') as f:
-                self.config = json.load(f)
-        elif isinstance(config, dict):
-            self.config = config.copy()
-        else:
-            raise TypeError("config must be dict or path to JSON file")
-        
-        # Validate required keys
-        missing = self.REQUIRED_KEYS - set(self.config.keys())
-        if missing:
-            raise ValueError(f"Missing required config keys: {missing}")
-    
-    def to_json(self, path: str):
-        """Save config to JSON file"""
-        with open(path, 'w') as f:
-            json.dump(self.config, f, indent=2)
-    
-    def __getitem__(self, key):
-        return self.config[key]
-    
-    def __repr__(self):
-        return f"FlashMoEConfig({self.config})"
-
-
 def run_moe(
-    input_tensor: torch.Tensor,
-    gate_weights: torch.Tensor,
-    expert_weights: torch.Tensor,
     n_processes: int = 1,
     processes_per_node: Optional[int] = None,
-    hostfile: Optional[str] = None
+    hostfile: Optional[str] = None,
+    config_path: str = "csrc/kleos_config.json"
 ) -> torch.Tensor:
     """
-    Run MoE forward pass
+    Run MoE forward pass with random tensors for benchmarking/testing.
     
-    NOTE: Tensor dimensions must match the compile-time config from
-    csrc/kleos_config.json. To use different dimensions, edit the JSON
-    file and rebuild with: pip install -e . --no-build-isolation
+    Tensors are automatically created based on compiled configuration.
     
     Args:
-        input_tensor: Input activations [batch, seq_len, hidden_size]
-        gate_weights: Gate weights [hidden_size, num_experts]
-        expert_weights: Expert weights [num_experts, 2, intermediate_size, hidden_size]
         n_processes: Number of processes (default=1 for single GPU)
         processes_per_node: Processes per node (default: same as n_processes)
         hostfile: Path to MPI-style hostfile for multi-node execution
+        config_path: Path to config file (must match compiled config)
     
     Returns:
-        output: MoE layer output [batch, seq_len, hidden_size]
+        None (prints timing results)
     
     Examples:
-        >>> # Tensors must match compiled config dimensions
-        >>> input_tensor = torch.randn(256, 8192, 2048, dtype=torch.float16, device='cuda')
-        >>> gate_weights = torch.randn(2048, 64, dtype=torch.float16, device='cuda')
-        >>> expert_weights = torch.randn(64, 2, 2048, 2048, dtype=torch.float16, device='cuda')
-        >>> output = run_moe(input_tensor, gate_weights, expert_weights)
-        
-        >>> # Multi-GPU
-        >>> output = run_moe(input_tensor, gate_weights, expert_weights, n_processes=4)
+        >>> import flashmoe
+        >>> 
+        >>> # Single GPU
+        >>> flashmoe.run_moe()
+        >>> 
+        >>> # Multi-GPU single node
+        >>> flashmoe.run_moe(n_processes=4)
+        >>> 
+        >>> # Multi-node
+        >>> flashmoe.run_moe(n_processes=16, processes_per_node=8, hostfile="hosts.txt")
+    
+    Note:
+        To change dimensions, edit csrc/kleos_config.json and rebuild:
+        pip install -e . --no-build-isolation
     """
-    if n_processes == 1:
-        # Single GPU - call directly
-        return _C.moe_forward(input_tensor, gate_weights, expert_weights)
-    else:
-        # Multi-GPU - use nvshmrun launcher
-        raise NotImplementedError("Multi-GPU support via nvshmrun launcher coming soon")
-
-
-def run_moe_from_config(
-    config: Union[str, Dict[str, Any]],
-    n_processes: int = 1,
-    processes_per_node: Optional[int] = None,
-    hostfile: Optional[str] = None
-) -> torch.Tensor:
-    """
-    Run MoE forward pass with random tensors created from config
-    
-    This is mainly for testing. Config must match compile-time config!
-    
-    Args:
-        config: Config dict or path to kleos_config.json
-        n_processes: Number of processes
-        processes_per_node: Processes per node
-        hostfile: Path to hostfile for multi-node
-    
-    Returns:
-        output: MoE layer output
-    """
-    cfg = FlashMoEConfig(config) if not isinstance(config, FlashMoEConfig) else config
-    
     if processes_per_node is None:
         processes_per_node = n_processes
     
-    from .launcher import nvshmrun_launcher
-    return nvshmrun_launcher(
-        config=cfg,
-        n_processes=n_processes,
-        processes_per_node=processes_per_node,
-        hostfile=hostfile
-    )
+    if n_processes == 1:
+        # Single GPU - run directly
+        return _run_single_gpu(config_path)
+    else:
+        # Multi-GPU - use nvshmrun launcher
+        return nvshmrun_launcher(
+            config_path=config_path,
+            n_processes=n_processes,
+            processes_per_node=processes_per_node,
+            hostfile=hostfile
+        )
 
 
-def get_compiled_config() -> Dict[str, int]:
+def _run_single_gpu(config_path: str = "csrc/kleos_config.json") -> torch.Tensor:
+    """Run single GPU with random tensors"""
+    import json
+    
+    # Load config to create tensors
+    config_path = Path(config_path)
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file not found: {config_path}")
+    
+    with open(config_path, 'r') as f:
+        config = json.load(f)
+    
+    # Get dimensions
+    mini_batch = config["mini_batch"]
+    seq_len = config["sequence_len"]
+    H = config["hidden_size"]
+    I = config["intermediate_size"]
+    E = config["num_experts"]
+    
+    # Map dtype
+    dtype_map = {0: torch.float16, 1: torch.float32}
+    dtype = dtype_map[config["torch_dtype"]]
+    
+    print(f"Creating random tensors: [{mini_batch}, {seq_len}, {H}], dtype={dtype}")
+    
+    # Create random tensors
+    input_tensor = torch.randn(mini_batch, seq_len, H, dtype=dtype, device='cuda')
+    gate_weights = torch.randn(H, E, dtype=dtype, device='cuda')
+    expert_weights = torch.randn(E, 2, I, H, dtype=dtype, device='cuda')
+    
+    # Run forward
+    output = _C.moe_forward(input_tensor, gate_weights, expert_weights)
+    
+    return output
+
+
+def get_compiled_config():
     """
-    Get the compile-time config dimensions from the built extension
+    Get compile-time configuration dimensions.
     
     Returns:
-        dict with keys: S, H, E, P (compile-time constants)
+        dict with keys: S, H, E, P, PX, element_size_bytes
     """
-    # This would require adding a function to python_bindings.cu
-    # For now, just document that users should check kleos_config.json
-    raise NotImplementedError(
-        "To check compiled config, see csrc/kleos_config.json. "
-        "The extension is compiled with those dimensions."
-    )
+    if not _CUDA_AVAILABLE:
+        raise RuntimeError("CUDA extension not available. Install with: pip install -e .")
+    return _C.get_compiled_config()

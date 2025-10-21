@@ -1,6 +1,5 @@
 """
-Worker script for distributed FlashMoE execution via nvshmrun
-This script is executed by each process in the distributed setup.
+Worker script for distributed FlashMoE execution
 """
 import os
 import sys
@@ -10,60 +9,64 @@ from pathlib import Path
 
 
 def main():
-    """Main worker function executed by nvshmrun"""
-    # Get NVSHMEM process info
-    rank = int(os.environ.get("NVSHMEM_RANK", "0"))
-    world_size = int(os.environ.get("NVSHMEM_WORLD_SIZE", "1"))
+    """Main worker function"""
     
-    print(f"Process {rank}/{world_size} starting...", flush=True)
-    
-    # Load config from path passed as command line argument
+    # Load config
     if len(sys.argv) < 2:
         print("ERROR: Config path not provided", file=sys.stderr)
         sys.exit(1)
     
     config_path = sys.argv[1]
-    
-    # Load config (for tensor dimensions only - kernel uses compile-time config)
     with open(config_path, "r") as f:
         config = json.load(f)
     
-    # Set device
-    torch.cuda.set_device(rank % torch.cuda.device_count())
+    # Get local rank from MPI env vars (for GPU selection only)
+    local_rank = int(os.environ.get("OMPI_COMM_WORLD_RANK", 
+                     os.environ.get("PMI_RANK",
+                     os.environ.get("SLURM_PROCID", "0"))))
+    world_size = int(os.environ.get("OMPI_COMM_WORLD_SIZE",
+                     os.environ.get("PMI_SIZE", 
+                     os.environ.get("SLURM_NTASKS", "1"))))
     
-    # Import here to ensure CUDA is initialized first
+    # Set device
+    device_id = local_rank % torch.cuda.device_count()
+    torch.cuda.set_device(device_id)
+    
+    print(f"Process {local_rank}/{world_size} using GPU {device_id}", flush=True)
+    
+    # Import C++ module
     from flashmoe import _C as _flashmoe_cuda
     
-    # Create tensors matching compile-time config expectations
-    batch = config["global_batch"]
-    seq = config["sequence_len"]
+    # Get dimensions
+    mini_batch = config["mini_batch"]
+    seq_len = config["sequence_len"]
     H = config["hidden_size"]
     I = config["intermediate_size"]
     E = config["num_experts"]
     
-    dtype_map = {0: torch.float32, 1: torch.float16, 2: torch.bfloat16}
+    dtype_map = {0: torch.float16, 1: torch.float32}
     dtype = dtype_map[config["torch_dtype"]]
     
-    # Input: [batch, seq, H]
-    input_tensor = torch.randn(batch, seq, H, dtype=dtype).cuda()
+    # Calculate local experts
+    nLx = E // world_size if world_size > 1 else E
     
-    # Gate weights: [H, E]
-    gate_weights = torch.randn(H, E, dtype=dtype).cuda()
+    print(f"Process {local_rank}: Creating {nLx} local experts (total {E})", flush=True)
     
-    # Expert weights: [E, 2, I, H]
-    expert_weights = torch.randn(E, 2, I, H, dtype=dtype).cuda()
+    # Create tensors
+    input_tensor = torch.randn(mini_batch, seq_len, H, dtype=dtype, device='cuda')
+    gate_weights = torch.randn(H, E, dtype=dtype, device='cuda')
+    expert_weights = torch.randn(nLx, 2, I, H, dtype=dtype, device='cuda')
     
-    print(f"Rank {rank}: input={input_tensor.shape}, gate={gate_weights.shape}, "
-          f"experts={expert_weights.shape}", flush=True)
+    print(f"Process {local_rank}: Calling moe_forward...", flush=True)
     
-    # Run MoE forward (no config passed - it's compile-time!)
+    # Run MoE (this initializes NVSHMEM internally)
     output = _flashmoe_cuda.moe_forward(
         input_tensor,
         gate_weights,
         expert_weights
     )
     
-    print(f"Process {rank} completed. Output shape: {output.shape}", flush=True)
+    print(f"Process {local_rank}: Completed! Output: {output.shape}", flush=True)
     
     return output
 

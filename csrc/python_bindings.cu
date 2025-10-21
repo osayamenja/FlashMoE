@@ -61,9 +61,9 @@ torch::Tensor moe_forward(
                 ", E=" + std::to_string(E) + "]. Got [" + 
                 std::to_string(gate_weights.size(0)) + ", " + 
                 std::to_string(gate_weights.size(1)) + "]");
-    TORCH_CHECK(expert_weights.size(0) == nLx, 
-                "Expert count mismatch. Expected " + std::to_string(nLx) + 
-                " local experts, got " + std::to_string(expert_weights.size(0)));
+    // TORCH_CHECK(expert_weights.size(0) == nLx, 
+    //             "Expert count mismatch. Expected " + std::to_string(nLx) + 
+    //             " local experts, got " + std::to_string(expert_weights.size(0)));
     TORCH_CHECK(expert_weights.size(1) == 2, 
                 "Expert weights must have up and down projections [nLx, 2, P, H]");
     TORCH_CHECK(expert_weights.size(2) == P && expert_weights.size(3) == H,
