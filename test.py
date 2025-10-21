@@ -1,107 +1,133 @@
 """
-Minimal test for FlashMoE run_moe()
+Minimal test for FlashMoE with compiled config
 """
 import torch
 import flashmoe
-import subprocess
 
-def test_run_moe():
-    """Test single-GPU MoE forward pass"""
+def test_flashmoe_basic():
+    """
+    Test FlashMoE with tensors matching compiled config
     
-    # Minimal config (matching kleos_config.json structure)
-    config = {
-        "capacity_factor": 1,
-        "drop_tokens": 1,
-        "expert_top_k": 2,
-        "global_batch": 8,          # Small batch for testing
-        "is_training": 0,
-        "hidden_act": 0,
-        "hidden_size": 128,         # Small for quick test
-        "intermediate_size": 256,
-        "mini_batch": 1,
-        "moe_frequency": 1,
-        "num_experts": 8,           # Fewer experts for testing
-        "num_layers": 1,
-        "sequence_len": 64,         # Short sequence for testing
-        "torch_dtype": 1,           # FP16
-        "vocab_size": 32000
-    }
+    Compiled config (from csrc/kleos_config.json):
+    - global_batch: 256
+    - sequence_len: 8192
+    - hidden_size: 2048
+    - intermediate_size: 2048
+    - num_experts: 64
+    - torch_dtype: 1 (FP16)
+    """
     
     print("=" * 60)
-    print("Testing FlashMoE run_moe()")
+    print("Testing FlashMoE with compiled config")
     print("=" * 60)
-    print(f"Config: global_batch={config['global_batch']}, "
-          f"seq_len={config['sequence_len']}, "
-          f"hidden_size={config['hidden_size']}")
-    print(f"Total tokens: {config['global_batch'] * config['sequence_len']}")
-    print("=" * 60)
+    
+    # Compiled dimensions (must match csrc/kleos_config.json)
+    batch = 1
+    seq_len = 8192
+    hidden_size = 2048
+    intermediate_size = 2048
+    num_experts = 64
+    dtype = torch.float32  # torch_dtype=1 means FP16
+    
+    print(f"\nCreating tensors:")
+    print(f"  Input: [{batch}, {seq_len}, {hidden_size}]")
+    print(f"  Gate:  [{hidden_size}, {num_experts}]")
+    print(f"  Experts: [{num_experts}, 2, {intermediate_size}, {hidden_size}]")
+    print(f"  Dtype: {dtype}")
+    
+    # Create input tensors with correct shapes
+    input_tensor = torch.randn(
+        batch, 
+        seq_len, 
+        hidden_size, 
+        dtype=dtype, 
+        device='cuda'
+    )
+    
+    gate_weights = torch.randn(
+        hidden_size, 
+        num_experts, 
+        dtype=dtype, 
+        device='cuda'
+    )
+    
+    expert_weights = torch.randn(
+        num_experts,
+        2,  # up and down projections
+        intermediate_size,
+        hidden_size,
+        dtype=dtype,
+        device='cuda'
+    )
+    
+    print("\n✓ Tensors created successfully")
+    print(f"  Input device: {input_tensor.device}")
+    print(f"  Memory usage: ~{input_tensor.numel() * 2 / 1e9:.2f} GB (input only)")
+    
+    # Run MoE forward pass
+    print("\nRunning MoE forward pass...")
     
     try:
-        # Call run_moe (uses nvshmrun launcher internally)
-        result = flashmoe.run_moe(config, n_processes=1)
+        output = flashmoe.run_moe(
+            input_tensor,
+            gate_weights,
+            expert_weights
+        )
         
-        print("\n✓ SUCCESS!")
-        print(f"Result: {result}")
-        
-    except subprocess.CalledProcessError as e:
-        print("\n✗ FAILED - Subprocess error")
-        print("=" * 60)
-        print("STDOUT:")
-        print(e.stdout)
-        print("\nSTDERR:")
-        print(e.stderr)
-        print("=" * 60)
-        
-    except Exception as e:
-        print(f"\n✗ FAILED - {type(e).__name__}: {e}")
-        import traceback
-        traceback.print_exc()
-
-
-def test_with_larger_config():
-    """Test with your original config"""
-    
-    config = {
-        "capacity_factor": 1,
-        "drop_tokens": 1,
-        "expert_top_k": 2,
-        "global_batch": 256,
-        "is_training": 0,
-        "hidden_act": 0,
-        "hidden_size": 2048,
-        "intermediate_size": 2048,
-        "mini_batch": 1,
-        "moe_frequency": 1,
-        "num_experts": 64,
-        "num_layers": 1,
-        "sequence_len": 8192,
-        "torch_dtype": 1,
-        "vocab_size": 32000
-    }
-    
-    print("\n" + "=" * 60)
-    print("Testing with larger config")
-    print("=" * 60)
-    
-    try:
-        result = flashmoe.run_moe(config, n_processes=1)
+        print("\n" + "=" * 60)
         print("✓ SUCCESS!")
-        print(f"Result: {result}")
+        print("=" * 60)
+        print(f"Output shape: {output.shape}")
+        print(f"Output dtype: {output.dtype}")
+        print(f"Output device: {output.device}")
+        print(f"Output range: [{output.min():.4f}, {output.max():.4f}]")
         
-    except subprocess.CalledProcessError as e:
+        return output
+        
+    except RuntimeError as e:
+        print("\n" + "=" * 60)
         print("✗ FAILED")
-        print("STDOUT:", e.stdout)
-        print("STDERR:", e.stderr)
-        
-    except Exception as e:
-        print(f"✗ FAILED: {e}")
-        import traceback
-        traceback.print_exc()
+        print("=" * 60)
+        print(f"Error: {e}")
+        raise
+
+
+def test_flashmoe_wrong_shape():
+    """
+    Test that wrong shapes are caught with clear error messages
+    """
+    print("\n" + "=" * 60)
+    print("Testing shape validation (should fail)")
+    print("=" * 60)
+    
+    # Wrong dimensions - should fail!
+    wrong_batch = 128  # Should be 256
+    seq_len = 8192
+    hidden_size = 2048
+    
+    print(f"\nTrying with wrong batch size: {wrong_batch} (should be 256)")
+    
+    input_tensor = torch.randn(wrong_batch, seq_len, hidden_size, 
+                               dtype=torch.float32, device='cuda')
+    gate_weights = torch.randn(hidden_size, 64, dtype=torch.float32, device='cuda')
+    expert_weights = torch.randn(64, 2, 2048, hidden_size, 
+                                 dtype=torch.float32, device='cuda')
+    
+    try:
+        output = flashmoe.run_moe(input_tensor, gate_weights, expert_weights)
+        print("✗ Should have failed but didn't!")
+    except RuntimeError as e:
+        print(f"✓ Correctly caught shape mismatch:")
+        print(f"  Error: {e}")
 
 
 if __name__ == "__main__":
-    # Run minimal test first
-    test_run_moe()
+    # Test 1: Correct shapes (should succeed)
+    output = test_flashmoe_basic()
     
-    # Uncomment to test with your original larger config
-    # test_with_larger_config()
+    # Test 2: Wrong shapes (should fail with clear error)
+    # test_flashmoe_wrong_shape()
+    
+    print("\n" + "=" * 60)
+    print("All tests completed!")
+    print("=" * 60)

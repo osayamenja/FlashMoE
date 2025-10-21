@@ -1,17 +1,15 @@
 """
-Core FlashMoE functionality - mirrors the C++ executable behavior
+Core FlashMoE functionality
 """
 import json
 import os
-import subprocess
-import sys
 from pathlib import Path
 from typing import Union, Dict, Any, Optional
 import torch
 
-# Import compiled C++ extension (standard naming convention)
+# Import compiled C++ extension
 try:
-    from flashmoe import _C  # Compiled extension: flashmoe._C
+    from flashmoe import _C
     _CUDA_AVAILABLE = True
 except ImportError:
     _CUDA_AVAILABLE = False
@@ -20,7 +18,13 @@ except ImportError:
 
 
 class FlashMoEConfig:
-    """Configuration for FlashMoE - matches kleos_config.json structure exactly"""
+    """
+    Configuration for FlashMoE - matches kleos_config.json structure
+    
+    NOTE: Config values are compile-time constants. This class is used
+    to help create properly-sized tensors for testing. To change config,
+    you must edit csrc/kleos_config.json and rebuild.
+    """
     
     REQUIRED_KEYS = {
         "capacity_factor", "drop_tokens", "expert_top_k", "global_batch",
@@ -65,109 +69,93 @@ class FlashMoEConfig:
 
 
 def run_moe(
+    input_tensor: torch.Tensor,
+    gate_weights: torch.Tensor,
+    expert_weights: torch.Tensor,
+    n_processes: int = 1,
+    processes_per_node: Optional[int] = None,
+    hostfile: Optional[str] = None
+) -> torch.Tensor:
+    """
+    Run MoE forward pass
+    
+    NOTE: Tensor dimensions must match the compile-time config from
+    csrc/kleos_config.json. To use different dimensions, edit the JSON
+    file and rebuild with: pip install -e . --no-build-isolation
+    
+    Args:
+        input_tensor: Input activations [batch, seq_len, hidden_size]
+        gate_weights: Gate weights [hidden_size, num_experts]
+        expert_weights: Expert weights [num_experts, 2, intermediate_size, hidden_size]
+        n_processes: Number of processes (default=1 for single GPU)
+        processes_per_node: Processes per node (default: same as n_processes)
+        hostfile: Path to MPI-style hostfile for multi-node execution
+    
+    Returns:
+        output: MoE layer output [batch, seq_len, hidden_size]
+    
+    Examples:
+        >>> # Tensors must match compiled config dimensions
+        >>> input_tensor = torch.randn(256, 8192, 2048, dtype=torch.float16, device='cuda')
+        >>> gate_weights = torch.randn(2048, 64, dtype=torch.float16, device='cuda')
+        >>> expert_weights = torch.randn(64, 2, 2048, 2048, dtype=torch.float16, device='cuda')
+        >>> output = run_moe(input_tensor, gate_weights, expert_weights)
+        
+        >>> # Multi-GPU
+        >>> output = run_moe(input_tensor, gate_weights, expert_weights, n_processes=4)
+    """
+    if n_processes == 1:
+        # Single GPU - call directly
+        return _C.moe_forward(input_tensor, gate_weights, expert_weights)
+    else:
+        # Multi-GPU - use nvshmrun launcher
+        raise NotImplementedError("Multi-GPU support via nvshmrun launcher coming soon")
+
+
+def run_moe_from_config(
     config: Union[str, Dict[str, Any]],
     n_processes: int = 1,
     processes_per_node: Optional[int] = None,
-    hostfile: Optional[str] = None,
-    input_tensor: Optional[torch.Tensor] = None,
-    expert_weights: Optional[torch.Tensor] = None,
-    gate_weights: Optional[torch.Tensor] = None
+    hostfile: Optional[str] = None
 ) -> torch.Tensor:
     """
-    Run MoE forward pass using nvshmrun launcher
+    Run MoE forward pass with random tensors created from config
     
-    Unified interface for all execution modes (always uses nvshmrun):
-    - Single GPU (n_processes=1): nvshmrun -n 1 -ppn 1
-    - Multi-GPU single node (n_processes>1, no hostfile): nvshmrun -n N -ppn N
-    - Multi-node (n_processes>1, with hostfile): nvshmrun -n N -ppn M --hostfile hosts.txt
-    
-    This mirrors the behavior of:
-    - nvshmrun -n 1 -ppn 1 ./csrc                           (single GPU)
-    - nvshmrun -n 4 -ppn 4 ./csrc                           (multi-GPU, single node)
-    - nvshmrun -n 16 -ppn 8 --hostfile hosts.txt ./csrc    (multi-node)
+    This is mainly for testing. Config must match compile-time config!
     
     Args:
-        config: Either dict with config params or path to kleos_config.json
-        n_processes: Total number of processes across all nodes (default=1 for single GPU)
-        processes_per_node: Processes per node (default: same as n_processes for single node)
-        hostfile: Path to MPI-style hostfile for multi-node execution.
-                 Format: one line per node with "hostname slots=N"
-                 Example:
-                     node1 slots=4
-                     node2 slots=4
-                     192.168.1.100 slots=8
-        input_tensor: Input tensor [global_batch, sequence_len, hidden_size].
-                     If None, uses random data (like C++ version does for benchmarking)
-        expert_weights: Expert weights [num_experts, intermediate_size, hidden_size].
-                       If None, uses random initialization
-        gate_weights: Gate weights [hidden_size, num_experts].
-                     If None, uses random initialization
+        config: Config dict or path to kleos_config.json
+        n_processes: Number of processes
+        processes_per_node: Processes per node
+        hostfile: Path to hostfile for multi-node
     
     Returns:
-        output: MoE layer output [global_batch, sequence_len, hidden_size]
-    
-    Examples:
-        # Single GPU - nvshmrun -n 1 -ppn 1
-        >>> config = {
-        ...     "capacity_factor": 1,
-        ...     "drop_tokens": 1,
-        ...     "expert_top_k": 2,
-        ...     "global_batch": 256,
-        ...     "is_training": 0,
-        ...     "hidden_act": 0,
-        ...     "hidden_size": 2048,
-        ...     "intermediate_size": 2048,
-        ...     "mini_batch": 1,
-        ...     "moe_frequency": 1,
-        ...     "num_experts": 64,
-        ...     "num_layers": 1,
-        ...     "sequence_len": 8192,
-        ...     "torch_dtype": 1,
-        ...     "vocab_size": 32000
-        ... }
-        >>> output = run_moe(config)
-        
-        # Multi-GPU single node (just like: nvshmrun -n 4 -ppn 4 ./csrc)
-        >>> output = run_moe(
-        ...     config="csrc/kleos_config.json",
-        ...     n_processes=4,
-        ...     processes_per_node=4
-        ... )
-        
-        # Multi-node with hostfile (just like: nvshmrun -n 16 -ppn 8 --hostfile hosts.txt ./csrc)
-        >>> output = run_moe(
-        ...     config="csrc/kleos_config.json",
-        ...     n_processes=16,
-        ...     processes_per_node=8,
-        ...     hostfile="hosts.txt"
-        ... )
+        output: MoE layer output
     """
-    
-    # Parse config
     cfg = FlashMoEConfig(config) if not isinstance(config, FlashMoEConfig) else config
     
-    # Set default processes_per_node
     if processes_per_node is None:
         processes_per_node = n_processes
     
-    # Always use nvshmrun launcher (even for single GPU)
     from .launcher import nvshmrun_launcher
     return nvshmrun_launcher(
         config=cfg,
         n_processes=n_processes,
         processes_per_node=processes_per_node,
-        hostfile=hostfile,
-        input_tensor=input_tensor,
-        expert_weights=expert_weights,
-        gate_weights=gate_weights
+        hostfile=hostfile
     )
 
 
-def _get_torch_dtype(dtype_int: int) -> torch.dtype:
-    """Convert dtype integer from config to torch dtype"""
-    dtype_map = {
-        0: torch.float32,
-        1: torch.float16,
-        2: torch.bfloat16,
-    }
-    return dtype_map.get(dtype_int, torch.float16)
+def get_compiled_config() -> Dict[str, int]:
+    """
+    Get the compile-time config dimensions from the built extension
+    
+    Returns:
+        dict with keys: S, H, E, P (compile-time constants)
+    """
+    # This would require adding a function to python_bindings.cu
+    # For now, just document that users should check kleos_config.json
+    raise NotImplementedError(
+        "To check compiled config, see csrc/kleos_config.json. "
+        "The extension is compiled with those dimensions."
+    )
