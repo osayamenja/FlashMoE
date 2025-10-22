@@ -54,10 +54,20 @@ def nvshmrun_launcher(
     ])
     
     print(f"Launching FlashMoE with: {' '.join(cmd)}")
-    result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-    
-    print(result.stdout)
-    if result.stderr:
-        print("STDERR:", result.stderr, file=sys.stderr)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        print(result.stdout)
+        if result.stderr:
+            print("STDERR:", result.stderr, file=sys.stderr)
+    except subprocess.CalledProcessError as e:
+        print("=" * 60)
+        print(f"ERROR: Command failed with exit code {e.returncode}")
+        print("=" * 60)
+        print("STDOUT:")
+        print(e.stdout)
+        print("\nSTDERR:")
+        print(e.stderr)
+        print("=" * 60)
+        raise
     
     return result

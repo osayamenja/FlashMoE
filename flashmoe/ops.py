@@ -56,53 +56,12 @@ def run_moe(
     if processes_per_node is None:
         processes_per_node = n_processes
     
-    if n_processes == 1:
-        # Single GPU - run directly
-        return _run_single_gpu(config_path)
-    else:
-        # Multi-GPU - use nvshmrun launcher
-        return nvshmrun_launcher(
-            config_path=config_path,
-            n_processes=n_processes,
-            processes_per_node=processes_per_node,
-            hostfile=hostfile
-        )
-
-
-def _run_single_gpu(config_path: str = "csrc/kleos_config.json") -> torch.Tensor:
-    """Run single GPU with random tensors"""
-    import json
-    
-    # Load config to create tensors
-    config_path = Path(config_path)
-    if not config_path.exists():
-        raise FileNotFoundError(f"Config file not found: {config_path}")
-    
-    with open(config_path, 'r') as f:
-        config = json.load(f)
-    
-    # Get dimensions
-    mini_batch = config["mini_batch"]
-    seq_len = config["sequence_len"]
-    H = config["hidden_size"]
-    I = config["intermediate_size"]
-    E = config["num_experts"]
-    
-    # Map dtype
-    dtype_map = {0: torch.float16, 1: torch.float32}
-    dtype = dtype_map[config["torch_dtype"]]
-    
-    print(f"Creating random tensors: [{mini_batch}, {seq_len}, {H}], dtype={dtype}")
-    
-    # Create random tensors
-    input_tensor = torch.randn(mini_batch, seq_len, H, dtype=dtype, device='cuda')
-    gate_weights = torch.randn(H, E, dtype=dtype, device='cuda')
-    expert_weights = torch.randn(E, 2, I, H, dtype=dtype, device='cuda')
-    
-    # Run forward
-    output = _C.moe_forward(input_tensor, gate_weights, expert_weights)
-    
-    return output
+    return nvshmrun_launcher(
+        config_path=config_path,
+        n_processes=n_processes,
+        processes_per_node=processes_per_node,
+        hostfile=hostfile
+    )
 
 
 def get_compiled_config():

@@ -35,7 +35,7 @@ torch::Tensor moe_forward(
     TORCH_CHECK(expert_weights.is_contiguous(), "Expert weights must be contiguous");
     
     // Initialize Kleos (NVSHMEM, etc.)
-    kleos::initialize();
+    // kleos::initialize();
     const auto rank = kleos::getRank();
     
     // Get dimensions from compile-time config
@@ -61,9 +61,9 @@ torch::Tensor moe_forward(
                 ", E=" + std::to_string(E) + "]. Got [" + 
                 std::to_string(gate_weights.size(0)) + ", " + 
                 std::to_string(gate_weights.size(1)) + "]");
-    // TORCH_CHECK(expert_weights.size(0) == nLx, 
-    //             "Expert count mismatch. Expected " + std::to_string(nLx) + 
-    //             " local experts, got " + std::to_string(expert_weights.size(0)));
+    TORCH_CHECK(expert_weights.size(0) == nLx, 
+                "Expert count mismatch. Expected " + std::to_string(nLx) + 
+                " local experts, got " + std::to_string(expert_weights.size(0)));
     TORCH_CHECK(expert_weights.size(1) == 2, 
                 "Expert weights must have up and down projections [nLx, 2, P, H]");
     TORCH_CHECK(expert_weights.size(2) == P && expert_weights.size(3) == H,
@@ -72,7 +72,7 @@ torch::Tensor moe_forward(
                 std::to_string(expert_weights.size(2)) + ", " + 
                 std::to_string(expert_weights.size(3)) + "]");
     
-    // Calculate memory layout (matching your runOS() layout)
+    // Calculate memory layout
     constexpr unsigned long aZ = S * H;              // Activations
     constexpr auto gwZ = aZ + PX * H;                // + Gate weights
     const auto bZ = gwZ + nLx * P * H;               // + Expert up weights
@@ -103,7 +103,6 @@ torch::Tensor moe_forward(
     KLEOS_CHECK_CUDA(cudaMemcpyAsync(
         dP + aZ,
         gate_weights.data_ptr(),
-        // (gwZ - aZ) * sizeof(Element),
         E * H * sizeof(Element),
         cudaMemcpyDeviceToDevice,
         kleos::kleosStream
@@ -134,9 +133,7 @@ torch::Tensor moe_forward(
     float timed = 0;
     kleos::moe::forwardHostBench<32, 32>(p, p + dZ * sizeof(Element), timed);
     
-    if (rank == 0) {
-        printf("FlashMoE forward pass took %.2fms\n", timed);
-    }
+    printf("Process %d: FlashMoE forward pass took %.2f ms\n", rank, timed);
     
     KLEOS_CHECK_CUDA(cudaPeekAtLastError());
     
@@ -167,7 +164,7 @@ torch::Tensor moe_forward(
 /**
  * Initialize NVSHMEM/Kleos
  */
-void init_nvshmem() {
+void initialize() {
     kleos::initialize();
 }
 
@@ -175,7 +172,7 @@ void init_nvshmem() {
 /**
  * Finalize NVSHMEM/Kleos
  */
-void finalize_nvshmem() {
+void finalize() {
     kleos::finalize();
 }
 
@@ -191,6 +188,15 @@ py::dict get_compiled_config() {
     return result;
 }
 
+py::dict get_bookkeeping() {
+    py::dict result;
+    result["nLx"] = kleos::hostBookkeeping.nLx;
+    return result;
+}
+
+uint16_t get_num_local_experts() {
+    return kleos::hostBookkeeping.nLx;
+}
 
 /**
  * PyBind11 module definition
@@ -204,12 +210,18 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("gate_weights"),
           py::arg("expert_weights"));
     
-    m.def("init_nvshmem", &init_nvshmem,
+    m.def("initialize", &initialize,
           "Initialize NVSHMEM/Kleos");
     
-    m.def("finalize_nvshmem", &finalize_nvshmem,
+    m.def("finalize", &finalize,
           "Finalize NVSHMEM/Kleos");
 
     m.def("get_compiled_config", &get_compiled_config,
       "Get compile-time configuration values");
+
+    m.def("get_bookkeeping", &get_bookkeeping,
+      "Get internal bookkeeping values");
+
+    m.def("get_num_local_experts", &get_num_local_experts,
+      "Get the number of local experts");
 }

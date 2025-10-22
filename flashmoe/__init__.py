@@ -22,6 +22,7 @@ from .ops import run_moe, get_compiled_config
 try:
     from . import _C
     _CUDA_AVAILABLE = True
+    _C.initialize()
 except ImportError:
     _CUDA_AVAILABLE = False
     import warnings

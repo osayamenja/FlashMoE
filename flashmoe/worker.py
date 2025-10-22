@@ -47,8 +47,8 @@ def main():
     dtype_map = {0: torch.float16, 1: torch.float32}
     dtype = dtype_map[config["torch_dtype"]]
     
-    # Calculate local experts
-    nLx = E // world_size if world_size > 1 else E
+    # Get local expert count computed during distributed initialization
+    nLx = _flashmoe_cuda.get_num_local_experts()
     
     print(f"Process {local_rank}: Creating {nLx} local experts (total {E})", flush=True)
     
