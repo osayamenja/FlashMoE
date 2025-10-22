@@ -7,9 +7,11 @@ import json
 import torch
 from pathlib import Path
 
+from flashmoe import _C
 
 def main():
     """Main worker function"""
+    _C.initialize()
     
     # Load config
     if len(sys.argv) < 2:
