@@ -1,16 +1,14 @@
 """
-Worker script for distributed FlashMoE execution
+Worker script for distributed execution
 """
 import os
 import sys
 import json
 import torch
-from pathlib import Path
 
 from flashmoe import _C
 
 def main():
-    """Main worker function"""
     _C.initialize()
     
     # Load config
@@ -61,7 +59,7 @@ def main():
     
     print(f"Process {local_rank}: Calling moe_forward...", flush=True)
     
-    # Run MoE (this initializes NVSHMEM internally)
+    # Run MoE
     output = _flashmoe_cuda.moe_forward(
         input_tensor,
         gate_weights,

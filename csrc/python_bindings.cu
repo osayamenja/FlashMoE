@@ -1,29 +1,22 @@
 /**
  * Python bindings for FlashMoE CUDA kernels
- * This wraps your existing CUDA code to be callable from Python
+ * This wraps FlashMoE CUDA code to be callable from Python
  */
 #include <torch/extension.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <cuda_runtime.h>
 
-// Include your existing headers
 #include "include/kleos/bootstrap.cuh"
 #include "include/kleos/moe/moe.cuh"
 
 namespace py = pybind11;
 
-// Forward declare the Element type from your config
 using Element = kleos::ACC::Element;
 
-
-/**
- * Modified version of runOS() that accepts tensors from Python
- * Config is compile-time only - tensor shapes must match compiled config
- */
 torch::Tensor moe_forward(
-    torch::Tensor input,              // [batch, seq_len, hidden_size] - Activations
-    torch::Tensor gate_weights,        // [hidden_size, num_experts] - Gate weights  
+    torch::Tensor input,               // [batch, seq_len, hidden_size] - Activations
+    torch::Tensor gate_weights,        // [hidden_size, num_experts] - Gate weights
     torch::Tensor expert_weights       // [local_experts, 2, intermediate_size, hidden_size] - Expert weights
 ) {
     // Validate inputs
@@ -34,8 +27,6 @@ torch::Tensor moe_forward(
     TORCH_CHECK(gate_weights.is_contiguous(), "Gate weights must be contiguous");
     TORCH_CHECK(expert_weights.is_contiguous(), "Expert weights must be contiguous");
     
-    // Initialize Kleos (NVSHMEM, etc.)
-    // kleos::initialize();
     const auto rank = kleos::getRank();
     
     // Get dimensions from compile-time config
@@ -88,11 +79,9 @@ torch::Tensor moe_forward(
     
     auto* __restrict__ dP = reinterpret_cast<Element*>(p);
     
-    // Copy activations (flatten if 3D)
-    // auto input_flat = input.reshape({S, H});
+    // Copy activations
     KLEOS_CHECK_CUDA(cudaMemcpyAsync(
         dP,
-        // input_flat.data_ptr(),
         input.data_ptr(),
         aZ * sizeof(Element),
         cudaMemcpyDeviceToDevice,
