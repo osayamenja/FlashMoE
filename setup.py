@@ -5,10 +5,8 @@ Compiles CUDA kernels and creates pip-installable package
 import os
 import sys
 import json
-import subprocess
 from pathlib import Path
-from setuptools import setup, Extension, find_packages
-from setuptools.command.build_ext import build_ext
+from setuptools import setup, find_packages
 import torch
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
@@ -19,7 +17,6 @@ CUDA_HOME = os.environ.get('CUDA_HOME', '/usr/local/cuda')
 
 
 def check_nvshmem():
-    """Check if NVSHMEM is available"""
     # Check for either static library or host shared library
     nvshmem_static = Path(NVSHMEM_HOME) / 'lib' / 'libnvshmem.a'
     nvshmem_host = Path(NVSHMEM_HOME) / 'lib' / 'libnvshmem_host.so'
@@ -82,7 +79,6 @@ def download_dependencies():
     
     import urllib.request
     import zipfile
-    import shutil
     
     for dep_name, dep_info in dependencies.items():
         dep_cache = cache_dir / dep_name
@@ -135,38 +131,6 @@ def get_cuda_extensions():
     # The python_bindings.cu is the new file that wraps your kernels
     sources = [
         'csrc/python_bindings.cu',
-        # "csrc/main.cu",
-        # 'csrc/include/kleos/arch.cuh',
-        # 'csrc/include/kleos/atomics.cuh',
-        # 'csrc/include/kleos/bootstrap.cuh',
-        # 'csrc/include/kleos/debug.cuh',
-        # 'csrc/include/kleos/indexing.cuh',
-        # 'csrc/include/kleos/kleos.cuh',
-        # 'csrc/include/kleos/telemetry.cuh',
-        # 'csrc/include/kleos/throughput.cuh',
-        # 'csrc/include/kleos/topo.cuh',
-        # 'csrc/include/kleos/types.cuh',
-        # 'csrc/include/kleos/moe/expert.cuh',
-        # 'csrc/include/kleos/moe/fffn.cuh',
-        # 'csrc/include/kleos/moe/gate.cuh',
-        # 'csrc/include/kleos/moe/moe.cuh',
-        # 'csrc/include/kleos/os/os.cuh',
-        # 'csrc/include/kleos/os/packet.cuh',
-        # 'csrc/include/kleos/os/scheduler.cuh',
-        # 'csrc/include/kleos/os/subscriber.cuh',
-        # 'csrc/include/kleos/os/decider/decider.cuh',
-        # 'csrc/include/kleos/os/decider/comps/args.cuh',
-        # 'csrc/include/kleos/os/decider/comps/edge.cuh',
-        # 'csrc/include/kleos/os/decider/comps/expert.cuh',
-        # 'csrc/include/kleos/os/decider/comps/functions.cuh',
-        # 'csrc/include/kleos/os/decider/comps/group.cuh',
-        # 'csrc/include/kleos/os/decider/comps/niche.cuh',
-        # 'csrc/include/kleos/os/decider/comps/worker.cuh',
-        # 'csrc/include/kleos/os/processor/gemm.cuh',
-        # 'csrc/include/kleos/os/processor/mmaConfig.cuh',
-        # 'csrc/include/kleos/os/processor/processor.cuh',
-        # 'csrc/correctness.cuh',
-        # 'csrc/eval.cuh',
     ]
     
     # Include directories - must include CUTLASS, CCCL, etc.
@@ -219,15 +183,6 @@ def get_cuda_extensions():
         if nvtx_dirs:
             include_dirs.append(str(nvtx_dirs[0].absolute()))
             print(f"✓ Using NVTX3 from: {nvtx_dirs[0].absolute()}")
-        
-        # MatX
-        # matx_dirs = list(cpm_cache.glob('matx/*/include'))
-        # matx_dirs = list(cpm_cache.glob('MatX/include'))
-        # if matx_dirs:
-        #     include_dirs.append(str(matx_dirs[0].absolute()))
-        #     print(f"✓ Using MatX from: {matx_dirs[0].absolute()}")
-    
-    print("")  # Empty line for readability
     
     # Library directories
     library_dirs = [
@@ -237,13 +192,10 @@ def get_cuda_extensions():
     
     # Libraries to link
     libraries = [
-        # 'nvshmem',
         'nvshmem_host',
-        # 'cudadevrt',
         'cudart',
         'cublas',
         'cuda',
-        'nvml',
     ]
     
     # Compiler flags - matching your CMake settings
@@ -261,15 +213,13 @@ def get_cuda_extensions():
             '--expt-extended-lambda',
             '-rdc=true',
             '--cudart=shared',
-            # '-lcudadevrt',
-            # '--device-c',
             '-gencode', 'arch=compute_70,code=sm_70',  # V100
             '-gencode', 'arch=compute_80,code=sm_80',  # A100
             '-gencode', 'arch=compute_90,code=sm_90',  # H100
             '-Xcompiler', '-fPIC',
             "-Xfatbin", "-compress-all"
         ],
-        # This solves device linking issue while enabling RDC,
+        # NOTE(byungsoo): This solves device linking issue while enabling RDC,
         # which is required by NVSHMEM
         'nvcc_dlink': [
             '-dlink',
@@ -423,7 +373,6 @@ setup(
     ext_modules=get_cuda_extensions(),
     cmdclass={
         'build_ext': BuildExtension
-        # 'build_ext': CustomBuildExtension
     },
     
     install_requires=[

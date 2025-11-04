@@ -21,7 +21,7 @@ def run_moe(
     processes_per_node: Optional[int] = None,
     hostfile: Optional[str] = None,
     config_path: str = "csrc/kleos_config.json"
-) -> torch.Tensor:
+):
     """
     Run MoE forward pass with random tensors for benchmarking/testing.
     
@@ -32,9 +32,6 @@ def run_moe(
         processes_per_node: Processes per node (default: same as n_processes)
         hostfile: Path to MPI-style hostfile for multi-node execution
         config_path: Path to config file (must match compiled config)
-    
-    Returns:
-        None (prints timing results)
     
     Examples:
         >>> import flashmoe
@@ -55,7 +52,7 @@ def run_moe(
     if processes_per_node is None:
         processes_per_node = n_processes
     
-    return nvshmrun_launcher(
+    nvshmrun_launcher(
         config_path=config_path,
         n_processes=n_processes,
         processes_per_node=processes_per_node,
