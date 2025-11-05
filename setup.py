@@ -120,20 +120,15 @@ def get_cuda_extensions():
     # Find all CUDA source files in csrc/
     csrc_dir = Path('csrc')
     
-    # Download dependencies if not cached
     print("\nChecking dependencies...")
     download_dependencies()
     
-    # Check for CPM cache directory (where dependencies are stored)
     cpm_cache = csrc_dir / 'cmake' / 'cache'
     
-    # You need to list your source files here
-    # The python_bindings.cu is the new file that wraps your kernels
     sources = [
         'csrc/python_bindings.cu',
     ]
     
-    # Include directories - must include CUTLASS, CCCL, etc.
     include_dirs = [
         str(csrc_dir.absolute()),  # Use absolute path
         os.path.join(str(csrc_dir.absolute()), "include"),
@@ -145,44 +140,41 @@ def get_cuda_extensions():
     
     # Add dependencies from cache
     if cpm_cache.exists():
-        # CUTLASS (header-only) - use absolute paths
         cutlass_dirs = list(cpm_cache.glob('cutlass/*/include'))
         if cutlass_dirs:
             include_dirs.append(str(cutlass_dirs[0].absolute()))
-            print(f"✓ Using CUTLASS from: {cutlass_dirs[0].absolute()}")
+            print(f"Using CUTLASS from: {cutlass_dirs[0].absolute()}")
         
-        # CCCL (header-only, contains CuTe in libcudacxx)
-        # CCCL has multiple components: libcudacxx (contains CuTe), thrust, cub
         cccl_base_dirs = list(cpm_cache.glob('cccl/*'))
         if cccl_base_dirs:
             cccl_base = cccl_base_dirs[0]
             
-            # Add libcudacxx (contains CuTe headers like cute/layout.hpp)
+            # Add libcudacxx
             if (cccl_base / 'libcudacxx' / 'include').exists():
                 include_dirs.append(str((cccl_base / 'libcudacxx' / 'include').absolute()))
-                print(f"✓ Using CCCL/libcudacxx from: {(cccl_base / 'libcudacxx' / 'include').absolute()}")
+                print(f"Using CCCL/libcudacxx from: {(cccl_base / 'libcudacxx' / 'include').absolute()}")
             
             # Add thrust
             if (cccl_base / 'thrust').exists():
                 include_dirs.append(str((cccl_base / 'thrust').absolute()))
-                print(f"✓ Using CCCL/thrust from: {(cccl_base / 'thrust').absolute()}")
+                print(f"Using CCCL/thrust from: {(cccl_base / 'thrust').absolute()}")
             
             # Add cub
             if (cccl_base / 'cub').exists():
                 include_dirs.append(str((cccl_base / 'cub').absolute()))
-                print(f"✓ Using CCCL/cub from: {(cccl_base / 'cub').absolute()}")
+                print(f"Using CCCL/cub from: {(cccl_base / 'cub').absolute()}")
         
         # FMT
         fmt_dirs = list(cpm_cache.glob('fmt/*/include'))
         if fmt_dirs:
             include_dirs.append(str(fmt_dirs[0].absolute()))
-            print(f"✓ Using fmt from: {fmt_dirs[0].absolute()}")
+            print(f"Using fmt from: {fmt_dirs[0].absolute()}")
         
         # NVTX3
         nvtx_dirs = list(cpm_cache.glob('nvtx/*/c/include'))
         if nvtx_dirs:
             include_dirs.append(str(nvtx_dirs[0].absolute()))
-            print(f"✓ Using NVTX3 from: {nvtx_dirs[0].absolute()}")
+            print(f"Using NVTX3 from: {nvtx_dirs[0].absolute()}")
     
     # Library directories
     library_dirs = [
@@ -198,7 +190,7 @@ def get_cuda_extensions():
         'cuda',
     ]
     
-    # Compiler flags - matching your CMake settings
+    # Compiler flags
     extra_compile_args = {
         'cxx': [
             '-O3',
@@ -360,7 +352,7 @@ setup(
     version='0.1.0',
     author='Osayamen Jonathan Aimuyo',
     author_email='',
-    description='Fast Distributed MoE in a Single Kernel',
+    description='FlashMoE: Fast Distributed MoE in a Single Kernel',
     long_description=read_readme(),
     long_description_content_type='text/markdown',
     url='https://github.com/osayamenja/FlashMoE',
