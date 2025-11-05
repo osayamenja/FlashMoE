@@ -118,7 +118,7 @@ vim csrc/kleos_config.json
 ```
 Then reinstall:
 ```bash
-pip install -e .
+pip install -e . --no-build-isolation
 ```
 
 ## 🚀 Usage
