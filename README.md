@@ -78,6 +78,10 @@ Compared to SOTA baselines, Flash:
 ## Requirements
 - Install CPM as [so](https://github.com/cpm-cmake/CPM.cmake?tab=readme-ov-file#adding-cpm). Make sure to create the `cmake` directory as they recommend.
 - Install CMake.
+- Install [Boost C++ libraries](https://packages.debian.org/sid/libboost-all-dev)
+  ```bash
+  sudo apt-get install -y libboost-all-dev
+  ```
 - (Optional but recommended) Install ninja
 
 ### Building NVSHMEM
@@ -92,20 +96,65 @@ For peak performance, (see [here](https://www.nvidia.com/en-us/on-demand/session
 - Run `cmake -S.. -B. -DNVSHMEM_ENABLE_ALL_DEVICE_INLINING=1 -Wno-dev`
 - Run `make -j install`
 
-## CMake Build
+## 📦 Installation
+You can install FlashMoE from source using pip:
+```bash
+git clone https://github.com/osayamenja/FlashMoE.git
+cd FlashMoE
+pip install -e .
+```
+
+> 💡 Note: FlashMoE requires a CUDA-capable GPU and an NVSHMEM installation.
+> Ensure that `CUDA_HOME` and `NVSHMEM_HOME` are correctly set before installation.
+
+If dependencies such as `cutlass` or `cccl` are missing, the setup script will attempt to download or guide you through installation.
+
+## ⚙️ Configuration
+FlashMoE uses compile-time configuration for key parameters (e.g., `expert_top_k`, `num_experts`, `sequence_len`).
+
+Before (re)building, edit the configuration file:
+```bash
+vim csrc/kleos_config.json
+```
+Then reinstall:
+```bash
+pip install -e .
+```
+
+## 🚀 Usage
+Once installed, you can import and run FlashMoE directly in Python:
+```py
+import flashmoe
+
+# Run on a single GPU
+flashmoe.run_moe()
+
+# Run distributed (multi-GPU)
+flashmoe.run_moe(n_processes=4)
+```
+
+## (Optional) Build from CMake and Run
 1. cd `csrc`
 2. mkdir `cmake-build-release` && cd `cmake-build-release`
 3. Configure `kleos_config.json` as needed.
 4. Run `cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_MAKE_PROGRAM=<path to ninja> -Wno-dev -G Ninja -S .. -B .`
 5. Run `cmake --build . --target csrc -j`
-> 💡 Note you must rebuild the application (4 and 5) to propagate any subsequent changes made to `kleos_config.json`. This intermediate stage is a compilation and performance optimization, as it exposes those parameters in the json file as _static_ constants within the application. Doing so reduces build times by about 60x (1 hour → ~1 min) as it allows for sidestepping exhaustive template instantiations, given the template parameters are known a priori. On the other hand, static constants allows for (1) loop unrolling, which we heavily adopt, (2) optimized mathematical operations, modular arithmetic for example, (3) code path elimination via `if constexpr` and (4) compile-time computations for address calculations which present recurrently in tensor indexing. We leverage all of these and some more additional compile-time optimizations in Flash.
-## Single Node
-- Run `nvshmrun -n <number of processes> -ppn <processes per node> ./csrc`
-## Multi node
-### SLURM
+> 💡 Note: Any changes to `kleos_config.json` require repeating steps 4–5. This exposes compile-time parameters as *static* constants, dramatically reducing build times (~1 hour → ~1 min) and enabling compiler optimizations. See *Why static constants help* below for details.
+6. Execute
+
+Single Node
+```bash
+nvshmrun -n <number of processes> -ppn <processes per node> ./csrc
 ```
+
+Multi node (SLURM)
+```bash
 srun -n <number of processes> ./csrc
 ```
+
+<details> <summary>Why static constants help</summary>
+This intermediate stage is a compilation and performance optimization, as it exposes those parameters in the json file as _static_ constants within the application. Doing so reduces build times by about 60x (1 hour → ~1 min) as it allows for sidestepping exhaustive template instantiations, given the template parameters are known a priori. On the other hand, static constants allows for (1) loop unrolling, which we heavily adopt, (2) optimized mathematical operations, modular arithmetic for example, (3) code path elimination via `if constexpr` and (4) compile-time computations for address calculations which present recurrently in tensor indexing. We leverage all of these and some more additional compile-time optimizations in Flash.
+</details>
 
 ## IDEs
 Alternatively, the codebase integrates well with CLion, which automates the build and run processes. 
