@@ -44,16 +44,9 @@ namespace kleos {
     struct FAA<cute::bfloat16_t, cutlass::epilogue::thread::ReLU<cute::bfloat16_t>> {
         __forceinline__ __device__
         cute::bfloat16_t operator()(const cute::bfloat16_t& accumulator, const cute::bfloat16_t& term) const {
-            // Manual FMA + ReLU for bfloat16 (no __hfma_relu_bf16 intrinsic exists)
-            // #if __CUDA_ARCH__ >= 800
-            // auto result = __hfma_bf16(accumulator.to_nv_bfloat16(), __float2bfloat16(1.0f), term.to_nv_bfloat16());
-            // return cute::bfloat16_t(__hmax_bf16(result, __float2bfloat16(0.0f)));
-            // #else
-            // // Fallback for older architectures
-            // float result = __bfloat162float(accumulator.to_nv_bfloat16()) * 1.0f + __bfloat162float(term.to_nv_bfloat16());
-            // return cute::bfloat16_t(__float2bfloat16(result > 0.0f ? result : 0.0f));
-            // #endif
-            // FMA + ReLU using float conversion (no native bfloat16 fma+relu intrinsic)
+            // TODO(byungsoo): Further validate this code.
+            // See https://github.com/osayamenja/FlashMoE/issues/6
+            // Note: This issue also occurs on NVIDIA A100 GPU.
             float acc_f = __bfloat162float(accumulator.to_nv_bfloat16());
             float term_f = __bfloat162float(term.to_nv_bfloat16());
             float result = acc_f * 1.0f + term_f;
