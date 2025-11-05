@@ -101,7 +101,7 @@ You can install FlashMoE from source using pip:
 ```bash
 git clone https://github.com/osayamenja/FlashMoE.git
 cd FlashMoE
-pip install -e .
+pip install -e . --no-build-isolation
 ```
 
 > 💡 Note: FlashMoE requires a CUDA-capable GPU and an NVSHMEM installation.
