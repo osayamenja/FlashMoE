@@ -2,7 +2,6 @@
 Core FlashMoE functionality
 """
 from typing import Optional
-import torch
 
 from .launcher import nvshmrun_launcher
 

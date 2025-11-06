@@ -21,9 +21,7 @@ from .ops import run_moe, get_compiled_config
 
 try:
     from . import _C
-    _CUDA_AVAILABLE = True
 except ImportError:
-    _CUDA_AVAILABLE = False
     import warnings
     warnings.warn("FlashMoE CUDA extension not found. Install with: pip install -e .")
 

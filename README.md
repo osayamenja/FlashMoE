@@ -78,7 +78,7 @@ Compared to SOTA baselines, Flash:
 ## Requirements
 - Install CPM as [so](https://github.com/cpm-cmake/CPM.cmake?tab=readme-ov-file#adding-cpm). Make sure to create the `cmake` directory as they recommend.
 - Install CMake.
-- Install [Boost C++ libraries](https://packages.debian.org/sid/libboost-all-dev)
+- Install [Boost C++ libraries](https://packages.debian.org/stable/libboost-all-dev)
   ```bash
   sudo apt-get install -y libboost-all-dev
   ```

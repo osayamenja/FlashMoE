@@ -311,15 +311,6 @@ def get_cuda_extensions():
     return ext_modules
 
 
-def read_requirements():
-    """Read requirements.txt"""
-    req_file = Path('requirements.txt')
-    if req_file.exists():
-        with open(req_file) as f:
-            return [line.strip() for line in f if line.strip() and not line.startswith('#')]
-    return []
-
-
 def read_readme():
     """Read README.md for long description"""
     readme_file = Path('README.md')
