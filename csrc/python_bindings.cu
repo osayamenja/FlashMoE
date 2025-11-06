@@ -19,6 +19,7 @@ torch::Tensor moe_forward(
     torch::Tensor gate_weights,        // [hidden_size, num_experts] - Gate weights
     torch::Tensor expert_weights       // [local_experts, 2, intermediate_size, hidden_size] - Expert weights
 ) {
+    TORCH_CHECK(kleos::isInitialized, "Must call initialize() before moe_forward");
     // Validate inputs
     TORCH_CHECK(input.is_cuda(), "Input must be CUDA tensor");
     TORCH_CHECK(gate_weights.is_cuda(), "Gate weights must be CUDA tensor");
