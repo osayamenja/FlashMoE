@@ -35,7 +35,7 @@ namespace kleos {
     struct FAA<cute::half_t, cutlass::epilogue::thread::ReLU<cute::half_t>> {
         __forceinline__ __device__
         cute::half_t operator()(const cute::half_t& accumulator, const cute::half_t& term) const {
-            return cute::half_t(__hfma_relu(__half(1.0f),accumulator.to_half(), term.to_half()));
+            return cute::half_t(__hfma_relu(__float2half(1.0f), accumulator.to_half(), term.to_half()));
         }
     };
 
@@ -44,8 +44,14 @@ namespace kleos {
     struct FAA<cute::bfloat16_t, cutlass::epilogue::thread::ReLU<cute::bfloat16_t>> {
         __forceinline__ __device__
         cute::bfloat16_t operator()(const cute::bfloat16_t& accumulator, const cute::bfloat16_t& term) const {
-            return cute::bfloat16_t(__hfma_relu(__nv_bfloat16(1.0f),
-                accumulator.to_nv_bfloat16(), term.to_nv_bfloat16()));
+            // TODO(byungsoo): Further validate this code.
+            // See https://github.com/osayamenja/FlashMoE/issues/6
+            // Note: This issue also occurs on NVIDIA A100 GPU.
+            float acc_f = __bfloat162float(accumulator.to_nv_bfloat16());
+            float term_f = __bfloat162float(term.to_nv_bfloat16());
+            float result = acc_f * 1.0f + term_f;
+            result = result > 0.0f ? result : 0.0f;  // ReLU
+            return cute::bfloat16_t(__float2bfloat16(result));
         }
     };
 
