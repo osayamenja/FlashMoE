@@ -7,19 +7,19 @@
 #include <pybind11/stl.h>
 #include <cuda_runtime.h>
 
-#include "include/kleos/bootstrap.cuh"
-#include "include/kleos/moe/moe.cuh"
+#include "include/flashmoe/bootstrap.cuh"
+#include "include/flashmoe/moe/moe.cuh"
 
 namespace py = pybind11;
 
-using Element = kleos::ACC::Element;
+using Element = flashmoe::ACC::Element;
 
 torch::Tensor moe_forward(
     torch::Tensor input,               // [batch, seq_len, hidden_size] - Activations
     torch::Tensor gate_weights,        // [hidden_size, num_experts] - Gate weights
     torch::Tensor expert_weights       // [local_experts, 2, intermediate_size, hidden_size] - Expert weights
 ) {
-    TORCH_CHECK(kleos::isInitialized, "Must call initialize() before moe_forward");
+    TORCH_CHECK(flashmoe::isInitialized, "Must call initialize() before moe_forward");
     // Validate inputs
     TORCH_CHECK(input.is_cuda(), "Input must be CUDA tensor");
     TORCH_CHECK(gate_weights.is_cuda(), "Gate weights must be CUDA tensor");
@@ -28,15 +28,15 @@ torch::Tensor moe_forward(
     TORCH_CHECK(gate_weights.is_contiguous(), "Gate weights must be contiguous");
     TORCH_CHECK(expert_weights.is_contiguous(), "Expert weights must be contiguous");
     
-    const auto rank = kleos::getRank();
+    const auto rank = flashmoe::getRank();
     
     // Get dimensions from compile-time config
-    constexpr auto S = kleos::ACC::S::value;
-    constexpr auto H = kleos::ACC::H::value;
-    constexpr auto E = kleos::ACC::E::value;
-    constexpr auto P = kleos::ACC::P::value;
-    constexpr auto PX = kleos::ACC::PX::value;
-    const auto nLx = kleos::hostBookkeeping.nLx;
+    constexpr auto S = flashmoe::ACC::S::value;
+    constexpr auto H = flashmoe::ACC::H::value;
+    constexpr auto E = flashmoe::ACC::E::value;
+    constexpr auto P = flashmoe::ACC::P::value;
+    constexpr auto PX = flashmoe::ACC::PX::value;
+    const auto nLx = flashmoe::hostBookkeeping.nLx;
     
     // Validate input dimensions match compile-time config
     TORCH_CHECK(input.dim() == 3, "Input must be 3D [batch, seq, H]");
@@ -75,57 +75,57 @@ torch::Tensor moe_forward(
     
     // Allocate device memory for all data
     cuda::std::byte* p;
-    KLEOS_CHECK_CUDA(cudaMallocAsync(&p, cZ * sizeof(Element), kleos::kleosStream));
-    KLEOS_CHECK_CUDA(cudaMemsetAsync(p, 0, cZ * sizeof(Element), kleos::kleosStream));
+    FLASHMOE_CHECK_CUDA(cudaMallocAsync(&p, cZ * sizeof(Element), flashmoe::flashmoeStream));
+    FLASHMOE_CHECK_CUDA(cudaMemsetAsync(p, 0, cZ * sizeof(Element), flashmoe::flashmoeStream));
     
     auto* __restrict__ dP = reinterpret_cast<Element*>(p);
     
     // Copy activations
-    KLEOS_CHECK_CUDA(cudaMemcpyAsync(
+    FLASHMOE_CHECK_CUDA(cudaMemcpyAsync(
         dP,
         input.data_ptr(),
         aZ * sizeof(Element),
         cudaMemcpyDeviceToDevice,
-        kleos::kleosStream
+        flashmoe::flashmoeStream
     ));
     
     // Copy gate weights
-    KLEOS_CHECK_CUDA(cudaMemcpyAsync(
+    FLASHMOE_CHECK_CUDA(cudaMemcpyAsync(
         dP + aZ,
         gate_weights.data_ptr(),
         E * H * sizeof(Element),
         cudaMemcpyDeviceToDevice,
-        kleos::kleosStream
+        flashmoe::flashmoeStream
     ));
     
     // Copy expert weights
     for (uint i = 0; i < nLx; ++i) {
         // Copy up projection
-        KLEOS_CHECK_CUDA(cudaMemcpyAsync(
+        FLASHMOE_CHECK_CUDA(cudaMemcpyAsync(
             dP + gwZ + i * (P * H),
             expert_weights[i][0].data_ptr(),
             P * H * sizeof(Element),
             cudaMemcpyDeviceToDevice,
-            kleos::kleosStream
+            flashmoe::flashmoeStream
         ));
         
         // Copy down projection
-        KLEOS_CHECK_CUDA(cudaMemcpyAsync(
+        FLASHMOE_CHECK_CUDA(cudaMemcpyAsync(
             dP + bZ + i * (P * H),
             expert_weights[i][1].data_ptr(),
             P * H * sizeof(Element),
             cudaMemcpyDeviceToDevice,
-            kleos::kleosStream
+            flashmoe::flashmoeStream
         ));
     }
     
     // Call kernel
     float timed = 0;
-    kleos::moe::forwardHostBench<32, 32>(p, p + dZ * sizeof(Element), timed);
+    flashmoe::moe::forwardHostBench<32, 32>(p, p + dZ * sizeof(Element), timed);
     
     printf("Process %d: FlashMoE forward pass took %.2f ms\n", rank, timed);
     
-    KLEOS_CHECK_CUDA(cudaPeekAtLastError());
+    FLASHMOE_CHECK_CUDA(cudaPeekAtLastError());
     
     // Extract output
     auto output = torch::empty({input.size(0), input.size(1), H}, 
@@ -133,59 +133,59 @@ torch::Tensor moe_forward(
                                    .dtype(input.dtype())
                                    .device(input.device()));
     
-    KLEOS_CHECK_CUDA(cudaMemcpyAsync(
+    FLASHMOE_CHECK_CUDA(cudaMemcpyAsync(
         output.data_ptr(),
         dP + gZ,
         S * H * sizeof(Element),
         cudaMemcpyDeviceToDevice,
-        kleos::kleosStream
+        flashmoe::flashmoeStream
     ));
     
     // Synchronize
-    KLEOS_CHECK_CUDA(cudaStreamSynchronize(kleos::kleosStream));
+    FLASHMOE_CHECK_CUDA(cudaStreamSynchronize(flashmoe::flashmoeStream));
     
     // Free memory
-    KLEOS_CHECK_CUDA(cudaFreeAsync(p, kleos::kleosStream));
+    FLASHMOE_CHECK_CUDA(cudaFreeAsync(p, flashmoe::flashmoeStream));
     
     return output;
 }
 
 
 /**
- * Initialize NVSHMEM/Kleos
+ * Initialize NVSHMEM/Flashmoe
  */
 void initialize() {
-    kleos::initialize();
+    flashmoe::initialize();
 }
 
 
 /**
- * Finalize NVSHMEM/Kleos
+ * Finalize NVSHMEM/Flashmoe
  */
 void finalize() {
-    kleos::finalize();
+    flashmoe::finalize();
 }
 
 // Helper function
 py::dict get_compiled_config() {
     py::dict result;
-    result["S"] = kleos::ACC::S::value;
-    result["H"] = kleos::ACC::H::value;
-    result["E"] = kleos::ACC::E::value;
-    result["P"] = kleos::ACC::P::value;
-    result["PX"] = kleos::ACC::PX::value;
+    result["S"] = flashmoe::ACC::S::value;
+    result["H"] = flashmoe::ACC::H::value;
+    result["E"] = flashmoe::ACC::E::value;
+    result["P"] = flashmoe::ACC::P::value;
+    result["PX"] = flashmoe::ACC::PX::value;
     result["Element_size"] = sizeof(Element);
     return result;
 }
 
 py::dict get_bookkeeping() {
     py::dict result;
-    result["nLx"] = kleos::hostBookkeeping.nLx;
+    result["nLx"] = flashmoe::hostBookkeeping.nLx;
     return result;
 }
 
 uint16_t get_num_local_experts() {
-    return kleos::hostBookkeeping.nLx;
+    return flashmoe::hostBookkeeping.nLx;
 }
 
 /**
@@ -201,10 +201,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("expert_weights"));
     
     m.def("initialize", &initialize,
-          "Initialize NVSHMEM/Kleos");
+          "Initialize NVSHMEM/Flashmoe");
     
     m.def("finalize", &finalize,
-          "Finalize NVSHMEM/Kleos");
+          "Finalize NVSHMEM/Flashmoe");
 
     m.def("get_compiled_config", &get_compiled_config,
       "Get compile-time configuration values");
