@@ -101,9 +101,7 @@ set(MATX_ENABLE_FILEIO ON)
 CPMAddPackage(
         NAME MATX
         GITHUB_REPOSITORY NVIDIA/MatX
-        GIT_TAG main
-        DOWNLOAD_ONLY TRUE
-        OPTIONS
+        GIT_TAG v0.9.4
 )
 ## NVSHMEM
 find_package(NVSHMEM REQUIRED HINTS "$ENV{NVSHMEM_HOME}/lib/cmake/nvshmem")
@@ -181,7 +179,7 @@ function(flash_target_common tgt)
         endif()
     endif ()
     if(MATX_ADDED)
-        target_include_directories(${tgt} SYSTEM PRIVATE "${MATX_SOURCE_DIR}/include")
+        target_link_libraries(${tgt} PRIVATE matx::matx)
     endif ()
     if(DEFINED ENV{NERSC_HOST} AND "$ENV{NERSC_HOST}" STREQUAL "perlmutter")
         target_link_libraries(${tgt} PRIVATE nvshmem::nvshmem_host nvshmem::nvshmem_device)
@@ -201,35 +199,42 @@ function(flash_target_common tgt)
                 $<$<COMPILE_LANGUAGE:CUDA>:-O0; -g; -G>
         )
     elseif(CMAKE_BUILD_TYPE STREQUAL "Release")
-        target_compile_options(${tgt} PRIVATE
-                $<$<COMPILE_LANGUAGE:CXX>:-O3>
-                $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-gencode=arch=compute_${COMPUTE_CAPABILITY},code=lto_${COMPUTE_CAPABILITY}>
-                $<$<COMPILE_LANGUAGE:CUDA>:-Xptxas -v;--expt-relaxed-constexpr; -diag-suppress 186>
-        )
+        if(${tgt} STREQUAL "fb")
+            target_compile_options(${tgt} PRIVATE
+                    $<$<COMPILE_LANGUAGE:CXX>:-O3>
+                    $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-gencode=arch=compute_${COMPUTE_CAPABILITY},code=lto_${COMPUTE_CAPABILITY}>
+                    $<$<COMPILE_LANGUAGE:CUDA>:-Xptxas -v;--expt-relaxed-constexpr; -diag-suppress 186>
+            )
+        else ()
+            target_compile_options(${tgt} PRIVATE
+                    $<$<COMPILE_LANGUAGE:CXX>:-O3>
+                    $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-gencode=arch=compute_${COMPUTE_CAPABILITY},code=sm_${COMPUTE_CAPABILITY}>
+                    $<$<COMPILE_LANGUAGE:CUDA>:-Xptxas -v;--expt-relaxed-constexpr;--extended-lambda;-diag-suppress 186>
+            )
+        endif ()
     endif ()
-    if (${tgt} STREQUAL "fb")
-        target_compile_definitions(${tgt}
-                PRIVATE
-                FLASHMOE_ARCH=${GPU_ARCH}
-                CAP_FACTOR=${CAP_FACTOR_V}
-                DROP_TOKENS=${DROP_TOKENS_V}
-                E_TOP_K=${E_TOP_K_V}
-                GLOBAL_BATCH=${GLOBAL_BATCH_V}
-                IS_TRAINING=${IS_TRAINING_V}
-                HIDDEN_ACT=${HIDDEN_ACT_V}
-                HIDDEN_SIZE=${HIDDEN_SIZE_V}
-                I_SIZE=${I_SIZE_V}
-                MOE_FREQ=${MOE_FREQ_V}
-                MINI_BATCH=${MINI_BATCH_V}
-                NUM_EXPERTS=${NUM_EXPERTS_V}
-                NUM_LAYERS=${NUM_LAYERS_V}
-                SEQ_LEN=${SEQ_LEN_V}
-                DTYPE=${DTYPE_V}
-                VOCAB_SIZE=${VOCAB_SIZE_V}
-                NUM_SMS=${CUDA_NUM_SMS}
-                FLASHMOE_NVTX=1
-        )
-    endif ()
+    # TODO (Jonathan): make the below opt-in
+    target_compile_definitions(${tgt}
+            PRIVATE
+            FLASHMOE_ARCH=${GPU_ARCH}
+            CAP_FACTOR=${CAP_FACTOR_V}
+            DROP_TOKENS=${DROP_TOKENS_V}
+            E_TOP_K=${E_TOP_K_V}
+            GLOBAL_BATCH=${GLOBAL_BATCH_V}
+            IS_TRAINING=${IS_TRAINING_V}
+            HIDDEN_ACT=${HIDDEN_ACT_V}
+            HIDDEN_SIZE=${HIDDEN_SIZE_V}
+            I_SIZE=${I_SIZE_V}
+            MOE_FREQ=${MOE_FREQ_V}
+            MINI_BATCH=${MINI_BATCH_V}
+            NUM_EXPERTS=${NUM_EXPERTS_V}
+            NUM_LAYERS=${NUM_LAYERS_V}
+            SEQ_LEN=${SEQ_LEN_V}
+            DTYPE=${DTYPE_V}
+            VOCAB_SIZE=${VOCAB_SIZE_V}
+            NUM_SMS=${CUDA_NUM_SMS}
+            FLASHMOE_NVTX=1
+    )
 endfunction()
 
 add_executable(fb benchmarks/flash_bench.cu

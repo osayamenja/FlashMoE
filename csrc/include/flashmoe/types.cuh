@@ -159,7 +159,6 @@ namespace flashmoe{
     };
 
     using mp_t = float; // or tf32
-    using GEA = float;
     using specType = unsigned int;
     using flagsType = uint64_t;
 
@@ -457,7 +456,7 @@ namespace flashmoe{
         using Element = DType<DTYPE>::DT;
         using DTK = cute::C<DROP_TOKENS? DropTokens::yes : DropTokens::no>;
         using HA = cute::C<HIDDEN_ACT>;
-        using ActivationOp = AFunction<HIDDEN_ACT, GEA>::DT;
+        using ActivationOp = AFunction<HIDDEN_ACT, float>::DT;
         using ActivationOpX = cute::identity;
         using PeakHardware = flashmoe::Hardware<FLASHMOE_ARCH, 255>;
         using Elems = cute::C<cute::min(BLOCK_N, PeakHardware::rScratch::value * sizeof(mp_t) / sizeof(Element))>;

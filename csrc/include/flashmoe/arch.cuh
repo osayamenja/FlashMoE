@@ -14,7 +14,7 @@
 #define ARCH_CUH
 
 #include <cute/numeric/integral_constant.hpp>
-#define BASE_SHARED_SIZE 16 * 1024U
+#define BASE_SHARED_SIZE (16 * 1024U)
 #define BASE_PIPE_STAGES 2U
 #define MAX_THREADS_PER_SM 2048U
 namespace flashmoe {

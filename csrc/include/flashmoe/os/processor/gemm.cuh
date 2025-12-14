@@ -15,6 +15,7 @@
 #include <cutlass/epilogue/thread/activation.h>
 #include <cutlass/gemm/collective/collective_mma.hpp>
 
+#include "../../types.cuh"
 #include "mmaConfig.cuh"
 #include "../../arch.cuh"
 
