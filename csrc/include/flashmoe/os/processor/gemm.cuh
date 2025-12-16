@@ -40,21 +40,17 @@ namespace flashmoe {
         }
     };
 
+#if (__CUDA_ARCH__ >= 800)
     // specialization for bfloat16 and relu
     template<>
     struct FAA<cute::bfloat16_t, cutlass::epilogue::thread::ReLU<cute::bfloat16_t>> {
         __forceinline__ __device__
         cute::bfloat16_t operator()(const cute::bfloat16_t& accumulator, const cute::bfloat16_t& term) const {
-            // TODO(byungsoo): Further validate this code.
-            // See https://github.com/osayamenja/FlashMoE/issues/6
-            // Note: This issue also occurs on NVIDIA A100 GPU.
-            float acc_f = __bfloat162float(accumulator.to_nv_bfloat16());
-            float term_f = __bfloat162float(term.to_nv_bfloat16());
-            float result = acc_f * 1.0f + term_f;
-            result = result > 0.0f ? result : 0.0f;  // ReLU
-            return cute::bfloat16_t(__float2bfloat16(result));
+            return cute::bfloat16_t(__hfma_relu(__float2bfloat16(1.0f), accumulator.to_nv_bfloat16(),
+                term.to_nv_bfloat16()));
         }
     };
+#endif
 
     template<typename F>
     struct isFAA : cuda::std::false_type {};
@@ -67,10 +63,12 @@ namespace flashmoe {
         typename ElementA,
         typename ElementB = ElementA,
         typename ElementC = ACC::ElementC,
-        unsigned int sizeK = ACC::PeakHardware::bKBase::value,
-        unsigned int Arch = cute::min(ACC::PeakHardware::arch::value,800), // clamp at 800 for now
-        unsigned int threads = ACC::PeakHardware::OS::threads::value,
-        unsigned int pipeStages = ACC::PeakHardware::pipeStages::value
+        int bM = BLOCK_M,
+        int bN = BLOCK_N,
+        int sizeK = ACC::PeakHardware::bKBase::value,
+        int pipeStages = ACC::PeakHardware::pipeStages::value,
+        int threads = ACC::PeakHardware::OS::threads::value,
+        int Arch = cute::min(ACC::PeakHardware::arch::value,800) // clamp at 800 for now
     >
     requires(cuda::std::is_same_v<ElementC, ACC::ElementC> ||
         (cuda::std::is_same_v<ElementC, cute::half_t> &&
@@ -78,17 +76,14 @@ namespace flashmoe {
             cuda::std::is_same_v<ElementB, cute::half_t>))
     struct BlockMM {
         // will clamp at Ampere for now, until we implement Hopper specific GEMM
-        static_assert(BLOCK_M == THREADS && BLOCK_M == threads);
-        static_assert(BLOCK_M == 128);
-        static_assert(BLOCK_N == 64, "64 is a very good value for N, change it back!");
         using Threads = cute::C<threads>;
         using MatrixAType = ElementA;
         using MatrixBType = ElementB;
         using MatrixCType = ElementC;
         using MatrixDType = ElementA;
-        using BlockTiler = cute::Shape<cute::Int<BLOCK_M>, cute::Int<BLOCK_N>, cute::Int<sizeK>>;
-        using TilerOut = cute::Shape<cute::Int<BLOCK_M>, cute::Int<BLOCK_N>>;
-        using Parameters = CollectiveMMAConfig<BLOCK_M, BLOCK_N, sizeK, Arch, ElementA, ElementB, ElementC,
+        using BlockTiler = cute::Shape<cute::Int<bM>, cute::Int<bN>, cute::Int<sizeK>>;
+        using TilerOut = cute::Shape<cute::Int<bM>, cute::Int<bN>>;
+        using Parameters = CollectiveMMAConfig<bM, bN, sizeK, Arch, ElementA, ElementB, ElementC,
             LayoutOptimization::UseSwizzle>;
         using MMA = typename Parameters::mma_t;
         using CollectiveMainloop = cutlass::gemm::collective::CollectiveMma<
