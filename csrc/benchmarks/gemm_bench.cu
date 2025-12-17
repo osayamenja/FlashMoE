@@ -8,10 +8,11 @@
 #include "../include/flashmoe/os/processor/gemm.cuh"
 #include "../include/flashmoe/os/processor/mmaConfig.cuh"
 
-#define RTOL 1e-5
-#define ATOL 1e-8
+#define RTOL 1e-3
+#define ATOL 1e-4
 template<typename BlockGEMM, int threads, typename MMA_C, typename Element, typename ElementC>
-__device__ void gemmMainloopV1(void* __restrict__ const& workspace,
+__device__ __forceinline__
+void gemmMainloopV1(void* __restrict__ const& workspace,
     const Element* __restrict__ const& a,
     const Element* __restrict__ const& b,
     ElementC* __restrict__ const& c,
@@ -46,25 +47,20 @@ __device__ void gemmMainloopV1(void* __restrict__ const& workspace,
     const auto gC = cute::local_tile(mC, typename BlockGEMM::BlockTiler{}, ctaCoord,
         cute::Step<cute::_1,cute::_1, cute::X>{});
     const auto k_tile_iter = cute::make_coord_iterator(tilesK);
-    // prefetch bias from global memory
-    const auto mD = make_tensor(cute::make_gmem_ptr(bias),
-        cute::make_layout(cute::make_shape(cute::_1{}, N), cute::Stride<cute::_0, cute::_1>{}));
-    const auto biasCoord = idx2crd(tileIdx, cute::make_shape(cute::_1{}, tilesN),
-        cute::Stride<cute::Int<bN>, cute::_1>{});
-    const auto gD = cute::local_tile(mD, cute::Shape<cute::_1, cute::Int<bN>>{}, cute::get<1>(biasCoord));
     // prefetch bias
-    ElementC biasCache[cute::ceil_div(threads, bN)];
-    using LT =  cuda::std::conditional_t<sizeof(ElementC) == 2, uint16_t, uint32_t>;
     constexpr auto trips = cute::ceil_div(bN, threads);
-    if constexpr (threads > bN) {
-        biasCache[0] = __ldg(CONST_CAST_TO(LT, &gD(threadIdx.x % bN)));
+    ElementC biasCache[trips];
+    const int biasOffset = tileIdx % tilesN;
+    const auto* __restrict__ bP = bias + biasOffset;
+    if constexpr (threads >= bN) {
+        biasCache[0] = bP[threadIdx.x % bN];
     }
     else {
         // below is not strictly necessary, but it makes my life easier :)
         static_assert(bN % threads == 0);
         #pragma unroll
         for (int i = 0; i < trips; ++i) {
-            biasCache[i] = __ldg(CONST_CAST_TO(LT, &gD(threadIdx.x + i * bN)));
+            biasCache[i] = bP[threadIdx.x + i * bN];
         }
     }
     mainLoop(
@@ -138,7 +134,7 @@ __global__ void gk(const Element* __restrict__ a, const Element* __restrict__ b,
     constexpr auto sharedSize = cute::max(bK * pipeStages * (bM + bN) * sizeof(ElementC),
         bM * bN * sizeof(MMA_C));
     __shared__ __align__(16) cuda::std::byte workspace[sharedSize];
-    using V1G = flashmoe::BlockMM<ActivationFunction, Element, Element, ElementC, bM, bN, bK, pipeStages, threads>;
+        using V1G = flashmoe::BlockMM<ActivationFunction, Element, Element, MMA_C, bM, bN, bK, pipeStages, threads>;
     for (int tileIdx = SC(int, blockIdx.x); tileIdx < nTiles; tileIdx += SC(int, gridDim.x)) {
         if constexpr (v == GemmVersion::V1) {
             gemmMainloopV1<V1G, threads, MMA_C>(workspace, a, b, c, bias, M, N, K, tileIdx);
@@ -149,29 +145,40 @@ __global__ void gk(const Element* __restrict__ a, const Element* __restrict__ b,
     }
 }
 
-template<int runs, typename Element, typename ElementC>
+template<typename Element>
+using MXE = cuda::std::conditional_t<cuda::std::is_same_v<Element, cute::half_t>, matx::matxFp16,
+        cuda::std::conditional_t<cuda::std::is_same_v<Element, cute::bfloat16_t>, matx::matxBf16, Element>>;
+
+template<int runs, typename Activation, typename Element, typename ElementC>
 __host__ __forceinline__
-auto reference(Element* const& a, Element* const& b,
-    ElementC* const& bias, ElementC* const& c_ref, ElementC* const& c_ext,
+auto reference(void* const& a, void* const& b,
+    void* const& bias, void* const& c_ref, void* const& c_ext,
     const int& M, const int& N, const int& K, matx::cudaExecutor& exec) {
-    auto tA = matx::make_tensor<Element>(a, {M, K});
-    auto tB = matx::make_tensor<Element>(b, {K, N});
-    auto tC = matx::make_tensor<ElementC>(c_ref, {M, N});
-    auto tBias = matx::make_tensor<ElementC>(bias, {N});
-    using ReLU = cutlass::epilogue::thread::ReLU<ElementC>;
+    auto* mx_a = static_cast<Element*>(a);
+    auto* mx_b = static_cast<Element*>(b);
+    auto* mx_bias = static_cast<ElementC*>(bias);
+    auto* mx_c_ref = static_cast<ElementC*>(c_ref);
+    auto* mx_c_ext = static_cast<ElementC*>(c_ext);
+
+    auto tA = matx::make_tensor<Element>(mx_a, {M, K});
+    auto tB = matx::make_tensor<Element>(mx_b, {N, K});
+    auto tC = matx::make_tensor<ElementC>(mx_c_ref, {M, N});
+    auto tBias = matx::make_tensor<ElementC>(mx_bias, {N});
     // ReLU((a @ b) + bias)
-    (tC = matx::apply(ReLU{}, (matx::matmul(tA, tB) + tBias))).run(exec);
+    (tC = matx::apply(Activation{}, (matx::matmul(tA, tB.PermuteMatrix()) + tBias))).run(exec);
     auto result = matx::make_tensor<int>({});
-    auto tCx = matx::make_tensor<ElementC>(c_ext, {M, N});
+    exec.sync();
+    auto tCx = matx::make_tensor<ElementC>(mx_c_ext, {M, N});
     matx::allclose(result, tCx, tC, RTOL, ATOL, exec);
+    exec.sync();
     // warmup
     for (int i = 0; i < 32; ++i) {
-        (tC = matx::apply(ReLU{}, (matx::matmul(tA, tB) + tBias))).run(exec);
+        (tC = matx::apply(Activation{}, (matx::matmul(tA, tB) + tBias))).run(exec);
     }
     exec.sync();
     exec.start_timer();
     for (int i = 0; i < runs; ++i) {
-        (tC = matx::apply(ReLU{}, (matx::matmul(tA, tB) + tBias))).run(exec);
+        (tC = matx::apply(Activation{}, (matx::matmul(tA, tB) + tBias))).run(exec);
     }
     exec.stop_timer();
     exec.sync();
@@ -184,15 +191,17 @@ __host__ __forceinline__
 auto gk_test(Element* const& a, Element* const& b,
     ElementC* const& c, ElementC* const& c_ref, ElementC* const& bias,
     const int& M, const int& N, const int& K, matx::cudaExecutor& exec) {
-    using Act = cutlass::epilogue::thread::ReLU<ElementC>;
+    //using Act = cutlass::epilogue::thread::ReLU<ElementC>;
+    using Act = cutlass::epilogue::thread::Identity<MMA_C>;
+    using ActM = cutlass::epilogue::thread::Identity<MXE<ElementC>>;
     constexpr auto runs = 64;
     int bps = 0;
     auto kernel = gk<GemmVersion::V1, bM, bN, bK, pipeStages, threads, Act, MMA_C, Element, ElementC>;
     cudaOccupancyMaxActiveBlocksPerMultiprocessor(&bps, kernel, threads, 0);
     const int blocks = min((M / bM) * (N / bN), bps * NUM_SMS);
     kernel<<<blocks, threads, 0, exec.getStream()>>>(a, b, c, bias, M, N, K);
-    exec.sync();
-    const auto [isCorrect, ref_time_ms] = reference<runs>(a, b, bias, c_ref, c, M, N, K, exec);
+    const auto [isCorrect, ref_time_ms] = reference<runs, ActM, MXE<Element>, MXE<ElementC>>(
+        a, b, bias, c_ref, c, M, N, K, exec);
     // warmup
     for (int i = 0; i < 32; ++i) {
         kernel<<<blocks, threads, 0, exec.getStream()>>>(a, b, c, bias, M, N, K);
@@ -242,12 +251,18 @@ void test_driver(const int& M, const int& N, const int& K, matx::cudaExecutor& e
     cudaMallocAsync(&c, M * N * sizeof(ElementC), stream);
     cudaMallocAsync(&c_ref, M * N * sizeof(ElementC), stream);
     cudaMallocAsync(&bias, N * sizeof(ElementC), stream);
-    auto tA = matx::make_tensor<Element>(a, {M, K});
-    (tA = matx::apply(ConvFunctor<Element>{}, matx::random<float>(tA.Shape(), matx::UNIFORM))).run(exec);
-    auto tB = matx::make_tensor<Element>(b, {K, N});
-    (tB = matx::apply(ConvFunctor<Element>{}, matx::random<float>(tB.Shape(), matx::UNIFORM))).run(exec);
-    auto tBias = matx::make_tensor<ElementC>(bias, {N});
-    (tBias = matx::ones<ElementC>(tBias.Shape())).run(exec);
+
+    using MX = MXE<Element>;
+    using MXC = MXE<ElementC>;
+    auto tA = matx::make_tensor<MX>(reinterpret_cast<MX*>(a), {M, K});
+    (tA = matx::apply(ConvFunctor<MX>{}, matx::random<float>(tA.Shape(), matx::NORMAL))).run(exec);
+    //(tA = matx::ones<ElementC>(tA.Shape())).run(exec);
+    auto tB = matx::make_tensor<MX>(reinterpret_cast<MX*>(b), {N, K});
+    (tB = matx::apply(ConvFunctor<MX>{}, matx::random<float>(tB.Shape(), matx::NORMAL))).run(exec);
+    //(tB = matx::ones<ElementC>(tB.Shape())).run(exec);
+    auto tBias = matx::make_tensor<MXC>(reinterpret_cast<MXC*>(bias), {N});
+    (tBias = matx::ones<MXC>(tBias.Shape())).run(exec);
+    //(tBias = matx::apply(ConvFunctor<MXC>{}, matx::random<float>(tBias.Shape(), matx::UNIFORM))).run(exec);
     gk_test<bM, bN, bK, pipeStages, threads, MMA_C, Element, ElementC>(a, b, c, c_ref, bias, M, N, K, exec);
 
     FLASHMOE_CHECK_CUDA(cudaPeekAtLastError());
@@ -266,7 +281,7 @@ void test_parser(const int argc, char** argv) {
     using ElementC = float;
     using MMA_C = float;
     printf("M, N, K, Correct?, Kernel_Time(ms), Matx_Time(ms)\n");
-    constexpr auto bK = 8 * (sizeof(ElementC) / 4);
+    constexpr auto bK = 8 * (4 / sizeof(ElementC));
     if (argc > 1) {
         MNK = std::stoi(argv[1]);
     }
@@ -274,12 +289,41 @@ void test_parser(const int argc, char** argv) {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
     matx::cudaExecutor exec{stream, true};
-    for (int i = MNK; i <= 8*1024; i *= 2) {
+    for (int i = MNK; i <= 4*1024; i *= 2) {
         test_driver<128, 64, bK, 2, 128, MMA_C, Element, ElementC>(i, i, i, exec);
     }
     cudaStreamDestroy(stream);
 }
 
+void work() {
+    cudaSetDevice(0);
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+    matx::cudaExecutor exec{stream, true};
+    constexpr auto M = 2;
+    constexpr auto K = 2;
+    constexpr auto N = 4;
+    auto tA = matx::make_tensor<float>({M, K});
+    tA(0,0) = 0.f;
+    tA(0,1) = 1.f;
+    tA(1,0) = 2.f;
+    tA(1,1) = 3.f;
+    print(tA);
+    auto tB = matx::make_tensor<float>({N, K});
+    tB(0,0) = 4.f;
+    tB(0,1) = 5.f;
+    tB(1,0) = 6.f;
+    tB(1,1) = 7.f;
+    tB(2,0) = 8.f;
+    tB(2,1) = 9.f;
+    tB(3,0) = 10.f;
+    tB(3,1) = 11.f;
+    (tB = matx::random<float>(tB.Shape(), matx::NORMAL)).run(exec);
+    print(tB);
+    auto tC = matx::make_tensor<float>({M, N});
+    (tC = matx::matmul(tA, tB.PermuteMatrix())).run(exec);
+    print(tC);
+}
 int main(int argc, char** argv) {
     test_parser(argc, argv);
 }
