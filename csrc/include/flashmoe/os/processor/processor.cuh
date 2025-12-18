@@ -242,9 +242,6 @@ namespace flashmoe::processor{
         const auto mC = make_tensor(cute::make_gmem_ptr(output),
         cute::Layout<cute::Shape<cute::Int<M>, cute::Int<N>>,
             cute::Stride<cute::Int<N>, cute::_1>>{});
-        const auto mD = make_tensor(cute::make_gmem_ptr(bias),
-            cute::Layout<cute::Shape<cute::_1, cute::Int<N>>,
-                cute::Stride<cute::_0, cute::_1>>{});
 
         // M is padded, such that the below is correct
         constexpr auto tilesM = M / bM;
@@ -266,15 +263,20 @@ namespace flashmoe::processor{
         using Element = typename BlockGEMM::MatrixDType;
 
         // prefetch bias from global memory
-        static_assert(ACC::sharedSize::value >= ACC::GSM::value + sizeof(Element) * bN);
-        const auto biasCoord = idx2crd(tileIdx, cute::Shape<cute::_1, cute::Int<tilesN>>{},
-            cute::Stride<cute::Int<bN>, cute::_1>{});
-        const auto gD = cute::local_tile(mD,
-            cute::Shape<cute::_1, cute::Int<bN>>{}, cute::get<1>(biasCoord));
-        static_assert(threads % bN == 0);
-        if (threadIdx.x < bN) {
-            using LT =  cuda::std::conditional_t<sizeof(Element) == 2, uint16_t, uint32_t>;
-            CAST_TO(LT, workspace)[threadIdx.x] = __ldg(CONST_CAST_TO(LT, &gD(threadIdx.x)));
+        constexpr auto trips = cute::ceil_div(bN, threads);
+        Element biasCache[trips];
+        const int biasOffset = (tileIdx % tilesN) * bN;
+        const auto* __restrict__ bP = bias + biasOffset;
+        if constexpr (threads >= bN) {
+            biasCache[0] = bP[threadIdx.x % bN];
+        }
+        else {
+            // below is not strictly necessary, but it makes my life easier :)
+            static_assert(bN % threads == 0);
+            #pragma unroll
+            for (int i = 0; i < trips; ++i) {
+                biasCache[i] = bP[threadIdx.x + i * bN];
+            }
         }
         mainLoop(
             accumulator,
@@ -294,16 +296,9 @@ namespace flashmoe::processor{
         constexpr auto gDLoadOp = cutlass::NumericConverter<ElementC, Element>{};
         // Assume elementwise operator
         typename BlockGEMM::FusedEpilogue epilogueOp{};
-        constexpr auto trips = size(accumulator) / elems;
-        // copy single bias value
-        ElementC rB[trips];
-        #pragma unroll
-        for (uint i = 0 ; i < trips; ++i) {
-            rB[i] = gDLoadOp(workspace[threadIdx.x % elems + i * elems]);
-        }
         constexpr auto sCLay = cute::make_layout(cute::Shape<cute::Int<bM>, cute::Int<elems>>{},
             cute::LayoutRight{});
-        const auto sC = cute::make_tensor(cute::make_smem_ptr(CAST_TO(ElementC, workspace + bN)), sCLay);
+        const auto sC = cute::make_tensor(cute::make_smem_ptr(CAST_TO(ElementC, workspace)), sCLay);
         const auto rC = cute::make_tensor(cute::make_rmem_ptr(CAST_TO(Element, accumulator.data())),
             cute::Layout<cute::Shape<cute::_1, cute::Int<bN>>,
                 cute::Stride<cute::Int<bN>, cute::_1>>{});
@@ -311,18 +306,15 @@ namespace flashmoe::processor{
 
         // Reorder to striped arrangement
         #pragma unroll
-        for (unsigned int i = 0; i < trips; ++i) {
-            #pragma unroll
-            for (unsigned int j = 0; j < elems; ++j) {
-                tCsC(j) = accumulator(j + i * elems);
-            }
-            __syncthreads();
-            const auto rIdx = threadIdx.x / elems * elems;
-            const auto cIdx = threadIdx.x % elems;
-            #pragma unroll
-            for (unsigned int j = 0; j < elems; ++j) {
-                accumulator(j + i * elems) = sC(rIdx + j, cIdx);
-            }
+        for (unsigned int j = 0; j < elems; ++j) {
+            tCsC(j) = accumulator(j);
+        }
+        __syncthreads();
+        const auto rIdx = threadIdx.x / elems * elems;
+        const auto cIdx = threadIdx.x % elems;
+        #pragma unroll
+        for (unsigned int j = 0; j < elems; ++j) {
+            accumulator(j) = sC(rIdx + j, cIdx);
         }
 
         // apply epilogue
@@ -330,12 +322,10 @@ namespace flashmoe::processor{
         for (uint i = 0; i < trips; ++i) {
             #pragma unroll
             for (int j = 0; j < elems; ++j) {
-                rC(j + i * elems) = gCStoreOp(epilogueOp(accumulator(j + i * elems), rB[i]));
+                rC(j + i * elems) = gCStoreOp(epilogueOp(accumulator(j + i * elems), biasCache[i]));
             }
         }
 
-        const auto rIdx = threadIdx.x / elems * elems;
-        const auto cIdx = threadIdx.x % elems;
         // Coalesced copy from registers to global memory
         #pragma unroll
         for (uint i = 0; i < trips; ++i) {
@@ -401,18 +391,20 @@ namespace flashmoe::processor{
         const auto k_tile_iter = cute::make_coord_iterator(tilesK);
         using Element = typename BlockGEMM::MatrixDType;
         // prefetch bias from global memory
-        static_assert(ACC::sharedSize::value >= ACC::GSM::value + sizeof(Element) * bN);
-        const auto mD = make_tensor(cute::make_gmem_ptr(bias),
-            cute::Layout<cute::Shape<cute::_1, cute::Int<N>>,
-                cute::Stride<cute::_0, cute::_1>>{});
-        const auto biasCoord = idx2crd(tileIdx, cute::Shape<cute::_1, cute::Int<tilesN>>{},
-            cute::Stride<cute::Int<bN>, cute::_1>{});
-        const auto gD = cute::local_tile(mD,
-            cute::Shape<cute::_1, cute::Int<bN>>{}, cute::get<1>(biasCoord));
-        static_assert(threads % bN == 0);
-        if (threadIdx.x < bN) {
-            using LT =  cuda::std::conditional_t<sizeof(Element) == 2, uint16_t, uint32_t>;
-            CAST_TO(LT, workspace)[threadIdx.x] = __ldg(CONST_CAST_TO(LT, &gD(threadIdx.x)));
+        constexpr auto trips = cute::ceil_div(bN, threads);
+        Element biasCache[trips];
+        const int biasOffset = (tileIdx % tilesN) * bN;
+        const auto* __restrict__ bP = bias + biasOffset;
+        if constexpr (threads >= bN) {
+            biasCache[0] = bP[threadIdx.x % bN];
+        }
+        else {
+            // below is not strictly necessary, but it makes my life easier :)
+            static_assert(bN % threads == 0);
+            #pragma unroll
+            for (int i = 0; i < trips; ++i) {
+                biasCache[i] = bP[threadIdx.x + i * bN];
+            }
         }
         using ElementC = typename decltype(accumulator)::value_type;
         mainLoop(
@@ -423,29 +415,22 @@ namespace flashmoe::processor{
             k_tile_iter, tilesK,
             cute::Underscore{},
             threadIdx.x,
-            CAST_TO(char, workspace + bN));
-        /// There is a block-wide barrier at the end of the above ^
+            CAST_TO(char, workspace));
+        __syncthreads();
 
         // Epilogue
         typename BlockGEMM::MMA tiledMMA{};
         constexpr auto gCStoreOp = cutlass::NumericConverter<Element, ElementC>{};
-        constexpr auto gDLoadOp = cutlass::NumericConverter<ElementC, Element>{};
         // Assume elementwise operator
         typename BlockGEMM::FusedEpilogue epilogueOp{};
-        constexpr auto trips = size(accumulator) / elems;
-        // copy single bias value
-        ElementC rB[trips];
-        #pragma unroll
-        for (uint i = 0 ; i < trips; ++i) {
-            rB[i] = gDLoadOp(workspace[threadIdx.x % elems + i * elems]);
-        }
         constexpr auto sCLay = cute::make_layout(cute::Shape<cute::Int<bM>, cute::Int<elems>>{},
             cute::LayoutRight{});
-        const auto sC = cute::make_tensor(cute::make_smem_ptr(CAST_TO(ElementC, workspace + bN)), sCLay);
+        const auto sC = cute::make_tensor(cute::make_smem_ptr(CAST_TO(ElementC, workspace)), sCLay);
         const auto rC = cute::make_tensor(cute::make_rmem_ptr(CAST_TO(Element, accumulator.data())),
             cute::Layout<cute::Shape<cute::_1, cute::Int<bN>>,
                 cute::Stride<cute::Int<bN>, cute::_1>>{});
         const auto tCsC = tiledMMA.get_slice(threadIdx.x).partition_C(sC);
+        static_assert(elems == bN);
 
         // Reorder to striped arrangement
         // TODO(Jonathan): Do the below reordering without shared memory. It would make my day (decade actually) to solve this.
@@ -453,18 +438,15 @@ namespace flashmoe::processor{
         // I haven't sat down to think about a solution yet.
         // First idea that comes to mind is some form of warp register shuffling.
         #pragma unroll
-        for (unsigned int i = 0; i < trips; ++i) {
-            #pragma unroll
-            for (unsigned int j = 0; j < elems; ++j) {
-                tCsC(j) = accumulator(j + i * elems);
-            }
-            __syncthreads();
-            const auto rIdx = threadIdx.x / elems * elems;
-            const auto cIdx = threadIdx.x % elems;
-            #pragma unroll
-            for (unsigned int j = 0; j < elems; ++j) {
-                accumulator(j + i * elems) = sC(rIdx + j, cIdx);
-            }
+        for (unsigned int j = 0; j < elems; ++j) {
+            tCsC(j) = accumulator(j);
+        }
+        __syncthreads();
+        const auto rIdx = threadIdx.x / elems * elems;
+        const auto cIdx = threadIdx.x % elems;
+        #pragma unroll
+        for (unsigned int j = 0; j < elems; ++j) {
+            accumulator(j) = sC(rIdx + j, cIdx);
         }
 
         // apply epilogue
@@ -472,12 +454,9 @@ namespace flashmoe::processor{
         for (uint i = 0; i < trips; ++i) {
             #pragma unroll
             for (int j = 0; j < elems; ++j) {
-                rC(j + i * elems) = gCStoreOp(epilogueOp(accumulator(j + i * elems), rB[i]));
+                rC(j + i * elems) = gCStoreOp(epilogueOp(accumulator(j + i * elems), biasCache[i]));
             }
         }
-
-        const auto rIdx = threadIdx.x / elems * elems;
-        const auto cIdx = threadIdx.x % elems;
         // Coalesced copy from registers to global memory
         #pragma unroll
         for (uint i = 0; i < trips; ++i) {
