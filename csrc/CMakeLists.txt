@@ -250,5 +250,7 @@ add_executable(gb
         benchmarks/gemm_bench.cu
         include/flashmoe/os/processor/gemm.cuh
         include/flashmoe/os/processor/mmaConfig.cuh
+        benchmarks/cdx_gemm.cuh
+        benchmarks/v0_gemm.cuh
 )
 flash_target_common(gb)
