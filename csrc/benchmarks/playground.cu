@@ -2,6 +2,8 @@
 // Created by osayamen on 12/22/25.
 //
 
+#include <array>
+
 #include <cublasdx.hpp>
 #include <cutlass/epilogue/thread/activation.h>
 #include <matx.h>
@@ -33,15 +35,28 @@ struct ConvFunctor<matx::matxBf16> {
 template<typename Element>
 using MXE = cuda::std::conditional_t<cuda::std::is_same_v<Element, __half>, matx::matxFp16,
         cuda::std::conditional_t<cuda::std::is_same_v<Element, __nv_bfloat16>, matx::matxBf16, Element>>;
+
+template<typename Element, typename MMA_C>
+struct Tolerances {
+    using rtol = cute::C<1e-3f>;
+    using atol = cute::C<1e-4f>;
+};
+
+template<>
+struct Tolerances<__half, __half> {
+    using rtol = cute::C<1e-1f>;
+    using atol = cute::C<1e-2f>;
+};
+
 __host__ __forceinline__
 void test_cdx() {
-    const int M = 16;
-    const int N = 16;
-    const int K = 16;
-    constexpr int bM = 16;
-    constexpr int bN = 16;
-    constexpr int bK = 16;
-    constexpr int pipeStages = 1;
+    const int M = 8192;
+    const int N = 8192;
+    const int K = 8192;
+    constexpr int bM = 128;
+    constexpr int bN = 64;
+    constexpr int bK = 32;
+    constexpr int pipeStages = 4;
     constexpr int alignment = 16;
     using Element = __half;
     using ElementC = Element;
@@ -53,15 +68,15 @@ void test_cdx() {
     cudaStreamCreate(&stream);
     Element* a = nullptr;
     Element* b = nullptr;
-    Element* c = nullptr;
-    Element* c_ref = nullptr;
-    Element* bias = nullptr;
+    ElementC* c = nullptr;
+    ElementC* c_ref = nullptr;
+    ElementC* bias = nullptr;
 
-    cudaMallocManaged(&a, M * K * sizeof(Element));
-    cudaMallocManaged(&b, K * N * sizeof(Element));
-    cudaMallocManaged(&c, M * N * sizeof(ElementC));
-    cudaMallocManaged(&c_ref, M * N * sizeof(ElementC));
-    cudaMallocManaged(&bias, N * sizeof(ElementC));
+    cudaMallocAsync(&a, M * K * sizeof(Element), stream);
+    cudaMallocAsync(&b, K * N * sizeof(Element), stream);
+    cudaMallocAsync(&c, M * N * sizeof(ElementC), stream);
+    cudaMallocAsync(&c_ref, M * N * sizeof(ElementC), stream);
+    cudaMallocAsync(&bias, N * sizeof(ElementC), stream);
     matx::cudaExecutor exec{stream};
     using MX = MXE<Element>;
     using MXC = MXE<ElementC>;
@@ -72,23 +87,14 @@ void test_cdx() {
     auto* __restrict__ bias_m = reinterpret_cast<MXC*>(bias);
     auto tA = matx::make_tensor<MX>(a_m, {M, K});
     (tA = matx::apply(ConvFunctor<MX>{}, matx::random<float>(tA.Shape(), matx::NORMAL, 7))).run(exec);
-    /*tA(0,0) = static_cast<Element>(1.f);
-    tA(0,1) = static_cast<Element>(2.f);
-    tA(1,0) = static_cast<Element>(3.f);
-    tA(1,1) = static_cast<Element>(4.f);*/
     auto tB = matx::make_tensor<MX>(b_m, {N, K});
     (tB = matx::apply(ConvFunctor<MX>{}, matx::random<float>(tB.Shape(), matx::NORMAL, 17))).run(exec);
-    /*tB(0,0) = static_cast<Element>(2.f);
-    tB(0,1) = static_cast<Element>(3.f);
-    tB(1,0) = static_cast<Element>(4.f);
-    tB(1,1) = static_cast<Element>(5.f);*/
     auto tC = matx::make_tensor<MXC>(c_m, {M, N});
     auto tC_ref = matx::make_tensor<MXC>(c_ref_m, {M, N});
     auto tBias = matx::make_tensor<MXC>(bias_m, {N});
-    //(tBias = matx::apply(ConvFunctor<MXC>{}, matx::random<float>(tBias.Shape(), matx::NORMAL))).run(exec);
-    (tBias = matx::zeros<MXC>(tBias.Shape())).run(exec);
-    using Act = cutlass::epilogue::thread::Identity<ElementC>;
-    using ActM = cutlass::epilogue::thread::Identity<MX>;
+    (tBias = matx::apply(ConvFunctor<MXC>{}, matx::random<float>(tBias.Shape(), matx::NORMAL))).run(exec);
+    using Act = cutlass::epilogue::thread::ReLU<ElementC>;
+    using ActM = cutlass::epilogue::thread::ReLU<MX>;
     using BLAS = decltype(
             cublasdx::Size<bM, bN, bK>() +
             cublasdx::Precision<Element, Element, MMA_C>() +
@@ -105,14 +111,11 @@ void test_cdx() {
     const int blocks = min((M / bM) * (N / bN), bps * NUM_SMS);
     kernel<<<blocks, BLAS::suggested_block_dim, 0, stream>>>(a, b, c, bias, M, N, K);
     (tC_ref = matx::apply(ActM{}, (matx::matmul(tA, tB.PermuteMatrix()) + tBias))).run(exec);
+    FLASHMOE_CHECK_CUDA(cudaPeekAtLastError());
     exec.sync();
-    print(tC);
-    print(tC_ref);
     auto result = matx::make_tensor<int>({});
     matx::allclose(result, tC, tC_ref, RTOL, ATOL, exec);
-    //print(matx::isclose(tC, tC_ref));
     exec.sync();
-    FLASHMOE_CHECK_CUDA(cudaPeekAtLastError());
     printf("Correct? %s\n", result() == 1 ? "Yes" : "No");
     cudaFree(a);
     cudaFree(b);

@@ -60,6 +60,17 @@ namespace v1
         cute::cp_async_wait<N>();
         __syncthreads();
     }
+
+    template<int offset, typename Tensor, typename Element>
+    __device__ __forceinline__
+    void update_buffer(Tensor& tensor, Element* __restrict__ const& base_ptr, const int& stage) {
+        tensor.data() = base_ptr + (stage * offset);
+    }
+    template<int stage, int offset, typename Tensor, typename Element>
+    __device__ __forceinline__
+    void update_buffer(Tensor& tensor, Element* __restrict__ const& base_ptr) {
+        tensor.data() = base_ptr + (stage * offset);
+    }
     template<typename BLAS, int pipeStages, typename Element, typename Accumulator, typename TileCoord>
     requires(cublasdx::is_blas_execution_v<BLAS>)
     __device__ __forceinline__
@@ -69,8 +80,6 @@ namespace v1
         Accumulator& accumulator,
         const int& M, const int& N, const int& K, const TileCoord& tileCoord) {
         accumulator.clear();
-        using BM = cute::Int<cublasdx::size_of<BLAS>::m>;
-        using BN = cute::Int<cublasdx::size_of<BLAS>::n>;
         using BK = cute::Int<cublasdx::size_of<BLAS>::k>;
         const int tilesK = K / BK{};
 
@@ -79,32 +88,47 @@ namespace v1
         const auto gB = getTileB<cublasdx::size_of<BLAS>::k, cublasdx::size_of<BLAS>::n,
             cublasdx::arrangement_of_v_b<BLAS>>(b, K, N, tileCoord);
 
-        // shared layouts
+        /*shared layouts
+        we could simplify with the below hierarchical layout, but it would not dispatch to LDSM.
         constexpr auto sALay = cute::tile_to_shape(BLAS::suggest_layout_smem_a().layout,
-            cute::Shape<BM, BK, cute::Int<pipeStages>>{});
+        cute::Shape<BM, BK, cute::Int<PIPE_STAGES>>{});
         constexpr auto sBLay = cute::tile_to_shape(BLAS::suggest_layout_smem_b().layout,
-            cute::Shape<BK, BN, cute::Int<pipeStages>>{});
+            cute::Shape<BK, BN, cute::Int<PIPE_STAGES>>{});
         const auto [sA, sB] = cublasdx::shared_memory::slice<Element, Element>(
-            workspace, cublasdx::alignment_of_v_a<BLAS>, sALay,
-            cublasdx::alignment_of_v_b<BLAS>, sBLay);
+            workspace, cublasdx::alignment_of_v_a<BLAS>, sALay, cublasdx::alignment_of_v_b<BLAS>, sBLay);
+        */
+        constexpr auto sASS = cublasdx::cosize(BLAS::suggest_layout_smem_a());
+        constexpr auto sBSS = cublasdx::cosize(BLAS::suggest_layout_smem_b());
+        auto* __restrict__ sAP = static_cast<Element*>(workspace);
+        auto* __restrict__ sBP = static_cast<Element*>(workspace) + (sASS * pipeStages);
+        auto sA = cublasdx::make_tensor(sAP, BLAS::suggest_layout_smem_a());
+        auto sB = cublasdx::make_tensor(sBP, BLAS::suggest_layout_smem_b());
         cuda::static_for<pipeStages>([&](auto stage){
-            cublasdx::copy<BLAS, cublasdx::alignment_of_v_a<BLAS>>(gA(cute::_, cute::_, stage), sA(cute::_, cute::_, stage));
-            cublasdx::copy<BLAS, cublasdx::alignment_of_v_b<BLAS>>(gB(cute::_, cute::_, stage), sB(cute::_, cute::_, stage));
+            update_buffer<stage, sASS>(sA, sAP);
+            update_buffer<stage, sBSS>(sB, sBP);
+            cublasdx::copy<BLAS, cublasdx::alignment_of_v_a<BLAS>>(gA(cute::_, cute::_, stage), sA);
+            cublasdx::copy<BLAS, cublasdx::alignment_of_v_b<BLAS>>(gB(cute::_, cute::_, stage), sB);
             cute::cp_async_fence();
         });
+        // mainloop
         for (int kStage = pipeStages; kStage < tilesK; ++kStage) {
             const int ps = kStage % pipeStages;
+            update_buffer<sASS>(sA, sAP, ps);
+            update_buffer<sBSS>(sB, sBP, ps);
             cpWait<pipeStages - 1>();
-            BLAS().execute(sA(cute::_, cute::_, ps), sB(cute::_, cute::_, ps), accumulator);
+            BLAS().execute(sA, sB, accumulator);
             __syncthreads();
-            cublasdx::copy<BLAS, cublasdx::alignment_of_v_a<BLAS>>(gA(cute::_, cute::_, kStage), sA(cute::_, cute::_, ps));
-            cublasdx::copy<BLAS, cublasdx::alignment_of_v_b<BLAS>>(gB(cute::_, cute::_, kStage), sB(cute::_, cute::_, ps));
+            cublasdx::copy<BLAS, cublasdx::alignment_of_v_a<BLAS>>(gA(cute::_, cute::_, kStage), sA);
+            cublasdx::copy<BLAS, cublasdx::alignment_of_v_b<BLAS>>(gB(cute::_, cute::_, kStage), sB);
             cute::cp_async_fence();
         }
+        // tail
         cuda::static_for<pipeStages>([&](auto stage) {
             const int ps = (tilesK + stage) % pipeStages;
+            update_buffer<sASS>(sA, sAP, ps);
+            update_buffer<sBSS>(sB, sBP, ps);
             cpWait<(pipeStages - 1) - stage>();
-            BLAS().execute(sA(cute::_, cute::_, ps), sB(cute::_, cute::_, ps), accumulator);
+            BLAS().execute(sA, sB, accumulator);
         });
     }
 
@@ -121,9 +145,8 @@ namespace v1
         using BN = cute::Int<cublasdx::size_of<BLAS>::n>;
         const auto tileCoord = tileIdx2Crd<BM{}, BN{}>(M, N, tileIdx);
         // gmem -> rmem: prefetch bias
-        const auto gD = getTileBias<cublasdx::size_of<BLAS>::m, cublasdx::size_of<BLAS>::n>(bias, M, N, tileCoord);
-        auto d_frag = cublasdx::make_fragment_like<Element>(accumulator.partition_like_C(gD));
-        static_assert(cuda::std::is_same_v<Element, typename decltype(d_frag)::value_type>);
+        const auto gD = getTileBias<BM{}, BN{}>(bias, M, N, tileCoord);
+        auto d_frag = cublasdx::make_fragment_like<Element>(accumulator.get_results());
         cublasdx::copy_fragment<cublasdx::alignment_of<BLAS>::c>(gD, d_frag, accumulator);
         // compute Tile
         tileMainLoop<BLAS, pipeStages>(workspace, a, b, accumulator, M, N, K, tileCoord);
@@ -133,10 +156,10 @@ namespace v1
         const auto c_frag = accumulator.get_results();
         constexpr int accum_size = cublasdx::size(c_frag);
         cuda::static_for<accum_size>([&c_frag, &d_frag](auto i) {
+            // TODO: vectorize the addition?
             d_frag(i) = act(conv(c_frag(i)) + d_frag(i));
         });
-        auto gC = getTileC<cublasdx::size_of<BLAS>::m, cublasdx::size_of<BLAS>::n,
-            cublasdx::arrangement_of_v_c<BLAS>>(c, M, N, tileCoord);
+        auto gC = getTileC<BM{}, BN{}, cublasdx::arrangement_of_v_c<BLAS>>(c, M, N, tileCoord);
         // rmem -> gmem
         cublasdx::copy_fragment<cublasdx::alignment_of<BLAS>::c>(d_frag, gC, accumulator);
     }
@@ -144,7 +167,7 @@ namespace v1
     #define SC(T, v) static_cast<T>(v)
     template<typename BLAS, int pipeStages, typename Activation,
     typename Element, typename ElementC>
-    requires(cublasdx::is_blas_execution_v<BLAS>)
+    requires(cublasdx::is_blas_execution_v<BLAS> && pipeStages >= 0)
     __global__ void gk(const Element* __restrict__ a, const Element* __restrict__ b,
         ElementC* __restrict__ c, const ElementC* __restrict__ bias,
         const __grid_constant__ int M, const __grid_constant__ int N, const int __grid_constant__ K) {
