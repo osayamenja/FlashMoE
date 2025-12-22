@@ -254,3 +254,8 @@ add_executable(gb
         benchmarks/v0_gemm.cuh
 )
 flash_target_common(gb)
+
+add_executable(pl
+        benchmarks/playground.cu
+)
+flash_target_common(pl)

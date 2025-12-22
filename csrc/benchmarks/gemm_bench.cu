@@ -4,7 +4,7 @@
 #include <matx.h>
 #include <cutlass/epilogue/thread/activation.h>
 
-#include "v0_gemm.cuh"
+#include "cdx_gemm.cuh"
 #include "../include/flashmoe/debug.cuh"
 
 #define RTOL 1e-3
@@ -51,22 +51,15 @@ auto reference(void* const& a, void* const& b,
     return std::make_tuple(result(), exec.get_time_ms() / static_cast<float>(runs));
 }
 
-template<int bM, int bN, int bK, int pipeStages, int threads, typename MMA_C, typename Element, typename ElementC>
+template<int threads, typename Act, typename Kernel, typename Element, typename ElementC>
 __host__ __forceinline__
-auto gk_test(Element* const& a, Element* const& b,
+auto gk_test(Kernel& kernel, Element* const& a, Element* const& b,
     ElementC* const& c, ElementC* const& c_ref, ElementC* const& bias,
-    const int& M, const int& N, const int& K, matx::cudaExecutor& exec) {
-    //using Act = cutlass::epilogue::thread::ReLU<ElementC>;
-    using Act = cutlass::epilogue::thread::ReLU<MMA_C>;
-    using ActM = cutlass::epilogue::thread::ReLU<MXE<ElementC>>;
+    const int& M, const int& N, const int& K, const int& blocks, matx::cudaExecutor& exec) {
     constexpr auto runs = 64;
     constexpr auto warmup = 32;
-    int bps = 0;
-    auto kernel = v0::gk<bM, bN, bK, pipeStages, threads, Act, MMA_C, Element, ElementC>;
-    cudaOccupancyMaxActiveBlocksPerMultiprocessor(&bps, kernel, threads, 0);
-    const int blocks = min((M / bM) * (N / bN), bps * NUM_SMS);
     kernel<<<blocks, threads, 0, exec.getStream()>>>(a, b, c, bias, M, N, K);
-    const auto [isCorrect, ref_time_ms] = reference<warmup, runs, ActM, MXE<Element>, MXE<ElementC>>(
+    const auto [isCorrect, ref_time_ms] = reference<warmup, runs, Act, MXE<Element>, MXE<ElementC>>(
         a, b, bias, c_ref, c, M, N, K, exec);
     // warmup
     for (int i = 0; i < warmup; ++i) {
@@ -118,15 +111,31 @@ void test_driver(const int& M, const int& N, const int& K, matx::cudaExecutor& e
     cudaMallocAsync(&c_ref, M * N * sizeof(ElementC), stream);
     cudaMallocAsync(&bias, N * sizeof(ElementC), stream);
 
+    using Act = cutlass::epilogue::thread::ReLU<Element>;
+    using BLAS = decltype(
+            cublasdx::Size<bM, bN, bK>() +
+            cublasdx::Precision<Element, Element, MMA_C>() +
+            cublasdx::Type<cublasdx::type::real>() +
+            cublasdx::Function<cublasdx::function::MM>() +
+            cublasdx::Arrangement<cublasdx::row_major, cublasdx::row_major, cublasdx::row_major>() +
+            cublasdx::Block() +
+            cublasdx::MaxAlignment() +
+            cublasdx::StaticBlockDim() +
+            cublasdx::SM<FLASHMOE_ARCH>());
+    auto kernel = v1::gk<BLAS, pipeStages, Act, Element, ElementC>;
+    int bps = 0;
+    cudaOccupancyMaxActiveBlocksPerMultiprocessor(&bps, kernel, threads, 0);
+    const int blocks = min((M / bM) * (N / bN), bps * NUM_SMS);
     using MX = MXE<Element>;
     using MXC = MXE<ElementC>;
+    using ActM = cutlass::epilogue::thread::ReLU<MX>;
     auto tA = matx::make_tensor<MX>(reinterpret_cast<MX*>(a), {M, K});
     (tA = matx::apply(ConvFunctor<MX>{}, matx::random<float>(tA.Shape(), matx::NORMAL))).run(exec);
     auto tB = matx::make_tensor<MX>(reinterpret_cast<MX*>(b), {N, K});
     (tB = matx::apply(ConvFunctor<MX>{}, matx::random<float>(tB.Shape(), matx::NORMAL))).run(exec);
     auto tBias = matx::make_tensor<MXC>(reinterpret_cast<MXC*>(bias), {N});
-    (tBias = matx::apply(ConvFunctor<MXC>{}, matx::random<float>(tBias.Shape(), matx::UNIFORM))).run(exec);
-    gk_test<bM, bN, bK, pipeStages, threads, MMA_C, Element, ElementC>(a, b, c, c_ref, bias, M, N, K, exec);
+    (tBias = matx::apply(ConvFunctor<MXC>{}, matx::random<float>(tBias.Shape(), matx::NORMAL))).run(exec);
+    gk_test<threads, ActM, Element, ElementC>(kernel, a, b, c, c_ref, bias, M, N, K, blocks, exec);
 
     FLASHMOE_CHECK_CUDA(cudaPeekAtLastError());
     cudaFreeAsync(a, stream);
@@ -156,55 +165,6 @@ void test_parser(const int argc, char** argv) {
         test_driver<128, 64, bK, 2, 128, MMA_C, Element, ElementC>(i, i, i, exec);
     }
     cudaStreamDestroy(stream);
-}
-
-__host__ __forceinline__
-void gemm_only(const int& M, const int& N, const int& K) {
-    // for NSight compute purposes
-    constexpr int bM = 128;
-    constexpr int bN = 64;
-    constexpr int bK = 8;
-    constexpr int pipeStages = 2;
-    constexpr int threads = 128;
-    cudaSetDevice(0);
-    cudaStream_t stream;
-    cudaStreamCreate(&stream);
-    matx::cudaExecutor exec{stream, true};
-    using Element = float;
-    using ElementC = float;
-    using MMA_C = float;
-    Element* a = nullptr;
-    Element* b = nullptr;
-    ElementC* c = nullptr;
-    ElementC* c_ref = nullptr;
-    ElementC* bias = nullptr;
-    cudaMallocAsync(&a, M * K * sizeof(Element), stream);
-    cudaMallocAsync(&b, N * K * sizeof(Element), stream);
-    cudaMallocAsync(&c, M * N * sizeof(ElementC), stream);
-    cudaMallocAsync(&c_ref, M * N * sizeof(ElementC), stream);
-    cudaMallocAsync(&bias, N * sizeof(ElementC), stream);
-
-    using MX = MXE<Element>;
-    using MXC = MXE<ElementC>;
-    auto tA = matx::make_tensor<MX>(reinterpret_cast<MX*>(a), {M, K});
-    (tA = matx::apply(ConvFunctor<MX>{}, matx::random<float>(tA.Shape(), matx::NORMAL))).run(exec);
-    auto tB = matx::make_tensor<MX>(reinterpret_cast<MX*>(b), {N, K});
-    (tB = matx::apply(ConvFunctor<MX>{}, matx::random<float>(tB.Shape(), matx::NORMAL))).run(exec);
-    auto tBias = matx::make_tensor<MXC>(reinterpret_cast<MXC*>(bias), {N});
-    (tBias = matx::apply(ConvFunctor<MXC>{}, matx::random<float>(tBias.Shape(), matx::UNIFORM))).run(exec);
-    int bps = 0;
-    using Act = cutlass::epilogue::thread::ReLU<MMA_C>;
-    auto kernel = v0::gk<bM, bN, bK, pipeStages, threads, Act, MMA_C, Element, ElementC>;
-    cudaOccupancyMaxActiveBlocksPerMultiprocessor(&bps, kernel, threads, 0);
-    const int blocks = min((M / bM) * (N / bN), bps * NUM_SMS);
-    kernel<<<blocks, threads, 0, stream>>>(a, b, c, bias, M, N, K);
-    FLASHMOE_CHECK_CUDA(cudaPeekAtLastError());
-    cudaFreeAsync(a, stream);
-    cudaFreeAsync(b, stream);
-    cudaFreeAsync(c, stream);
-    cudaFreeAsync(c_ref, stream);
-    cudaFreeAsync(bias, stream);
-    cudaStreamSynchronize(stream);
 }
 
 int main(int argc, char** argv) {
