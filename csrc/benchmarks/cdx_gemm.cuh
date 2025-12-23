@@ -7,9 +7,26 @@
 
 #include <cublasdx.hpp>
 #include <cuda/utility>
-#include <cutlass/numeric_conversion.h>
 namespace v1
 {
+    template<typename T, typename S>
+    struct Converter {
+        __device__ auto operator()(const S& x) const {
+            return static_cast<T>(x);
+        }
+    };
+    template<>
+    struct Converter<__half, float> {
+        __device__ auto operator()(const float& x) const {
+            return  __float2half(x);
+        }
+    };
+    template<>
+    struct Converter<__nv_bfloat16, float> {
+        __device__ auto operator()(const float& x) const {
+            return  __float2bfloat16(x);
+        }
+    };
     template<int bM, int bN>
     __device__ __forceinline__
     constexpr auto tileIdx2Crd(const int& M, const int& N, const int& tileIdx) {
@@ -82,7 +99,6 @@ namespace v1
         accumulator.clear();
         using BK = cute::Int<cublasdx::size_of<BLAS>::k>;
         const int tilesK = K / BK{};
-
         const auto gA = getTileA<cublasdx::size_of<BLAS>::m, cublasdx::size_of<BLAS>::k,
             cublasdx::arrangement_of_v_a<BLAS>>(a, M, K, tileCoord);
         const auto gB = getTileB<cublasdx::size_of<BLAS>::k, cublasdx::size_of<BLAS>::n,
@@ -100,7 +116,7 @@ namespace v1
         constexpr auto sASS = cublasdx::cosize(BLAS::suggest_layout_smem_a());
         constexpr auto sBSS = cublasdx::cosize(BLAS::suggest_layout_smem_b());
         auto* __restrict__ sAP = static_cast<Element*>(workspace);
-        auto* __restrict__ sBP = static_cast<Element*>(workspace) + (sASS * pipeStages);
+        auto* __restrict__ sBP = sAP + (sASS * pipeStages);
         auto sA = cublasdx::make_tensor(sAP, BLAS::suggest_layout_smem_a());
         auto sB = cublasdx::make_tensor(sBP, BLAS::suggest_layout_smem_b());
         cuda::static_for<pipeStages>([&](auto stage){
@@ -146,18 +162,21 @@ namespace v1
         const auto tileCoord = tileIdx2Crd<BM{}, BN{}>(M, N, tileIdx);
         // gmem -> rmem: prefetch bias
         const auto gD = getTileBias<BM{}, BN{}>(bias, M, N, tileCoord);
-        auto d_frag = cublasdx::make_fragment_like<Element>(accumulator.get_results());
+        auto d_frag = cublasdx::make_fragment_like<ElementC>(accumulator.get_results());
         cublasdx::copy_fragment<cublasdx::alignment_of<BLAS>::c>(gD, d_frag, accumulator);
         // compute Tile
         tileMainLoop<BLAS, pipeStages>(workspace, a, b, accumulator, M, N, K, tileCoord);
         // Epilogue
-        constexpr Activation act{};
-        constexpr cutlass::NumericConverter<ElementC, typename decltype(accumulator)::value_type> conv{};
+        constexpr Activation act{}; // activation function like relu, etc
+        // ElementC -> accum type
+        constexpr Converter<typename decltype(accumulator)::value_type, ElementC> loadConv{};
+        // accum type -> ElementC
+        constexpr Converter<ElementC, typename decltype(accumulator)::value_type> storeConv{};
         const auto c_frag = accumulator.get_results();
         constexpr int accum_size = cublasdx::size(c_frag);
         cuda::static_for<accum_size>([&c_frag, &d_frag](auto i) {
-            // TODO: vectorize the addition?
-            d_frag(i) = act(conv(c_frag(i)) + d_frag(i));
+            // TODO: vectorize the below?
+            d_frag(i) = storeConv(act(c_frag(i) + loadConv(d_frag(i))));
         });
         auto gC = getTileC<BM{}, BN{}, cublasdx::arrangement_of_v_c<BLAS>>(c, M, N, tileCoord);
         // rmem -> gmem
@@ -167,7 +186,8 @@ namespace v1
     #define SC(T, v) static_cast<T>(v)
     template<typename BLAS, int pipeStages, typename Activation,
     typename Element, typename ElementC>
-    requires(cublasdx::is_blas_execution_v<BLAS> && pipeStages >= 0)
+    requires(cublasdx::is_blas_execution_v<BLAS> && pipeStages > 0)
+    __launch_bounds__(BLAS::max_threads_per_block, 1)
     __global__ void gk(const Element* __restrict__ a, const Element* __restrict__ b,
         ElementC* __restrict__ c, const ElementC* __restrict__ bias,
         const __grid_constant__ int M, const __grid_constant__ int N, const int __grid_constant__ K) {

@@ -2,16 +2,14 @@
 // Created by osayamen on 12/22/25.
 //
 
-#include <array>
-
 #include <cublasdx.hpp>
 #include <cutlass/epilogue/thread/activation.h>
 #include <matx.h>
 #include "cdx_gemm.cuh"
 #include "../include/flashmoe/debug.cuh"
 
-#define RTOL 1e-3
-#define ATOL 1e-4
+#define RTOL 1e-2
+#define ATOL 1e-3
 
 template<typename T>
 struct ConvFunctor {
@@ -34,29 +32,18 @@ struct ConvFunctor<matx::matxBf16> {
 
 template<typename Element>
 using MXE = cuda::std::conditional_t<cuda::std::is_same_v<Element, __half>, matx::matxFp16,
-        cuda::std::conditional_t<cuda::std::is_same_v<Element, __nv_bfloat16>, matx::matxBf16, Element>>;
-
-template<typename Element, typename MMA_C>
-struct Tolerances {
-    using rtol = cute::C<1e-3f>;
-    using atol = cute::C<1e-4f>;
-};
-
-template<>
-struct Tolerances<__half, __half> {
-    using rtol = cute::C<1e-1f>;
-    using atol = cute::C<1e-2f>;
-};
+        cuda::std::conditional_t<cuda::std::is_same_v<Element, __nv_bfloat16>, matx::matxBf16,
+        cuda::std::conditional_t<cuda::std::is_same_v<Element, cublasdx::tfloat32_t>, float, Element>>>;
 
 __host__ __forceinline__
 void test_cdx() {
     const int M = 8192;
-    const int N = 8192;
-    const int K = 8192;
+    const int N = 2048;
+    const int K = 2048;
     constexpr int bM = 128;
-    constexpr int bN = 64;
+    constexpr int bN = 128;
     constexpr int bK = 32;
-    constexpr int pipeStages = 4;
+    constexpr int pipeStages = 2;
     constexpr int alignment = 16;
     using Element = __half;
     using ElementC = Element;
@@ -93,7 +80,7 @@ void test_cdx() {
     auto tC_ref = matx::make_tensor<MXC>(c_ref_m, {M, N});
     auto tBias = matx::make_tensor<MXC>(bias_m, {N});
     (tBias = matx::apply(ConvFunctor<MXC>{}, matx::random<float>(tBias.Shape(), matx::NORMAL))).run(exec);
-    using Act = cutlass::epilogue::thread::ReLU<ElementC>;
+    using Act = cutlass::epilogue::thread::ReLU<MMA_C>;
     using ActM = cutlass::epilogue::thread::ReLU<MX>;
     using BLAS = decltype(
             cublasdx::Size<bM, bN, bK>() +
@@ -113,14 +100,17 @@ void test_cdx() {
     (tC_ref = matx::apply(ActM{}, (matx::matmul(tA, tB.PermuteMatrix()) + tBias))).run(exec);
     FLASHMOE_CHECK_CUDA(cudaPeekAtLastError());
     exec.sync();
-    auto result = matx::make_tensor<int>({});
-    matx::allclose(result, tC, tC_ref, RTOL, ATOL, exec);
+    auto num_matches = matx::make_tensor<long int>({});
+    (num_matches = matx::sum(matx::isclose(tC, tC_ref, RTOL, ATOL))).run(exec);
     exec.sync();
-    printf("Correct? %s\n", result() == 1 ? "Yes" : "No");
-    cudaFree(a);
-    cudaFree(b);
-    cudaFree(c);
-    cudaFree(bias);
+    const auto ep =  (1.0 - (static_cast<double>(num_matches()) / static_cast<double>(M*N))) * 100;
+    printf("error_pct: %lf%%\n", ep);
+    cudaFreeAsync(a, stream);
+    cudaFreeAsync(b, stream);
+    cudaFreeAsync(c, stream);
+    cudaFreeAsync(c_ref, stream);
+    cudaFreeAsync(bias, stream);
+    FLASHMOE_CHECK_CUDA(cudaPeekAtLastError());
     cudaStreamDestroy(stream);
 }
 

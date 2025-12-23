@@ -7,12 +7,13 @@
 #include "cdx_gemm.cuh"
 #include "../include/flashmoe/debug.cuh"
 
-#define RTOL 1e-3
-#define ATOL 1e-4
+#define RTOL 2e-2
+#define ATOL 2e-3
 
 template<typename Element>
-using MXE = cuda::std::conditional_t<cuda::std::is_same_v<Element, cute::half_t>, matx::matxFp16,
-        cuda::std::conditional_t<cuda::std::is_same_v<Element, cute::bfloat16_t>, matx::matxBf16, Element>>;
+using MXE = cuda::std::conditional_t<cuda::std::is_same_v<Element, __half>, matx::matxFp16,
+        cuda::std::conditional_t<cuda::std::is_same_v<Element, __nv_bfloat16>, matx::matxBf16,
+        cuda::std::conditional_t<cuda::std::is_same_v<Element, cublasdx::tfloat32_t>, float, Element>>>;
 
 template<int warmup, int runs, typename Activation, typename Element, typename ElementC>
 __host__ __forceinline__
@@ -28,14 +29,16 @@ auto reference(void* const& a, void* const& b,
     auto tA = matx::make_tensor<Element>(mx_a, {M, K});
     auto tB = matx::make_tensor<Element>(mx_b, {N, K});
     auto tC = matx::make_tensor<ElementC>(mx_c_ref, {M, N});
+    auto tCx = matx::make_tensor<ElementC>(mx_c_ext, {M, N});
     auto tBias = matx::make_tensor<ElementC>(mx_bias, {N});
     // ReLU((a @ b) + bias)
     (tC = matx::apply(Activation{}, (matx::matmul(tA, tB.PermuteMatrix()) + tBias))).run(exec);
-    auto result = matx::make_tensor<int>({});
     exec.sync();
-    auto tCx = matx::make_tensor<ElementC>(mx_c_ext, {M, N});
-    matx::allclose(result, tCx, tC, RTOL, ATOL, exec);
-    exec.sync();
+    matx::cudaExecutor exec1{exec.getStream()};
+    auto num_matches = matx::make_tensor<long int>({});
+    (num_matches = matx::sum(matx::isclose(tC, tCx, RTOL, ATOL))).run(exec1);
+    exec1.sync();
+    const auto ep =  (1.0 - (static_cast<double>(num_matches()) / static_cast<double>(M*N))) * 100;
     // warmup
     for (int i = 0; i < warmup; ++i) {
         (tC = matx::apply(Activation{}, (matx::matmul(tA, tB) + tBias))).run(exec);
@@ -48,7 +51,7 @@ auto reference(void* const& a, void* const& b,
     exec.stop_timer();
     exec.sync();
     FLASHMOE_CHECK_CUDA(cudaPeekAtLastError());
-    return std::make_tuple(result(), exec.get_time_ms() / static_cast<float>(runs));
+    return std::make_tuple(ep, exec.get_time_ms() / static_cast<float>(runs));
 }
 
 template<int threads, typename Act, typename Kernel, typename Element, typename ElementC>
@@ -56,10 +59,10 @@ __host__ __forceinline__
 auto gk_test(Kernel& kernel, Element* const& a, Element* const& b,
     ElementC* const& c, ElementC* const& c_ref, ElementC* const& bias,
     const int& M, const int& N, const int& K, const int& blocks, matx::cudaExecutor& exec) {
-    constexpr auto runs = 64;
+    constexpr auto runs = 128;
     constexpr auto warmup = 32;
     kernel<<<blocks, threads, 0, exec.getStream()>>>(a, b, c, bias, M, N, K);
-    const auto [isCorrect, ref_time_ms] = reference<warmup, runs, Act, MXE<Element>, MXE<ElementC>>(
+    const auto [error_pct, ref_time_ms] = reference<warmup, runs, Act, MXE<Element>, MXE<ElementC>>(
         a, b, bias, c_ref, c, M, N, K, exec);
     // warmup
     for (int i = 0; i < warmup; ++i) {
@@ -74,7 +77,7 @@ auto gk_test(Kernel& kernel, Element* const& a, Element* const& b,
     exec.sync();
     FLASHMOE_CHECK_CUDA(cudaPeekAtLastError());
     const auto k_time_ms = exec.get_time_ms() / static_cast<float>(runs);
-    printf("%d, %d, %d, %s, %f, %f\n", M, N, K, isCorrect ? "Yes" : "No", k_time_ms, ref_time_ms);
+    return std::make_tuple(k_time_ms, error_pct, ref_time_ms);
 }
 
 template<typename T>
@@ -96,7 +99,7 @@ struct ConvFunctor<matx::matxBf16> {
     }
 };
 
-template<int bM, int bN, int bK, int pipeStages, int threads, typename MMA_C, typename Element, typename ElementC>
+template<int bM, int bN, int bK, int pipeStages, typename MMA_C, typename Element, typename ElementC>
 __host__ __forceinline__
 void test_driver(const int& M, const int& N, const int& K, matx::cudaExecutor& exec) {
     Element* a = nullptr;
@@ -117,25 +120,29 @@ void test_driver(const int& M, const int& N, const int& K, matx::cudaExecutor& e
             cublasdx::Precision<Element, Element, MMA_C>() +
             cublasdx::Type<cublasdx::type::real>() +
             cublasdx::Function<cublasdx::function::MM>() +
-            cublasdx::Arrangement<cublasdx::row_major, cublasdx::row_major, cublasdx::row_major>() +
+            cublasdx::Arrangement<cublasdx::row_major, cublasdx::col_major, cublasdx::row_major>() +
             cublasdx::Block() +
             cublasdx::MaxAlignment() +
             cublasdx::StaticBlockDim() +
             cublasdx::SM<FLASHMOE_ARCH>());
     auto kernel = v1::gk<BLAS, pipeStages, Act, Element, ElementC>;
     int bps = 0;
+    constexpr auto threads = BLAS::max_threads_per_block;
     cudaOccupancyMaxActiveBlocksPerMultiprocessor(&bps, kernel, threads, 0);
     const int blocks = min((M / bM) * (N / bN), bps * NUM_SMS);
     using MX = MXE<Element>;
     using MXC = MXE<ElementC>;
     using ActM = cutlass::epilogue::thread::ReLU<MX>;
     auto tA = matx::make_tensor<MX>(reinterpret_cast<MX*>(a), {M, K});
-    (tA = matx::apply(ConvFunctor<MX>{}, matx::random<float>(tA.Shape(), matx::NORMAL))).run(exec);
+    (tA = matx::apply(ConvFunctor<MX>{}, matx::random<float>(tA.Shape(), matx::UNIFORM,43))).run(exec);
     auto tB = matx::make_tensor<MX>(reinterpret_cast<MX*>(b), {N, K});
-    (tB = matx::apply(ConvFunctor<MX>{}, matx::random<float>(tB.Shape(), matx::NORMAL))).run(exec);
+    (tB = matx::apply(ConvFunctor<MX>{}, matx::random<float>(tB.Shape(), matx::UNIFORM, 79))).run(exec);
     auto tBias = matx::make_tensor<MXC>(reinterpret_cast<MXC*>(bias), {N});
-    (tBias = matx::apply(ConvFunctor<MXC>{}, matx::random<float>(tBias.Shape(), matx::NORMAL))).run(exec);
-    gk_test<threads, ActM, Element, ElementC>(kernel, a, b, c, c_ref, bias, M, N, K, blocks, exec);
+    (tBias = matx::apply(ConvFunctor<MXC>{}, matx::random<float>(tBias.Shape(), matx::UNIFORM, 5))).run(exec);
+    const auto [k_ms, e_p, r_ms] = gk_test<threads, ActM>(kernel, a, b, c, c_ref, bias, M, N, K, blocks, exec);
+
+    printf("%d, %d, %d, %d, %d, %d, %d, %d, %lf, %f, %f\n", M, N, K, bM, bN, bK, pipeStages,
+        blocks, e_p, k_ms, r_ms);
 
     FLASHMOE_CHECK_CUDA(cudaPeekAtLastError());
     cudaFreeAsync(a, stream);
@@ -148,21 +155,41 @@ void test_driver(const int& M, const int& N, const int& K, matx::cudaExecutor& e
 
 __host__ __forceinline__
 void test_parser(const int argc, char** argv) {
-    int MNK = 128;
-    using Element = float;
-    using ElementC = float;
+    int MNK = 16;
+    int MNK_max = 8192;
+    using Element = __half;
+    using ElementC = Element;
     using MMA_C = float;
-    printf("M, N, K, Correct?, Kernel_Time(ms), Matx_Time(ms)\n");
-    constexpr auto bK = 8 * (4 / sizeof(ElementC));
+    printf("M, N, K, bM, bN, bK, pipeStages, blocks, error(%%), Kernel_Time(ms), Matx_Time(ms)\n");
     if (argc > 1) {
         MNK = std::stoi(argv[1]);
+    }
+    if (argc > 2) {
+        MNK_max = std::stoi(argv[2]);
     }
     cudaSetDevice(0);
     cudaStream_t stream;
     cudaStreamCreate(&stream);
     matx::cudaExecutor exec{stream, true};
-    for (int i = MNK; i <= 4*1024; i *= 2) {
-        test_driver<128, 64, bK, 2, 128, MMA_C, Element, ElementC>(i, i, i, exec);
+    for (int i = MNK; i <= MNK_max; i *= 2) {
+        if (i == 16) {
+            test_driver<16, 16, 16, 1, MMA_C, Element, ElementC>(i, i, i, exec);
+        }
+        else if (i == 32) {
+            test_driver<32, 32, 32, 1, MMA_C, Element, ElementC>(i, i, i, exec);
+        }
+        else if (i == 64) {
+            test_driver<64, 64, 64, 1, MMA_C, Element, ElementC>(i, i, i, exec);
+        }
+        else if (i == 128) {
+            test_driver<128, 64, 32, 1, MMA_C, Element, ElementC>(i, i, i, exec);
+        }
+        else if (i > 128 && i <= 2048) {
+            test_driver<128, 64, 32, 2, MMA_C, Element, ElementC>(i, i, i, exec);
+        }
+        else if (i > 2048) {
+            test_driver<128, 128, 32, 2, MMA_C, Element, ElementC>(i, i, i, exec);
+        }
     }
     cudaStreamDestroy(stream);
 }
