@@ -21,32 +21,6 @@
 
 ...into a *single, tile-pipelined, persistent kernel*.
 
-It is written entirely in **pure CUDA**, with no host-device roundtrips, and is part of the **Kleos** runtime.
-
-### 🏎️ Portability
-
-Out-of-the box, Flash supports 
-- $\geq$ SM70 GPUs
-- RDMA (EFA, libfabric, ibverbs, Slingshot) and NVLink.
-- TF32 (peak performance) 
-- FP16/BF16 (functionality is complete *but* achieving peak performance is still a work in progress)
-
----
-
-## 🚨 Problem: Why This Kernel?
-
-Conventional CPU-driven Distributed MoE execution suffers from:
-- Kernel launch overhead,
-- Network latency due to bulk-synchronous `AllToAll`,
-- Straggler effects
-- Payload inefficiency (padding) due to rigid communication or compute interfaces,
-- Lack of task locality
-
-FlashDMoE addresses this by:
-- Performing dispatch, expert compute, and combine **entirely on the GPU**,
-- Pipelining across fine-grained tiles,
-- Overlapping communication and computation within a fused kernel.
-
 ---
 
 ## 📊 Performance Results
