@@ -1,7 +1,6 @@
 # FlashDMoE: Fast Distributed MoE in a Single Kernel
 
-⚡ A high-performance GPU kernel for MoE workloads  
-🚧 Under active research
+🚧 Note we are currently making numerous changes in preparation for our first stable release v0.1.0. If you want to use this work for production use-cases, kindly wait till the release.
 
 ---
 
