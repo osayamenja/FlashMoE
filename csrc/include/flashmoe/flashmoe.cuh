@@ -25,7 +25,7 @@
 #include "os/processor/mmaConfig.cuh"
 #include "os/processor/processor.cuh"
 
-#include "moe/moe.cuh"
+#include "moe.cuh"
 
 #include "topo.cuh"
 #include "bootstrap.cuh"

@@ -76,7 +76,7 @@ namespace flashmoe {
                 FLASHMOE_CHECK_CUDA(cudaMemsetAsync(tileSync, 0, tSz, flashmoeStream));
             }
             // Needed to clear accumulator buffer
-            if constexpr (c == CombineMode::multithreaded) {
+            if constexpr (c == CombineMode::plural) {
                 FLASHMOE_CHECK_CUDA(cudaMemsetAsync(oP + M * N, 0, sizeof(Element) * (M * K),
                     flashmoeStream));
             }
@@ -89,7 +89,7 @@ namespace flashmoe {
                 FLASHMOE_CHECK_CUDA(cudaMemsetAsync(tileSync, 0, tSz, flashmoeStream));
             }
             // Needed to clear accumulator buffer
-            if constexpr (c == CombineMode::multithreaded) {
+            if constexpr (c == CombineMode::plural) {
                 FLASHMOE_CHECK_CUDA(cudaMemsetAsync(oP + M * N, 0, sizeof(Element) * (M * K),
                     flashmoeStream));
             }

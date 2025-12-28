@@ -259,7 +259,7 @@ namespace flashmoe{
     __device__
     enum class CombineMode {
         single,
-        multithreaded
+        plural
     };
 
     __device__
@@ -451,7 +451,7 @@ namespace flashmoe{
         using GRL = cute::C<NUM_EXPERTS <= BLOCK_N ? GateReductionLevel::singleBlock :
             GateReductionLevel::multiBlock>;
         using TK = cute::C<E_TOP_K>;
-        using CM = cute::C<(E_TOP_K > 1) ? CombineMode::multithreaded : CombineMode::single>;
+        using CM = cute::C<(E_TOP_K > 1) ? CombineMode::plural : CombineMode::single>;
         using ElementC = float;
         using Element = DType<DTYPE>::DT;
         using DTK = cute::C<DROP_TOKENS? DropTokens::yes : DropTokens::no>;
@@ -869,7 +869,7 @@ namespace flashmoe{
                 ACC::S::value * ACC::TPX::value : 0U;
         }
         /// Ring top k flags
-        /// Two sets for pipelining termination phase of round i and initial phase of round i + 1
+        /// Two sets for pipelining termination phase of round i with initial phase of round i + 1
         __device__ __forceinline__
         auto* rTp() const {
             return bookRTP;
@@ -1009,7 +1009,7 @@ namespace flashmoe{
     __constant__ static __inline__ Bookkeeping bookkeeping{};
     __inline__ Bookkeeping hostBookkeeping{};
     __inline__ bool isInitialized = false;
-    __inline__ auto flashmoeStream = cudaStreamPerThread;
+    cudaStream_t flashmoeStream = nullptr;
 
     namespace heap {
         /// The symmetric heap is a 5-D tensor (P, S, C, E, EC) of tokens,

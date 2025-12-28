@@ -1,14 +1,89 @@
 //
 // Created by osayamen on 12/13/25.
 //
+// Benchmark and correctness test for the tiled GEMM underlying FlashMoE.
+// We compare against MatX which calls cuBLASLt underneath.
+
+#include <random>
+
 #include <matx.h>
 #include <cutlass/epilogue/thread/activation.h>
+#include <cublasdx.hpp>
 
-#include "cdx_gemm.cuh"
-#include "../include/flashmoe/debug.cuh"
+#include "../include/flashmoe/tile.cuh"
 
-#define RTOL 2e-2
-#define ATOL 2e-3
+#if !defined(CHECK_CUDA)
+#  define CHECK_CUDA(e)                                      \
+do {                                                         \
+    cudaError_t code = (e);                                  \
+    if (code != cudaSuccess) {                               \
+        fprintf(stderr, "<%s:%d> %s:\n    %s: %s\n",         \
+            __FILE__, __LINE__, #e,                          \
+            cudaGetErrorName(code),                          \
+            cudaGetErrorString(code));                       \
+        fflush(stderr);                                      \
+        exit(1);                                             \
+    }                                                        \
+} while (0)
+#endif
+
+template<typename TileGEMM, typename Activation, typename ElementC, typename Element>
+__device__ __forceinline__
+void gemmMainloop(void* __restrict__ const& workspace,
+    const Element* __restrict__ const& a,
+    const Element* __restrict__ const& b,
+    ElementC* __restrict__ const& c,
+    const ElementC* __restrict__ const& bias,
+    const int& M, const int& N, const int& K, const int& tileIdx) {
+    using BLAS = TileGEMM::BLAS;
+    auto accumulator = BLAS::suggest_accumulator();
+    using BM = cute::Int<cublasdx::size_of<BLAS>::m>;
+    using BN = cute::Int<cublasdx::size_of<BLAS>::n>;
+    const auto tileCoord = flashmoe::tile::idx2Coord(M / BM{}, N / BN{}, tileIdx);
+    // gmem -> rmem: prefetch bias
+    const auto gD = flashmoe::tile::getBias<BM{}, BN{}>(bias, M, N, cute::select<0, 1>(tileCoord));
+    auto d_frag = cublasdx::make_fragment_like<ElementC>(accumulator.get_results());
+    cublasdx::copy_fragment<cublasdx::alignment_of<BLAS>::c>(gD, d_frag, accumulator);
+    // compute Tile
+    constexpr TileGEMM tileMainloop{};
+    tileMainloop(workspace, a, b, accumulator, M, N, K, tileCoord);
+    // Epilogue
+    constexpr Activation act{}; // activation function like relu, etc
+    // ElementC -> accum type
+    constexpr flashmoe::Converter<typename decltype(accumulator)::value_type, ElementC> loadConv{};
+    // accum type -> ElementC
+    constexpr flashmoe::Converter<ElementC, typename decltype(accumulator)::value_type> storeConv{};
+    const auto c_frag = accumulator.get_results();
+    constexpr int accum_size = cublasdx::size(c_frag);
+    cute::for_each(cute::make_int_sequence<accum_size>{}, [&c_frag, &d_frag](auto i) {
+        d_frag(i) = storeConv(act(c_frag(i) + loadConv(d_frag(i))));
+    });
+    auto gC = flashmoe::tile::getC<BM{}, BN{}, cublasdx::arrangement_of_v_c<BLAS>>(c, M, N,
+        cute::select<0, 1>(tileCoord));
+    // rmem -> gmem
+    cublasdx::copy_fragment<cublasdx::alignment_of<BLAS>::c>(d_frag, gC, accumulator);
+}
+
+#define SC(T, v) static_cast<T>(v)
+// Fused kernel for Act((a @ b) + bias)
+template<typename TileGEMM, typename Activation, typename Element, typename ElementC>
+requires(cublasdx::is_blas_execution_v<typename TileGEMM::BLAS>)
+__launch_bounds__(TileGEMM::BLAS::max_threads_per_block, 1)
+__global__ void gk(const Element* __restrict__ a, const Element* __restrict__ b,
+    ElementC* __restrict__ c, const ElementC* __restrict__ bias,
+    const __grid_constant__ int M, const __grid_constant__ int N, const int __grid_constant__ K) {
+    using BLAS = TileGEMM::BLAS;
+    constexpr int bM = cublasdx::size_of<BLAS>::m;
+    constexpr int bN = cublasdx::size_of<BLAS>::n;
+    constexpr int bK = cublasdx::size_of<BLAS>::k;
+    const int nTiles = (M / bM) * (N / bN);
+    __shared__ __align__(16) cuda::std::byte workspace[bK * TileGEMM::PipeStages::value * (bM + bN) * sizeof(Element)];
+    // simple row-major tile scheduling,
+    // TODO try threadblock swizzling
+    for (int tileIdx = SC(int, blockIdx.x); tileIdx < nTiles; tileIdx += SC(int, gridDim.x)) {
+        gemmMainloop<TileGEMM, Activation>(workspace, a, b, c, bias, M, N, K, tileIdx);
+    }
+}
 
 template<typename Element>
 using MXE = cuda::std::conditional_t<cuda::std::is_same_v<Element, __half>, matx::matxFp16,
@@ -19,7 +94,8 @@ template<int warmup, int runs, typename Activation, typename Element, typename E
 __host__ __forceinline__
 auto reference(void* const& a, void* const& b,
     void* const& bias, void* const& c_ref, void* const& c_ext,
-    const int& M, const int& N, const int& K, matx::cudaExecutor& exec) {
+    const int& M, const int& N, const int& K, const float& rtol, const float& atol,
+    matx::cudaExecutor& exec) {
     auto* mx_a = static_cast<Element*>(a);
     auto* mx_b = static_cast<Element*>(b);
     auto* mx_bias = static_cast<ElementC*>(bias);
@@ -31,13 +107,14 @@ auto reference(void* const& a, void* const& b,
     auto tC = matx::make_tensor<ElementC>(mx_c_ref, {M, N});
     auto tCx = matx::make_tensor<ElementC>(mx_c_ext, {M, N});
     auto tBias = matx::make_tensor<ElementC>(mx_bias, {N});
-    // ReLU((a @ b) + bias)
+    // Act((a @ b) + bias)
     (tC = matx::apply(Activation{}, (matx::matmul(tA, tB.PermuteMatrix()) + tBias))).run(exec);
     exec.sync();
     matx::cudaExecutor exec1{exec.getStream()};
     auto num_matches = matx::make_tensor<long int>({});
-    (num_matches = matx::sum(matx::isclose(tC, tCx, RTOL, ATOL))).run(exec1);
+    (num_matches = matx::sum(matx::isclose(tCx, tC, rtol, atol))).run(exec1);
     exec1.sync();
+    // calculate error percentage
     const auto ep =  (1.0 - (static_cast<double>(num_matches()) / static_cast<double>(M*N))) * 100;
     // warmup
     for (int i = 0; i < warmup; ++i) {
@@ -50,20 +127,21 @@ auto reference(void* const& a, void* const& b,
     }
     exec.stop_timer();
     exec.sync();
-    FLASHMOE_CHECK_CUDA(cudaPeekAtLastError());
+    CHECK_CUDA(cudaPeekAtLastError());
     return std::make_tuple(ep, exec.get_time_ms() / static_cast<float>(runs));
 }
 
 template<int threads, typename Act, typename Kernel, typename Element, typename ElementC>
 __host__ __forceinline__
-auto gk_test(Kernel& kernel, Element* const& a, Element* const& b,
+auto gk_run(Kernel& kernel, Element* const& a, Element* const& b,
     ElementC* const& c, ElementC* const& c_ref, ElementC* const& bias,
-    const int& M, const int& N, const int& K, const int& blocks, matx::cudaExecutor& exec) {
+    const int& M, const int& N, const int& K, const int& blocks,
+    const float& rtol, const float& atol, matx::cudaExecutor& exec) {
     constexpr auto runs = 128;
     constexpr auto warmup = 32;
     kernel<<<blocks, threads, 0, exec.getStream()>>>(a, b, c, bias, M, N, K);
     const auto [error_pct, ref_time_ms] = reference<warmup, runs, Act, MXE<Element>, MXE<ElementC>>(
-        a, b, bias, c_ref, c, M, N, K, exec);
+        a, b, bias, c_ref, c, M, N, K, rtol, atol, exec);
     // warmup
     for (int i = 0; i < warmup; ++i) {
         kernel<<<blocks, threads, 0, exec.getStream()>>>(a, b, c, bias, M, N, K);
@@ -75,7 +153,7 @@ auto gk_test(Kernel& kernel, Element* const& a, Element* const& b,
     }
     exec.stop_timer();
     exec.sync();
-    FLASHMOE_CHECK_CUDA(cudaPeekAtLastError());
+    CHECK_CUDA(cudaPeekAtLastError());
     const auto k_time_ms = exec.get_time_ms() / static_cast<float>(runs);
     return std::make_tuple(k_time_ms, error_pct, ref_time_ms);
 }
@@ -101,7 +179,7 @@ struct ConvFunctor<matx::matxBf16> {
 
 template<int bM, int bN, int bK, int pipeStages, typename MMA_C, typename Element, typename ElementC>
 __host__ __forceinline__
-void test_driver(const int& M, const int& N, const int& K, matx::cudaExecutor& exec) {
+void driver(const int& M, const int& N, const int& K, const float& rtol, const float& atol, matx::cudaExecutor& exec) {
     Element* a = nullptr;
     Element* b = nullptr;
     ElementC* c = nullptr;
@@ -114,37 +192,31 @@ void test_driver(const int& M, const int& N, const int& K, matx::cudaExecutor& e
     cudaMallocAsync(&c_ref, M * N * sizeof(ElementC), stream);
     cudaMallocAsync(&bias, N * sizeof(ElementC), stream);
 
-    using Act = cutlass::epilogue::thread::ReLU<Element>;
-    using BLAS = decltype(
-            cublasdx::Size<bM, bN, bK>() +
-            cublasdx::Precision<Element, Element, MMA_C>() +
-            cublasdx::Type<cublasdx::type::real>() +
-            cublasdx::Function<cublasdx::function::MM>() +
-            cublasdx::Arrangement<cublasdx::row_major, cublasdx::col_major, cublasdx::row_major>() +
-            cublasdx::Block() +
-            cublasdx::MaxAlignment() +
-            cublasdx::StaticBlockDim() +
-            cublasdx::SM<FLASHMOE_ARCH>());
-    auto kernel = v1::gk<BLAS, pipeStages, Act, Element, ElementC>;
-    int bps = 0;
-    constexpr auto threads = BLAS::max_threads_per_block;
-    cudaOccupancyMaxActiveBlocksPerMultiprocessor(&bps, kernel, threads, 0);
-    const int blocks = min((M / bM) * (N / bN), bps * NUM_SMS);
     using MX = MXE<Element>;
     using MXC = MXE<ElementC>;
+    using Act = cutlass::epilogue::thread::ReLU<MMA_C>;
     using ActM = cutlass::epilogue::thread::ReLU<MX>;
+    constexpr int threads = flashmoe::tile::suggest_thread_count<bM, bN, bK, FLASHMOE_ARCH, Element, MMA_C>();
+    using TileGEMM = flashmoe::tile::CollectiveMainloop<
+            bM, bN, bK, FLASHMOE_ARCH, Element, MMA_C, threads, pipeStages
+    >;
+    auto kernel = gk<TileGEMM, Act, Element, ElementC>;
+    int bps = 0;
+    cudaOccupancyMaxActiveBlocksPerMultiprocessor(&bps, kernel, threads, 0);
+    const int blocks = min((M / bM) * (N / bN), bps * NUM_SMS);
     auto tA = matx::make_tensor<MX>(reinterpret_cast<MX*>(a), {M, K});
-    (tA = matx::apply(ConvFunctor<MX>{}, matx::random<float>(tA.Shape(), matx::UNIFORM,43))).run(exec);
+    std::random_device rd;
+    (tA = matx::apply(ConvFunctor<MX>{}, matx::random<float>(tA.Shape(), matx::NORMAL,43))).run(exec);
     auto tB = matx::make_tensor<MX>(reinterpret_cast<MX*>(b), {N, K});
-    (tB = matx::apply(ConvFunctor<MX>{}, matx::random<float>(tB.Shape(), matx::UNIFORM, 79))).run(exec);
+    (tB = matx::apply(ConvFunctor<MX>{}, matx::random<float>(tB.Shape(), matx::NORMAL, 79))).run(exec);
     auto tBias = matx::make_tensor<MXC>(reinterpret_cast<MXC*>(bias), {N});
-    (tBias = matx::apply(ConvFunctor<MXC>{}, matx::random<float>(tBias.Shape(), matx::UNIFORM, 5))).run(exec);
-    const auto [k_ms, e_p, r_ms] = gk_test<threads, ActM>(kernel, a, b, c, c_ref, bias, M, N, K, blocks, exec);
+    (tBias = matx::apply(ConvFunctor<MXC>{}, matx::random<float>(tBias.Shape(), matx::NORMAL, 5))).run(exec);
+    const auto [k_ms, e_p, r_ms] = gk_run<threads, ActM>(kernel, a, b, c, c_ref, bias, M, N, K, blocks, rtol, atol, exec);
 
-    printf("%d, %d, %d, %d, %d, %d, %d, %d, %lf, %f, %f\n", M, N, K, bM, bN, bK, pipeStages,
-        blocks, e_p, k_ms, r_ms);
+    printf("%d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %lf, %f, %f\n",
+        M, N, K, bM, bN, bK, pipeStages, threads, bps, NUM_SMS, blocks, e_p, k_ms, r_ms);
 
-    FLASHMOE_CHECK_CUDA(cudaPeekAtLastError());
+    CHECK_CUDA(cudaPeekAtLastError());
     cudaFreeAsync(a, stream);
     cudaFreeAsync(b, stream);
     cudaFreeAsync(c, stream);
@@ -154,46 +226,73 @@ void test_driver(const int& M, const int& N, const int& K, matx::cudaExecutor& e
 }
 
 __host__ __forceinline__
-void test_parser(const int argc, char** argv) {
-    int MNK = 16;
+void kickStart(const int argc, char** argv) {
+    int MNK = 8;
     int MNK_max = 8192;
+    float rtol = 2e-2f;
+    float atol = 2e-3f;
     using Element = __half;
     using ElementC = Element;
     using MMA_C = float;
-    printf("M, N, K, bM, bN, bK, pipeStages, blocks, error(%%), Kernel_Time(ms), Matx_Time(ms)\n");
+    printf("M, N, K, bM, bN, bK, pipeStages, threads, blocks/SM, SMs, blocks, error(%%), Kernel_Time(ms), "
+           "Matx_Time(ms)\n");
     if (argc > 1) {
         MNK = std::stoi(argv[1]);
     }
     if (argc > 2) {
         MNK_max = std::stoi(argv[2]);
     }
+    if (argc > 3) {
+        rtol = std::stof(argv[3]);
+    }
+    if (argc > 4) {
+        atol = std::stof(argv[4]);
+    }
     cudaSetDevice(0);
     cudaStream_t stream;
     cudaStreamCreate(&stream);
     matx::cudaExecutor exec{stream, true};
     for (int i = MNK; i <= MNK_max; i *= 2) {
-        if (i == 16) {
-            test_driver<16, 16, 16, 1, MMA_C, Element, ElementC>(i, i, i, exec);
-        }
-        else if (i == 32) {
-            test_driver<32, 32, 32, 1, MMA_C, Element, ElementC>(i, i, i, exec);
-        }
-        else if (i == 64) {
-            test_driver<64, 64, 64, 1, MMA_C, Element, ElementC>(i, i, i, exec);
-        }
-        else if (i == 128) {
-            test_driver<128, 64, 32, 1, MMA_C, Element, ElementC>(i, i, i, exec);
-        }
-        else if (i > 128 && i <= 2048) {
-            test_driver<128, 64, 32, 2, MMA_C, Element, ElementC>(i, i, i, exec);
-        }
-        else if (i > 2048) {
-            test_driver<128, 128, 32, 2, MMA_C, Element, ElementC>(i, i, i, exec);
+        switch (i) {
+        case 8:
+            driver<8, 8, 8, 1, MMA_C, Element, ElementC>(i, i, i, rtol, atol, exec);
+            break;
+        case 16:
+            driver<16, 16, 16, 1, MMA_C, Element, ElementC>(i, i, i, rtol, atol, exec);
+            break;
+        case 32:
+            driver<32, 32, 32, 1, MMA_C, Element, ElementC>(i, i, i, rtol, atol, exec);
+            break;
+        case 64:
+            driver<64, 64, 64, 1, MMA_C, Element, ElementC>(i, i, i, rtol, atol, exec);
+            break;
+        default:
+            {
+                if (i >= 128 && i <= 2048) {
+                    driver<128, 64, 32, 2, MMA_C, Element, ElementC>(i, i, i, rtol, atol,exec);
+                }
+                else if (i > 2048) {
+                    driver<128, 64 * (4 / sizeof(Element)), 32, 2, MMA_C, Element, ElementC>(i, i, i, rtol, atol,exec);
+                }
+            }
+
         }
     }
     cudaStreamDestroy(stream);
 }
 
-int main(int argc, char** argv) {
-    test_parser(argc, argv);
+int main(const int argc, char** argv) {
+    using BLAS = decltype(
+            cublasdx::Size<128, 128, 64>() +
+            cublasdx::Precision<__half, __half, float>() +
+            cublasdx::Type<cublasdx::type::real>() +
+            cublasdx::Function<cublasdx::function::MM>() +
+            cublasdx::Arrangement<cublasdx::row_major, cublasdx::col_major, cublasdx::row_major>() +
+            cublasdx::Block() +
+            cublasdx::MaxAlignment() +
+            cublasdx::StaticBlockDim() +
+            cublasdx::EnableInputStreaming() +
+            cublasdx::SM<800>());
+    constexpr auto t = BLAS::max_threads_per_block;
+    kickStart(argc, argv);
 }

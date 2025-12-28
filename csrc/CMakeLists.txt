@@ -167,8 +167,15 @@ function(flash_target_common tgt)
     if(CUTLASS_ADDED)
         target_include_directories(${tgt} SYSTEM PRIVATE "${CUTLASS_SOURCE_DIR}/include")
     endif ()
-    if(FMT_ADDED)
-        target_link_libraries(${tgt} PRIVATE fmt::fmt)
+    if(${tgt} STREQUAL "fb" AND FMT_ADDED)
+        if(FMT_ADDED)
+            target_link_libraries(${tgt} PRIVATE fmt::fmt)
+        endif ()
+        if(DEFINED ENV{NERSC_HOST} AND "$ENV{NERSC_HOST}" STREQUAL "perlmutter")
+            target_link_libraries(${tgt} PRIVATE nvshmem::nvshmem_host nvshmem::nvshmem_device)
+        else ()
+            target_link_libraries(${tgt} PRIVATE nvshmem::nvshmem)
+        endif ()
     endif ()
     if(NVTX3_ADDED)
         target_link_libraries(${tgt} PRIVATE nvtx3-cpp)
@@ -181,16 +188,11 @@ function(flash_target_common tgt)
     if(MATX_ADDED)
         target_link_libraries(${tgt} PRIVATE matx::matx)
     endif ()
-    if(DEFINED ENV{NERSC_HOST} AND "$ENV{NERSC_HOST}" STREQUAL "perlmutter")
-        target_link_libraries(${tgt} PRIVATE nvshmem::nvshmem_host nvshmem::nvshmem_device)
-    else ()
-        target_link_libraries(${tgt} PRIVATE nvshmem::nvshmem)
-    endif ()
     target_link_libraries(${tgt} PRIVATE mathdx::cublasdx)
     target_compile_options(${tgt} PRIVATE
             $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-Xfatbin -compress-all>
             $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
-            $<$<COMPILE_LANGUAGE:CUDA>:-t0; --generate-line-info>
+            $<$<COMPILE_LANGUAGE:CUDA>:-t0;> #--generate-line-info, use sm_xxa for xx >= 90
             $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-gencode=arch=compute_${COMPUTE_CAPABILITY},code=sm_${COMPUTE_CAPABILITY}>
     )
     if(CMAKE_BUILD_TYPE STREQUAL "Debug")
@@ -239,6 +241,7 @@ endfunction()
 
 add_executable(fb benchmarks/flash_bench.cu
         include/flashmoe/flashmoe.cuh
+        include/flashmoe/tile.cuh
 )
 set_target_properties(fb PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
@@ -248,10 +251,6 @@ flash_target_common(fb)
 
 add_executable(gb
         benchmarks/gemm_bench.cu
-        include/flashmoe/os/processor/gemm.cuh
-        include/flashmoe/os/processor/mmaConfig.cuh
-        benchmarks/cdx_gemm.cuh
-        benchmarks/v0_gemm.cuh
 )
 flash_target_common(gb)
 

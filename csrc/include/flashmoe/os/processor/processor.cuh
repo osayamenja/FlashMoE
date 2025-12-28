@@ -107,7 +107,7 @@ namespace flashmoe::processor{
                 registers[j + i * elems] = gA(rIdx, cIdx);
             }
         }
-        if constexpr (c == CombineMode::multithreaded) {
+        if constexpr (c == CombineMode::plural) {
             TPS wT[wE];
             Element rS[wE];
             #pragma unroll

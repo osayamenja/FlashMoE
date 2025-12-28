@@ -535,6 +535,7 @@ namespace flashmoe{
         flashmoeRange initRange{__PRETTY_FUNCTION__};
         #endif
         FLASHMOE_ASSERT(!isInitialized, "Already Initialized");
+        FLASHMOE_CHECK_CUDA(cudaStreamCreate(&flashmoeStream));
         using GPUType = flashmoe::Hardware<FLASHMOE_ARCH, 255>;
         constexpr auto blocks = GPUType::OS::processorBlocks::value;
         static_assert(FLASHMOE_ARCH >= 700, "Volta and above is required!");
@@ -585,6 +586,7 @@ namespace flashmoe{
         nvshmem_finalize();
         FLASHMOE_CHECK_CUDA(cudaPeekAtLastError());
         FLASHMOE_CHECK_CUDA(cudaStreamSynchronize(flashmoeStream));
+        FLASHMOE_CHECK_CUDA(cudaStreamDestroy(flashmoeStream));
     }
 }
 #endif //BOOTSTRAP_CUH

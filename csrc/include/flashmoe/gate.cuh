@@ -16,81 +16,39 @@
 #include <cub/cub.cuh>
 #include <cuda/std/array>
 
-#include "../os/processor/gemm.cuh"
-#include "../types.cuh"
-#include "../atomics.cuh"
+#include "tile.cuh"
+#include "types.cuh"
+#include "atomics.cuh"
 
+namespace flashmoe
+{
+    enum class SoftMaxReductionOrder {
+        // slower (maybe?) but closest to the actual result of online softmax
+        fixed,
+        // eliminates bank conflicts but may numerically drift
+        // from online softmax results due to non-associativity of fp addition
+        unordered,
+    };
+    enum class InsideFusedKernel {
+        // If inside fused kernel, we would need to limit the resource consumption of the router
+        // to minimize its influence on determining occupancy.
+        yes,
+        no
+    };
+}
 namespace flashmoe::gate {
-    template<
-        GateReductionLevel g = GateReductionLevel::singleBlock,
-        JobType j = JobType::inference
-    >
-    struct GateArgs {
-        static_assert(g == GateReductionLevel::singleBlock && j == JobType::inference);
-        TPS* __restrict__ tP;
-        BookType* __restrict__ eC;
-        __device__
-        GateArgs(TPS* const& _tP,
-            BookType* const& _eC,
-            mp_t* const&,
-            mp_t* const&,
-            RingSoftmaxPayload* const&,
-            RingTopKPayload* const&) : tP(_tP), eC(_eC) {}
-    };
-    template<>
-    struct GateArgs<GateReductionLevel::singleBlock, JobType::training> {
-        TPS* __restrict__ tP;
-        BookType* __restrict__ eC;
-        mp_t* __restrict__ gMeC;
-        mp_t* __restrict__ gML;
-        __device__
-        GateArgs(TPS* const& _tP,
-            BookType* const& _eC,
-            mp_t* const& _gMeC,
-            mp_t* const& _gML,
-            RingSoftmaxPayload* const&,
-            RingTopKPayload* const&) :
-        tP(_tP), eC(_eC), gMeC(_gMeC), gML(_gML) {}
-    };
-    template<>
-    struct GateArgs<GateReductionLevel::multiBlock, JobType::inference> {
-        TPS* __restrict__ tP;
-        BookType* __restrict__ eC;
-        RingSoftmaxPayload* __restrict__ bRsP;
-        RingTopKPayload* __restrict__ rTp;
-        __device__
-        GateArgs(TPS* const& _tP,
-            BookType* const& _eC,
-            mp_t* const&,
-            mp_t* const&,
-            RingSoftmaxPayload* const& _bRsP,
-            RingTopKPayload* const& _rTp) :
-        tP(_tP), eC(_eC), bRsP(_bRsP), rTp(_rTp) {}
-    };
-    template<>
-    struct GateArgs<GateReductionLevel::multiBlock, JobType::training> {
-        TPS* __restrict__ tP;
-        BookType* __restrict__ eC;
-        mp_t* __restrict__ gMeC;
-        mp_t* __restrict__ gML;
-        RingSoftmaxPayload* __restrict__ bRsP;
-        RingTopKPayload* __restrict__ rTp;
-        __device__
-        GateArgs(TPS* const& _tP,
-            BookType* const& _eC,
-            mp_t* const& _gMeC,
-            mp_t* const& _gML,
-            RingSoftmaxPayload* const& _bRsP,
-            RingTopKPayload* const& _rTp) :
-        tP(_tP), eC(_eC), gMeC(_gMeC), gML(_gML), bRsP(_bRsP), rTp(_rTp) {}
-    };
+    template<int threads>
+    using BlockScan = cub::BlockScan<int, threads, cub::BLOCK_SCAN_WARP_SCANS>;
+    using UPPER_SHARED_MEM = cute::Int<32 * 1024>;
+    using SoftType = float;
     /// Fused GEMM, softmax, topKMask, and loss, assuming blocks >= tiles.N and no bias.
-    /// Supporting the latter is trivial; the former requires a completely new algorithm
     template<
         GateReductionLevel g,
-        typename BlockGEMM
+        typename BlockGEMM,
+        int threads,
+        SoftMaxReductionOrder sro
     >
-    struct FusedGate {
+    struct GateMainloop {
         static_assert(g == GateReductionLevel::multiBlock);
         template<
             typename MatrixA,
@@ -269,34 +227,7 @@ namespace flashmoe::gate {
             }
 
             // Online softmax is complete
-            // Begin loss computation and global token ordering construction
-            if constexpr (jT == JobType::training) {
-                constexpr uint S = ACC::S::value;
-                constexpr auto wS = 32U; // warpSize
-                ElementC cache[bN / wS]; // |cache| == 2
-                using BlockReduce = cub::BlockReduce<ElementC, threads>;
-                auto* __restrict__ cS = CAST_TO(typename BlockReduce::TempStorage, gateScratch);
-                // Prior to reusing shared memory
-                __syncthreads();
-                // Reduce down columns with bespoke collective, completes in about 8.2 𝜇s
-                #pragma unroll
-                for (uint i = 0; i < bN; ++i) {
-                    auto colAgg = BlockReduce(cS[i]).Sum(accumulator(i));
-                    // thread0 only has the aggregate, which it broadcasts to all threads in its warp
-                    colAgg = __shfl_sync(0xffffffff, colAgg , 0);
-                    // Each thread owns bN / warpSize elements in striped arrangement.
-                    // We duplicate this value layout across all warps in the block, but only use the first warp's values.
-                    cache[i / wS] = threadIdx.x % wS == i % wS? colAgg : cache[i / wS];
-                }
-                if (threadIdx.x < wS) {
-                    // Only the first warp aggregates atomically, as other warps have garbage values
-                    #pragma unroll
-                    for (uint i = 0; i < bN / wS; ++i) {
-                        const auto eIdx = bN * cute::get<1>(tileCoord) + (threadIdx.x + i * wS);
-                        atomicAdd(gArg.gML + eIdx, __fdividef(cache[i], S));
-                    }
-                }
-            }
+            // Begin global token ordering construction
 
             // Now do online top-k mask
             // Prep shared memory view tensors
@@ -444,12 +375,6 @@ namespace flashmoe::gate {
             if (threadIdx.x < bN) {
                 startIndices[threadIdx.x] = atomicAdd(gArg.eC + (bN * cute::get<1>(tileCoord) + threadIdx.x),
                     cachedSelected);
-                if constexpr (jT == JobType::training) {
-                    constexpr uint S = ACC::S::value;
-                    atomicAdd(gArg.gMec + (bN * cute::get<1>(tileCoord) + threadIdx.x),
-                        __fdividef(static_cast<ElementC>(cachedSelected),
-                    static_cast<ElementC>(S)));
-                }
             }
             __syncthreads();
             #pragma unroll
@@ -469,250 +394,173 @@ namespace flashmoe::gate {
 
     // Special, nice case where N <= BLOCK_N
     template<
-        typename BlockGEMM
+        typename TileGEMM,
+        int threads, // blockDim.x
+        SoftMaxReductionOrder sro
     >
-    struct FusedGate<GateReductionLevel::singleBlock, BlockGEMM> {
+    struct GateMainloop<GateReductionLevel::singleBlock, TileGEMM, threads, sro> {
         template<
-            typename MatrixA,
-            typename MatrixB,
-            typename MatrixC,
-            typename GArg,
-            typename ElementC,
-            typename Element = typename MatrixA::value_type,
-            unsigned int elems = ACC::STE::value,
-            unsigned int sharedSize = ACC::PeakHardware::sharedMemory::value
+            typename Element,
+            typename ElementC
         >
         __device__ __forceinline__
-        void operator()(const MatrixA& activations,
-            const MatrixB& weights, MatrixC const& routing,
+        void operator()(void* __restrict__ const& gateScratch,
+            const Element* __restrict__ const& activations,
+            const Element* __restrict__ const& weights,
+            const ElementC* __restrict__ const& routing,
             const unsigned int& tileIdx,
-            GArg const& gArg,
-            ElementC* __restrict__ const& gateScratch) {
-            // Matrix dimensions
-            constexpr auto M = ACC::S::value;
-            constexpr auto K = ACC::H::value;
-            constexpr auto k = ACC::TK::value;
-            constexpr auto jT = ACC::JT::value;
-            static_assert(cuda::std::is_same_v<ElementC, float> && cuda::std::is_same_v<ElementC, mp_t>);
-            typename BlockGEMM::CollectiveMainloop mainLoop{};
-            auto accumulator = cute::partition_fragment_C(typename BlockGEMM::MMA{}, typename BlockGEMM::TilerOut{});
-            cute::clear(accumulator);
-            constexpr auto bM = cute::get<0>(typename BlockGEMM::BlockTiler{});
-            constexpr auto bN = cute::get<1>(typename BlockGEMM::BlockTiler{});
-            constexpr auto bK = cute::get<2>(typename BlockGEMM::BlockTiler{});
-            static_assert(ACC::E::value <= bN);
-            static_assert(cute::size(accumulator) == bN);
-            constexpr auto threads = BlockGEMM::Threads::value;
-            const auto tokenIds = make_tensor(cute::make_gmem_ptr(gArg.tP),
-                cute::Layout<cute::Shape<cute::Int<ACC::E::value>, cute::Int<ACC::pEC::value>>,
-                    cute::Stride<cute::Int<ACC::pEC::value>, cute::_1>>{});
-
-            constexpr auto tilesM = M / bM;
+            int* __restrict__ const& _tokenIds,
+            int* __restrict__ const& expertCounts,
+            const int& S, const int& H, const int& E,
+            const int& k,const int& expertCap) {
+            constexpr TileGEMM tileMainloop{};
+            auto accumulator = TileGEMM::BLAS::suggest_accumulator();
+            constexpr auto bM = cute::get<0>(typename TileGEMM::TileShape{});
+            constexpr auto bN = cute::get<1>(typename TileGEMM::TileShape{});
+            constexpr auto bK = cute::get<2>(typename TileGEMM::TileShape{});
+            const auto tokenIds = make_tensor(cute::make_gmem_ptr(_tokenIds),
+                cute::make_layout(cute::make_shape(E, expertCap), cute::LayoutRight{}));
+            const auto tilesM = S / bM;
             constexpr auto tilesN = 1U;
-            constexpr auto tilesK = K / bK;
-
-            const auto tileCoord = idx2crd(tileIdx,
-                cute::Shape<cute::Int<tilesM>, cute::Int<tilesN>>{},
-                    cute::Stride<cute::Int<tilesN>, cute::_1>{});
-            const auto ctaCoord = make_coord(cute::get<0>(tileCoord), cute::get<1>(tileCoord), cute::_);
-            const auto gA = cute::local_tile(activations, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1, cute::X,cute::_1>{});
-            const auto gB = cute::local_tile(weights, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step< cute::X,cute::_1,cute::_1>{});
-            const auto gC = cute::local_tile(routing, typename BlockGEMM::BlockTiler{}, ctaCoord, cute::Step<cute::_1,cute::_1, cute::X>{});
-
-            static_assert(cuda::std::numeric_limits<ElementC>::is_iec559, "IEEE 754 required");
+            const auto tilesK = H / bK;
+            const auto tileCoord = tile::idx2Coord(tilesM, tilesN, tileIdx);
+            const auto gC = tile::getC<bM, bN, TileGEMM::CArr::value>(routing, S, E,
+                cute::select<0, 1>(tileCoord));
             static_assert(cuda::std::numeric_limits<ElementC>::has_infinity);
-            auto k_tile_iter = cute::make_coord_iterator(tilesK);
-
-            mainLoop(
-                accumulator,
-                gA,
-                gB,
-                accumulator,
-                k_tile_iter, tilesK,
-                cute::Underscore{},
-                threadIdx.x,
-                CAST_TO(char, gateScratch));
+            // compute tile
+            tileMainloop(gateScratch, activations, weights, accumulator, S, E, H, tileCoord);
             __syncthreads();
 
-            /// Epilogue
-            static_assert(bN % elems == 0);
-            constexpr auto trips = bN / elems;
-
-            // Transposed layout in shared memory to minimize bank conflicts
-            using sCLay = cute::Layout<cute::Shape<cute::Int<bM>, cute::Int<elems>>>;
-            const auto sC = cute::make_tensor(cute::make_smem_ptr(CAST_TO(ElementC, gateScratch)), sCLay{});
-            constexpr auto sCLayR = cute::make_layout(cute::Shape<cute::Int<bM>, cute::Int<elems>>{},
-            cute::LayoutRight{});
-            const auto sCR = cute::make_tensor(cute::make_smem_ptr(CAST_TO(Element, gateScratch)), sCLayR);
-            static_assert(size(accumulator) == bN);
-            typename BlockGEMM::MMA tiledMMA{};
-            const auto tCsC = tiledMMA.get_slice(threadIdx.x).partition_C(sC);
-            constexpr auto abN = cute::min(bN, ACC::E::value);
-            constexpr auto gCStoreOp = cutlass::NumericConverter<typename decltype(gC)::value_type,
-                                                        typename decltype(accumulator)::value_type>{};
-            constexpr auto gCLoadOp = cutlass::NumericConverter<typename decltype(accumulator)::value_type,
-                                                        typename decltype(gC)::value_type>{};
-
-            // Begin softmax
+            /// Epilogue -> softmax + topk + routing table construction
+            // Begin online softmax
             // using notation from https://courses.cs.washington.edu/courses/cse599m/23sp/notes/flashattn.pdf
-            auto dI = ElementC(0);
-            auto mI = -cuda::std::numeric_limits<ElementC>::infinity();
-            // Transpose thread data to a blocked arrangement
-            #pragma unroll
-            for (unsigned int i = 0; i < trips; ++i) {
-                #pragma unroll
-                for (unsigned int j = 0; j < elems; ++j) {
-                    tCsC(j) = accumulator(j + i * elems);
-                }
-                __syncthreads();
-                #pragma unroll
-                for (unsigned int j = 0; j < elems; ++j) {
-                    accumulator(j + i * elems) = sC(threadIdx.x, j);
-                }
-            }
-
-            /// Softmax Reduction
-            #pragma unroll
-            for (uint i = 0; i < abN; ++i) {
-                const auto pM = mI;
-                mI = max(mI, accumulator(i));
-                dI = fmaf(dI, __expf(pM - mI),__expf(accumulator(i) - mI));
-            }
-            #pragma unroll
-            for (uint i = 0; i < abN; ++i) {
-                accumulator(i) = __fdividef(__expf(accumulator(i) - mI), dI);
-            }
-
-            /// Eagerly Copy results to global memory
-            // before using shared memory
+            // do all computation in float for stability
+            auto dI = static_cast<SoftType>(0.f);
+            auto mI = -cuda::std::numeric_limits<SoftType>::infinity();
+            // assumes row-major as we would be performing the softmax on the row
+            using AccumType = decltype(accumulator)::value_type;
+            auto sC = cublasdx::make_tensor(
+                cute::make_smem_ptr(static_cast<AccumType*>(gateScratch)),
+                cute::Layout<cute::Shape<cute::Int<bM>, cute::Int<bN>>,
+                cute::Stride<cute::Int<bN>, cute::_1>>{});
+            // vectorized smem layout
+            using VTD = VectorTypeDescriptor<AccumType>;
+            using VT = VTD::VectorType;
+            constexpr int vectorWidth = VTD::VectorWidth::value;
+            constexpr int vbN = bN / VTD::VectorWidth::value;
+            // assumes row-major
+            auto vsC = cublasdx::make_tensor(
+                cute::make_smem_ptr(static_cast<VT*>(gateScratch)),
+                cute::Layout<cute::Shape<cute::Int<bM>, cute::Int<vbN>>,
+                cute::Stride<cute::Int<vbN>, cute::_1>>{});
+            const auto c_frag = accumulator.get_results();
+            constexpr Converter<SoftType, AccumType> softLoad{};
+            constexpr Converter<ElementC, AccumType> softStore{};
+            // rmem -> smem
+            cublasdx::copy_fragment<TileGEMM::CAlign::value>(c_frag, sC, accumulator);
             __syncthreads();
-            static_assert(elems % WARP_SIZE == 0 && size(accumulator) % elems == 0);
-            #pragma unroll
-            for (uint i = 0; i < trips; ++i) {
+            // TODO loosen this
+            static_assert(threads >= bM);
+            SoftType reginald[bN];
+            if (threadIdx.x < bM) {
                 #pragma unroll
-                for (uint j = 0; j < elems; ++j) {
-                    const auto swizzleIdx = (j + threadIdx.x) % elems;
-                    sCR(threadIdx.x, swizzleIdx) = gCStoreOp(accumulator(j + i * elems));
-                }
-                __syncthreads();
-                const auto rIdx = threadIdx.x / elems * elems;
-                const auto cIdx = threadIdx.x % elems;
-                #pragma unroll
-                for (uint j = 0; j < elems; ++j) {
-                    const auto swIdx =  (j + threadIdx.x) % elems;
-                    gC(rIdx + j, cIdx + i * elems) = sCR(rIdx + j, swIdx);
-                }
-            }
-
-            // Begin loss computation and global token ordering construction
-            if constexpr (jT == JobType::training) {
-                constexpr auto wS = 32U; // warpSize
-                constexpr auto S = ACC::S::value;
-                auto* __restrict__ gML = gArg.gML;
-                static_assert(bN % wS == 0);
-                ElementC cache[bN / wS];
-                using BlockReduce = cub::BlockReduce<ElementC, threads>;
-                auto* __restrict__ cS = CAST_TO(typename BlockReduce::TempStorage, gateScratch);
-                // Prior to reusing shared memory
-                __syncthreads();
-                // Reduce down columns with bespoke collective, completes in about 8.2 𝜇s
-                #pragma unroll
-                for (uint i = 0; i < bN; ++i) {
-                    auto colAgg = BlockReduce(cS[i]).Sum(accumulator(i));
-                    // thread0 only has the aggregate, which it broadcasts to all threads in its warp
-                    colAgg = __shfl_sync(0xffffffff, colAgg , 0);
-                    // Each thread owns bN / warpSize elements in striped arrangement.
-                    // We duplicate this value layout across all warps in the block, but only use the first warp's values.
-                    cache[i / wS] = threadIdx.x % wS == i % wS? colAgg : cache[i / wS];
-                }
-                if (threadIdx.x < wS) {
-                    // Only the first warp aggregates atomically, as other warps have garbage values
+                for (int i = 0; i < vbN; ++i) {
+                    // smem -> rmem in blocked format
+                    // each thread owns a row
+                    const int swizzleIdx = sro == SoftMaxReductionOrder::fixed ? i : (i + threadIdx.x) % vbN;
+                    const auto v = vsC(threadIdx.x, swizzleIdx);
+                    // unpack
                     #pragma unroll
-                    for (uint i = 0; i < bN / wS; ++i) {
-                        atomicAdd(gML + (threadIdx.x + i * wS), __fdividef(cache[i], S));
+                    for (int j = 0; j < vectorWidth; ++j) {
+                        reginald[j + i * vectorWidth] = softLoad(v[j]);
                     }
                 }
+                /// Softmax Reduction
+                #pragma unroll
+                for (uint j = 0; j < bN; ++j) {
+                    const auto pM = mI;
+                    mI = max(mI, reginald[j]);
+                    dI = fmaf(dI, __expf(pM - mI),__expf(reginald[j] - mI));
+                }
+                #pragma unroll
+                for (uint j = 0; j < bN; ++j) {
+                    reginald[j] = __fdividef(__expf(reginald[j] - mI), dI);
+                }
+                #pragma unroll
+                for (int i = 0; i < vbN; ++i) {
+                    const int swizzleIdx = sro == SoftMaxReductionOrder::fixed ? i : (i + threadIdx.x) % vbN;
+                    auto v = VT{};
+                    // pack
+                    // ideally the compiler would not emit any data movement instructions here
+                    #pragma unroll
+                    for (int j = 0; j < vectorWidth; ++j) {
+                        v[j] = softStore(reginald[j + i * vectorWidth]);
+                    }
+                    // rmem -> smem
+                    vsC(threadIdx.x, swizzleIdx) = v;
+                }
             }
-
-            // sum of the combine weights per token
-            auto mCw = ElementC(0);
-            // Now do online top-k mask
-            // Prep shared memory view tensors
-            static_assert(sharedSize >= 16 * 1024);
-            using TKT = cuda::std::conditional_t<sharedSize < threads * bN, uint16_t, uint>;
-            using CSL = cute::Layout<cute::Shape<cute::Int<abN>, cute::Int<threads>>>;
-            const auto topK = cute::make_tensor(cute::make_smem_ptr(CAST_TO(TKT, gateScratch)), CSL{})
-                (cute::_, threadIdx.x);
-            cutlass::AlignedArray<uint, abN> rTopK{};
-            // Prior to reusing shared memory
             __syncthreads();
+            // smem -> gmem
+            cublasdx::copy<TileGEMM::BLAS, TileGEMM::CAlign>(sC, gC);
+            int rTK[bN];
             #pragma unroll
-            for (uint i = 0; i < abN; ++i) {
-                topK[i] = 0U;
+            for (int i = 0; i < bN; ++i) {
+                rTK[i] = 0;
             }
-
-            for (uint i = 0; i < k; ++i) {
-                auto sV = -cuda::std::numeric_limits<ElementC>::infinity();
-                uint sIdx = 0U;
+            // sum of the combine weights per token
+            auto mCw = static_cast<SoftType>(0.f);
+            // Now do online top-k mask
+            if (threadIdx.x < bM) {
+                auto sTK = cute::make_tensor(cute::make_smem_ptr(static_cast<uint16_t*>(gateScratch),
+                    cute::Layout<cute::Shape<cute::Int<bM>, cute::Int<bN>>>{}))
+                (threadIdx.x, cute::_);
                 #pragma unroll
-                for(uint j = 0; j < abN; ++j) {
-                    rTopK[j] = topK[j];
+                for (int i = 0; i < bN; ++i) {
+                    sTK(i) = 0;
                 }
-                #pragma unroll
-                for (uint j = 0; j < abN; ++j) {
-                    if (accumulator(j) > sV && !rTopK[j]) {
-                        sIdx = j;
-                        sV = accumulator(j);
+                for (int i = 0; i < k; ++i) {
+                    auto sV = -cuda::std::numeric_limits<ElementC>::infinity();
+                    int sIdx = 0;
+                    #pragma unroll
+                    for(int j = 0; j < bN; ++j) {
+                        rTK[j] = static_cast<int>(sTK[j]);
                     }
+                    #pragma unroll
+                    for (int j = 0; j < bN; ++j) {
+                        if (reginald[j] > sV && !rTK[j]) {
+                            sIdx = j;
+                            sV = reginald[j];
+                        }
+                    }
+                    sTK[sIdx] = 1;
+                    mCw += sV;
                 }
-                topK[sIdx] = 1U;
-                mCw += sV;
-            }
-            // prefetch topK to registers, one last time :)
-            #pragma unroll
-            for(uint j = 0; j < abN; ++j) {
-                rTopK[j] = topK[j];
             }
             // needed for reusing shared memory
             __syncthreads();
-            using BlockScan = cub::BlockScan<uint, threads>;
-            auto* __restrict__ startIndices = CAST_TO(uint, gateScratch);
-            auto* __restrict__ scanTempStorage = CAST_TO(typename BlockScan::TempStorage, startIndices + bN);
-            static_assert(bM <= cuda::std::numeric_limits<uint>::max());
-
-            uint cachedSelected = 0U;
-            cuda::std::array<uint, abN> myIndices{};
-            constexpr auto syncLimit = sharedSize / 1024;
-            static_assert(sizeof(typename BlockScan::TempStorage) * syncLimit + sizeof(uint) * bN <= sharedSize);
+            __shared__ int startIndices[bN];
+            auto* __restrict__ scanTempStorage = CAST_TO(BlockScan<threads>::TempStorage, gateScratch);
+            int cachedSelected = 0;
+            int myIndices[bN];
             // scan down the column
             #pragma unroll
-            for (uint i = 0; i < abN; ++i) {
-                uint selected = 0U;
-                BlockScan(scanTempStorage[i % syncLimit]).InclusiveSum(rTopK[i], myIndices[i], selected);
+            for (uint i = 0; i < bN; ++i) {
+                int selected = 0;
+                BlockScan(scanTempStorage[i]).InclusiveSum(rTK[i], myIndices[i], selected);
                 cachedSelected = threadIdx.x == i ? selected : cachedSelected;
-                if (i > 0 && i % syncLimit == 0) {
-                    __syncthreads();
-                }
             }
-
-            if (threadIdx.x < abN) {
-                startIndices[threadIdx.x] = atomicAdd(gArg.eC + threadIdx.x, cachedSelected);
-                if constexpr (jT == JobType::training) {
-                    constexpr auto S = ACC::S::value;
-                    auto* __restrict__ gMeC = gArg.gMeC;
-                    atomicAdd(gMeC + threadIdx.x, __fdividef(static_cast<ElementC>(cachedSelected),
-                    static_cast<ElementC>(S)));
-                }
+            if (threadIdx.x < bN) {
+                startIndices[threadIdx.x] = atomicAdd(expertCounts + threadIdx.x, cachedSelected);
             }
             __syncthreads();
             #pragma unroll
-            for (uint i = 0; i < abN; ++i) {
+            for (uint i = 0; i < bN; ++i) {
                 myIndices[i] = startIndices[i] + myIndices[i] - 1;
             }
-            constexpr auto EC = ACC::EC::value;
             #pragma unroll
-            for (uint i = 0; i < abN; ++i) {
-                if (rTopK[i] && myIndices[i] < EC) {
+            for (uint i = 0; i < bN; ++i) {
+                if (rTK[i] && myIndices[i] < expertCap) {
                     tokenIds(i, myIndices[i]) = TPS{bM * cute::get<0>(tileCoord) + threadIdx.x, mCw};
                 }
             }
@@ -720,71 +568,65 @@ namespace flashmoe::gate {
     };
 
     template<
-        typename ElementC,
-        typename MatrixA,
-        typename MatrixB,
-        typename MatrixC
+        typename TileShape,
+        int Arch,
+        int threads,
+        GateReductionLevel grl = GateReductionLevel::singleBlock,
+        SoftMaxReductionOrder sro = SoftMaxReductionOrder::fixed,
+        InsideFusedKernel ifk = InsideFusedKernel::yes,
+        typename Element,
+        typename ElementR
     >
     __device__ __forceinline__
-    void forward(const MatrixA& activations,
-        const MatrixB& weights,
-        MatrixC const& routing,
-        ElementC* __restrict__ const& scratch){
-        constexpr auto g = ACC::GRL::value;
-        constexpr auto jT = ACC::JT::value;
-        const auto gArg = GateArgs<g, jT> {
-                bookkeeping.tP(),
-                bookkeeping.eC(),
-                bookkeeping.gMeC(),
-                bookkeeping.gML(),
-                bookkeeping.bRsP(),
-                bookkeeping.rTp()
-        };
-        using GPUType = ACC::PeakHardware;
-        // ALL SMs execute this function
-        constexpr auto blocks = GPUType::blocks::value;
-        static_assert(cuda::std::is_same_v<mp_t, ElementC>);
-        using ElementA = typename MatrixA::value_type;
-        using ElementB = typename MatrixB::value_type;
-        using Operation = BlockMM<cute::identity, ElementA, ElementB, ElementC>;
-        using ctaTiler = typename Operation::BlockTiler; // (BLK_M, BLK_N, BLK_K)
-        constexpr auto threads = Operation::Threads::value;
-        constexpr auto bM = cute::get<0>(ctaTiler{});
-        constexpr auto bN = cute::get<1>(ctaTiler{});
-        FusedGate<g, Operation> fusedGate{};
-
-        constexpr auto nT = ACC::TM::value * ACC::TPX::value;
+    void forward(const Element* __restrict__ const& _activations,
+        const Element* __restrict__ const& _gateWeights,
+        const ElementR* __restrict__ const& _routing,
+        int* __restrict__ const& tokenIds,
+        int* __restrict__ const& expertCounts,
+        const int& S, const int& H, const int& E, const int& k, const int& EC,
+        RingSoftmaxPayload* __restrict__ const& scratch0 = nullptr, // only needed for grl == multiblock
+        RingTopKPayload* __restrict__ const& scratch1 = nullptr // only needed for grl == multiblock
+        ){
+        // row major
+        const auto activations = make_tensor(
+            cute::make_gmem_ptr(_activations),
+                cute::make_layout(cute::make_shape(S, H), cute::LayoutRight{}));
+        const auto gateWeights = make_tensor(cute::make_gmem_ptr(_gateWeights),
+            cute::make_layout(cute::make_shape(H, E), cute::LayoutRight{}));
+        const auto routing = make_tensor(cute::make_gmem_ptr(_routing),
+            cute::make_layout(cute::make_shape(S, E), cute::LayoutRight{}));
+        const int blocks = gridDim.x;
+        // assert(blocks >= E / bN)
+        using MMA_C = float;
+        constexpr int bM = cute::get<0>(TileShape{});
+        constexpr int bN = cute::get<1>(TileShape{});
+        constexpr int bK = cute::get<2>(TileShape{});
+        constexpr int pipeStages = cute::get<3>(TileShape{});
+        using TileGEMM = tile::CollectiveMainloop<
+            bM, bN, bK, Arch, Element, MMA_C, threads, pipeStages
+        >;
+        constexpr auto sharedSize = cute::max(
+            TileGEMM::SharedSize,
+            bM * bN * sizeof(TileGEMM::AccumType),
+            sizeof(BlockScan<threads>::TempStorage) * bN);
+        __shared__ __align__(cute::max(TileGEMM::GeneralAlignment,
+            alignof(BlockScan<threads>::TempStorage))) cuda::std::byte workspace[sharedSize];
+        if constexpr (ifk == InsideFusedKernel::yes) {
+            static_assert(bN * sizeof(SoftType) <= 256, "Reduce bN to reduce Router's register pressure");
+            static_assert(sharedSize <= UPPER_SHARED_MEM::value, "Shared memory is too high for the Router");
+        }
+        GateMainloop<grl, TileGEMM, threads, sro> gateMainLoop{};
+        constexpr auto nT = S / bM * (E / bN);
         for (unsigned int i = blockIdx.x; i < nT; i += blocks) {
-            fusedGate(activations, weights, routing, i, gArg, scratch);
-        }
-        // Needed prior to packet dispatch
-        gridBarrier();
+            if constexpr (grl == GateReductionLevel::singleBlock) {
+                gateMainLoop(workspace, activations, gateWeights, routing, i,
+                    tokenIds, expertCounts, S, H, E, k, EC);
+            }
+            else {
+                gateMainLoop(activations, gateWeights, routing, i, bookkeeping.tP(),
+                    bookkeeping.eC());
+            }
 
-        if constexpr (jT == JobType::training) {
-            auto* __restrict__ gML = bookkeeping.gML();
-            auto* __restrict__ gMeC = bookkeeping.gMeC();
-            // Compute Gate loss
-            auto* __restrict__ gL = bookkeeping.gL();
-            for (unsigned int i = threads * blockIdx.x + threadIdx.x; i < ACC::E::value; i+= threads * blocks) {
-                const auto me = gML[i];
-                const auto ce = gMeC[i];
-                atomicAdd(gL, __fdividef(me * ce, static_cast<mp_t>(ACC::E::value)));
-            }
-        }
-
-        if constexpr (ACC::GRL::value == GateReductionLevel::multiBlock) {
-            // asynchronously wipe flags clean for the next iteration
-            auto* __restrict__ bRsP = bookkeeping.bRsP();
-            constexpr auto rSlt = bookkeeping.rSlt();
-            auto* __restrict__ rTp = bookkeeping.rTp();
-            constexpr auto rTlt = bookkeeping.rTlt();
-            const auto idx = threads * blockIdx.x + threadIdx.x;
-            for (unsigned int i = idx; i < rSlt; i += threads * blocks) {
-                bRsP[i] = RingSoftmaxPayload{};
-            }
-            for (unsigned int i = idx; i < rTlt; i += threads * blocks) {
-                rTp[i] = RingTopKPayload{};
-            }
         }
     }
 }

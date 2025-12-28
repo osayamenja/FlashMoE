@@ -9,26 +9,21 @@
 #ifndef FLASHMOE_MOE_CUH
 #define FLASHMOE_MOE_CUH
 
-#include "../arch.cuh"
-#include "../debug.cuh"
-#include "../os/os.cuh"
-#include "../os/processor/processor.cuh"
-#include "fffn.cuh"
+#include "arch.cuh"
+#include "debug.cuh"
+#include "os/os.cuh"
+#include "os/processor/processor.cuh"
+#include "moe/fffn.cuh"
 #include "gate.cuh"
-#include "../telemetry.cuh"
+#include "telemetry.cuh"
 
 namespace flashmoe::moe{
     template<
-        uint threads,
-        uint blocks,
-        uint processors,
         CombineMode c,
-        JobType jT,
-        uint OZ,
         typename Element
     >
     __device__ __forceinline__
-    void clearState(Element* __restrict__ const& outP) {
+    void clearState(Element* __restrict__ const& outP, const int& outSize) {
         // A barrier must occur after below otherwise, undefined behavior results.
         auto* __restrict__ pDB = bookkeeping.pDB();
         auto* __restrict__ sQ = bookkeeping.sQ();
@@ -39,17 +34,14 @@ namespace flashmoe::moe{
         auto* __restrict__ pSA = bookkeeping.pSA();
         constexpr auto gBz = Bookkeeping::gBz();
         auto* __restrict__ eCSync = bookkeeping.eCSync();
+        const int threads = gridDim.x;
         const auto idx = threads * blockIdx.x + threadIdx.x;
-        if constexpr (c == CombineMode::multithreaded) {
+        const int blocks = gridDim.x;
+        const int processors = blocks - 1;
+        if constexpr (c == CombineMode::plural) {
             // clear output buffer
-            for (uint i = idx; i < OZ; i += blocks * threads) {
+            for (uint i = idx; i < outSize; i += blocks * threads) {
                 outP[i] = Element(0.0f);
-            }
-        }
-        if constexpr (jT == JobType::training) {
-            // clear loss buffers
-            for (uint i = idx; i < gBz; i += blocks * threads) {
-                gBp[i] = 0.0f;
             }
         }
         // clear processor doorbells
@@ -68,78 +60,91 @@ namespace flashmoe::moe{
             *eCSync = 0U;
         }
     }
+
+    template<GateReductionLevel grl>
+    __device__ __forceinline__
+    void blockade(const int& E) {
+        gridBarrier();
+        const int threads = blockDim.x;
+        const int blocks = gridDim.x;
+
+        if constexpr (grl == GateReductionLevel::multiBlock) {
+            // asynchronously wipe flags clean for the next iteration
+            auto* __restrict__ bRsP = bookkeeping.bRsP();
+            constexpr auto rSlt = Bookkeeping::rSlt();
+            auto* __restrict__ rTp = bookkeeping.rTp();
+            constexpr auto rTlt = Bookkeeping::rTlt();
+            const auto idx = threads * blockIdx.x + threadIdx.x;
+            for (unsigned int i = idx; i < rSlt; i += threads * blocks) {
+                bRsP[i] = RingSoftmaxPayload{};
+            }
+            for (unsigned int i = idx; i < rTlt; i += threads * blocks) {
+                rTp[i] = RingTopKPayload{};
+            }
+        }
+    }
+    // TODO will have to JIT below from Python
+    // we intentionally limit the static inputs to the minimal needed set (tile shapes) to
+    // keep our APIs flexible to users
     template<
-        unsigned S = ACC::S::value,
-        unsigned int P = ACC::P::value,
-        unsigned int H = ACC::H::value,
-        unsigned int PX = ACC::PX::value
+        typename GateTile, // <M,N,K,pipeStages>
+        typename GEMM1Tile, // <M,N,K,pipeStages>
+        typename GEMM2Tile, // <M,N,K,pipeStages>
+        int _Arch, //  GPU Architecture
+        int _threads,
+        bool isKG1, // is k greater than 1
+        DropTokens _dTk, // yes or no,
+        GateReductionLevel gRl // E > GateTileShape.K ? single : multi
+    >
+    struct MoEConfig {
+        static_assert(cute::is_tuple_v<GateTile> && cute::rank_v<GateTile> == 4);
+        using GTS = GateTile;
+        static_assert(cute::is_tuple_v<GEMM1Tile> && cute::rank_v<GEMM1Tile> == 4);
+        using G1TS = GEMM1Tile;
+        static_assert(cute::is_tuple_v<GEMM2Tile> && cute::rank_v<GEMM2Tile> == 4);
+        using G2TS = GEMM2Tile;
+        using Arch = cute::Int<_Arch>;
+        using Threads = cute::Int<_threads>;
+        using GRL = cute::C<gRl>;
+        using DTK = cute::C<_dTk>;
+        using CM = cute::C<isKG1 ? CombineMode::plural : CombineMode::single>;
+    };
+
+    template<
+        typename Config,
+        typename Element
     >
     __global__ __maxnreg__(ACC::PeakHardware::registers::value) void forward(
-        const void* __restrict__ iP, /* A, G, B, D*/ void* __restrict__ oP /*G, O*/,
+        const Element* __restrict__ _activations,
+        const Element* __restrict__ _gateWeights,
+        const Element* __restrict__ _expertUpWeights,
+        const Element* __restrict__ _biasUp,
+        const Element* __restrict__ _expertDownWeights,
+        const Element* __restrict__ _biasDown,
+        Element* __restrict__ _gateOut,
+        Element* __restrict__ _moeOut,
+        const __grid_constant__ int S,
+        const __grid_constant__ int H,
+        const __grid_constant__ int E,
         const __grid_constant__ uint16_t sb) {
-        using GPUType = ACC::PeakHardware;
-        constexpr auto blocks = GPUType::blocks::value;
-        constexpr auto processors = GPUType::OS::processorBlocks::value;
-        constexpr auto sharedSize = ACC::sharedSize::value;
-        constexpr auto threads = GPUType::OS::threads::value;
-        constexpr auto d = ACC::DTK::value;
-        constexpr auto c = ACC::CM::value;
-        using Element = ACC::Element;
-        using ElementC = ACC::ElementC;
-
         const auto lE = bookkeeping.nLx;
-        // Salami slice pointers
-        const auto* __restrict__ gP = CONST_CAST_TO(Element, iP) + S * H;
-        const auto* __restrict__ ePu = gP + H * PX;
-        const auto* __restrict__ ePd = ePu + lE * P * H;
-        const auto* __restrict__ bU = ePd + lE * H * P;
-        const auto* __restrict__ bd = bU + lE * P;
-        auto* __restrict__ gOp = CAST_TO(Element, oP);
-        auto* __restrict__ mOp = gOp + S * PX;
-        __shared__ __align__(16) cuda::std::byte workspace[sharedSize];
-        clearState<threads, blocks, processors, c, ACC::JT::value, S * H>(mOp);
-
-        // prep tensors
-        const auto activations = make_tensor(
-            cute::make_gmem_ptr(CONST_CAST_TO(Element, iP)),
-                    cute::Layout<cute::Shape<cute::Int<S>, cute::Int<H>>,
-                            cute::Stride<cute::Int<H>, cute::_1>>{});
-        const auto gateWeights = make_tensor(cute::make_gmem_ptr(gP),
-            cute::Layout<cute::Shape<cute::Int<PX>, cute::Int<H>>,
-                cute::Stride<cute::Int<H>, cute::_1>>{});
-        // Experts Weights
-        const auto expertsUp = make_tensor(cute::make_gmem_ptr(ePu),
-            make_layout(make_shape(lE, cute::Shape<cute::Int<P>, cute::Int<H>>{}),
-                cute::LayoutRight{}));
-        const auto expertsDown = make_tensor(cute::make_gmem_ptr(ePd),
-            make_layout(make_shape(lE, cute::Shape<cute::Int<H>, cute::Int<P>>{}),
-                cute::LayoutRight{}));
-        // Bias
-        // Broadcast from vector to matrix
-        const auto biasUp = make_tensor(cute::make_gmem_ptr(bU),
-            make_layout(cute::make_shape(lE, P),
-                cute::Stride<cute::Int<P>, cute::_1>{}));
-        const auto biasDown = make_tensor(cute::make_gmem_ptr(bd),
-            make_layout(make_shape(lE, cute::Int<H>{}),
-                cute::Stride<cute::Int<H>, cute::_1>{}));
-
-        // Output
-        const auto gateOutput = make_tensor(cute::make_gmem_ptr(gOp),
-            cute::Layout<cute::Shape<cute::Int<S>, cute::Int<PX>>,
-                cute::Stride<cute::Int<PX>, cute::_1>>{});
-        const auto moeOutput = make_tensor(cute::make_gmem_ptr(mOp),
-            cute::Layout<cute::Shape<cute::Int<S>, cute::Int<H>>,
-                cute::Stride<cute::Int<H>, cute::_1>>{});
-
-        gate::forward(activations, gateWeights, gateOutput, CAST_TO(ElementC, workspace));
-        if (blockIdx.x + 1 < blocks) {
+        // TODO revisit this
+        clearState<Config::CM::value, Config::JT::value>(_moeOut);
+        gate::forward<
+            Config::GTS,
+            Config::Arch::value,
+            Config::GRL::value>(_activations, _gateWeights, _gateOut);
+        // Needed prior to tokens dispatch
+        blockade<Config::JT::value>();
+        if (blockIdx.x + 1 < gridDim.x) {
             if (blockIdx.x < ACC::DBZ::value) {
-                packet::dispatch<ACC::DBZ::value, d, ACC::SBZ::value>(activations, workspace, sb);
+                // MoE dispatch
+                packet::dispatch<ACC::DBZ::value, Config::DTK::value, ACC::SBZ::value>(activations, workspace, sb);
             }
             processor::start(workspace, gateOutput, moeOutput, sb);
         }
         else {
-            os::start<processors, d>(workspace, expertsUp, expertsDown, biasUp, biasDown, sb);
+            os::start<Config::DTK::value>(expertsUp, expertsDown, biasUp, biasDown, sb);
         }
     }
 
