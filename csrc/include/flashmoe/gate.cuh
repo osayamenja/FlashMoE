@@ -14,7 +14,6 @@
 #define GATE_CUH
 
 #include <cub/cub.cuh>
-#include <cuda/std/array>
 
 #include "tile.cuh"
 #include "types.cuh"
@@ -129,7 +128,6 @@ namespace flashmoe::gate {
             RingTopKPayload rTp{};
 
             /// Epilogue -> RingSoftmax + topk + routing table construction
-            // Transposed layout in shared memory to minimize bank conflicts
             // assumes row-major as we would be performing the softmax on the row
             using AccumType = decltype(accumulator)::value_type;
             auto sC = cublasdx::make_tensor(
@@ -355,7 +353,7 @@ namespace flashmoe::gate {
         }
     };
 
-    // Special, nice case where N <= BLOCK_N
+    // Special, nice case where N == BLOCK_N
     template<
         typename TileGEMM,
         int threads, // blockDim.x
@@ -495,7 +493,7 @@ namespace flashmoe::gate {
                 }
             }
             __shared__ int startIndices[bN];
-            using BTS = BlockScan<threads>::TempStorage;
+            using BTS = BlockScan<threads>::TempStorage; // :)
             __shared__ __align__(alignof(BTS)) BTS scanTempStorage[bN];
             int cachedSelected = 0;
             int myIndices[bN];

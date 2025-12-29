@@ -107,6 +107,7 @@ CPMAddPackage(
 find_package(NVSHMEM REQUIRED HINTS "$ENV{NVSHMEM_HOME}/lib/cmake/nvshmem")
 # cuBLASDx
 find_package(mathdx REQUIRED COMPONENTS cublasdx CONFIG)
+find_package(mathdx REQUIRED COMPONENTS curanddx CONFIG)
 
 
 # Pre-compile constants
@@ -188,7 +189,7 @@ function(flash_target_common tgt)
     if(MATX_ADDED)
         target_link_libraries(${tgt} PRIVATE matx::matx)
     endif ()
-    target_link_libraries(${tgt} PRIVATE mathdx::cublasdx)
+    target_link_libraries(${tgt} PRIVATE mathdx::cublasdx mathdx::curanddx)
     target_compile_options(${tgt} PRIVATE
             $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-Xfatbin -compress-all>
             $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>

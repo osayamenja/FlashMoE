@@ -2,30 +2,17 @@
 // Created by osayamen on 12/13/25.
 //
 // Benchmark and correctness test for the tiled GEMM underlying FlashMoE.
-// We compare against MatX which calls cuBLASLt underneath.
+// We compare against the numerical library MatX which calls cuBLASLt underneath.
 
 #include <random>
 
 #include <matx.h>
 #include <cutlass/epilogue/thread/activation.h>
 #include <cublasdx.hpp>
+#include <curanddx.hpp>
 
+#include "common.cuh"
 #include "../include/flashmoe/tile.cuh"
-
-#if !defined(CHECK_CUDA)
-#  define CHECK_CUDA(e)                                      \
-do {                                                         \
-    cudaError_t code = (e);                                  \
-    if (code != cudaSuccess) {                               \
-        fprintf(stderr, "<%s:%d> %s:\n    %s: %s\n",         \
-            __FILE__, __LINE__, #e,                          \
-            cudaGetErrorName(code),                          \
-            cudaGetErrorString(code));                       \
-        fflush(stderr);                                      \
-        exit(1);                                             \
-    }                                                        \
-} while (0)
-#endif
 
 template<typename TileGEMM, typename Activation, typename ElementC, typename Element>
 __device__ __forceinline__
@@ -205,16 +192,16 @@ void driver(const int& M, const int& N, const int& K, const float& rtol, const f
     cudaOccupancyMaxActiveBlocksPerMultiprocessor(&bps, kernel, threads, 0);
     const int blocks = min((M / bM) * (N / bN), bps * NUM_SMS);
     auto tA = matx::make_tensor<MX>(reinterpret_cast<MX*>(a), {M, K});
-    std::random_device rd;
-    (tA = matx::apply(ConvFunctor<MX>{}, matx::random<float>(tA.Shape(), matx::NORMAL,43))).run(exec);
+    std::random_device rd; // random seed provider
+    (tA = matx::apply(ConvFunctor<MX>{}, matx::random<float>(tA.Shape(), matx::UNIFORM,rd()))).run(exec);
     auto tB = matx::make_tensor<MX>(reinterpret_cast<MX*>(b), {N, K});
-    (tB = matx::apply(ConvFunctor<MX>{}, matx::random<float>(tB.Shape(), matx::NORMAL, 79))).run(exec);
+    (tB = matx::apply(ConvFunctor<MX>{}, matx::random<float>(tB.Shape(), matx::UNIFORM, rd()))).run(exec);
     auto tBias = matx::make_tensor<MXC>(reinterpret_cast<MXC*>(bias), {N});
-    (tBias = matx::apply(ConvFunctor<MXC>{}, matx::random<float>(tBias.Shape(), matx::NORMAL, 5))).run(exec);
+    (tBias = matx::apply(ConvFunctor<MXC>{}, matx::random<float>(tBias.Shape(), matx::UNIFORM, rd()))).run(exec);
     const auto [k_ms, e_p, r_ms] = gk_run<threads, ActM>(kernel, a, b, c, c_ref, bias, M, N, K, blocks, rtol, atol, exec);
 
-    printf("%d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %lf, %f, %f\n",
-        M, N, K, bM, bN, bK, pipeStages, threads, bps, NUM_SMS, blocks, e_p, k_ms, r_ms);
+    printf("%d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %.1e, %.1e, %lf, %f, %f\n",
+        M, N, K, bM, bN, bK, pipeStages, threads, bps, NUM_SMS, blocks, rtol, atol, e_p, k_ms, r_ms);
 
     CHECK_CUDA(cudaPeekAtLastError());
     cudaFreeAsync(a, stream);
@@ -234,7 +221,7 @@ void kickStart(const int argc, char** argv) {
     using Element = __half;
     using ElementC = Element;
     using MMA_C = float;
-    printf("M, N, K, bM, bN, bK, pipeStages, threads, blocks/SM, SMs, blocks, error(%%), Kernel_Time(ms), "
+    printf("M, N, K, bM, bN, bK, pipeStages, threads, blocks/SM, SMs, blocks, rtol, atol, error(%%), Kernel_Time(ms), "
            "Matx_Time(ms)\n");
     if (argc > 1) {
         MNK = std::stoi(argv[1]);
@@ -281,12 +268,6 @@ void kickStart(const int argc, char** argv) {
     cudaStreamDestroy(stream);
 }
 
-__global__ void foo() {
-    using BlockScan = cub::BlockScan<int, 128, cub::BLOCK_SCAN_WARP_SCANS>;
-    __shared__ BlockScan::TempStorage scanTS[64];
-    constexpr int z = sizeof(scanTS);
-    constexpr auto a = alignof(BlockScan::TempStorage);
-}
 int main(const int argc, char** argv) {
     kickStart(argc, argv);
 }
