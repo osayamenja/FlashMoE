@@ -284,9 +284,38 @@ namespace flashmoe{
     };
 
     __device__
+    struct __align__(8) SoftmaxStatePacked {
+        uint32_t m_bits;   // raw bits of mI (fp32)
+        uint32_t d_bits;   // raw bits of dI (fp32), sign bit used as signal
+    };
+    // Pack: signal is implicitly always 1
+    __device__ __forceinline__
+    SoftmaxStatePacked pack_state(const float& m, const float& d) {
+        SoftmaxStatePacked p;
+        p.m_bits = __float_as_uint(m);
+
+        uint32_t db = __float_as_uint(d);
+        db |= 0x80000000u;          // force signal bit (sign) = 1
+        p.d_bits = db;
+
+        return p;
+    }
+    // Unpack: returns (m, d) and the signal bit for polling
+    __device__ __forceinline__
+    void unpack_state(const SoftmaxStatePacked &p, float &m, float &d) {
+        m = __uint_as_float(p.m_bits);
+        d = __uint_as_float(p.d_bits & 0x7FFFFFFFu);  // clear sign bit
+    }
+    __device__ __forceinline__
+    bool has_payload_arrived(const SoftmaxStatePacked &p) {
+        const int signal = p.d_bits >> 31;
+        return signal == 1;
+    }
+
+    __device__
     struct __align__(8) RingSoftmaxPayload {
         mp_t mI = -cuda::std::numeric_limits<mp_t>::infinity();
-        cute::half_t dI = cute::half_t(0.0f);
+        __half dI = __half(0.0f);
         uint16_t signal = 0U;
     };
     __device__

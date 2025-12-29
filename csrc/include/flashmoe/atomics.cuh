@@ -146,13 +146,13 @@ namespace flashmoe{
     __device__ __forceinline__
     void signalPayload(Payload* __restrict__ const& addr, const Payload* __restrict__ const& payload) {
         if constexpr (scope == cuda::thread_scope_block || scope == cuda::thread_scope_thread) {
-            atomicExch_block(CAST_TO(ull_t, addr), *CONST_CAST_TO(ull_t, payload));
+            atomicExch_block(reinterpret_cast<ull_t*>(addr), *reinterpret_cast<const ull_t*>(payload));
         }
         else if constexpr (scope == cuda::thread_scope_system) {
-            atomicExch_system(CAST_TO(ull_t, addr), *CONST_CAST_TO(ull_t, payload));
+            atomicExch_system(reinterpret_cast<ull_t*>(addr), *reinterpret_cast<const ull_t*>(payload));
         }
         else {
-            atomicExch(CAST_TO(ull_t, addr), *CONST_CAST_TO(ull_t, payload));
+            atomicExch(reinterpret_cast<ull_t*>(addr), *reinterpret_cast<const ull_t*>(payload));
         }
     }
 

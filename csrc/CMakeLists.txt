@@ -258,3 +258,8 @@ add_executable(pl
         benchmarks/playground.cu
 )
 flash_target_common(pl)
+
+add_executable(gtb
+        benchmarks/gate_bench.cu
+)
+flash_target_common(gtb)

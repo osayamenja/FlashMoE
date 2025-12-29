@@ -281,18 +281,12 @@ void kickStart(const int argc, char** argv) {
     cudaStreamDestroy(stream);
 }
 
+__global__ void foo() {
+    using BlockScan = cub::BlockScan<int, 128, cub::BLOCK_SCAN_WARP_SCANS>;
+    __shared__ BlockScan::TempStorage scanTS[64];
+    constexpr int z = sizeof(scanTS);
+    constexpr auto a = alignof(BlockScan::TempStorage);
+}
 int main(const int argc, char** argv) {
-    using BLAS = decltype(
-            cublasdx::Size<128, 128, 64>() +
-            cublasdx::Precision<__half, __half, float>() +
-            cublasdx::Type<cublasdx::type::real>() +
-            cublasdx::Function<cublasdx::function::MM>() +
-            cublasdx::Arrangement<cublasdx::row_major, cublasdx::col_major, cublasdx::row_major>() +
-            cublasdx::Block() +
-            cublasdx::MaxAlignment() +
-            cublasdx::StaticBlockDim() +
-            cublasdx::EnableInputStreaming() +
-            cublasdx::SM<800>());
-    constexpr auto t = BLAS::max_threads_per_block;
     kickStart(argc, argv);
 }
