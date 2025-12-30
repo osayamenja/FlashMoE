@@ -3,41 +3,38 @@
 //
 
 #include <random>
-
 #include <curanddx.hpp>
 #include <cublasdx.hpp>
-
 #include "common.cuh"
 
-__host__ __forceinline__
-void driver(const int& M, const int& N) {
-    const long int n = M * N;
+int main() {
     cudaSetDevice(0);
     cudaStream_t stream;
     cudaStreamCreate(&stream);
-    using Element = __half;
-    using CuteElement = cute::half_t;
-    Element* p = nullptr;
-    const auto nBytes = n * sizeof(Element);
-    cudaMallocAsync(&p, nBytes, stream);
-    auto* q = static_cast<Element*>(std::malloc(nBytes));
-    std::random_device rd;
-    constexpr int TPB = 256;
-    const int blocks = (n + 4ull * TPB - 1) / (4ull * TPB);
-    generateRandUniform<FLASHMOE_ARCH><<<blocks, TPB>>>(p, n, /*seed=*/rd(),
-        -1.f, 1.f);
-    cudaMemcpyAsync(q, p, nBytes, cudaMemcpyDeviceToHost, stream);
-    cudaStreamSynchronize(stream);
-    CHECK_CUDA(cudaPeekAtLastError());
-    // print tensor
-    const auto t = cute::make_tensor(reinterpret_cast<CuteElement*>(q),
-        cute::make_layout(cute::make_shape(M, N), cute::LayoutRight{}));
-    print_tensor(t);
-    cudaFreeAsync(p, stream);
-    std::free(q);
-    cudaStreamSynchronize(stream);
+    matx::cudaExecutor exec{stream};
+    auto tA = matx::make_tensor<int>({2,2});
+    constexpr auto cutoff = 1;
+    tA(0,0) = 2; tA(0, 1) = 1; tA(1, 0) = 4; tA(1, 1) = 3;
+    auto tAx = tA.Slice<2>({0, 0}, {matx::matxEnd, cutoff});
+    print(tA);
+    auto stAx = matx::make_tensor<int>(tAx.Shape());
+    (stAx = matx::sort(tAx, matx::SORT_DIR_ASC)).run(exec);
+    auto tB = matx::make_tensor<matx::index_t>({2,2});
+    tB(0,0) = 2; tB(0, 1) = 1; tB(1, 0) = 4; tB(1, 1) = 3;
+    auto tBx = tB.Slice<2>({0, 0}, {matx::matxEnd, cutoff});
+    print(tB);
+    auto stBx = matx::make_tensor<matx::index_t>(tBx.Shape());
+    (stBx = matx::sort(tBx, matx::SORT_DIR_ASC)).run(exec);
+    exec.sync();
+    print(stAx);print(stBx);
+    auto isEqual = matx::make_tensor<matx::index_t>(stAx.Shape());
+    (isEqual = stAx == stBx).run(exec);
+    auto tC = matx::make_tensor<float>({2,2});
+    auto topK_idx = matx::make_tensor<matx::index_t>(tC.Shape());
+    (tC = matx::random<float>(tC.Shape(), matx::UNIFORM)).run(exec);
+    (topK_idx = matx::argsort(tC, matx::SORT_DIR_DESC)).run(exec);
+    exec.sync();
+    print(isEqual);
+    print(tC);print(topK_idx);
     cudaStreamDestroy(stream);
-}
-int main() {
-    driver(8, 8);
 }

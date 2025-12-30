@@ -6,10 +6,8 @@
 
 #include <random>
 
-#include <matx.h>
 #include <cutlass/epilogue/thread/activation.h>
 #include <cublasdx.hpp>
-#include <curanddx.hpp>
 
 #include "common.cuh"
 #include "../include/flashmoe/tile.cuh"
@@ -71,11 +69,6 @@ __global__ void gk(const Element* __restrict__ a, const Element* __restrict__ b,
         gemmMainloop<TileGEMM, Activation>(workspace, a, b, c, bias, M, N, K, tileIdx);
     }
 }
-
-template<typename Element>
-using MXE = cuda::std::conditional_t<cuda::std::is_same_v<Element, __half>, matx::matxFp16,
-        cuda::std::conditional_t<cuda::std::is_same_v<Element, __nv_bfloat16>, matx::matxBf16,
-        cuda::std::conditional_t<cuda::std::is_same_v<Element, cublasdx::tfloat32_t>, float, Element>>>;
 
 template<int warmup, int runs, typename Activation, typename Element, typename ElementC>
 __host__ __forceinline__

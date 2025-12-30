@@ -28,14 +28,14 @@ namespace flashmoe
         // use fast exponential and float division
         highest,
     };
+}
+namespace flashmoe::gate {
     enum class InsideFusedKernel {
         // If inside fused kernel, we would need to limit the resource consumption of the router
         // to minimize its influence on occupancy.
         yes,
         no
     };
-}
-namespace flashmoe::gate {
     template<SoftMaxOptimizationLevel level = SoftMaxOptimizationLevel::none>
     __device__ __forceinline__
     float fexp(const float& x) {
@@ -78,7 +78,7 @@ namespace flashmoe::gate {
         >
         __device__ __forceinline__
         void operator()(void* __restrict__ const& gateScratch,
-            const Element* __restrict__ const& activations,
+            const Element* __restrict__ const& tokens,
             const Element* __restrict__ const& weights,
             ElementC* __restrict__ routing, const int& tileIdx,
             TPS* __restrict__ const& _tokenIds, int* __restrict__ const& expertCounts,
@@ -103,7 +103,7 @@ namespace flashmoe::gate {
                 cute::select<0, 1>(tileCoord));
             static_assert(cuda::std::numeric_limits<ElementC>::has_infinity);
             // compute tile
-            tileMainloop(gateScratch, activations, weights, accumulator, S, E, H, tileCoord);
+            tileMainloop(gateScratch, tokens, weights, accumulator, S, E, H, tileCoord);
             __syncthreads();
 
             /// Pointers for flags needed in epilogue
@@ -366,7 +366,7 @@ namespace flashmoe::gate {
         >
         __device__ __forceinline__
         void operator()(void* __restrict__ const& gateScratch,
-            const Element* __restrict__ const& activations,
+            const Element* __restrict__ const& tokens,
             const Element* __restrict__ const& weights,
             ElementC* __restrict__ const& routing,
             const int& tileIdx,
@@ -389,7 +389,7 @@ namespace flashmoe::gate {
                 cute::select<0, 1>(tileCoord));
             static_assert(cuda::std::numeric_limits<ElementC>::has_infinity);
             // compute tile
-            tileMainloop(gateScratch, activations, weights, accumulator, S, E, H, tileCoord);
+            tileMainloop(gateScratch, tokens, weights, accumulator, S, E, H, tileCoord);
             __syncthreads();
 
             /// Epilogue -> softmax + topk + routing table construction
@@ -529,13 +529,14 @@ namespace flashmoe::gate {
         GateReductionLevel grl = GateReductionLevel::singleBlock,
         SoftMaxOptimizationLevel sro = SoftMaxOptimizationLevel::none,
         InsideFusedKernel ifk = InsideFusedKernel::yes,
+        typename MMA_C = float,
         typename Element,
         typename ElementR
     >
     __device__ __forceinline__
-    void forward(const Element* __restrict__ const& _activations,
+    void forward(const Element* __restrict__ const& tokens,
         const Element* __restrict__ const& _gateWeights,
-        const ElementR* __restrict__ const& _routing,
+        ElementR* __restrict__ const& _routing,
         TPS* __restrict__ const& tokenIds,
         int* __restrict__ const& expertCounts,
         const int& S, const int& H, const int& E, const int& k, const int& EC,
@@ -544,7 +545,6 @@ namespace flashmoe::gate {
         ){
         const int blocks = gridDim.x;
         // assert(blocks >= E / bN)
-        using MMA_C = float;
         constexpr int bM = cute::get<0>(TileShape{});
         constexpr int bN = cute::get<1>(TileShape{});
         constexpr int bK = cute::get<2>(TileShape{});
@@ -552,8 +552,8 @@ namespace flashmoe::gate {
         using TileGEMM = tile::CollectiveMainloop<
             bM, bN, bK, Arch, Element, MMA_C, threads, pipeStages
         >;
-        constexpr auto sharedSize = cute::max(TileGEMM::SharedSize, bM * bN * sizeof(TileGEMM::AccumType));
-        __shared__ __align__(TileGEMM::GeneralAlignment) cuda::std::byte workspace[sharedSize];
+        constexpr auto sharedSize = cute::max(TileGEMM::SharedSize::value, bM * bN * sizeof(TileGEMM::AccumType));
+        __shared__ __align__(TileGEMM::GeneralAlignment::value) cuda::std::byte workspace[sharedSize];
         if constexpr (ifk == InsideFusedKernel::yes) {
             static_assert(bN * sizeof(SoftType) <= 256, "Reduce bN to reduce Router's register pressure");
             static_assert(sharedSize <= UPPER_SHARED_MEM::value, "Shared memory is too high for the Router");
@@ -562,11 +562,11 @@ namespace flashmoe::gate {
         const auto nT = S / bM * (E / bN);
         for (int i = blockIdx.x; i < nT; i += blocks) {
             if constexpr (grl == GateReductionLevel::singleBlock) {
-                gateMainLoop(workspace, _activations, _gateWeights, _routing, i,
+                gateMainLoop(workspace, tokens, _gateWeights, _routing, i,
                     tokenIds, expertCounts, S, H, E, k, EC);
             }
             else {
-                gateMainLoop(workspace, _activations, _gateWeights, _routing, i,
+                gateMainLoop(workspace, tokens, _gateWeights, _routing, i,
                     tokenIds, expertCounts, S, H, E, k, EC, rSp, rTp);
             }
 
