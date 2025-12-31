@@ -3,68 +3,52 @@
 //
 // Benchmark and unit tests for the fused gate
 #include <random>
+#include <tuple>
+#include <vector>
+#include <cstdio>
+#include <string>
 
 #include "common.cuh"
 #include "../include/flashmoe/gate.cuh"
 
-template<typename RE, typename REC>
-__host__ __forceinline__
-auto reference(RE* const& tokens, RE* const& gateWeights,
-    const int& S, const int& H, const int& E, const int& k, const int& EC,
-    int* const& _tokenIds, matx::index_t* const& _tokenIds_ref,
-    int* const& _eCounts, matx::index_t* const& _eCounts_ref, matx::index_t* const& _topK,
-    REC* const& routing, REC* const& routing_ref,
-    const float& rtol, const float& atol, matx::cudaExecutor& exec) {
-    using Element = MXE<RE>;
-    using ElementC = MXE<REC>;
-    auto tA = matx::make_tensor<Element>(reinterpret_cast<Element*>(tokens), {S, H});
-    auto tB = matx::make_tensor<Element>(reinterpret_cast<Element*>(gateWeights), {H, E});
-    auto tC = matx::make_tensor<ElementC>(reinterpret_cast<ElementC*>(routing_ref), {S, E});
-    auto tCx = matx::make_tensor<ElementC>(reinterpret_cast<ElementC*>(routing), {S, E});
-
-    auto tokenIds = matx::make_tensor<matx::index_t>(_tokenIds_ref, {E, S});
-    auto eCounts = matx::make_tensor<matx::index_t>(_eCounts_ref, {E});
-    auto tokenIds_x = matx::make_tensor<int>(_tokenIds, {E, EC});
-    auto eCounts_x = matx::make_tensor<int>(_eCounts, {E});
-
-    auto gemm_n_matches = matx::make_tensor<long int>({});
-    auto ec_matches = matx::make_tensor<int>({});
-
-    // GEMM + Softmax
-    (tC = matx::softmax(matx::matmul(tA, tB.PermuteMatrix()), {1})).run(exec);
-    // check error for GEMM+Softmax
-    matx::cudaExecutor exec1{exec.getStream()};
-    (gemm_n_matches = matx::sum(matx::isclose(tCx, tC, rtol, atol))).run(exec1);
-    auto topK = matx::make_tensor<matx::index_t>(_topK, {S, E});
-    // select topK
-    // use external probabilities to verify token indices
-    (topK = matx::argsort(tCx, matx::SORT_DIR_DESC)).run(exec);
-    // Gather tokenIds
-    for (int i = 0; i < E; ++i) {
-        // get ith row
-        auto tKRow = topK.PermuteMatrix().Slice<1>({i, 0}, {matx::matxDropDim, matx::matxEnd});
-        // get ith row
-        auto tIdsRow = tokenIds.Slice<1>({i, 0}, {matx::matxDropDim, matx::matxEnd});
-        auto eC = eCounts.Slice<0>({i}, {matx::matxDropDim});
-        (matx::mtie(tIdsRow, eC) = matx::find_idx(tKRow, matx::LT<matx::index_t>{k})).run(exec);
-        // check if it matches
-        auto tIdsRow_x = tokenIds_x.Slice<1>({i, 0}, {matx::matxDropDim, matx::matxEnd});
-        //auto st_x = matx::make_tensor<>()
+struct IndexSanitizer {
+    const matx::index_t y;
+    explicit IndexSanitizer(const matx::index_t& _y): y(_y){}
+    __host__ __device__
+    auto operator()(const matx::index_t& x) const {
+        return x / y;
     }
-    // check eC
-    (ec_matches = matx::sum(eCounts_x == eCounts)).run(exec);
-    CHECK_CUDA(cudaPeekAtLastError());
-    exec.sync();
-    // calculate error percentage
-    const auto ep_gs =  (1.0 - (static_cast<double>(gemm_n_matches()) /
-        static_cast<double>(tC.TotalSize()))) * 100;
-    const auto ep_ec = (1.0 - (static_cast<double>(ec_matches()) /
-        static_cast<double>(tC.TotalSize()))) * 100;
+};
 
-    // benchmark results
+struct SplitFunctor {
+    __host__ __device__
+    auto operator()(const flashmoe::TPS& t) const {
+        return t.tokenIdx;
+    }
+};
 
-    return std::make_tuple(0.f, 0.f);
-}
+struct __align__(16) GateArgs {
+    void* tokens;
+    void* gateWeights;
+    void* routing;
+    void* routing_ref;
+    flashmoe::TPS* tokenIds_packed;
+    int* tokenIds;
+    matx::index_t* tokenIds_ref;
+    int* eCounts;
+    matx::index_t* eCounts_ref;
+    matx::index_t* topK;
+    flashmoe::SoftmaxStatePacked* rSp;
+    flashmoe::RingTopKPayload* rTp;
+    int S;
+    int H;
+    int E;
+    int k;
+    int EC;
+    float rtol;
+    float atol;
+    int dropTokens;
+};
 
 template<
         typename TileShape,
@@ -91,39 +75,169 @@ __global__ void gateKernel(const Element* __restrict__ tokens,
         flashmoe::SoftmaxStatePacked* __restrict__ rSp,
         flashmoe::RingTopKPayload* __restrict__ rTp
         ) {
-        flashmoe::gate::forward<TileShape, Arch, threads, grl, sro, ifk, MMA_C>(tokens, _gateWeights,
-            _routing, tokenIds, expertCounts, S, H, E, k, EC, rSp, rTp);
+    flashmoe::gate::forward<TileShape, Arch, threads, grl, sro, ifk, MMA_C>(tokens, _gateWeights,
+        _routing, tokenIds, expertCounts, S, H, E, k, EC, rSp, rTp);
 }
 
-template<int threads, typename Kernel, typename Element, typename ElementC>
+template<int warmup, int runs, typename RE, typename REC>
 __host__ __forceinline__
-auto gk_run(Kernel& kernel,
-    Element* const& tokens, Element* const& gateWeights,
-    const int& S, const int& H, const int& E, const int& k, const int& EC, const int& blocks,
-    const float& rtol, const float& atol, matx::cudaExecutor& exec,
-    ElementC* const& routing, ElementC* const& routing_ref,
-    int* const& tokenIds, matx::index_t* const& tokenIds_ref,
-    int* const& eCounts, matx::index_t* const& eCounts_ref, matx::index_t* const& topK,
-    flashmoe::SoftmaxStatePacked* const& rSp, flashmoe::RingTopKPayload* const& rTp) {
-    constexpr auto runs = 128;
-    constexpr auto warmup = 32;
-    kernel<<<blocks, threads, 0, exec.getStream()>>>(tokens, gateWeights, routing, tokenIds,
-        eCounts, S, H, E, k, EC, rSp, rTp);
-    const auto [error_pct, ref_time_ms] = reference();
+auto reference(matx::cudaExecutor& exec, const GateArgs& gArgs) {
+    using Element = MXE<RE>;
+    using ElementC = MXE<REC>;
+    auto tA = matx::make_tensor<Element>(static_cast<Element*>(gArgs.tokens),
+        {gArgs.S, gArgs.H});
+    auto tB = matx::make_tensor<Element>(static_cast<Element*>(gArgs.gateWeights),
+        {gArgs.H, gArgs.E});
+    auto tC = matx::make_tensor<ElementC>(static_cast<ElementC*>(gArgs.routing_ref),
+        {gArgs.S, gArgs.E});
+    auto tCx = matx::make_tensor<ElementC>(static_cast<ElementC*>(gArgs.routing),
+        {gArgs.S, gArgs.E});
+
+    auto tokenIds = matx::make_tensor<matx::index_t>(gArgs.tokenIds_ref,
+        {gArgs.E, gArgs.S});
+    auto eCounts = matx::make_tensor<matx::index_t>(gArgs.eCounts_ref,
+        {gArgs.E});
+    auto tokenIds_packed = matx::make_tensor<flashmoe::TPS>(gArgs.tokenIds_packed,
+        {gArgs.E, gArgs.EC});
+    auto tokenIds_x = matx::make_tensor<int>(gArgs.tokenIds, {gArgs.E, gArgs.EC});
+    (tokenIds_x = matx::apply(SplitFunctor{}, tokenIds_packed)).run(exec);
+    auto eCounts_x = matx::make_tensor<int>(gArgs.eCounts, {gArgs.E});
+
+    // dynamically allocated managed memory
+    auto gemm_n_matches = matx::make_tensor<long int>({});
+    auto ec_matches = matx::make_tensor<int>({gArgs.E});
+    auto s_ec_matches = matx::make_tensor<int>({});
+    auto tIds_matches = matx::make_tensor<int>({gArgs.E});
+    (tIds_matches = matx::zeros<int>(tIds_matches.Shape())).run(exec);
+    auto s_tIds_matches = matx::make_tensor<int>({});
+
+    // GEMM + Softmax
+    (tC = matx::softmax(matx::matmul(tA, tB.PermuteMatrix()), {1})).run(exec);
+    // check error for GEMM+Softmax
+    matx::cudaExecutor exec1{exec.getStream()};
+    (gemm_n_matches = matx::sum(matx::isclose(tCx, tC, gArgs.rtol, gArgs.atol))).run(exec1);
+    auto sIndices = matx::make_tensor<matx::index_t>(gArgs.topK, {gArgs.S, gArgs.E});
+    // select topK
+    // we use external probabilities to verify token indices which avoids
+    // unpredictable sideeffects from any numerical discrepancy between tCx and tC.
+    // Specifically, if tC is used instead, given a failed check,
+    // we would not be able to tell if it is due to the indices being generated
+    // incorrectly by the fused kernel or due to the floating point disparity in comparison to tCx.
+    // That's why the check is two-phased. The first check verifies the floating-point correctness
+    // of the GEMM+Softmax while the other verifies the indices generation logic _independently_.
+    (sIndices = matx::argsort(tCx, matx::SORT_DIR_DESC)).run(exec);
+    auto topK_idx = sIndices.Slice<2>({0, 0}, {matx::matxEnd, gArgs.k});
+    // Gather tokenIds
+    for (int i = 0; i < gArgs.E; ++i) {
+        auto tIdx_row = tokenIds.Slice<1>({i, 0}, {matx::matxDropDim, matx::matxEnd});
+        auto eC = eCounts.Slice<0>({i}, {matx::matxDropDim});
+        (matx::mtie(tIdx_row, eC) = matx::find_idx(topK_idx, matx::EQ<matx::index_t>{i})).run(exec);
+        // converts indices from linearized [0, S*K) to [0, S).
+        // This is necessary and correct from prior experience using matx::find_idx
+        (tIdx_row = matx::apply(IndexSanitizer{gArgs.k}, tIdx_row)).run(exec);
+    }
+    // check eC
+    (ec_matches = (eCounts_x == eCounts)).run(exec);
+    (s_ec_matches = matx::sum(ec_matches)).run(exec);
+    std::vector<matx::index_t> hec(eCounts.TotalSize());
+    cudaMemcpyAsync(hec.data(), gArgs.eCounts_ref, sizeof(matx::index_t) * eCounts.TotalSize(),
+        cudaMemcpyDeviceToHost, exec.getStream());
+    exec.sync();
+    // check tokenIds
+    matx::index_t totalRoutedTokens = 0;
+    for (int i = 0; i < gArgs.E; ++i) {
+        if (ec_matches(i)) {
+            // expert count matches
+            // now check token indices
+            const auto eCount = hec[i];
+            const auto cutoff = gArgs.dropTokens ? cute::min(eCount, gArgs.EC) : eCount;
+            totalRoutedTokens += cutoff;
+            auto tIdsRow_x = tokenIds_x.Slice<1>({i, 0}, {matx::matxDropDim, cutoff});
+            auto st_x = matx::make_tensor<matx::index_t>(tIdsRow_x.Shape());
+            (st_x = matx::sort(tIdsRow_x, matx::SORT_DIR_DESC)).run(exec);
+            // check if it matches
+            auto tIdsRow = tokenIds.Slice<1>({i, 0}, {matx::matxDropDim, cutoff});
+            auto st = matx::make_tensor<matx::index_t>(tIdsRow.Shape());
+            (st = matx::sort(tIdsRow, matx::SORT_DIR_DESC)).run(exec);
+            auto tIm_r = tIds_matches.Slice<0>({i}, {matx::matxDropDim});
+            // compare sorted indices arrays
+            (tIm_r = matx::sum(st_x == st)).run(exec);
+        }
+    }
+    (s_tIds_matches = matx::sum(tIds_matches)).run(exec);
+    CHECK_CUDA(cudaPeekAtLastError());
+    exec.sync();
+    // calculate error percentage
+    const auto ep_gs =  (1.0 - (static_cast<double>(gemm_n_matches()) /
+        static_cast<double>(tC.TotalSize()))) * 100;
+    const auto ep_ec = (1.0 - (static_cast<double>(s_ec_matches()) /
+        static_cast<double>(eCounts.TotalSize()))) * 100;
+    const auto ep_tIds = (1.0 - (static_cast<double>(s_tIds_matches()) /
+        static_cast<double>(totalRoutedTokens))) * 100;
+
+    auto gate_via_matx = [&]() {
+        // GEMM + Softmax
+        (tC = matx::softmax(matx::matmul(tA, tB.PermuteMatrix()), {1})).run(exec);
+        (sIndices = matx::argsort(tCx, matx::SORT_DIR_DESC)).run(exec);
+        // Gather tokenIds
+        for (int i = 0; i < gArgs.E; ++i) {
+            auto tIdx_row = tokenIds.Slice<1>({i, 0}, {matx::matxDropDim, matx::matxEnd});
+            auto eC = eCounts.Slice<0>({i}, {matx::matxDropDim});
+            (matx::mtie(tIdx_row, eC) = matx::find_idx(topK_idx, matx::EQ<matx::index_t>{i})).run(exec);
+            (tIdx_row = matx::apply(IndexSanitizer{gArgs.k}, tIdx_row)).run(exec);
+        }
+    };
     for (int i = 0; i < warmup; ++i) {
-        kernel<<<blocks, threads, 0, exec.getStream()>>>(tokens, gateWeights, routing, tokenIds,
-            eCounts, S, H, E, k, EC, rSp, rTp);
+        gate_via_matx();
     }
     exec.sync();
     exec.start_timer();
     for (int i = 0; i < runs; ++i) {
-        kernel<<<blocks, threads, 0, exec.getStream()>>>(tokens, gateWeights, routing, tokenIds,
-            eCounts, S, H, E, k, EC, rSp, rTp);
+        gate_via_matx();
+    }
+    exec.stop_timer();
+    exec.sync();
+    const float m_time_ms = exec.get_time_ms() / static_cast<float>(runs);
+
+    // benchmark results
+    return std::make_tuple(m_time_ms, ep_gs, ep_ec, ep_tIds);
+}
+
+template<int Arch,
+    typename TileShape,
+    flashmoe::GateReductionLevel grl = flashmoe::GateReductionLevel::singleBlock,
+    flashmoe::SoftMaxOptimizationLevel sro = flashmoe::SoftMaxOptimizationLevel::none,
+    flashmoe::gate::InsideFusedKernel ifk = flashmoe::gate::InsideFusedKernel::no,
+    int threads, typename AccumType, typename Element, typename ElementC
+>
+__host__ __forceinline__
+auto gk_run(matx::cudaExecutor& exec, const GateArgs& gArgs, const int& blocks) {
+    constexpr auto runs = 128;
+    constexpr auto warmup = 32;
+    auto kernel = [&]() {
+        cudaMemsetAsync(gArgs.eCounts, 0, sizeof(int) * gArgs.E, exec.getStream());
+        gateKernel<TileShape, Arch, threads,grl, sro, ifk, AccumType>
+        <<<blocks, threads, 0, exec.getStream()>>>(
+            static_cast<Element*>(gArgs.tokens),
+            static_cast<Element*>(gArgs.gateWeights),
+            static_cast<ElementC*>(gArgs.routing),
+            gArgs.tokenIds_packed,
+            gArgs.eCounts, gArgs.S, gArgs.H, gArgs.E, gArgs.k, gArgs.EC, gArgs.rSp, gArgs.rTp);
+    };
+    kernel();
+    const auto ref_result = reference<warmup, runs, Element, ElementC>(exec, gArgs);
+    for (int i = 0; i < warmup; ++i) {
+        kernel();
+    }
+    exec.sync();
+    exec.start_timer();
+    for (int i = 0; i < runs; ++i) {
+        kernel();
     }
     exec.stop_timer();
     CHECK_CUDA(cudaPeekAtLastError());
     const auto k_time_ms = exec.get_time_ms() / static_cast<float>(runs);
-    return std::make_tuple(k_time_ms, error_pct, ref_time_ms);
+    return std::make_tuple(k_time_ms, ref_result);
 }
 
 template<
@@ -135,17 +249,19 @@ template<
     typename Element, typename ElementC
 >
 __host__ __forceinline__
-void driver(const int& S, const int& E, const int& H, const int& k, const float& rtol, const float& atol, matx::cudaExecutor& exec,
+void driver(const int& S, const int& E, const int& H, const int& k, const float& rtol,
+    const float& atol, matx::cudaExecutor& exec,
     const bool dropTokens = true) {
     const int M = S;
     const int N = E;
     const int K = H;
     const int eCap = dropTokens ? cute::ceil_div(S, E) * k : S;
-    Element* a = nullptr; // token matrix
-    Element* b = nullptr; // weights
+    Element* tokens = nullptr; // token matrix
+    Element* gateWeights = nullptr; // weights
     ElementC* routing = nullptr; // routing
     ElementC* routing_ref = nullptr;
-    int* tokenIds = nullptr;
+    flashmoe::TPS* tokenIds = nullptr; // TPS is a packed struct of float and int
+    int* tokenIds_idx = nullptr; // TPS is a packed struct of float and int
     matx::index_t* tokenIds_ref = nullptr;
     int* eCounts = nullptr;
     matx::index_t* eCounts_ref = nullptr;
@@ -154,23 +270,26 @@ void driver(const int& S, const int& E, const int& H, const int& k, const float&
     flashmoe::RingTopKPayload* rTp = nullptr;
 
     auto stream = exec.getStream();
-    cudaMallocAsync(&a, M * K * sizeof(Element), stream);
-    cudaMallocAsync(&b, K * N * sizeof(Element), stream);
+    cudaMallocAsync(&tokens, M * K * sizeof(Element), stream);
+    cudaMallocAsync(&gateWeights, K * N * sizeof(Element), stream);
     cudaMallocAsync(&routing, M * N * sizeof(ElementC), stream);
     cudaMallocAsync(&routing_ref, M * N * sizeof(ElementC), stream);
-    cudaMallocAsync(&tokenIds, E * eCap * sizeof(int), stream);
+    cudaMallocAsync(&tokenIds, E * eCap * sizeof(flashmoe::TPS), stream);
+    cudaMallocAsync(&tokenIds_idx, E * eCap * sizeof(int), stream);
     cudaMallocAsync(&tokenIds_ref, E * S * sizeof(matx::index_t), stream);
-    cudaMallocAsync(&eCounts, M * N * sizeof(int), stream);
-    cudaMemsetAsync(eCounts, 0, M * N * sizeof(int), stream);
-    cudaMallocAsync(&eCounts_ref, M * N * sizeof(matx::index_t), stream);
-    cudaMallocAsync(&topK, M * N * sizeof(matx::index_t), stream);
+    cudaMallocAsync(&eCounts, E * sizeof(int), stream);
+    cudaMemsetAsync(eCounts, 0, E * sizeof(int), stream);
+    cudaMallocAsync(&topK, S * E * sizeof(matx::index_t), stream);
+    cudaMallocAsync(&eCounts_ref, E * sizeof(matx::index_t), stream);
     if (E > bN) {
-        const auto sspSize = S * (E / bN);
-        cudaMallocAsync(&rSp, sspSize * sizeof(flashmoe::SoftmaxStatePacked), stream);
-        cudaMemsetAsync(rSp, 0, sspSize * sizeof(flashmoe::SoftmaxStatePacked), stream);
-        const auto rtpSize = 2 * S * (E / bN);
-        cudaMallocAsync(&rTp, M * N * sizeof(matx::index_t), stream);
-        cudaMemsetAsync(rTp, 0, rtpSize * sizeof(flashmoe::RingTopKPayload), stream);
+        const auto sspSize = S * cute::ceil_div(E, bN) * sizeof(flashmoe::SoftmaxStatePacked);
+        cudaMallocAsync(&rSp, sspSize, stream);
+        // only need to reset this once, the kernel internally resets after usage
+        cudaMemsetAsync(rSp, 0, sspSize, stream);
+        const auto rtpSize = 2 * S * cute::ceil_div(E, bN) * sizeof(flashmoe::RingTopKPayload);
+        cudaMallocAsync(&rTp, rtpSize, stream);
+        // only need to reset this once, the kernel internally resets after usage
+        cudaMemsetAsync(rTp, 0, rtpSize, stream);
     }
 
     using AccumType = float;
@@ -179,29 +298,63 @@ void driver(const int& S, const int& E, const int& H, const int& k, const float&
     auto kernel = gateKernel<TileShape, Arch, threads, grl, sro, ifk, AccumType, Element, ElementC>;
     int bps = 0;
     cudaOccupancyMaxActiveBlocksPerMultiprocessor(&bps, kernel, threads, 0);
-    const int blocks = min((M / bM) * (N / bN), bps * NUM_SMS);
+    const int blocks = cute::min(cute::ceil_div(M, bM) * cute::ceil_div(N, bN),
+        bps * NUM_SMS); // use ceil_div to avoid zero
     constexpr auto min_v = -1.f;
     constexpr auto max_v = 1.f;
     std::random_device rd;
     // fill a
-    randUniform<Arch, /*add jitter*/true>(a, M * K, rd(), min_v, max_v, exec.getStream());
+    randUniform<Arch, /*add jitter*/true>(tokens, M * K, rd(), min_v,
+        max_v, exec.getStream());
     // fill b
-    randUniform<Arch, true>(b, K * N, rd(), min_v, max_v, exec.getStream());
+    randUniform<Arch, true>(gateWeights, K * N, rd(), min_v, max_v, exec.getStream());
+    const GateArgs gArgs{
+        tokens,
+        gateWeights,
+        routing,
+        routing_ref,
+        tokenIds,
+        tokenIds_idx,
+        tokenIds_ref, eCounts, eCounts_ref, topK, rSp, rTp,
+        S, H, E, k, eCap,
+        rtol, atol, static_cast<int>(dropTokens)
+    };
+    // returns [kernel_ms, [m_time_ms, ep_gs, ep_ec, ep_tIds]]
+    const auto results = gk_run<Arch, TileShape, grl, sro, ifk, threads, AccumType, Element, ElementC>
+    (exec, gArgs, blocks);
+    const float kernel_ms = std::get<0>(results);
+    const auto r_tuple = std::get<1>(results);
+    const float matx_ms = std::get<0>(r_tuple);
+    const double ep_gs = std::get<1>(r_tuple);
+    const double ep_ec = std::get<2>(r_tuple);
+    const double ep_tIds = std::get<3>(r_tuple);
 
-    printf("%d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %.1e, %.1e, %lf, %f, %f\n",
-        M, N, K, bM, bN, bK, pipeStages, threads, bps, NUM_SMS, blocks, rtol, atol, e_p, k_ms, r_ms);
+    printf("%d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %.1e, %.1e, %lf, %lf, %lf, %f, %f\n",
+        M, N, K, bM, bN, bK, pipeStages, threads, bps, NUM_SMS,
+        blocks, rtol, atol, ep_gs, ep_ec, ep_tIds, kernel_ms, matx_ms);
+
+    cudaFreeAsync(tokens, stream);
+    cudaFreeAsync(gateWeights, stream);
+    cudaFreeAsync(routing, stream);
+    cudaFreeAsync(routing_ref, stream);
+    cudaFreeAsync(tokenIds, stream);
+    cudaFreeAsync(tokenIds_idx, stream);
+    cudaFreeAsync(tokenIds_ref, stream);
+    cudaFreeAsync(eCounts, stream);
+    cudaFreeAsync(topK, stream);
+    cudaFreeAsync(eCounts_ref, stream);
+    if (E > bN) {
+        cudaFreeAsync(rSp, stream);
+        cudaFreeAsync(rTp, stream);
+    }
+    exec.sync();
 }
 
-enum class BenchType {
-    sweepExperts = 0,
-    sweepSeqEmb = 1,
-};
-//./gtb <bench_type(0 or 1)> <E> <rtol> <atol>
-template<BenchType b = BenchType::sweepExperts>
+//./gtb <E> <E_max> <k> <rtol> <atol>
+// Sequence length and H are fixed
 __host__ __forceinline__
 void kickStart(const int argc, char** argv) {
-    static_assert(b == BenchType::sweepExperts);
-    // we have to fix these to minimize instantiated templates
+    // we have to fix S and H to minimize instantiated templates as tile shapes are dependent on them
     constexpr auto S = 128;
     constexpr auto H = 2048;
     using Element = __half;
@@ -210,14 +363,19 @@ void kickStart(const int argc, char** argv) {
     float atol = 2e-3f;
     int E = 2;
     int E_max = 256;
-
-    printf("S, E, H, bM, bN, bK, pipeStages, threads, blocks/SM, SMs, blocks, rtol, atol, error(%%), Kernel_Time(ms), "
-           "Matx_Time(ms)\n");
+    int k = 1;
+    constexpr int Arch = FLASHMOE_ARCH;
+    printf("S, E, H, bM, bN, bK, pipeStages, threads, blocks/SM, SMs, "
+           "blocks, rtol, atol, error_gemm_softmax(%%), error_expert_counts(%%), error_tokenIds(%%), "
+           "Kernel_Time(ms), Matx_Time(ms)\n");
+    if (argc > 1) {
+        E = std::stoi(argv[1]);
+    }
     if (argc > 2) {
-        E = std::stoi(argv[2]);
+        E_max = std::stoi(argv[2]);
     }
     if (argc > 3) {
-        E_max = std::stoi(argv[3]);
+        k = std::stoi(argv[3]);
     }
     if (argc > 4) {
         rtol = std::stof(argv[4]);
@@ -229,6 +387,8 @@ void kickStart(const int argc, char** argv) {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
     matx::cudaExecutor exec{stream, true};
+    constexpr auto sro = flashmoe::SoftMaxOptimizationLevel::none;
+    constexpr auto ifk = flashmoe::gate::InsideFusedKernel::no;
     // tiling heuristics
     constexpr int bM = cute::min(S, 128);
     constexpr int kF = 32 * (4 / sizeof(Element));
@@ -237,103 +397,87 @@ void kickStart(const int argc, char** argv) {
     for (int i = E; i <= E_max; i *= 2) {
         switch (i) {
         case 8:
-            driver<bM, 8, bK, pS, Element, ElementC>(S, i, H, rtol, atol, exec);
-            break;
-        case 16:
-            driver<bM, 16, bK, pS, Element, ElementC>(S, i, i, rtol, atol, exec);
-            break;
-        case 32:
-            driver<bM, 32, bK, pS, Element, ElementC>(S, i, H, rtol, atol, exec);
-            break;
-        case 64:
-            driver<bM, 64, bK, pS, Element, ElementC>(S, i, H, rtol, atol, exec);
-            break;
-        default:
             {
-                if (i >= 128 && i <= 2048) {
-                    driver<bM, 64, bK, pS, Element, ElementC>(S, i, H, rtol, atol,exec);
+                constexpr int bN = 8;
+                if (k > 1) {
+                    driver<Arch, bM, bN, bK, pS, flashmoe::GateReductionLevel::multiBlock, sro, ifk,
+                        Element, ElementC>(S, i, H, k, rtol, atol, exec);
                 }
-                else if (i > 2048) {
-                    driver<bM, 64 * (4 / sizeof(Element)), bK, pS, Element, ElementC>(S, i, H, rtol, atol,exec);
+                else if (k == 1) {
+                    driver<Arch, bM, bN, bK, pS, flashmoe::GateReductionLevel::singleBlock, sro, ifk,
+                        Element, ElementC>(S, i, H, k, rtol, atol, exec);
                 }
             }
-
+            break;
+        /*case 16:
+            {
+                constexpr int bN = 16;
+                if (k > 1) {
+                    driver<Arch, bM, bN, bK, pS, flashmoe::GateReductionLevel::multiBlock, sro, ifk,
+                        Element, ElementC>(S, i, H, k, rtol, atol, exec);
+                }
+                else if (k == 1) {
+                    driver<Arch, bM, bN, bK, pS, flashmoe::GateReductionLevel::singleBlock, sro, ifk,
+                        Element, ElementC>(S, i, H, k, rtol, atol, exec);
+                }
+            }
+            break;
+        case 32:
+            {
+                constexpr int bN = 32;
+                if (k > 1) {
+                    driver<Arch, bM, bN, bK, pS, flashmoe::GateReductionLevel::multiBlock, sro, ifk,
+                        Element, ElementC>(S, i, H, k, rtol, atol, exec);
+                }
+                else if (k == 1) {
+                    driver<Arch, bM, bN, bK, pS, flashmoe::GateReductionLevel::singleBlock, sro, ifk,
+                        Element, ElementC>(S, i, H, k, rtol, atol, exec);
+                }
+            }
+            break;
+        case 64:
+            {
+                constexpr int bN = 64;
+                if (k > 1) {
+                    driver<Arch, bM, bN, bK_x, pS, flashmoe::GateReductionLevel::multiBlock, sro, ifk,
+                        Element, ElementC>(S, i, H, k, rtol, atol, exec);
+                }
+                else if (k == 1) {
+                    driver<Arch, bM, bN, bK_x, pS, flashmoe::GateReductionLevel::singleBlock, sro, ifk,
+                        Element, ElementC>(S, i, H, k, rtol, atol, exec);
+                }
+            }
+            break;*/
+        default:
+            {
+                /*if (i >= 128 && i <= 2048) {
+                    constexpr int bN = 64;
+                    if (k > 1) {
+                        driver<Arch, bM, bN, bK_x, pS, flashmoe::GateReductionLevel::multiBlock, sro, ifk,
+                        Element, ElementC>(S, i, H, k, rtol, atol, exec);
+                    }
+                    else if (k == 1) {
+                        driver<Arch, bM, bN, bK_x, pS, flashmoe::GateReductionLevel::singleBlock, sro, ifk,
+                            Element, ElementC>(S, i, H, k, rtol, atol, exec);
+                    }
+                }
+                else if (i > 2048) {
+                    constexpr int bN = 64 * (4 / sizeof(Element));
+                    if (k > 1) {
+                        driver<Arch, bM, bN, bK_x, pS, flashmoe::GateReductionLevel::multiBlock, sro, ifk,
+                            Element, ElementC>(S, i, H, k, rtol, atol, exec);
+                    }
+                    else if (k == 1) {
+                        driver<Arch, bM, bN, bK_x, pS, flashmoe::GateReductionLevel::singleBlock, sro, ifk,
+                            Element, ElementC>(S, i, H, k, rtol, atol, exec);
+                    }
+                }*/
+            }
         }
     }
     cudaStreamDestroy(stream);
 }
 
-template<>
-__host__ __forceinline__
-void kickStart<BenchType::sweepSeqEmb>(const int argc, char** argv) {
-    // fixed to minimize template instantiations
-    constexpr int E = 8;
-    int MK = 8;
-    int MK_max = 8192;
-    float rtol = 2e-2f;
-    float atol = 2e-3f;
-    using Element = __half;
-    using ElementC = Element;
-    printf("S, E, H, bM, bN, bK, pipeStages, threads, blocks/SM, SMs, blocks, rtol, atol, error(%%), Kernel_Time(ms), "
-           "Matx_Time(ms)\n");
-    if (argc > 2) {
-        MK = std::stoi(argv[2]);
-    }
-    if (argc > 3) {
-        MK_max = std::stoi(argv[3]);
-    }
-    if (argc > 4) {
-        rtol = std::stof(argv[4]);
-    }
-    if (argc > 5) {
-        atol = std::stof(argv[5]);
-    }
-    cudaSetDevice(0);
-    cudaStream_t stream;
-    cudaStreamCreate(&stream);
-    matx::cudaExecutor exec{stream, true};
-    // tiling heuristics
-    constexpr int bN = cute::min(E, 64);
-    for (int i = MK; i <= MK_max; i *= 2) {
-        switch (i) {
-        case 8:
-            driver<8, bN, 8, 1, Element, ElementC>(i, E, i, rtol, atol, exec);
-            break;
-        case 16:
-            driver<16, bN, 16, 1, Element, ElementC>(i, E, i, rtol, atol, exec);
-            break;
-        case 32:
-            driver<32, bN, 32, 1, Element, ElementC>(i, E, i, rtol, atol, exec);
-            break;
-        case 64:
-            driver<64, bN, 64, 1, Element, ElementC>(i, i, E, rtol, atol, exec);
-            break;
-        default:
-            {
-                if (i >= 128 && i <= 2048) {
-                    driver<128, bN, 32, 2, Element, ElementC>(i, E, i, rtol, atol,exec);
-                }
-                else if (i > 2048) {
-                    driver<128, bN * (4 / sizeof(Element)), 32, 2, Element, ElementC>(i, E, i, rtol, atol,exec);
-                }
-            }
-
-        }
-    }
-    cudaStreamDestroy(stream);
-}
 int main(const int argc, char** argv) {
-    int bench_type = 0;
-    printf("S, E, H, bM, bN, bK, pipeStages, threads, blocks/SM, SMs, blocks, rtol, atol, error(%%), "
-           "Kernel_Time(ms), Matx_Time(ms)\n");
-    if (argc > 1) {
-        bench_type = atoi(argv[1]);
-    }
-    if (bench_type == 0) {
-        kickStart<BenchType::sweepExperts>(argc, argv);
-    }
-    else {
-        kickStart<BenchType::sweepExperts>(argc, argv);
-    }
     kickStart(argc, argv);
 }

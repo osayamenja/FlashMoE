@@ -260,7 +260,13 @@ add_executable(pl
 )
 flash_target_common(pl)
 
-add_executable(gtb
+add_executable(gtb_x
         benchmarks/gate_bench.cu
 )
-flash_target_common(gtb)
+flash_target_common(gtb_x)
+
+add_executable(gtb_se
+        benchmarks/gate_bench_seq_emb.cu
+
+)
+flash_target_common(gtb_se)

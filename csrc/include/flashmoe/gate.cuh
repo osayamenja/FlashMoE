@@ -16,7 +16,6 @@
 #include <cub/cub.cuh>
 
 #include "tile.cuh"
-#include "types.cuh"
 #include "atomics.cuh"
 
 namespace flashmoe
@@ -186,7 +185,7 @@ namespace flashmoe::gate {
                 }
                 /// Softmax Reduction
                 #pragma unroll
-                for (uint j = 0; j < bN; ++j) {
+                for (int j = 0; j < bN; ++j) {
                     const auto pM = mI;
                     mI = max(mI, reginald[j]);
                     dI = fmaf(dI, fexp<sro>(pM - mI),fexp<sro>(reginald[j] - mI));
@@ -211,7 +210,7 @@ namespace flashmoe::gate {
                     }
                 }
                 #pragma unroll
-                for (uint j = 0; j < bN; ++j) {
+                for (int j = 0; j < bN; ++j) {
                     reginald[j] = fdiv<sro>(fexp<sro>(reginald[j] - mI), dI);
                 }
                 #pragma unroll
@@ -255,7 +254,7 @@ namespace flashmoe::gate {
                     sV = -cuda::std::numeric_limits<SoftType>::infinity();
                     if (shouldSweep) {
                         #pragma unroll
-                        for (uint j = 0; j < bN; ++j) {
+                        for (int j = 0; j < bN; ++j) {
                             // local maximum
                             if (!rTK[j] && reginald[j] > lSV) {
                                 lSIdx = cute::get<1>(tileCoord) * bN + j;
@@ -298,7 +297,7 @@ namespace flashmoe::gate {
                             static_cast<uint16_t>(sIdx),
                             static_cast<uint16_t>(bPs)};
                         auto* __restrict__ mailboxes = tkXMailbox;
-                        for (uint j = 0; j < tilesN - 1; ++j) {
+                        for (int j = 0; j < tilesN - 1; ++j) {
                             signalPayload(mailboxes + flagPrefix, &sP);
                             mailboxes += phases * bM * tilesM;
                         }
@@ -328,7 +327,7 @@ namespace flashmoe::gate {
             int myIndices[bN];
             // scan down the column
             #pragma unroll
-            for (uint i = 0; i < bN; ++i) {
+            for (int i = 0; i < bN; ++i) {
                 int selected = 0;
                 BlockScan(scanTempStorage[i]).InclusiveSum(rTK[i], myIndices[i], selected);
                 cachedSelected = threadIdx.x == i ? selected : cachedSelected;
@@ -339,17 +338,16 @@ namespace flashmoe::gate {
             }
             __syncthreads();
             #pragma unroll
-            for (uint i = 0; i < bN; ++i) {
+            for (int i = 0; i < bN; ++i) {
                 myIndices[i] = startIndices[i] + myIndices[i] - 1;
             }
             #pragma unroll
-            for (uint i = 0; i < bN; ++i) {
+            for (int i = 0; i < bN; ++i) {
                 if (rTK[i] && myIndices[i] < expertCap) {
                     const auto expertIdx = bN * cute::get<1>(tileCoord) + i;
                     tokenIds(expertIdx, myIndices[i]) = TPS{bM * cute::get<0>(tileCoord) + threadIdx.x, mCw};
                 }
             }
-            cublasdx::copy_wait();
         }
     };
 
@@ -438,13 +436,13 @@ namespace flashmoe::gate {
                 }
                 /// Softmax Reduction
                 #pragma unroll
-                for (uint j = 0; j < bN; ++j) {
+                for (int j = 0; j < bN; ++j) {
                     const auto pM = mI;
                     mI = max(mI, reginald[j]);
                     dI = fmaf(dI, fexp<sro>(pM - mI),fexp<sro>(reginald[j] - mI));
                 }
                 #pragma unroll
-                for (uint j = 0; j < bN; ++j) {
+                for (int j = 0; j < bN; ++j) {
                     reginald[j] = fdiv<sro>(fexp<sro>(reginald[j] - mI), dI);
                 }
                 #pragma unroll
@@ -499,7 +497,7 @@ namespace flashmoe::gate {
             int myIndices[bN];
             // scan down the column
             #pragma unroll
-            for (uint i = 0; i < bN; ++i) {
+            for (int i = 0; i < bN; ++i) {
                 int selected = 0;
                 BlockScan(scanTempStorage[i]).InclusiveSum(rTK[i], myIndices[i], selected);
                 cachedSelected = threadIdx.x == i ? selected : cachedSelected;
@@ -509,16 +507,15 @@ namespace flashmoe::gate {
             }
             __syncthreads();
             #pragma unroll
-            for (uint i = 0; i < bN; ++i) {
+            for (int i = 0; i < bN; ++i) {
                 myIndices[i] = startIndices[i] + myIndices[i] - 1;
             }
             #pragma unroll
-            for (uint i = 0; i < bN; ++i) {
+            for (int i = 0; i < bN; ++i) {
                 if (rTK[i] && myIndices[i] < expertCap) {
                     tokenIds(i, myIndices[i]) = TPS{bM * cute::get<0>(tileCoord) + threadIdx.x, mCw};
                 }
             }
-            cublasdx::copy_wait();
         }
     };
 
@@ -569,7 +566,9 @@ namespace flashmoe::gate {
                 gateMainLoop(workspace, tokens, _gateWeights, _routing, i,
                     tokenIds, expertCounts, S, H, E, k, EC, rSp, rTp);
             }
-
+            if constexpr (ifk == InsideFusedKernel::yes) {
+                cublasdx::copy_wait();
+            }
         }
     }
 }

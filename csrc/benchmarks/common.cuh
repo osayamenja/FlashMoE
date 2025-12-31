@@ -132,7 +132,7 @@ __global__ void generateRandUniform(
         // n % 4 == 0
         using VTD = VectorTypeDescriptor<Element>;
         using VT = VectorTypeDescriptor<Element>::VectorType;
-        static_assert(VTD::VectorWidth == 4);
+        static_assert(VTD::VectorWidth::value == 4);
         auto* __restrict__ vo = reinterpret_cast<VT*>(out);
         VT vt{storeOp(v.x), storeOp(v.y), storeOp(v.z), storeOp(v.w)};
         vo[tid] = vt;

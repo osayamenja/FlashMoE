@@ -560,7 +560,7 @@ namespace flashmoe{
 
     // Index and gate combine weight
     struct __align__(8) TPS {
-        uint tokenIdx;
+        int tokenIdx;
         mp_t probability;
     };
 
