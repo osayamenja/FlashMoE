@@ -28,10 +28,10 @@ namespace flashmoe
         }
     };
 
-    template<typename T>
+    template<typename T, int Alignment = MAX_ALIGNMENT>
     struct VectorTypeDescriptor {
-        using VectorWidth = cute::C<MAX_ALIGNMENT / sizeof(T)>;
-        using VectorType = cutlass::AlignedArray<T, VectorWidth::value, MAX_ALIGNMENT>;
+        using VectorWidth = cute::C<Alignment / sizeof(T)>;
+        using VectorType = cutlass::AlignedArray<T, VectorWidth::value, Alignment>;
     };
 
 }

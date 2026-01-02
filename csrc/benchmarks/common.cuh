@@ -81,10 +81,10 @@ __device__ __forceinline__ float tie_jitter64(const int64_t& linear_idx,
     return (u - 0.5f) * eps;       // [-eps/2, +eps/2]
 }
 
-template<typename T>
+template<typename T, int Alignment = 16>
     struct VectorTypeDescriptor {
-    using VectorWidth = cute::C<16 / sizeof(T)>;
-    using VectorType = cutlass::AlignedArray<T, VectorWidth::value, 16>;
+    using VectorWidth = cute::C<Alignment / sizeof(T)>;
+    using VectorType = cutlass::AlignedArray<T, VectorWidth::value, Alignment>;
 };
 
 template <int Arch, bool predicate, bool addJitter = false, typename Element>
@@ -104,7 +104,8 @@ __global__ void generateRandUniform(
     const auto tid = static_cast<unsigned long long int>(blockIdx.x)
     * blockDim.x + threadIdx.x;
 
-    const size_t out_base = static_cast<size_t>(tid) * 4;
+    constexpr int vF = 4;
+    const size_t out_base = static_cast<size_t>(tid) * vF;
 
     if (out_base >= n) return;
 
@@ -130,11 +131,15 @@ __global__ void generateRandUniform(
 
     if constexpr (!predicate) {
         // n % 4 == 0
-        using VTD = VectorTypeDescriptor<Element>;
-        using VT = VectorTypeDescriptor<Element>::VectorType;
-        static_assert(VTD::VectorWidth::value == 4);
+        using VTD = VectorTypeDescriptor<Element, vF * sizeof(Element)>;
+        using VT = VTD::VectorType;
+        static_assert(VTD::VectorWidth::value == vF);
         auto* __restrict__ vo = reinterpret_cast<VT*>(out);
-        VT vt{storeOp(v.x), storeOp(v.y), storeOp(v.z), storeOp(v.w)};
+        VT vt{};
+        vt[0] = storeOp(v.x);
+        vt[1] = storeOp(v.y);
+        vt[2] = storeOp(v.z);
+        vt[3] = storeOp(v.w);
         vo[tid] = vt;
     }
     else {
@@ -150,8 +155,8 @@ __host__ __forceinline__
 void randUniform(Element* __restrict__ const& out,
     const  size_t& n, const long int& seed, const float& minv,
     const float& maxv, cudaStream_t stream) {
-    constexpr int threads = 256;
-    const int blocks = cute::ceil_div(n, 256 * 4);
+    constexpr int threads = 128;
+    const int blocks = cute::ceil_div(n, threads * 4);
     if (n % 4 == 0) {
         generateRandUniform<Arch, true, addJitter><<<blocks, threads, 0, stream>>>(out, n, seed, minv, maxv);
     }

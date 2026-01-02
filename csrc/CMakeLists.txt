@@ -31,7 +31,7 @@ endif ()
 set(FLASHMOE_CUDA_CXX_FLAGS "${FLASHMOE_CUDA_CXX_FLAGS} -Wno-unknown-pragmas -Wnull-dereference -Wnarrowing")
 set(FLASHMOE_CUDA_CXX_FLAGS "${FLASHMOE_CUDA_CXX_FLAGS} -Wno-switch -Wduplicated-branches -Wformat=2")
 set(FLASHMOE_CUDA_CXX_FLAGS "${FLASHMOE_CUDA_CXX_FLAGS} -Wno-unused-but-set-parameter")
-set(FLASHMOE_CUDA_CXX_FLAGS "${FLASHMOE_CUDA_CXX_FLAGS} -Wno-sign-compare -v")
+set(FLASHMOE_CUDA_CXX_FLAGS "${FLASHMOE_CUDA_CXX_FLAGS} -Wno-sign-compare")
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -193,13 +193,13 @@ function(flash_target_common tgt)
     target_compile_options(${tgt} PRIVATE
             $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-Xfatbin -compress-all>
             $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
-            $<$<COMPILE_LANGUAGE:CUDA>:-t0;> #--generate-line-info, use sm_xxa for xx >= 90
+            $<$<COMPILE_LANGUAGE:CUDA>:-t0;--generate-line-info> #use sm_xxa for xx >= 90
             $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-gencode=arch=compute_${COMPUTE_CAPABILITY},code=sm_${COMPUTE_CAPABILITY}>
     )
     if(CMAKE_BUILD_TYPE STREQUAL "Debug")
         target_compile_options(${tgt} PRIVATE
                 $<$<COMPILE_LANGUAGE:CXX>:-O0;-g;>
-                $<$<COMPILE_LANGUAGE:CUDA>:-O0; -g; -G>
+                # $<$<COMPILE_LANGUAGE:CUDA>:-O0; -g; -G>
         )
     elseif(CMAKE_BUILD_TYPE STREQUAL "Release")
         if(${tgt} STREQUAL "fb")
@@ -264,9 +264,3 @@ add_executable(gtb_x
         benchmarks/gate_bench.cu
 )
 flash_target_common(gtb_x)
-
-add_executable(gtb_se
-        benchmarks/gate_bench_seq_emb.cu
-
-)
-flash_target_common(gtb_se)

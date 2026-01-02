@@ -207,7 +207,7 @@ void driver(const int& M, const int& N, const int& K, const float& rtol, const f
 
 __host__ __forceinline__
 void kickStart(const int argc, char** argv) {
-    int MNK = 8;
+    int MNK = 2;
     int MNK_max = 8192;
     float rtol = 2e-2f;
     float atol = 2e-3f;
@@ -234,6 +234,12 @@ void kickStart(const int argc, char** argv) {
     matx::cudaExecutor exec{stream, true};
     for (int i = MNK; i <= MNK_max; i *= 2) {
         switch (i) {
+        case 2:
+            driver<2, 2, 2, 1, MMA_C, Element, ElementC>(i, i, i, rtol, atol, exec);
+            break;
+        case 4:
+            driver<4, 4, 4, 1, MMA_C, Element, ElementC>(i, i, i, rtol, atol, exec);
+            break;
         case 8:
             driver<8, 8, 8, 1, MMA_C, Element, ElementC>(i, i, i, rtol, atol, exec);
             break;

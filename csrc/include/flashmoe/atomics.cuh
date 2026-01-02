@@ -91,22 +91,6 @@ namespace flashmoe{
         }
     }
 
-
-    /// Expected Signal is known
-    template<cuda::thread_scope scope = cuda::thread_scope_device,typename Payload, typename T>
-    requires(sizeof(Payload) == sizeof(ull_t) && alignof(Payload) == alignof(ull_t))
-    __device__ __forceinline__
-    void awaitPayload(Payload* __restrict__ const& addr, Payload* __restrict__ const& dest, const T& expected = 1U) {
-        static_assert(cuda::std::is_same_v<decltype(dest->signal), T>, "Signal types should be the same!");
-        auto mail = atomicLoad<scope>(CAST_TO(ull_t, addr));
-        auto* __restrict__ payload = CAST_TO(Payload, &mail);
-        while (payload->signal != expected) {
-            mail = atomicLoad<scope>(CAST_TO(ull_t, addr));
-            payload = CAST_TO(Payload, &mail);
-        }
-        *dest = *payload;
-    }
-
     template<cuda::thread_scope scope = cuda::thread_scope_device, typename Notification, typename T>
     requires(sizeof(Notification) == sizeof(ull_t) && alignof(Notification) == alignof(ull_t))
     __device__ __forceinline__

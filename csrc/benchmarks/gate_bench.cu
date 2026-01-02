@@ -33,7 +33,7 @@ struct __align__(16) GateArgs {
     void* routing;
     void* routing_ref;
     flashmoe::TPS* tokenIds_packed;
-    int* tokenIds;
+    uint* tokenIds;
     matx::index_t* tokenIds_ref;
     int* eCounts;
     matx::index_t* eCounts_ref;
@@ -47,7 +47,6 @@ struct __align__(16) GateArgs {
     int EC;
     float rtol;
     float atol;
-    int dropTokens;
 };
 
 template<
@@ -57,7 +56,7 @@ template<
         flashmoe::GateReductionLevel grl = flashmoe::GateReductionLevel::singleBlock,
         flashmoe::SoftMaxOptimizationLevel sro = flashmoe::SoftMaxOptimizationLevel::none,
         flashmoe::gate::InsideFusedKernel ifk = flashmoe::gate::InsideFusedKernel::yes,
-        typename MMA_C = float,
+        typename AccumType = float,
         typename Element,
         typename ElementR
     >
@@ -75,19 +74,27 @@ __global__ void gateKernel(const Element* __restrict__ tokens,
         flashmoe::SoftmaxStatePacked* __restrict__ rSp,
         flashmoe::RingTopKPayload* __restrict__ rTp
         ) {
-    flashmoe::gate::forward<TileShape, Arch, threads, grl, sro, ifk, MMA_C>(tokens, _gateWeights,
-        _routing, tokenIds, expertCounts, S, H, E, k, EC, rSp, rTp);
+    constexpr int bM = cute::get<0>(TileShape{});
+    constexpr int bN = cute::get<1>(TileShape{});
+    constexpr int bK = cute::get<2>(TileShape{});
+    constexpr int pipeStages = cute::get<3>(TileShape{});
+    using TileGEMM = flashmoe::tile::CollectiveMainloop<
+            bM, bN, bK, Arch, Element, AccumType, threads, pipeStages
+        >;
+    extern __shared__ __align__(TileGEMM::GeneralAlignment::value) cuda::std::byte gateWorkspace[];
+    flashmoe::gate::forward<TileGEMM, grl, sro, ifk>(gateWorkspace, tokens, _gateWeights,
+        _routing, tokenIds, expertCounts, S, H, E, k, EC, static_cast<int>(gridDim.x), rSp, rTp);
 }
 
 template<int warmup, int runs, typename RE, typename REC>
 __host__ __forceinline__
-auto reference(matx::cudaExecutor& exec, const GateArgs& gArgs) {
+auto reference(matx::cudaExecutor& exec, const GateArgs& gArgs, cudaEvent_t start, cudaEvent_t stop) {
     using Element = MXE<RE>;
     using ElementC = MXE<REC>;
     auto tA = matx::make_tensor<Element>(static_cast<Element*>(gArgs.tokens),
         {gArgs.S, gArgs.H});
     auto tB = matx::make_tensor<Element>(static_cast<Element*>(gArgs.gateWeights),
-        {gArgs.H, gArgs.E});
+        {gArgs.E, gArgs.H});
     auto tC = matx::make_tensor<ElementC>(static_cast<ElementC*>(gArgs.routing_ref),
         {gArgs.S, gArgs.E});
     auto tCx = matx::make_tensor<ElementC>(static_cast<ElementC*>(gArgs.routing),
@@ -99,7 +106,7 @@ auto reference(matx::cudaExecutor& exec, const GateArgs& gArgs) {
         {gArgs.E});
     auto tokenIds_packed = matx::make_tensor<flashmoe::TPS>(gArgs.tokenIds_packed,
         {gArgs.E, gArgs.EC});
-    auto tokenIds_x = matx::make_tensor<int>(gArgs.tokenIds, {gArgs.E, gArgs.EC});
+    auto tokenIds_x = matx::make_tensor<uint>(gArgs.tokenIds, {gArgs.E, gArgs.EC});
     (tokenIds_x = matx::apply(SplitFunctor{}, tokenIds_packed)).run(exec);
     auto eCounts_x = matx::make_tensor<int>(gArgs.eCounts, {gArgs.E});
 
@@ -108,8 +115,10 @@ auto reference(matx::cudaExecutor& exec, const GateArgs& gArgs) {
     auto ec_matches = matx::make_tensor<int>({gArgs.E});
     auto s_ec_matches = matx::make_tensor<int>({});
     auto tIds_matches = matx::make_tensor<int>({gArgs.E});
-    (tIds_matches = matx::zeros<int>(tIds_matches.Shape())).run(exec);
     auto s_tIds_matches = matx::make_tensor<int>({});
+    auto st_x = matx::make_tensor<uint>({gArgs.EC});
+    auto st = matx::make_tensor<matx::index_t>({gArgs.EC});
+    (tIds_matches = matx::zeros<int>(tIds_matches.Shape())).run(exec);
 
     // GEMM + Softmax
     (tC = matx::softmax(matx::matmul(tA, tB.PermuteMatrix()), {1})).run(exec);
@@ -150,18 +159,17 @@ auto reference(matx::cudaExecutor& exec, const GateArgs& gArgs) {
             // expert count matches
             // now check token indices
             const auto eCount = hec[i];
-            const auto cutoff = gArgs.dropTokens ? cute::min(eCount, gArgs.EC) : eCount;
-            totalRoutedTokens += cutoff;
-            auto tIdsRow_x = tokenIds_x.Slice<1>({i, 0}, {matx::matxDropDim, cutoff});
-            auto st_x = matx::make_tensor<matx::index_t>(tIdsRow_x.Shape());
-            (st_x = matx::sort(tIdsRow_x, matx::SORT_DIR_DESC)).run(exec);
+            totalRoutedTokens += eCount;
+            auto tIdsRow_x = tokenIds_x.Slice<1>({i, 0}, {matx::matxDropDim, eCount});
+            auto st_x_s = st_x.Slice<1>({0}, {eCount});
+            (st_x_s = matx::sort(tIdsRow_x, matx::SORT_DIR_DESC)).run(exec);
             // check if it matches
-            auto tIdsRow = tokenIds.Slice<1>({i, 0}, {matx::matxDropDim, cutoff});
-            auto st = matx::make_tensor<matx::index_t>(tIdsRow.Shape());
-            (st = matx::sort(tIdsRow, matx::SORT_DIR_DESC)).run(exec);
+            auto tIdsRow = tokenIds.Slice<1>({i, 0}, {matx::matxDropDim, eCount});
+            auto st_s = st.Slice<1>({0}, {eCount});
+            (st_s = matx::sort(tIdsRow, matx::SORT_DIR_DESC)).run(exec);
             auto tIm_r = tIds_matches.Slice<0>({i}, {matx::matxDropDim});
             // compare sorted indices arrays
-            (tIm_r = matx::sum(st_x == st)).run(exec);
+            (tIm_r = matx::sum(st_x_s == st_s)).run(exec);
         }
     }
     (s_tIds_matches = matx::sum(tIds_matches)).run(exec);
@@ -191,19 +199,21 @@ auto reference(matx::cudaExecutor& exec, const GateArgs& gArgs) {
         gate_via_matx();
     }
     exec.sync();
-    exec.start_timer();
+    cudaEventRecord(start, exec.getStream());
     for (int i = 0; i < runs; ++i) {
         gate_via_matx();
     }
-    exec.stop_timer();
-    exec.sync();
-    const float m_time_ms = exec.get_time_ms() / static_cast<float>(runs);
+    cudaEventRecord(stop, exec.getStream());
+    CHECK_CUDA(cudaEventSynchronize(stop));
+    float m_ms = 0;
+    CHECK_CUDA(cudaEventElapsedTime(&m_ms, start, stop));
+    const float m_time_ms = m_ms / static_cast<float>(runs);
 
     // benchmark results
     return std::make_tuple(m_time_ms, ep_gs, ep_ec, ep_tIds);
 }
 
-template<int Arch,
+template<int Arch, int sharedSize,
     typename TileShape,
     flashmoe::GateReductionLevel grl = flashmoe::GateReductionLevel::singleBlock,
     flashmoe::SoftMaxOptimizationLevel sro = flashmoe::SoftMaxOptimizationLevel::none,
@@ -214,10 +224,13 @@ __host__ __forceinline__
 auto gk_run(matx::cudaExecutor& exec, const GateArgs& gArgs, const int& blocks) {
     constexpr auto runs = 128;
     constexpr auto warmup = 32;
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
     auto kernel = [&]() {
         cudaMemsetAsync(gArgs.eCounts, 0, sizeof(int) * gArgs.E, exec.getStream());
-        gateKernel<TileShape, Arch, threads,grl, sro, ifk, AccumType>
-        <<<blocks, threads, 0, exec.getStream()>>>(
+        gateKernel<TileShape, Arch, threads, grl, sro, ifk, AccumType>
+        <<<blocks, threads, sharedSize, exec.getStream()>>>(
             static_cast<Element*>(gArgs.tokens),
             static_cast<Element*>(gArgs.gateWeights),
             static_cast<ElementC*>(gArgs.routing),
@@ -225,18 +238,23 @@ auto gk_run(matx::cudaExecutor& exec, const GateArgs& gArgs, const int& blocks) 
             gArgs.eCounts, gArgs.S, gArgs.H, gArgs.E, gArgs.k, gArgs.EC, gArgs.rSp, gArgs.rTp);
     };
     kernel();
-    const auto ref_result = reference<warmup, runs, Element, ElementC>(exec, gArgs);
+    const auto ref_result = reference<warmup, runs, Element, ElementC>(exec, gArgs, start, stop);
     for (int i = 0; i < warmup; ++i) {
         kernel();
     }
     exec.sync();
-    exec.start_timer();
+    cudaEventRecord(start, exec.getStream());
     for (int i = 0; i < runs; ++i) {
         kernel();
     }
-    exec.stop_timer();
+    cudaEventRecord(stop, exec.getStream());
+    float k_ms = 0;
+    CHECK_CUDA(cudaEventSynchronize(stop));
+    CHECK_CUDA(cudaEventElapsedTime(&k_ms, start, stop));
     CHECK_CUDA(cudaPeekAtLastError());
-    const auto k_time_ms = exec.get_time_ms() / static_cast<float>(runs);
+    const auto k_time_ms = k_ms / static_cast<float>(runs);
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
     return std::make_tuple(k_time_ms, ref_result);
 }
 
@@ -250,18 +268,17 @@ template<
 >
 __host__ __forceinline__
 void driver(const int& S, const int& E, const int& H, const int& k, const float& rtol,
-    const float& atol, matx::cudaExecutor& exec,
-    const bool dropTokens = true) {
+    const float& atol, matx::cudaExecutor& exec) {
     const int M = S;
     const int N = E;
     const int K = H;
-    const int eCap = dropTokens ? cute::ceil_div(S, E) * k : S;
+    const int eCap = S; // no dropping for the test
     Element* tokens = nullptr; // token matrix
     Element* gateWeights = nullptr; // weights
     ElementC* routing = nullptr; // routing
     ElementC* routing_ref = nullptr;
     flashmoe::TPS* tokenIds = nullptr; // TPS is a packed struct of float and int
-    int* tokenIds_idx = nullptr; // TPS is a packed struct of float and int
+    uint* tokenIds_idx = nullptr; // TPS is a packed struct of float and int
     matx::index_t* tokenIds_ref = nullptr;
     int* eCounts = nullptr;
     matx::index_t* eCounts_ref = nullptr;
@@ -275,7 +292,7 @@ void driver(const int& S, const int& E, const int& H, const int& k, const float&
     cudaMallocAsync(&routing, M * N * sizeof(ElementC), stream);
     cudaMallocAsync(&routing_ref, M * N * sizeof(ElementC), stream);
     cudaMallocAsync(&tokenIds, E * eCap * sizeof(flashmoe::TPS), stream);
-    cudaMallocAsync(&tokenIds_idx, E * eCap * sizeof(int), stream);
+    cudaMallocAsync(&tokenIds_idx, E * eCap * sizeof(uint), stream);
     cudaMallocAsync(&tokenIds_ref, E * S * sizeof(matx::index_t), stream);
     cudaMallocAsync(&eCounts, E * sizeof(int), stream);
     cudaMemsetAsync(eCounts, 0, E * sizeof(int), stream);
@@ -297,7 +314,10 @@ void driver(const int& S, const int& E, const int& H, const int& k, const float&
     constexpr int threads = flashmoe::tile::suggest_thread_count<bM, bN, bK, Arch, Element, AccumType>();
     auto kernel = gateKernel<TileShape, Arch, threads, grl, sro, ifk, AccumType, Element, ElementC>;
     int bps = 0;
-    cudaOccupancyMaxActiveBlocksPerMultiprocessor(&bps, kernel, threads, 0);
+    constexpr auto sharedSize = cute::max(bK * pipeStages * (bM + bN) * sizeof(Element),
+        bM * bN * sizeof(AccumType));
+    CHECK_CUDA(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&bps, kernel, threads, sharedSize));
+    CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, sharedSize));
     const int blocks = cute::min(cute::ceil_div(M, bM) * cute::ceil_div(N, bN),
         bps * NUM_SMS); // use ceil_div to avoid zero
     constexpr auto min_v = -1.f;
@@ -317,10 +337,10 @@ void driver(const int& S, const int& E, const int& H, const int& k, const float&
         tokenIds_idx,
         tokenIds_ref, eCounts, eCounts_ref, topK, rSp, rTp,
         S, H, E, k, eCap,
-        rtol, atol, static_cast<int>(dropTokens)
+        rtol, atol
     };
     // returns [kernel_ms, [m_time_ms, ep_gs, ep_ec, ep_tIds]]
-    const auto results = gk_run<Arch, TileShape, grl, sro, ifk, threads, AccumType, Element, ElementC>
+    const auto results = gk_run<Arch, sharedSize, TileShape, grl, sro, ifk, threads, AccumType, Element, ElementC>
     (exec, gArgs, blocks);
     const float kernel_ms = std::get<0>(results);
     const auto r_tuple = std::get<1>(results);
@@ -355,14 +375,14 @@ void driver(const int& S, const int& E, const int& H, const int& k, const float&
 __host__ __forceinline__
 void kickStart(const int argc, char** argv) {
     // we have to fix S and H to minimize instantiated templates as tile shapes are dependent on them
-    constexpr auto S = 128;
-    constexpr auto H = 2048;
+    constexpr auto S = 64;
+    constexpr auto H = 256;
     using Element = __half;
     using ElementC = float;
     float rtol = 2e-2f;
     float atol = 2e-3f;
-    int E = 2;
-    int E_max = 256;
+    int E = 8;
+    int E_max = 8;
     int k = 1;
     constexpr int Arch = FLASHMOE_ARCH;
     printf("S, E, H, bM, bN, bK, pipeStages, threads, blocks/SM, SMs, "
@@ -386,92 +406,69 @@ void kickStart(const int argc, char** argv) {
     cudaSetDevice(0);
     cudaStream_t stream;
     cudaStreamCreate(&stream);
-    matx::cudaExecutor exec{stream, true};
+    matx::cudaExecutor exec{stream};
     constexpr auto sro = flashmoe::SoftMaxOptimizationLevel::none;
     constexpr auto ifk = flashmoe::gate::InsideFusedKernel::no;
     // tiling heuristics
     constexpr int bM = cute::min(S, 128);
-    constexpr int kF = 32 * (4 / sizeof(Element));
-    constexpr int bK = cute::min(H, kF);
+    constexpr int bK = cute::min(H, 64);
     constexpr int pS = H >= bK * 2 ? 2 : 1;
     for (int i = E; i <= E_max; i *= 2) {
         switch (i) {
-        case 8:
+        case 2:
             {
+                constexpr int bM_x = 64;
                 constexpr int bN = 8;
-                if (k > 1) {
-                    driver<Arch, bM, bN, bK, pS, flashmoe::GateReductionLevel::multiBlock, sro, ifk,
+                driver<Arch, bM_x, bN, bK, pS, flashmoe::GateReductionLevel::singleBlock, sro, ifk,
                         Element, ElementC>(S, i, H, k, rtol, atol, exec);
-                }
-                else if (k == 1) {
-                    driver<Arch, bM, bN, bK, pS, flashmoe::GateReductionLevel::singleBlock, sro, ifk,
-                        Element, ElementC>(S, i, H, k, rtol, atol, exec);
-                }
             }
             break;
-        /*case 16:
+        case 4:
             {
+                constexpr int bM_x = 64;
+                constexpr int bN = 8;
+                driver<Arch, bM_x, bN, bK, pS, flashmoe::GateReductionLevel::singleBlock, sro, ifk,
+                        Element, ElementC>(S, i, H, k, rtol, atol, exec);
+            }
+            break;
+        case 8:
+            {
+                constexpr int bM_x = 64;
+                constexpr int bN = 8;
+                driver<Arch, bM_x, bN, bK, pS, flashmoe::GateReductionLevel::singleBlock, sro, ifk,
+                        Element, ElementC>(S, i, H, k, rtol, atol, exec);
+            }
+            break;
+        case 16:
+            {
+                constexpr int bM_x = 64;
                 constexpr int bN = 16;
-                if (k > 1) {
-                    driver<Arch, bM, bN, bK, pS, flashmoe::GateReductionLevel::multiBlock, sro, ifk,
+                driver<Arch, bM_x, bN, bK, pS, flashmoe::GateReductionLevel::singleBlock, sro, ifk,
                         Element, ElementC>(S, i, H, k, rtol, atol, exec);
-                }
-                else if (k == 1) {
-                    driver<Arch, bM, bN, bK, pS, flashmoe::GateReductionLevel::singleBlock, sro, ifk,
-                        Element, ElementC>(S, i, H, k, rtol, atol, exec);
-                }
             }
             break;
         case 32:
             {
+                constexpr int bM_x = 64;
                 constexpr int bN = 32;
-                if (k > 1) {
-                    driver<Arch, bM, bN, bK, pS, flashmoe::GateReductionLevel::multiBlock, sro, ifk,
+                driver<Arch, bM_x, bN, bK, pS, flashmoe::GateReductionLevel::singleBlock, sro, ifk,
                         Element, ElementC>(S, i, H, k, rtol, atol, exec);
-                }
-                else if (k == 1) {
-                    driver<Arch, bM, bN, bK, pS, flashmoe::GateReductionLevel::singleBlock, sro, ifk,
-                        Element, ElementC>(S, i, H, k, rtol, atol, exec);
-                }
             }
             break;
         case 64:
             {
                 constexpr int bN = 64;
-                if (k > 1) {
-                    driver<Arch, bM, bN, bK_x, pS, flashmoe::GateReductionLevel::multiBlock, sro, ifk,
+                driver<Arch, bM, bN, bK, pS, flashmoe::GateReductionLevel::singleBlock, sro, ifk,
                         Element, ElementC>(S, i, H, k, rtol, atol, exec);
-                }
-                else if (k == 1) {
-                    driver<Arch, bM, bN, bK_x, pS, flashmoe::GateReductionLevel::singleBlock, sro, ifk,
-                        Element, ElementC>(S, i, H, k, rtol, atol, exec);
-                }
             }
-            break;*/
+            break;
         default:
             {
-                /*if (i >= 128 && i <= 2048) {
+                if (i > 64) {
                     constexpr int bN = 64;
-                    if (k > 1) {
-                        driver<Arch, bM, bN, bK_x, pS, flashmoe::GateReductionLevel::multiBlock, sro, ifk,
-                        Element, ElementC>(S, i, H, k, rtol, atol, exec);
-                    }
-                    else if (k == 1) {
-                        driver<Arch, bM, bN, bK_x, pS, flashmoe::GateReductionLevel::singleBlock, sro, ifk,
+                    driver<Arch, bM, bN, bK, pS, flashmoe::GateReductionLevel::multiBlock, sro, ifk,
                             Element, ElementC>(S, i, H, k, rtol, atol, exec);
-                    }
                 }
-                else if (i > 2048) {
-                    constexpr int bN = 64 * (4 / sizeof(Element));
-                    if (k > 1) {
-                        driver<Arch, bM, bN, bK_x, pS, flashmoe::GateReductionLevel::multiBlock, sro, ifk,
-                            Element, ElementC>(S, i, H, k, rtol, atol, exec);
-                    }
-                    else if (k == 1) {
-                        driver<Arch, bM, bN, bK_x, pS, flashmoe::GateReductionLevel::singleBlock, sro, ifk,
-                            Element, ElementC>(S, i, H, k, rtol, atol, exec);
-                    }
-                }*/
             }
         }
     }

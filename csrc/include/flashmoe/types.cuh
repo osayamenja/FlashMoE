@@ -283,11 +283,17 @@ namespace flashmoe{
         WorkerAttribute wA;
     };
 
-    __device__
     struct __align__(8) SoftmaxStatePacked {
         uint32_t m_bits;   // raw bits of mI (fp32)
         uint32_t d_bits;   // raw bits of dI (fp32), sign bit used as signal
     };
+    __device__ __forceinline__
+    auto to_softmax_state(const unsigned long long int& raw) {
+        SoftmaxStatePacked s;
+        s.m_bits = static_cast<uint32_t>(raw & 0xFFFFFFFFull);
+        s.d_bits = static_cast<uint32_t>(raw >> 32);
+        return s;
+    }
     // Pack: signal is implicitly always 1
     __device__ __forceinline__
     SoftmaxStatePacked pack_state(const float& m, const float& d) {
@@ -300,7 +306,7 @@ namespace flashmoe{
 
         return p;
     }
-    // Unpack: returns (m, d) and the signal bit for polling
+    // Unpack: returns (m, d)
     __device__ __forceinline__
     void unpack_state(const SoftmaxStatePacked &p, float &m, float &d) {
         m = __uint_as_float(p.m_bits);
@@ -308,8 +314,40 @@ namespace flashmoe{
     }
     __device__ __forceinline__
     bool has_payload_arrived(const SoftmaxStatePacked &p) {
-        const int signal = p.d_bits >> 31;
-        return signal == 1;
+        return (p.d_bits >> 31) != 0;
+    }
+
+    __device__
+    struct __align__(8) RingTopKPayload {
+        uint32_t sV; // raw fp32 bits
+        uint32_t sIdx = 0U; // raw index bits, sign bit used as signal
+    };
+    __device__ __forceinline__
+    auto to_tk_payload(const unsigned long long int& raw) {
+        RingTopKPayload r;
+        r.sV = static_cast<uint32_t>(raw & 0xFFFFFFFFull);
+        r.sIdx = static_cast<uint32_t>(raw >> 32);
+        return r;
+    }
+    // Pack: signal is implicitly always 1
+    __device__ __forceinline__
+    auto pack_tk_payload(const float& sV, const uint32_t& sIdx) {
+        RingTopKPayload r;
+        r.sV = __float_as_uint(sV);
+
+        r.sIdx = sIdx;
+        r.sIdx = (sIdx & 0x7FFFFFFFu) | 0x80000000u;  // keep 31 bits, set signal bit
+        return r;
+    }
+    // Unpack: returns (m, d)
+    __device__ __forceinline__
+    void unpack_tk_payload(const RingTopKPayload &p, float &sV, uint32_t &sIdx) {
+        sV = __uint_as_float(p.sV);
+        sIdx = p.sIdx & 0x7FFFFFFFu; // clear sign bit
+    }
+    __device__ __forceinline__
+    bool has_payload_arrived(const RingTopKPayload &p) {
+        return (p.sIdx >> 31) != 0;
     }
 
     __device__
@@ -318,13 +356,6 @@ namespace flashmoe{
         __half dI = __half(0.0f);
         uint16_t signal = 0U;
     };
-    __device__
-    struct __align__(8) RingTopKPayload {
-        mp_t sV = -cuda::std::numeric_limits<mp_t>::infinity();
-        uint16_t sIdx = 0U;
-        uint16_t signal = 0U;
-    };
-    
     template<PacketStage p = PacketStage::initial>
     __device__
     struct __align__(8) SignalPayload {
@@ -560,7 +591,7 @@ namespace flashmoe{
 
     // Index and gate combine weight
     struct __align__(8) TPS {
-        int tokenIdx;
+        uint tokenIdx;
         mp_t probability;
     };
 
