@@ -96,15 +96,28 @@ namespace flashmoe::tile
         tensor.data() = base_ptr + (stage * offset);
     }
 
+    template<typename Element, int dim>
+    constexpr int ElementWidth = cute::min(dim, MAX_ALIGNMENT / sizeof(Element));
+    template<typename Element, int dim>
+    constexpr int ElementAlignment = (cutlass::is_pow2<ElementWidth<Element, dim>>::value ?
+        ElementWidth<Element, dim> : 1) * sizeof(Element);
+    template<cublasdx::arrangement ar, int bM, int bK>
+    constexpr int ldA = ar == cublasdx::row_major ? bK : bM;
+    template<cublasdx::arrangement br, int bK, int bN>
+    constexpr int ldB = br == cublasdx::col_major ? bK : bN;
+    template<cublasdx::arrangement cr, int bM, int bN>
+    constexpr int ldC = cr == cublasdx::row_major ? bN : bM;
     template<
         int bM, int bN, int bK, // tile shape
         int Arch, // compute capability
         typename Element, // type for A and B
         typename MMA_C,  // compute type
-        int alignment = MAX_ALIGNMENT,
         cublasdx::arrangement ar = cublasdx::row_major,
         cublasdx::arrangement br = cublasdx::col_major,
-        cublasdx::arrangement cr = cublasdx::row_major
+        cublasdx::arrangement cr = cublasdx::row_major,
+        int aAlignment = MAX_ALIGNMENT,
+        int bAlignment = MAX_ALIGNMENT,
+        int cAlignment = MAX_ALIGNMENT
     >
     constexpr int suggest_thread_count() {
         using GhostBLAS = decltype(
@@ -114,7 +127,7 @@ namespace flashmoe::tile
             cublasdx::Function<cublasdx::function::MM>() +
             cublasdx::Arrangement<ar, br, cr>() +
             cublasdx::Block() +
-            cublasdx::Alignment<alignment, alignment, alignment>() +
+            cublasdx::Alignment<aAlignment, bAlignment, cAlignment>() +
             cublasdx::StaticBlockDim() +
             cublasdx::EnableInputStreaming() +
             cublasdx::SM<Arch, Arch >= 900 ? cublasdx::sm_modifier::arch_specific : cublasdx::sm_modifier::generic>());
@@ -127,12 +140,12 @@ namespace flashmoe::tile
         typename MMA_C,  // compute type
         int threads,
         int pipeStages = 1, // pipeline stages
-        int aAlignment = MAX_ALIGNMENT,
-        int bAlignment = MAX_ALIGNMENT,
-        int cAlignment = MAX_ALIGNMENT,
         cublasdx::arrangement ar = cublasdx::row_major,
         cublasdx::arrangement br = cublasdx::col_major,
-        cublasdx::arrangement cr = cublasdx::row_major
+        cublasdx::arrangement cr = cublasdx::row_major,
+        int aAlignment = MAX_ALIGNMENT,
+        int bAlignment = MAX_ALIGNMENT,
+        int cAlignment = MAX_ALIGNMENT
     >
     requires(pipeStages > 0 && Arch >= 700)
     struct CollectiveMainloop {

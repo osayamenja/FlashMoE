@@ -14,6 +14,7 @@
 #define GATE_CUH
 
 #include <cub/cub.cuh>
+#include <cuda/std/bit>
 
 #include "tile.cuh"
 #include "atomics.cuh"
@@ -60,9 +61,8 @@ namespace flashmoe::gate {
     }
     template<int threads>
     using BlockScan = cub::BlockScan<int, threads, cub::BLOCK_SCAN_WARP_SCANS>;
-    using UPPER_SHARED_MEM = cute::Int<32 * 1024>;
     using SoftType = float;
-    /// Fused GEMM, softmax, topKMask, and loss, assuming blocks >= tiles.N and no bias.
+    /// Fused GEMM, softmax, topKMask, assuming blocks >= tiles.N
     template<
         GateReductionLevel g,
         typename TileGEMM,
@@ -409,10 +409,7 @@ namespace flashmoe::gate {
                 cute::Layout<cute::Shape<cute::Int<bM>, cute::Int<bN>>,
                 cute::Stride<cute::Int<bN>, cute::_1>>{});
             // vectorized smem layout
-            constexpr int vW = MAX_ALIGNMENT / sizeof(AccumType);
-            constexpr int vElemWidth = cute::min(bN, vW);
-            constexpr int vAlignment = (cutlass::is_pow2<vElemWidth>::value ? vElemWidth : 1) * sizeof(AccumType);
-            using VTD = VectorTypeDescriptor<AccumType, vAlignment>;
+            using VTD = VectorTypeDescriptor<AccumType, tile::ElementAlignment<AccumType, bN>>;
             using VT = VTD::VectorType;
             constexpr int vectorWidth = VTD::VectorWidth::value;
             constexpr int vbN = bN / VTD::VectorWidth::value;
