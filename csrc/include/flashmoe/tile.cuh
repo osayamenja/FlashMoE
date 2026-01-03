@@ -164,7 +164,7 @@ namespace flashmoe::tile
         using Threads = cute::C<threads>;
         using TileShape = cute::Shape<cute::Int<bM>, cute::Int<bN>, cute::Int<bK>>;
         using SharedSize = cute::Int<bK * pipeStages * (bM + bN) * sizeof(Element)>;
-        using GeneralAlignment = cute::Int<cute::max(aAlignment, bAlignment, cAlignment)>;
+        using GeneralAlignment = cute::Int<MAX_ALIGNMENT>;
         using CArr = cute::C<cr>;
         using AAlign = cute::C<aAlignment>;
         using BAlign = cute::C<bAlignment>;

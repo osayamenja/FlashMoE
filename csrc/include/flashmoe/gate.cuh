@@ -80,6 +80,7 @@ namespace flashmoe::gate {
             const Element* __restrict__ const& weights,
             ElementC* __restrict__ routing, const int& tileIdx,
             TPS* __restrict__ const& _tokenIds, int* __restrict__ const& expertCounts,
+            int* __restrict__ const& eCGuards,
             const int& S, const int& H, const int& E, const int& k, const int& expertCap,
             SoftmaxStatePacked* __restrict__ const& _rSp,
             RingTopKPayload* __restrict__ const& _rTp) {
@@ -149,7 +150,7 @@ namespace flashmoe::gate {
             // rmem -> smem
             cublasdx::copy_fragment<TileGEMM::CAlign::value>(c_frag, sC, accumulator);
             __syncthreads();
-            // TODO loosen this
+            // TODO relax this
             static_assert(threads >= bM);
             SoftType reginald[bN];
             // using notation from https://courses.cs.washington.edu/courses/cse599m/23sp/notes/flashattn.pdf
@@ -327,20 +328,28 @@ namespace flashmoe::gate {
             __shared__ int startIndices[bN];
             using BTS = BlockScan<threads>::TempStorage;
             __shared__ __align__(alignof(BTS)) BTS scanTempStorage[bN];
-            int cachedSelected = 0;
             int myIndices[bN];
             // scan down the column
-            // TODO loosen this
-            static_assert(threads >= bN);
+            constexpr int sl = cute::ceil_div(bN, threads); // typically 1
+            int stash[sl];
+            #pragma unroll
+            for (int i = 0; i < sl; ++i) {
+                stash[i] = 0;
+            }
             #pragma unroll
             for (int i = 0; i < bN; ++i) {
                 int selected = 0;
                 BlockScan<threads>(scanTempStorage[i]).InclusiveSum(rTK[i], myIndices[i], selected);
-                cachedSelected = threadIdx.x == i ? selected : cachedSelected;
+                stash[i / threads] = threadIdx.x == (i % threads) ? selected : stash[i / threads];
             }
-            if (threadIdx.x < bN) {
-                startIndices[threadIdx.x] = atomicAdd(expertCounts +
-                    (bN * cute::get<1>(tileCoord) + threadIdx.x), cachedSelected);
+            #pragma unroll
+            for (int i = 0; i < sl; ++i) {
+                const int idx = threadIdx.x + i * threads;
+                if (idx < bN) {
+                    const int expertIdx = bN * cute::get<1>(tileCoord) + idx;
+                    startIndices[idx] = guardedAtomicAdd(eCGuards + expertIdx,
+                    expertCounts + expertIdx, stash[i]);
+                }
             }
             __syncthreads();
             #pragma unroll
@@ -377,6 +386,7 @@ namespace flashmoe::gate {
             const int& tileIdx,
             TPS* __restrict__ const& _tokenIds,
             int* __restrict__ const& expertCounts,
+            int* __restrict__ const& eCGuards,
             const int& S, const int& H, const int& E,
             const int& k,const int& expertCap) {
             constexpr int threads = TileGEMM::Threads::value;
@@ -424,7 +434,7 @@ namespace flashmoe::gate {
             // rmem -> smem
             cublasdx::copy_fragment<TileGEMM::CAlign::value>(c_frag, sC, accumulator);
             __syncthreads();
-            // TODO loosen this
+            // TODO relax this
             static_assert(threads >= bM);
             SoftType reginald[bN];
             if (threads == bM || threadIdx.x < bM) {
@@ -504,19 +514,27 @@ namespace flashmoe::gate {
             __shared__ int startIndices[bN];
             using BTS = BlockScan<threads>::TempStorage; // :)
             __shared__ __align__(alignof(BTS)) BTS scanTempStorage[bN];
-            int cachedSelected = 0;
             int myIndices[bN];
             // scan down the column
-            // TODO loosen this
-            static_assert(threads >= bN);
+            constexpr int sl = cute::ceil_div(bN, threads); // typically 1
+            int stash[sl];
+            #pragma unroll
+            for (int i = 0; i < sl; ++i) {
+                stash[i] = 0;
+            }
             #pragma unroll
             for (int i = 0; i < bN; ++i) {
                 int selected = 0;
                 BlockScan<threads>(scanTempStorage[i]).InclusiveSum(rTK[i], myIndices[i], selected);
-                cachedSelected = threadIdx.x == i ? selected : cachedSelected;
+                stash[i / threads] = threadIdx.x == (i % threads) ? selected : stash[i / threads];
             }
-            if (threadIdx.x < bN) {
-                startIndices[threadIdx.x] = atomicAdd(expertCounts + threadIdx.x, cachedSelected);
+            #pragma unroll
+            for (int i = 0; i < sl; ++i) {
+                const int expertIdx = threadIdx.x + i * threads;
+                if (expertIdx < bN) {
+                    startIndices[expertIdx] = guardedAtomicAdd(eCGuards + expertIdx,
+                    expertCounts + expertIdx, stash[i]);
+                }
             }
             __syncthreads();
             #pragma unroll
@@ -549,11 +567,18 @@ namespace flashmoe::gate {
         ElementR* __restrict__ const& _routing,
         TPS* __restrict__ const& tokenIds,
         int* __restrict__ const& expertCounts,
+        int* __restrict__ eCGuards,
         const int& S, const int& H, const int& E, const int& k, const int& EC,
         const int& blocks,
         SoftmaxStatePacked* __restrict__ const& rSp = nullptr, // only needed for grl == multiblock
         RingTopKPayload* __restrict__ const& rTp = nullptr // only needed for grl == multiblock
         ){
+        constexpr int threads = TileGEMM::Threads::value;
+        if (!blockIdx.x) {
+            for (int i = static_cast<int>(threadIdx.x); i < E; i += threads) {
+                tryGuardInit(eCGuards + i, expertCounts + i);
+            }
+        }
         // assert(blocks >= E / bN)
         using TileShape = TileGEMM::TileShape;
         constexpr int bM = cute::get<0>(TileShape{});
@@ -564,16 +589,19 @@ namespace flashmoe::gate {
         for (int i = static_cast<int>(blockIdx.x); i < nT; i += blocks) {
             if constexpr (grl == GateReductionLevel::singleBlock) {
                 gateMainLoop(workspace, tokens, _gateWeights, _routing, i,
-                    tokenIds, expertCounts, S, H, E, k, EC);
+                    tokenIds, expertCounts, eCGuards, S, H, E, k, EC);
             }
             else {
                 gateMainLoop(workspace, tokens, _gateWeights, _routing, i,
-                    tokenIds, expertCounts, S, H, E, k, EC, rSp, rTp);
+                    tokenIds, expertCounts, eCGuards, S, H, E, k, EC, rSp, rTp);
             }
             if constexpr (ifk == InsideFusedKernel::yes) {
                 cublasdx::copy_wait();
             }
         }
+        // clear guards
+        clearGuardsCoop<threads>(eCGuards, E + 1,
+            eCGuards + E, blocks, static_cast<int*>(workspace));
     }
 }
 #endif //GATE_CUH

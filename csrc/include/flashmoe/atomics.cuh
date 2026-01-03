@@ -33,13 +33,13 @@ namespace flashmoe{
     __device__ __forceinline__
     auto atomicLoad(T* __restrict__ const& addr){
         if constexpr (scope == cuda::thread_scope_block || scope == cuda::thread_scope_thread) {
-            return atomicOr_block(addr, 0U);
+            return atomicAdd_block(addr, 0);
         }
         else if constexpr (scope == cuda::thread_scope_system) {
-            return atomicOr_system(addr, 0U);
+            return atomicAdd_system(addr, 0);
         }
         else {
-            return atomicOr(addr, 0U);
+            return atomicAdd(addr, 0);
         }
     }
 
@@ -73,6 +73,56 @@ namespace flashmoe{
         }
         else {
             return atomicCAS(addr, 0U, 1U);
+        }
+    }
+
+    enum InitState: int {
+        stale = 0,
+        initializing = 1,
+        initialized = 2
+    };
+
+    __device__ __forceinline__
+    void tryGuardInit(int* __restrict__ const& guards, int* __restrict__ const& vals) {
+        cuda::atomic_ref<int, cuda::thread_scope_device> g{*guards};
+        if (int expected = stale;
+            g.compare_exchange_strong(expected, initializing, cuda::memory_order_relaxed)) {
+            *vals = 0;
+            g.store(initialized, cuda::memory_order_release);
+        }
+    }
+    // Enables in-kernel initialization of accumulators
+    __device__ __forceinline__
+    auto guardedAtomicAdd(int* __restrict__ const& guard, int* __restrict__ const& vals, const int& val) {
+        const cuda::atomic_ref<int, cuda::thread_scope_device> g{*guard};
+        int expected = stale;
+        if (g.compare_exchange_strong(expected, initializing, cuda::memory_order_acquire)) {
+            // initialize with my value
+            *vals = val;
+            g.store(initialized, cuda::memory_order_release);
+            return 0;
+        }
+        while (expected != initialized) {
+            // the idea here is that the load+acquire is a "slow enough" read to moonlight as a quasi-backoff
+            expected = g.load(cuda::memory_order_acquire);
+        }
+        return atomicAdd(vals, val);
+    }
+
+    template<int threads>
+    __device__ __forceinline__
+    void clearGuardsCoop(int* __restrict__ guards, const int& guardsLength, int* __restrict__ const& checkpoint,
+        const int& blocks, int* __restrict__ const& isLastBlock) {
+        __syncthreads();
+        if (!threadIdx.x) {
+            const cuda::atomic_ref<int, cuda::thread_scope_device> c{*checkpoint};
+            *isLastBlock = c.fetch_add(1, cuda::memory_order_release) + 1 == blocks;
+        }
+        __syncthreads();
+        if (*isLastBlock) {
+            for (int i = threadIdx.x; i < guardsLength; i += threads) {
+                guards[i] = 0;
+            }
         }
     }
 

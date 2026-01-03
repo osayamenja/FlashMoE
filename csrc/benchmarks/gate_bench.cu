@@ -38,6 +38,7 @@ struct __align__(16) GateArgs {
     uint* tokenIds;
     matx::index_t* tokenIds_ref;
     int* eCounts;
+    int* eCGuards;
     matx::index_t* eCounts_ref;
     matx::index_t* topK;
     flashmoe::SoftmaxStatePacked* rSp;
@@ -68,6 +69,7 @@ __global__ void gateKernel(const Element* __restrict__ tokens,
         ElementR* __restrict__ _routing,
         flashmoe::TPS* __restrict__ tokenIds,
         int* __restrict__ expertCounts,
+        int* __restrict__ eCGuards,
         const __grid_constant__ int S,
         const __grid_constant__ int H,
         const __grid_constant__ int E,
@@ -85,7 +87,8 @@ __global__ void gateKernel(const Element* __restrict__ tokens,
         >;
     extern __shared__ __align__(TileGEMM::GeneralAlignment::value) cuda::std::byte gateWorkspace[];
     flashmoe::gate::forward<TileGEMM, grl, sro, ifk>(gateWorkspace, tokens, _gateWeights,
-        _routing, tokenIds, expertCounts, S, H, E, k, EC, static_cast<int>(gridDim.x), rSp, rTp);
+        _routing, tokenIds, expertCounts, eCGuards,
+        S, H, E, k, EC, static_cast<int>(gridDim.x), rSp, rTp);
 }
 
 template<int warmup, int runs, typename RE, typename REC>
@@ -231,14 +234,14 @@ auto gk_run(matx::cudaExecutor& exec, const GateArgs& gArgs, const int& blocks, 
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
     auto kernel = [&]() {
-        cudaMemsetAsync(gArgs.eCounts, 0, sizeof(int) * gArgs.E, exec.getStream());
         gateKernel<TileShape, Arch, threads, grl, sro, ifk, AccumType>
         <<<blocks, threads, sharedSize, exec.getStream()>>>(
             static_cast<Element*>(gArgs.tokens),
             static_cast<Element*>(gArgs.gateWeights),
             static_cast<ElementC*>(gArgs.routing),
             gArgs.tokenIds_packed,
-            gArgs.eCounts, gArgs.S, gArgs.H, gArgs.E, gArgs.k, gArgs.EC, gArgs.rSp, gArgs.rTp);
+            gArgs.eCounts, gArgs.eCGuards,
+            gArgs.S, gArgs.H, gArgs.E, gArgs.k, gArgs.EC, gArgs.rSp, gArgs.rTp);
     };
     kernel();
     auto ref_result = std::make_tuple(0.f, -0.0, -0.0, -0.0);
@@ -292,18 +295,20 @@ void driver(const int& S, const int& E, const int& H, const int& k, const float&
     uint* tokenIds_idx = nullptr; // TPS is a packed struct of float and int
     matx::index_t* tokenIds_ref = nullptr;
     int* eCounts = nullptr;
+    int* eCGuards = nullptr;
     matx::index_t* eCounts_ref = nullptr;
     matx::index_t* topK = nullptr;
     flashmoe::SoftmaxStatePacked* rSp = nullptr;
     flashmoe::RingTopKPayload* rTp = nullptr;
 
     auto stream = exec.getStream();
+    cudaMallocAsync(&eCounts, E * sizeof(int), stream);
+    cudaMallocAsync(&eCGuards, (E + 1) * sizeof(int), stream);
+    cudaMemsetAsync(eCGuards, 0, (E + 1) * sizeof(int), stream);
     cudaMallocAsync(&tokens, M * K * sizeof(Element), stream);
     cudaMallocAsync(&gateWeights, K * N * sizeof(Element), stream);
     cudaMallocAsync(&routing, M * N * sizeof(ElementC), stream);
     cudaMallocAsync(&tokenIds, E * eCap * sizeof(flashmoe::TPS), stream);
-    cudaMallocAsync(&eCounts, E * sizeof(int), stream);
-    cudaMemsetAsync(eCounts, 0, E * sizeof(int), stream);
     if (checkCorrectness) {
         // correctness checking consumes a lot of memory
         cudaMallocAsync(&routing_ref, M * N * sizeof(ElementC), stream);
@@ -352,7 +357,7 @@ void driver(const int& S, const int& E, const int& H, const int& k, const float&
         routing_ref,
         tokenIds,
         tokenIds_idx,
-        tokenIds_ref, eCounts, eCounts_ref, topK, rSp, rTp,
+        tokenIds_ref, eCounts, eCGuards, eCounts_ref, topK, rSp, rTp,
         S, H, E, k, eCap,
         rtol, atol
     };
