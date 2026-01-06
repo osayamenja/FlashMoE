@@ -14,10 +14,11 @@
 #define GATE_CUH
 
 #include <cub/cub.cuh>
-#include <cuda/std/bit>
 
-#include "tile.cuh"
 #include "atomics.cuh"
+#include "packed.cuh"
+#include "tile.cuh"
+#include "vt.cuh"
 
 namespace flashmoe
 {
@@ -27,6 +28,11 @@ namespace flashmoe
         // eliminates bank conflicts but introduces permuted fp addition
         // use fast exponential and float division
         highest,
+    };
+
+    enum class GateReductionLevel {
+        singleBlock,
+        multiBlock
     };
 }
 namespace flashmoe::gate {
@@ -132,12 +138,10 @@ namespace flashmoe::gate {
                 cute::Layout<cute::Shape<cute::Int<bM>, cute::Int<bN>>,
                 cute::Stride<cute::Int<bN>, cute::_1>>{});
             // vectorized smem layout
-            constexpr int vW = MAX_ALIGNMENT / sizeof(AccumType);
-            constexpr int vElemWidth = cute::min(bN, vW);
-            constexpr int vAlignment = (cutlass::is_pow2<vElemWidth>::value ? vElemWidth : 1) * sizeof(AccumType);
-            using VTD = VectorTypeDescriptor<AccumType, vAlignment>;
+            using VTD = VectorTypeDescriptor<AccumType, ElementAlignment<AccumType, bN>>;
             using VT = VTD::VectorType;
             constexpr int vectorWidth = VTD::VectorWidth::value;
+            static_assert(bN % vectorWidth == 0);
             constexpr int vbN = bN / VTD::VectorWidth::value;
             // assumes row-major
             auto vsC = cublasdx::make_tensor(
@@ -166,8 +170,7 @@ namespace flashmoe::gate {
                 for (int i = 0; i < vbN; ++i) {
                     // smem -> rmem in blocked format
                     // each thread owns a row
-                    const int swizzleIdx = sro == SoftMaxOptimizationLevel::none ? i : (i + threadIdx.x) % vbN;
-                    const auto v = vsC(threadIdx.x, swizzleIdx);
+                    const auto v = vsC(threadIdx.x, i);
                     // unpack
                     #pragma unroll
                     for (int j = 0; j < vectorWidth; ++j) {
@@ -218,7 +221,6 @@ namespace flashmoe::gate {
                 }
                 #pragma unroll
                 for (int i = 0; i < vbN; ++i) {
-                    const int swizzleIdx = sro == SoftMaxOptimizationLevel::none ? i : (i + threadIdx.x) % vbN;
                     auto v = VT{};
                     // pack
                     // ideally the compiler would not emit any MOV instructions here
@@ -227,7 +229,7 @@ namespace flashmoe::gate {
                         v[j] = softStore(reginald[j + i * vectorWidth]);
                     }
                     // rmem -> smem
-                    vsC(threadIdx.x, swizzleIdx) = v;
+                    vsC(threadIdx.x, i) = v;
                 }
             }
             __syncthreads();
@@ -419,9 +421,10 @@ namespace flashmoe::gate {
                 cute::Layout<cute::Shape<cute::Int<bM>, cute::Int<bN>>,
                 cute::Stride<cute::Int<bN>, cute::_1>>{});
             // vectorized smem layout
-            using VTD = VectorTypeDescriptor<AccumType, tile::ElementAlignment<AccumType, bN>>;
+            using VTD = VectorTypeDescriptor<AccumType, ElementAlignment<AccumType, bN>>;
             using VT = VTD::VectorType;
             constexpr int vectorWidth = VTD::VectorWidth::value;
+            static_assert(bN % vectorWidth == 0);
             constexpr int vbN = bN / VTD::VectorWidth::value;
             // assumes row-major
             auto vsC = cublasdx::make_tensor(
@@ -442,8 +445,7 @@ namespace flashmoe::gate {
                 for (int i = 0; i < vbN; ++i) {
                     // smem -> rmem in blocked format
                     // each thread owns a row
-                    const int swizzleIdx = sro == SoftMaxOptimizationLevel::none ? i : (i + threadIdx.x) % vbN;
-                    const auto v = vsC(threadIdx.x, swizzleIdx);
+                    const auto v = vsC(threadIdx.x, i);
                     // unpack
                     #pragma unroll
                     for (int j = 0; j < vectorWidth; ++j) {
@@ -463,7 +465,6 @@ namespace flashmoe::gate {
                 }
                 #pragma unroll
                 for (int i = 0; i < vbN; ++i) {
-                    const int swizzleIdx = sro == SoftMaxOptimizationLevel::none ? i : (i + threadIdx.x) % vbN;
                     auto v = VT{};
                     // pack
                     // ideally the compiler would not emit any MOV instructions here
@@ -472,7 +473,7 @@ namespace flashmoe::gate {
                         v[j] = softStore(reginald[j + i * vectorWidth]);
                     }
                     // rmem -> smem
-                    vsC(threadIdx.x, swizzleIdx) = v;
+                    vsC(threadIdx.x, i) = v;
                 }
             }
             __syncthreads();

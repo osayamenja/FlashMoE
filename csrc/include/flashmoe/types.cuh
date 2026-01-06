@@ -13,26 +13,14 @@
 #ifndef FLASHMOE_TYPES_CUH
 #define FLASHMOE_TYPES_CUH
 
-#define FLASHMOE_BLOCK_SIZE 128U
 #define FLASHMOE_BLOCK_SIZE_WARP (128U / 32)
 #define FLASHMOE_STATIC_SBZ 32U
 
 #define CAST_TO(T, p) static_cast<T*>(static_cast<void*>(p))
 #define CONST_CAST_TO(T, p) static_cast<const T*>(static_cast<const void*>(p))
-/// Number of communication stages S
-#define STAGES 2U
-
-/// Per stage, there is one cell for sending and another for reception
-#define CELLS 2U
-#define SEND_CELL 0U
-#define RECEIVE_CELL 1U
-
-#define HEAP_ALIGNMENT 16U
 
 // Hardware description
-#define MIN_ARCH 700U
-#define THREADS 128U
-#define WARP_SIZE 32U
+#define WARP_SIZE 32
 #define SUBSCRIBERS (THREADS - WARP_SIZE)
 // GEMM configuration constants
 #define BLOCK_M 128U
@@ -41,13 +29,10 @@
 #define BLOCK_K_HALF 16U
 #define BLOCK_K_FULL 8U
 #define MAX_REGS (BLOCK_M * BLOCK_N) / THREADS
-#define GEMMs 2U // per expert
 
 #define TOPO_LOOP_TRIP 4U // this may be too much
 #define BETA_BUFFER (1024UL * 1024UL) // 1MiB
 #define ALPHA_BUFFER 1024UL // 1KiB
-#define NANO_TO_MILLI (cuda::std::nano::den / cuda::std::milli::den)
-#define NANO_TO_MICRO (cuda::std::nano::den / cuda::std::micro::den)
 #define BYTE_MAX cuda::std::numeric_limits<cuda::std::underlying_type_t<cuda::std::byte>>::max()
 #define TO_MB(b) (static_cast<float>(b) / (1000.0f*1000.0f))
 #define BETA_MB 1024.0f // 1GiB
@@ -59,8 +44,6 @@
 #include <cute/numeric/integral_constant.hpp>
 #include <cute/tensor.hpp>
 #include <cutlass/epilogue/thread/activation.h>
-
-#include "arch.cuh"
 
 namespace flashmoe{
     template<typename V>
@@ -221,27 +204,9 @@ namespace flashmoe{
     };
 
     __device__
-    enum class PacketStage: uint {
-        initial,
-        last,
-    };
-
-    __device__
-    enum class GateReductionLevel {
-        singleBlock,
-        multiBlock
-    };
-
-    __device__
     enum class PeerConnectivity {
         remote,
         p2p
-    };
-
-    __host__ __device__
-    enum class UseBarrier {
-        yes,
-        no
     };
 
     __device__
@@ -272,125 +237,6 @@ namespace flashmoe{
     enum SchedulerConstants : uint {
         interruptSignal = 0,
         tQHeadGroundState = 0
-    };
-
-    struct __align__(4) WorkerAttribute{
-        cute::half_t throughput; // expert per ms; could be fractional
-        uint16_t memoryCapacity; // upper bound of experts that we can accommodate
-    };
-    struct __align__(8) TopologySignal{
-        unsigned int signal;
-        WorkerAttribute wA;
-    };
-
-    struct __align__(8) SoftmaxStatePacked {
-        uint32_t m_bits;   // raw bits of mI (fp32)
-        uint32_t d_bits;   // raw bits of dI (fp32), sign bit used as signal
-    };
-    __device__ __forceinline__
-    auto to_softmax_state(const unsigned long long int& raw) {
-        SoftmaxStatePacked s;
-        s.m_bits = static_cast<uint32_t>(raw & 0xFFFFFFFFull);
-        s.d_bits = static_cast<uint32_t>(raw >> 32);
-        return s;
-    }
-    // Pack: signal is implicitly always 1
-    __device__ __forceinline__
-    SoftmaxStatePacked pack_state(const float& m, const float& d) {
-        SoftmaxStatePacked p;
-        p.m_bits = __float_as_uint(m);
-
-        uint32_t db = __float_as_uint(d);
-        db |= 0x80000000u;          // force signal bit (sign) = 1
-        p.d_bits = db;
-
-        return p;
-    }
-    // Unpack: returns (m, d)
-    __device__ __forceinline__
-    void unpack_state(const SoftmaxStatePacked &p, float &m, float &d) {
-        m = __uint_as_float(p.m_bits);
-        d = __uint_as_float(p.d_bits & 0x7FFFFFFFu);  // clear sign bit
-    }
-    __device__ __forceinline__
-    bool has_payload_arrived(const SoftmaxStatePacked &p) {
-        return (p.d_bits >> 31) != 0;
-    }
-
-    __device__
-    struct __align__(8) RingTopKPayload {
-        uint32_t sV; // raw fp32 bits
-        uint32_t sIdx = 0U; // raw index bits, sign bit used as signal
-    };
-    __device__ __forceinline__
-    auto to_tk_payload(const unsigned long long int& raw) {
-        RingTopKPayload r;
-        r.sV = static_cast<uint32_t>(raw & 0xFFFFFFFFull);
-        r.sIdx = static_cast<uint32_t>(raw >> 32);
-        return r;
-    }
-    // Pack: signal is implicitly always 1
-    __device__ __forceinline__
-    auto pack_tk_payload(const float& sV, const uint32_t& sIdx) {
-        RingTopKPayload r;
-        r.sV = __float_as_uint(sV);
-
-        r.sIdx = sIdx;
-        r.sIdx = (sIdx & 0x7FFFFFFFu) | 0x80000000u;  // keep 31 bits, set signal bit
-        return r;
-    }
-    // Unpack: returns (m, d)
-    __device__ __forceinline__
-    void unpack_tk_payload(const RingTopKPayload &p, float &sV, uint32_t &sIdx) {
-        sV = __uint_as_float(p.sV);
-        sIdx = p.sIdx & 0x7FFFFFFFu; // clear sign bit
-    }
-    __device__ __forceinline__
-    bool has_payload_arrived(const RingTopKPayload &p) {
-        return (p.sIdx >> 31) != 0;
-    }
-
-    __device__
-    struct __align__(8) RingSoftmaxPayload {
-        mp_t mI = -cuda::std::numeric_limits<mp_t>::infinity();
-        __half dI = __half(0.0f);
-        uint16_t signal = 0U;
-    };
-    template<PacketStage p = PacketStage::initial>
-    __device__
-    struct __align__(8) SignalPayload {
-        static_assert(p == PacketStage::initial);
-        uint routedTokens;
-        uint16_t totalTilesM;
-        uint16_t seqBit;
-
-       __device__ __forceinline__
-       void dump() const {
-            printf("{\n\t"
-                   "routedTokens: %u,\n\t"
-                   "totalTilesM: %u,\n\t"
-                   "seqBit: %u"
-                   "\n}\n",
-                   routedTokens, totalTilesM, seqBit);
-        }
-    };
-
-    template<>
-    __device__
-    struct __align__(8) SignalPayload<PacketStage::last> {
-        uint batchIdx;
-        uint16_t tokensM; // <= BLOCK_M
-        uint16_t seqBit;
-
-       __device__ __forceinline__
-       void dump() const {
-            printf("{\n\t"
-                   "batchIdx: %u,\n\t"
-                   "tokensM: %u,\n\t"
-                   "seqBit: %u"
-                   "\n}\n",
-                   batchIdx, tokensM, seqBit);
-        }
     };
 
     /// Expert lookup info: key is global expert index
@@ -491,86 +337,6 @@ namespace flashmoe{
         return (numBits / width) * T + cute::min(numBits % width, T);
     }
 
-    // Captures transitory states of a finite state machine
-    enum SignalConstants : flagsType {
-        ground = 0U,
-        sequenceStart = 1U,
-    };
-    __inline__ uint16_t seqBit = sequenceStart;
-    /// Flashmoe Compile-time Config
-    struct ACC {
-        // Upper bound of allowable early exits
-        using AEE = cute::C<0U>;
-        using IDZ = cute::C<AEE::value + 1>;
-        // Below ensures we can represent all states in the given integer type
-        static_assert(2 * AEE::value <= cuda::std::numeric_limits<decltype(seqBit)>::max() - 3);
-        // TODO write a proof for the below in the paper
-        // sequence bit states necessary to break symmetry in forward or backward detection
-        // includes ground state
-        using SBS = cute::C<2U * (2U + AEE::value)>;
-        using GRL = cute::C<NUM_EXPERTS <= BLOCK_N ? GateReductionLevel::singleBlock :
-            GateReductionLevel::multiBlock>;
-        using TK = cute::C<E_TOP_K>;
-        using CM = cute::C<(E_TOP_K > 1) ? CombineMode::plural : CombineMode::single>;
-        using ElementC = float;
-        using Element = DType<DTYPE>::DT;
-        using DTK = cute::C<DROP_TOKENS? DropTokens::yes : DropTokens::no>;
-        using HA = cute::C<HIDDEN_ACT>;
-        using ActivationOp = AFunction<HIDDEN_ACT, float>::DT;
-        using ActivationOpX = cute::identity;
-        using PeakHardware = flashmoe::Hardware<FLASHMOE_ARCH, 255>;
-        using Elems = cute::C<cute::min(BLOCK_N, PeakHardware::rScratch::value * sizeof(mp_t) / sizeof(Element))>;
-        using sharedSize = cute::C<PeakHardware::sharedMemory::value +
-            (PeakHardware::spare::value > 2048 ? PeakHardware::spare::value - 2048 : PeakHardware::spare::value)>;
-        using GSM = cute::C<cute::max(BLOCK_M * BLOCK_N * 2,
-            BLOCK_K_FULL * PeakHardware::pipeStages::value * sizeof(Element) * (BLOCK_M + BLOCK_N))>;
-        static_assert(sharedSize::value >= sizeof(mp_t) * BLOCK_M * BLOCK_N / 2);
-        using STE = cute::C<sharedSize::value >= BLOCK_M * BLOCK_N * sizeof(mp_t) ? BLOCK_N : BLOCK_N / 2U>;
-        using JT = cute::C<IS_TRAINING? JobType::training : JobType::inference>;
-        using S = cute::C<SEQ_LEN * MINI_BATCH>;
-        using P = cute::C<I_SIZE>;
-        using H = cute::C<HIDDEN_SIZE>;
-        using E = cute::C<NUM_EXPERTS>;
-        using SZD = cute::C<1024 * 1024 * 1024UL>;
-        //number of blocks within a dispatch superblock
-        using SBZ = cute::C<cute::max(cute::ceil_div(256U, cute::max(E::value, 4)), 2)>;
-        using DBZ = cute::C<PeakHardware::OS::processorBlocks::value / SBZ::value * SBZ::value>;
-        static_assert(E::value <= cuda::std::numeric_limits<uint16_t>::max());
-        // padded expert dimension
-        using PX = cute::C<cute::ceil_div(E::value, BLOCK_N) * BLOCK_N>;
-        using L = cute::C<NUM_LAYERS>;
-        using F = cute::C<MOE_FREQ>;
-        using GB = cute::C<GLOBAL_BATCH>;
-        using MB = cute::C<MINI_BATCH>;
-        // Global MoE Stages
-        using GMS = cute::C<(JT::value == JobType::training ? 3 : 1) *
-                (GB::value / MB::value) * (L::value / F::value)>;
-        using BPP = cute::C<JT::value == JobType::training ? 2 * sizeof(Element) + 12 : sizeof(Element)>;
-        // parameter count
-        // source: https://arxiv.org/abs/2401.14489
-        using PC = cute::C<H::value * (L::value * (12UL * H::value + 13U) + (VOCAB_SIZE + H::value))>;
-        using GRB = cute::C<cute::ceil_div(PC::value, 1024 * 1024)>;
-        using P2PB = cute::C<cute::ceil_div(S::value * H::value, 1024 * 1024)>;
-        using CF = cute::C<CAP_FACTOR>;
-        static_assert(CF::value >= 0);
-        static_assert(TK::value <= E::value);
-        using EC = cute::C<(DTK::value == DropTokens::no ? S::value : cute::ceil_div(S::value, E::value)) *
-            CF::value * TK::value>;
-        using pEC = cute::C<cute::ceil_div(EC::value, BLOCK_M) * BLOCK_M>;
-        using SZ = cute::C<pEC::value * H::value>;
-        using TM = cute::C<cute::ceil_div(S::value, BLOCK_M)>;
-        using TN = cute::C<cute::ceil_div(P::value, BLOCK_N)>;
-        using TNx = cute::C<cute::ceil_div(H::value, BLOCK_N)>;
-        using TCM = cute::C<cute::ceil_div(EC::value, BLOCK_M)>;
-        static_assert(TCM::value <= cuda::std::numeric_limits<uint16_t>::max());
-        using TPX = cute::C<cute::ceil_div(PX::value, BLOCK_N)>;
-        using TSZ = cute::C<TM::value * cute::min(TNx::value, PeakHardware::blocks::value)>;
-
-        // Scheduling state upper bound inside FFN
-        using TMU = cute::C<128>;
-        using FZ = cute::C<TSZ::value * sizeof(uint) + sizeof(Element) * (S::value * P::value)>;
-    };
-
     /// A more apropos name would be "static storage" rather than registers.
     template<class T>
     struct isRegister : cuda::std::false_type {};
@@ -590,21 +356,6 @@ namespace flashmoe{
     constexpr bool isRegisterV = isRegister<T>::value;
 
     // Index and gate combine weight
-    struct __align__(8) TPS {
-        uint tokenIdx;
-        mp_t probability;
-    };
-
-    enum class TaskType : uint16_t {
-        preGEMM,
-        postGEMM,
-        combine
-    };
-
-    enum class EP {
-        yes,
-        no
-    };
 
     __device__
     enum class FlagState {
@@ -620,97 +371,6 @@ namespace flashmoe{
     constexpr auto rTCL(uint const& zb) {
         return cute::ceil_div(zb, 128U / sizeof(Element)) * (128U / sizeof(Element));
     }
-
-    struct __align__(16) Task {
-        using TST = uint16_t;
-        static_assert(BLOCK_M <= cuda::std::numeric_limits<TST>::max());
-        // D = A * B + C
-        // sensible sentinel values
-        const cuda::std::byte* aData = nullptr;
-        cuda::std::array<const cuda::std::byte*, GEMMs> bData = {};
-        cuda::std::array<cuda::std::byte*, GEMMs> cData = {};
-        cuda::std::array<const cuda::std::byte*, GEMMs> dData = {};
-        cuda::std::byte* rcData = nullptr;
-        flagsType* flags = nullptr;
-        // crd2Idx(peer, expertIdx, offset)
-        unsigned int syncIdx = 0UL;
-        unsigned int tileIdx = 0U;
-        //padded
-        unsigned int M = 0U;
-        unsigned int batchIdx = 0U;
-        uint peerIdx = 0U;
-        uint expertIdx = 0U;
-        uint isPeerRemote = 0U;
-        TaskType taskType;
-        TST tileSize = 0U; // <= BLOCK_M
-        // below pads the struct to a cache line of 128 bytes
-        uint padding[6] = {};
-
-        __forceinline__ __device__
-        Task() = default;
-
-        // Stage 1
-        __device__ __forceinline__
-        Task(const TaskType& _taskType,
-            const cuda::std::byte* const& _aData,
-            const cuda::std::array<const cuda::std::byte*, GEMMs>& _bData,
-            const cuda::std::array<cuda::std::byte*, GEMMs>& _cData,
-            const cuda::std::array<const cuda::std::byte*, GEMMs>& _dData,
-            cuda::std::byte* const& _rcData,
-            flagsType* const& _flags,
-            const unsigned int& _syncIdx,
-            const unsigned int& _tile,
-            const unsigned int& _M,
-            const uint16_t& _size,
-            const unsigned int& _peerIdx,
-            const unsigned int& _batchIdx,
-            const uint& _isPeerRemote):
-        aData(_aData), bData(_bData),
-        cData(_cData), dData(_dData), rcData(_rcData), flags(_flags),
-        syncIdx(_syncIdx), tileIdx(_tile),  M(_M),
-        batchIdx(_batchIdx), peerIdx(_peerIdx), isPeerRemote(_isPeerRemote), taskType(_taskType), tileSize(_size){}
-
-        // Stage 2
-        __device__ __forceinline__
-        Task(const TaskType& _taskType,
-        const cuda::std::byte*  const& _aData,
-        const cuda::std::array<const cuda::std::byte*, GEMMs>& _bData,
-        const unsigned int& _size,
-        const unsigned int& _tile,
-        const unsigned int& _expertIdx):
-        aData(_aData), bData(_bData), tileIdx(_tile), expertIdx(_expertIdx), taskType(_taskType),
-        tileSize(_size){}
-
-        __device__ __forceinline__
-        void dump() const {
-            printf("{\n\t"
-                   "this: %p,\n\t"
-                   "aData: %p,\n\t"
-                   "bData[0]: %p,\n\t"
-                   "bData[1]: %p,\n\t"
-                   "cData[0]: %p,\n\t"
-                   "cData[1]: %p,\n\t"
-                   "dData[0]: %p,\n\t"
-                   "dData[1]: %p,\n\t"
-                   "rcData: %p,\n\t"
-                   "flags: %p,\n\t"
-                   "syncIdx: %u,\n\t"
-                   "tileIdx: %u,\n\t"
-                   "M: %u,\n\t"
-                   "batchIdx: %u,\n\t"
-                   "peerIdx: %u,\n\t"
-                   "expertIdx: %u,\n\t"
-                   "isPeerRemote: %s,\n\t"
-                   "taskType: %u,\n\t"
-                   "tileSize: %u"
-                   "\n}\n",
-                   this, aData, bData[0], bData[1], cData[0], cData[1],
-                   dData[0], dData[1], rcData, flags, syncIdx, tileIdx, M,
-                   batchIdx, peerIdx, expertIdx, isPeerRemote ? "True" : "False",
-                   taskType, tileSize);
-        }
-    };
-    static_assert(sizeof(Task) == 128);
 
     // Expert Parallel Group details
     struct __align__(8) EPG {
@@ -1039,9 +699,6 @@ namespace flashmoe{
         constexpr static auto xMlt(const unsigned int& _nLx, const unsigned int& _world) {
             return _world * _nLx * ACC::pEC::value * ACC::P::value;
         }
-        constexpr static auto xMlt() {
-            return ACC::S::value * ACC::P::value;
-        }
 
         /// Expository purposes
         __host__ __forceinline__
@@ -1058,94 +715,11 @@ namespace flashmoe{
                     sizeof(BookType) * b4lt(_nLx, _world) +
                     sizeof(ACC::Element) * xMlt(_nLx, _world);
         }
-
-        /// For fffn
-        __host__ __forceinline__
-        constexpr static unsigned long int bookLength() {
-            return ACC::FZ::value;
-        }
     };
 
     __constant__ static __inline__ Bookkeeping bookkeeping{};
     __inline__ Bookkeeping hostBookkeeping{};
     __inline__ bool isInitialized = false;
     cudaStream_t flashmoeStream = nullptr;
-
-    namespace heap {
-        /// The symmetric heap is a 5-D tensor (P, S, C, E, EC) of tokens,
-        /// where P, S, C, E, EC denote dimensions for peers, communication stages,
-        /// cells, experts, expert capacity, respectively.
-        template<
-            unsigned int stage,
-            unsigned int cell,
-            /*The user should not specify the parameters below*/
-            unsigned long int EC = ACC::pEC::value,
-            unsigned long int H = ACC::H::value,
-            unsigned long int B = sizeof(ACC::Element)
-        >
-        requires (stage < STAGES && cell < CELLS)
-        __device__ __forceinline__
-        constexpr auto* advance(cuda::std::byte* __restrict__ const& sHeap, const uint& peer,
-            const uint& expert, const uint& token = 0){
-            return sHeap + B * H * (EC * (CELLS * (STAGES * (peer * bookkeeping.xs + expert) + stage) + cell) + token);
-        }
-    }
-    struct __align__(4) BitSet {
-        uint storage = 0U;
-        __device__ __forceinline__
-        constexpr auto get(const uint& idx) const {
-            return storage >> idx & 1U;
-        }
-        __device__ __forceinline__
-        constexpr void set(const uint& idx) {
-            storage |= 1U << idx;
-        }
-    };
-    // sequence bits' state
-    namespace sbs {
-        __forceinline__ __host__
-        constexpr uint16_t next(const uint16_t& current) {
-            return current + 1 == ACC::SBS::value ?
-                static_cast<decltype(current)>(sequenceStart) : current + 1;
-        }
-
-        __forceinline__ __device__
-        constexpr auto ahead(const uint16_t& receivedState, const uint16_t& localState) {
-            if (receivedState < sequenceStart) {
-                // this is the case, when we observe the ground state
-                return false;
-            }
-            const auto wD =  (ACC::SBS::value - localState) + (receivedState -
-                static_cast<decltype(receivedState)>(sequenceStart));
-            return (receivedState > localState && ((receivedState - localState) <= ACC::IDZ::value)) ||
-                (receivedState < localState && wD <= ACC::IDZ::value);
-        }
-    }
-    enum class DQType {
-        stride,
-        block
-    };
-    /// Decoupled Queue, comprises tail and doorbell
-    namespace DQ {
-        template<
-            DQType dqt = DQType::stride,
-            unsigned int nQ = SUBSCRIBERS
-        >
-        __device__ __forceinline__
-        constexpr auto next(const uint& prev, const uint& slot) {
-            if constexpr (dqt == DQType::stride) {
-                return prev + slot * nQ;
-            }
-            return prev + slot;
-        }
-        template<
-            DQType dqt = DQType::stride,
-            unsigned int nQ = SUBSCRIBERS
-        >
-        __device__ __forceinline__
-        constexpr auto sNext(const uint& slot) {
-            return next<dqt, nQ>(0, slot);
-        }
-    }
 }
 #endif //FLASHMOE_TYPES_CUH

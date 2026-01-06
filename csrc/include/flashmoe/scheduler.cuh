@@ -16,8 +16,8 @@
 #include <cub/cub.cuh>
 #include <cutlass/array.h>
 
-#include "../atomics.cuh"
-#include "../types.cuh"
+#include "atomics.cuh"
+#include "types.cuh"
 
 namespace flashmoe::scheduler {
     template<

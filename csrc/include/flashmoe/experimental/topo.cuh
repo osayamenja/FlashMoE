@@ -13,11 +13,34 @@
 #ifndef TOPO_CUH
 #define TOPO_CUH
 
-#include <cuda/cmath>
-#include "types.cuh"
-#include "atomics.cuh"
+#define TOPO_BLOCK_SIZE 128
+#define NANO_TO_MILLI 1e6
 
+#include <cuda/atomic>
+#include <nvshmem.h>
 namespace flashmoe::topology{
+    struct __align__(4) WorkerAttribute{
+        cute::half_t throughput; // expert per ms; could be fractional
+        uint16_t memoryCapacity; // upper bound of experts that we can accommodate
+    };
+    struct __align__(8) TopologySignal{
+        unsigned int signal;
+        WorkerAttribute wA;
+    };
+    template<cuda::thread_scope scope = cuda::thread_scope_device, typename Notification, typename T>
+    requires(sizeof(Notification) == sizeof(ull_t) && alignof(Notification) == alignof(ull_t))
+    __device__ __forceinline__
+    void awaitBarrier(Notification* __restrict__ const& addr, Notification* __restrict__ const& dest,
+        const T& token) {
+        static_assert(cuda::std::is_same_v<decltype(addr->signal), T>, "Signal types should be the same!");
+        auto mail = atomicLoad<scope>(CAST_TO(ull_t, addr));
+        auto* __restrict__ payload = CAST_TO(Notification, &mail);
+        while (payload->signal < token) {
+            mail = atomicLoad<scope>(CAST_TO(ull_t, addr));
+            payload = CAST_TO(Notification, &mail);
+        }
+        *dest = *payload;
+    }
     __device__ __forceinline__
     auto* advancePtr(cuda::std::byte* __restrict__ const& buffer, const unsigned int& slot) {
         return buffer + slot * BETA_BUFFER;
@@ -32,7 +55,7 @@ namespace flashmoe::topology{
         if (!threadIdx.x) {
             workerAttributes[rank] = self;
         }
-        for (int i = threadIdx.x; i < n; i += FLASHMOE_BLOCK_SIZE) {
+        for (int i = threadIdx.x; i < n; i += TOPO_BLOCK_SIZE) {
             if (i != rank) {
                 awaitBarrier<cuda::thread_scope_system>(CAST_TO(Payload, flags + i), &result, seqNo);
                 workerAttributes[i] = result.wA;
@@ -95,7 +118,7 @@ namespace flashmoe::topology{
         __syncthreads();
 
         /// Stage my row on the symmetric heap
-        for (unsigned int i = threadIdx.x; i < n; i += FLASHMOE_BLOCK_SIZE) {
+        for (unsigned int i = threadIdx.x; i < n; i += TOPO_BLOCK_SIZE) {
             results[i] = scratchpad[i];
         }
 
@@ -127,7 +150,7 @@ namespace flashmoe::topology{
         __syncthreads();
 
         /// Stage my row to the symmetric heap
-        for (unsigned int i = threadIdx.x; i < numPeers; i += FLASHMOE_BLOCK_SIZE) {
+        for (unsigned int i = threadIdx.x; i < numPeers; i += TOPO_BLOCK_SIZE) {
             results[peers[i]] = scratchpad[i];
         }
         __syncthreads();
@@ -141,7 +164,7 @@ namespace flashmoe::topology{
         __syncthreads();
         auto signal = TopologySignal{seqNo, self};
         // Signal our vector, including FLOPs, to others
-        for (unsigned int i = threadIdx.x; i < numPeers; i += FLASHMOE_BLOCK_SIZE) {
+        for (unsigned int i = threadIdx.x; i < numPeers; i += TOPO_BLOCK_SIZE) {
             nvshmem_putmem_signal_nbi(results, results, n * sizeof(floatPair), flags + rank,
                     *CAST_TO(uint64_t, &signal), NVSHMEM_SIGNAL_SET, peers[i]);
         }
@@ -172,7 +195,7 @@ namespace flashmoe::topology{
         /// All-Reduce to get max transfer time across blocks
         /// Update the global buffer with my values via max reduction
         /// Intra-block slicing
-        for (unsigned int i = threadIdx.x; i < numPeers; i += FLASHMOE_BLOCK_SIZE) {
+        for (unsigned int i = threadIdx.x; i < numPeers; i += TOPO_BLOCK_SIZE) {
             cuda::std::ignore = cuda::atomic_ref<floatPair, cuda::thread_scope_device>{results[peers[i]]}
                 .fetch_max(scratchpad[i]);
         }
@@ -210,16 +233,13 @@ namespace flashmoe::topology{
         cuda::std::byte* __restrict__ sHeap, uint64_t* flags,
         floatPair* __restrict__ results, cuda::barrier<cuda::thread_scope_device>* dvB,
         WorkerAttribute* __restrict__ workerAttributes, const __grid_constant__ uint seqNo) {
-        assert(blockDim.x == FLASHMOE_BLOCK_SIZE);
+        assert(blockDim.x == TOPO_BLOCK_SIZE);
         assert(blockDim.y * blockDim.z == 1);
         assert(gridDim.x <= blocks + remotePresent);
         assert(gridDim.y * gridDim.z == 1);
 
-        // Align to 16 bytes for optimal copy performance.
-        // However, empirical results show identical performance (1.024 𝜇s) for 128 threads copying 256 floats,
-        // which is a likely practical upper bound for n.
         extern __shared__ __align__(16) floatPair scratchpad[];
-        for (uint i = threadIdx.x; i < n; i += FLASHMOE_BLOCK_SIZE) {
+        for (uint i = threadIdx.x; i < n; i += TOPO_BLOCK_SIZE) {
             scratchpad[i] = floatPair{0, 0};
         }
         __syncthreads();
@@ -230,7 +250,7 @@ namespace flashmoe::topology{
         else{
             // Specialization
             auto nP = 0;
-            __shared__ unsigned int numPeers;
+            __shared__ int numPeers;
             if (!threadIdx.x) {
                 auto* __restrict__ peersX = CAST_TO(unsigned int, scratchpad + n);
                 /// Block 0 gets remote peers, if present; otherwise, joins the others in getting proximal peers

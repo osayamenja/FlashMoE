@@ -7,7 +7,6 @@
 #include <vector>
 #include <cstdio>
 #include <string>
-
 #include <nvtx3/nvtx3.hpp>
 
 #include "common.cuh"
@@ -228,8 +227,8 @@ template<int Arch, int sharedSize,
 >
 __host__ __forceinline__
 auto gk_run(matx::cudaExecutor& exec, const GateArgs& gArgs, const int& blocks, const int& checkCorrectness) {
-    constexpr auto runs = 128;
-    constexpr auto warmup = 32;
+    constexpr auto runs = 1;
+    constexpr auto warmup = 1;
     cudaEvent_t start, stop;
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
@@ -400,12 +399,12 @@ __host__ __forceinline__
 void kickStart(const int argc, char** argv) {
     // we have to fix S and H to minimize instantiated templates as tile shapes are dependent on them
     constexpr auto S = 2048;
-    constexpr auto H = 2048;
+    constexpr auto H = 128;
     using Element = __half;
     using ElementC = float;
     float rtol = 2e-2f;
     float atol = 2e-3f;
-    int E = 2;
+    int E = 8;
     int E_max = 256;
     int k = 8;
     int checkCorrectness = 1;
@@ -438,7 +437,8 @@ void kickStart(const int argc, char** argv) {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
     matx::cudaExecutor exec{stream};
-    constexpr auto sro = flashmoe::SoftMaxOptimizationLevel::none;
+    // gives anywhere from 10-16% speedup with no increased error
+    constexpr auto sro = flashmoe::SoftMaxOptimizationLevel::highest;
     constexpr auto ifk = flashmoe::gate::InsideFusedKernel::no;
     // tiling heuristics
     constexpr int bM = cute::min(S, 128);

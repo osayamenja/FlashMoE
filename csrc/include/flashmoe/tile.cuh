@@ -6,7 +6,6 @@
 #define FLASHMOE_TILE_CUH
 #include <cublasdx.hpp>
 
-#define MAX_ALIGNMENT 16 // blackwell is 32?
 namespace flashmoe
 {
     template<typename T, typename S>
@@ -28,15 +27,10 @@ namespace flashmoe
         }
     };
 
-    template<typename T, int Alignment = MAX_ALIGNMENT>
-    struct VectorTypeDescriptor {
-        using VectorWidth = cute::C<Alignment / sizeof(T)>;
-        using VectorType = cutlass::AlignedArray<T, VectorWidth::value, Alignment>;
-    };
-
 }
 namespace flashmoe::tile
 {
+    constexpr int MAX_ALIGN = 16;
     template<int M, int N, int K, typename Element>
     struct Heuristics {
         using BM = cute::Int<cute::min(M, 128)>;
@@ -95,12 +89,6 @@ namespace flashmoe::tile
     void update_buffer(Tensor& tensor, Element* __restrict__ const& base_ptr) {
         tensor.data() = base_ptr + (stage * offset);
     }
-
-    template<typename Element, int dim>
-    constexpr int ElementWidth = cute::min(dim, MAX_ALIGNMENT / sizeof(Element));
-    template<typename Element, int dim>
-    constexpr int ElementAlignment = (cutlass::is_pow2<ElementWidth<Element, dim>>::value ?
-        ElementWidth<Element, dim> : 1) * sizeof(Element);
     template<cublasdx::arrangement ar, int bM, int bK>
     constexpr int ldA = ar == cublasdx::row_major ? bK : bM;
     template<cublasdx::arrangement br, int bK, int bN>
@@ -115,9 +103,9 @@ namespace flashmoe::tile
         cublasdx::arrangement ar = cublasdx::row_major,
         cublasdx::arrangement br = cublasdx::col_major,
         cublasdx::arrangement cr = cublasdx::row_major,
-        int aAlignment = MAX_ALIGNMENT,
-        int bAlignment = MAX_ALIGNMENT,
-        int cAlignment = MAX_ALIGNMENT
+        int aAlignment = MAX_ALIGN,
+        int bAlignment = MAX_ALIGN,
+        int cAlignment = MAX_ALIGN
     >
     constexpr int suggest_thread_count() {
         using GhostBLAS = decltype(
@@ -143,9 +131,9 @@ namespace flashmoe::tile
         cublasdx::arrangement ar = cublasdx::row_major,
         cublasdx::arrangement br = cublasdx::col_major,
         cublasdx::arrangement cr = cublasdx::row_major,
-        int aAlignment = MAX_ALIGNMENT,
-        int bAlignment = MAX_ALIGNMENT,
-        int cAlignment = MAX_ALIGNMENT
+        int aAlignment = MAX_ALIGN,
+        int bAlignment = MAX_ALIGN,
+        int cAlignment = MAX_ALIGN
     >
     requires(pipeStages > 0 && Arch >= 700)
     struct CollectiveMainloop {
@@ -164,7 +152,7 @@ namespace flashmoe::tile
         using Threads = cute::C<threads>;
         using TileShape = cute::Shape<cute::Int<bM>, cute::Int<bN>, cute::Int<bK>>;
         using SharedSize = cute::Int<bK * pipeStages * (bM + bN) * sizeof(Element)>;
-        using GeneralAlignment = cute::Int<MAX_ALIGNMENT>;
+        using GeneralAlignment = cute::Int<MAX_ALIGN>;
         using CArr = cute::C<cr>;
         using AAlign = cute::C<aAlignment>;
         using BAlign = cute::C<bAlignment>;

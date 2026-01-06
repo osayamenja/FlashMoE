@@ -17,7 +17,7 @@
 #include <nvshmem.h>
 
 #include "gemm.cuh"
-#include "../../types.cuh"
+#include "types.cuh"
 
 namespace flashmoe::processor{
     enum class ReleaseType {
@@ -204,138 +204,6 @@ namespace flashmoe::processor{
         }
     }
 
-    // fused GEMM, epilogue and data transfer, with static M, N and K
-    template<
-        typename BlockGEMM,
-        unsigned int M = ACC::S::value,
-        unsigned int N = ACC::H::value,
-        unsigned int K = ACC::P::value,
-        unsigned int elems = ACC::Elems::value,
-        unsigned int threads = ACC::PeakHardware::OS::threads::value
-    >
-    __forceinline__ __device__
-    void sfGET(typename BlockGEMM::MatrixDType* __restrict__ const& workspace,
-        const typename BlockGEMM::MatrixAType* __restrict__ const& inputs,
-        const typename BlockGEMM::MatrixBType* __restrict__ const& weights,
-        typename BlockGEMM::MatrixDType* __restrict__ const& output,
-        const typename BlockGEMM::MatrixDType* __restrict__ const& bias,
-        const unsigned int& tileIdx) {
-        auto accumulator = cute::partition_fragment_C(typename BlockGEMM::MMA{}, typename BlockGEMM::TilerOut{});
-        static_assert(cute::size(accumulator) % elems == 0);
-        cutlass::AlignedArray<typename BlockGEMM::MatrixDType, elems> rScratch{};
-        constexpr auto bM = cute::get<0>(typename BlockGEMM::BlockTiler{});
-        constexpr auto bN = cute::get<1>(typename BlockGEMM::BlockTiler{});
-        constexpr auto bK = cute::get<2>(typename BlockGEMM::BlockTiler{});
-        // Instantiate mainloop
-        typename BlockGEMM::CollectiveMainloop mainLoop{};
-        cute::clear(accumulator);
-
-        // Row-major
-        const auto mA = make_tensor(cute::make_gmem_ptr(inputs),
-        cute::Layout<cute::Shape<cute::Int<M>, cute::Int<K>>,
-            cute::Stride<cute::Int<K>, cute::_1>>{});
-        // Row-major, transposed
-        const auto mB = make_tensor(cute::make_gmem_ptr(weights),
-        cute::Layout<cute::Shape<cute::Int<N>, cute::Int<K>>,
-            cute::Stride<cute::Int<K>, cute::_1>>{});
-        // Row-major
-        const auto mC = make_tensor(cute::make_gmem_ptr(output),
-        cute::Layout<cute::Shape<cute::Int<M>, cute::Int<N>>,
-            cute::Stride<cute::Int<N>, cute::_1>>{});
-
-        // M is padded, such that the below is correct
-        constexpr auto tilesM = M / bM;
-        // We assert the below prior to this point
-        constexpr auto tilesN = N / bN;
-        constexpr auto tilesK = K / bK;
-
-        const auto tileCoord = idx2crd(tileIdx, cute::Shape<cute::Int<tilesM>, cute::Int<tilesN>>{},
-            cute::Stride<cute::Int<tilesN>, cute::_1>{});
-        const auto ctaCoord = make_coord(cute::get<0>(tileCoord), cute::get<1>(tileCoord), cute::_);
-        const auto gA = cute::local_tile(mA, typename BlockGEMM::BlockTiler{}, ctaCoord,
-            cute::Step<cute::_1, cute::X,cute::_1>{});
-        const auto gB = cute::local_tile(mB, typename BlockGEMM::BlockTiler{}, ctaCoord,
-            cute::Step< cute::X,cute::_1,cute::_1>{});
-        const auto gC = cute::local_tile(mC, typename BlockGEMM::BlockTiler{}, ctaCoord,
-            cute::Step<cute::_1,cute::_1, cute::X>{});
-
-        const auto k_tile_iter = cute::make_coord_iterator(tilesK);
-        using Element = typename BlockGEMM::MatrixDType;
-
-        // prefetch bias from global memory
-        constexpr auto trips = cute::ceil_div(bN, threads);
-        Element biasCache[trips];
-        const int biasOffset = (tileIdx % tilesN) * bN;
-        const auto* __restrict__ bP = bias + biasOffset;
-        if constexpr (threads >= bN) {
-            biasCache[0] = bP[threadIdx.x % bN];
-        }
-        else {
-            // below is not strictly necessary, but it makes my life easier :)
-            static_assert(bN % threads == 0);
-            #pragma unroll
-            for (int i = 0; i < trips; ++i) {
-                biasCache[i] = bP[threadIdx.x + i * bN];
-            }
-        }
-        mainLoop(
-            accumulator,
-            gA,
-            gB,
-            accumulator,
-            k_tile_iter, tilesK,
-            cute::Underscore{},
-            threadIdx.x,
-            CAST_TO(char, workspace));
-        /// There is a block-wide barrier at the end of the above ^
-
-        // Epilogue
-        using ElementC = typename decltype(accumulator)::value_type;
-        typename BlockGEMM::MMA tiledMMA{};
-        constexpr auto gCStoreOp = cutlass::NumericConverter<Element, ElementC>{};
-        constexpr auto gDLoadOp = cutlass::NumericConverter<ElementC, Element>{};
-        // Assume elementwise operator
-        typename BlockGEMM::FusedEpilogue epilogueOp{};
-        constexpr auto sCLay = cute::make_layout(cute::Shape<cute::Int<bM>, cute::Int<elems>>{},
-            cute::LayoutRight{});
-        const auto sC = cute::make_tensor(cute::make_smem_ptr(CAST_TO(ElementC, workspace)), sCLay);
-        const auto rC = cute::make_tensor(cute::make_rmem_ptr(CAST_TO(Element, accumulator.data())),
-            cute::Layout<cute::Shape<cute::_1, cute::Int<bN>>,
-                cute::Stride<cute::Int<bN>, cute::_1>>{});
-        const auto tCsC = tiledMMA.get_slice(threadIdx.x).partition_C(sC);
-
-        // Reorder to striped arrangement
-        #pragma unroll
-        for (unsigned int j = 0; j < elems; ++j) {
-            tCsC(j) = accumulator(j);
-        }
-        __syncthreads();
-        const auto rIdx = threadIdx.x / elems * elems;
-        const auto cIdx = threadIdx.x % elems;
-        #pragma unroll
-        for (unsigned int j = 0; j < elems; ++j) {
-            accumulator(j) = sC(rIdx + j, cIdx);
-        }
-
-        // apply epilogue
-        #pragma unroll
-        for (uint i = 0; i < trips; ++i) {
-            #pragma unroll
-            for (int j = 0; j < elems; ++j) {
-                rC(j + i * elems) = gCStoreOp(epilogueOp(accumulator(j + i * elems), biasCache[i]));
-            }
-        }
-
-        // Coalesced copy from registers to global memory
-        #pragma unroll
-        for (uint i = 0; i < trips; ++i) {
-            #pragma unroll
-            for (unsigned int j = 0; j < elems; ++j) {
-                gC(rIdx + j, cIdx + i * elems) = rC(j + i * elems);
-            }
-        }
-    }
-
     // fused GEMM, epilogue and data transfer, with dynamic M and static N and K
     template<
         typename BlockGEMM,
@@ -433,7 +301,6 @@ namespace flashmoe::processor{
         static_assert(elems == bN);
 
         // Reorder to striped arrangement
-        // TODO(Jonathan): Do the below reordering without shared memory. It would make my day (decade actually) to solve this.
         // A lot of performance badness happens down there.
         // I haven't sat down to think about a solution yet.
         // First idea that comes to mind is some form of warp register shuffling.
@@ -526,7 +393,7 @@ namespace flashmoe::processor{
                 const auto taskIdx = threadIdx.x + i * capacity;
                 const auto tileIdx = offset + taskIdx;
                 const auto nextTask = Task {
-                    TaskType::postGEMM,
+                    TaskType::GEMM1,
                     rCurrentTask.cData[preIndex],
                     rCurrentTask.bData,
                     rCurrentTask.cData,
@@ -564,7 +431,7 @@ namespace flashmoe::processor{
                 const auto taskIdx = threadIdx.x + trips * capacity;
                 const auto tileIdx = offset + taskIdx;
                 const auto nextTask = Task {
-                    TaskType::postGEMM,
+                    TaskType::GEMM1,
                     rCurrentTask.cData[preIndex],
                     rCurrentTask.bData,
                     rCurrentTask.cData,
@@ -682,7 +549,7 @@ namespace flashmoe::processor{
                 // shared -> registers
                 rCurrentTask = currentTask;
                 switch (rCurrentTask.taskType) {
-                    case TaskType::preGEMM: {
+                    case TaskType::GEMM0: {
                         constexpr unsigned int preIndex = 0;
                         fGET<PreGEMM, ACC::P::value, ACC::H::value>(
                             CAST_TO(typename PreGEMM::MatrixDType, workspace),
@@ -708,7 +575,7 @@ namespace flashmoe::processor{
                         }
                     }
                     break;
-                    case TaskType::postGEMM: {
+                    case TaskType::GEMM1: {
                         constexpr unsigned int postIndex = 1;
                         fGET<PostGEMM, ACC::H::value, ACC::P::value>(
                             CAST_TO(typename PostGEMM::MatrixDType, workspace),

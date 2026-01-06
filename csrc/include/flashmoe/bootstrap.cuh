@@ -20,15 +20,15 @@
 #include <fmt/ranges.h>
 
 #include "throughput.cuh"
-#include "topo.cuh"
+#include "experimental/topo.cuh"
 #include "debug.cuh"
 #include "telemetry.cuh"
 #include "types.cuh"
 #include "moe/expert.cuh"
-#include "os/decider/decider.cuh"
-#include "os/decider/comps/expert.cuh"
-#include "os/decider/comps/niche.cuh"
-#include "os/decider/comps/worker.cuh"
+#include "experimental/decider/decider.cuh"
+#include "experimental/decider/comps/expert.cuh"
+#include "experimental/decider/comps/niche.cuh"
+#include "experimental/decider/comps/worker.cuh"
 
 #define SUPPORTED = 1;
 namespace flashmoe{
@@ -67,204 +67,6 @@ namespace flashmoe{
     }
 
     __host__ __forceinline__
-    void exportTopo(const floatPair* __restrict__ const& aP,
-        const WorkerAttribute* __restrict__ const& attributes,
-        const uint& world, const uint& rank) {
-        const auto aM = make_tensor(aP,
-            make_layout(cute::make_shape(world, world), cute::LayoutRight{}));
-        std::vector<std::array<float, 2>> tAM(world);
-        std::vector<float> tWT(world);
-        std::vector<uint16_t> tWM(world);
-
-        auto* file = std::fopen(std::string("adjMatrix_Rank")
-            .append(std::to_string(rank)).append(".txt").c_str(), "w");
-        fmt::print(file, "----> {} processes pair-wise (𝛼 ms, 𝛽 ms/MB) costs <------\n", world);
-        for (uint i = 0; i < world; ++i){
-            for (uint j = 0; j < world; ++j){
-                const auto [alpha, beta] = aM(i, j);
-                tAM[j] = {alpha, beta};
-            }
-            fmt::print(file, "Rank {}: {:::.2e}\n", i, tAM);
-        }
-        for (uint i = 0; i < world; ++i) {
-            const auto [t, m] = attributes[i];
-            tWT[i] = static_cast<float>(t);
-            tWM[i] = m;
-        }
-        fmt::print(file, "Rank {}: \n\t Throughput: {}\n\t MemoryCapacity: {}\n", rank, tWT, tWM);
-        std::fclose(file);
-    }
-
-    __host__ __forceinline__
-    void estimateMemory(WorkerAttribute* __restrict__ const& dWa) {
-        #if FLASHMOE_NVTX
-        flashmoeRange estRange{__PRETTY_FUNCTION__};
-        #endif
-        // estimate available device memory
-        size_t free = 0, total = 0;
-        FLASHMOE_CHECK_CUDA(cudaMemGetInfo(&free, &total));
-        // Deduct cost for the dense case, assuming at least one expert per device
-        free -= ACC::BPP::value * (ACC::PC::value + ACC::S::value * ACC::H::value);
-        constexpr size_t mX = cute::ceil_div(ACC::L::value, ACC::F::value) * ACC::BPP::value * 2UL *
-            (ACC::P::value * ACC::H::value);
-        dWa->memoryCapacity = free / mX;
-    }
-
-    __host__ __forceinline__
-    void discoverTopology(void* const& hAp, const uint& n, const uint& globalRank,
-        const WorkerAttribute& lWa, WorkerAttribute* __restrict__ const& wAp) {
-        #if FLASHMOE_NVTX
-        flashmoeRange discRange{__func__};
-        #endif
-        const auto aD = n * n;
-        const auto heapBytes = n * BETA_BUFFER;
-        const auto sBkz =  n + aD;
-        WorkerAttribute* attributes;
-        cuda::barrier<cuda::thread_scope_device>* dvB;
-        FLASHMOE_CHECK_CUDA(cudaMallocAsync(&attributes, sizeof(WorkerAttribute) * n,
-            flashmoeStream));
-        FLASHMOE_CHECK_CUDA(cudaMallocAsync(&dvB,
-            sizeof(cuda::barrier<cuda::thread_scope_device>), flashmoeStream));
-        const auto hB = new cuda::barrier<cuda::thread_scope_device>{FLASHMOE_STATIC_SBZ};
-        FLASHMOE_CHECK_CUDA(cudaMemcpyAsync(dvB, hB,
-            sizeof(cuda::barrier<cuda::thread_scope_device>),
-            cudaMemcpyHostToDevice, flashmoeStream));
-        static_assert(sizeof(floatPair) == sizeof(flagsType) &&
-            alignof(floatPair) == sizeof(flagsType));
-        auto* symBook = nvshmem_calloc(sBkz, sizeof(flagsType));
-        auto* symHeap = nvshmem_align(16, heapBytes);
-        FLASHMOE_ASSERT(symBook != nullptr, "nvshmem_calloc failed");
-        FLASHMOE_ASSERT(symHeap != nullptr, "nvshmem_align failed");
-        // Pointer orchestration
-        // Starting index of flags array
-        auto* flags = static_cast<flagsType*>(symBook);
-        auto* adj = CAST_TO(floatPair, flags + n);
-        // Navigate to our slice of the adjacency matrix
-        auto* results = adj + globalRank * n;
-        const auto remotePresent = [&n, &results] {
-            for (int i = 0; i < n; ++i) {
-                if (nvshmem_ptr(results, i) == nullptr) return true;
-            }
-            return false;
-        };
-        const auto isRemotePresent = remotePresent();
-        const auto sharedSize = n * (sizeof(floatPair) + sizeof(unsigned int));
-        constexpr auto seqNo = 1U;
-        topology::discover<<<FLASHMOE_STATIC_SBZ, FLASHMOE_BLOCK_SIZE, sharedSize, flashmoeStream>>>(n, globalRank,
-            isRemotePresent, lWa,
-            static_cast<cuda::std::byte*>(symHeap),
-            flags, results, dvB, attributes, seqNo);
-        FLASHMOE_CHECK_CUDA(cudaMemcpyAsync(hAp, adj, aD * sizeof(floatPair),
-            cudaMemcpyDeviceToHost, flashmoeStream));
-        FLASHMOE_CHECK_CUDA(cudaMemcpyAsync(wAp, attributes, n * sizeof(WorkerAttribute),
-            cudaMemcpyDeviceToHost, flashmoeStream));
-        FLASHMOE_CHECK_CUDA(cudaFreeAsync(attributes, flashmoeStream));
-        FLASHMOE_CHECK_CUDA(cudaFreeAsync(dvB, flashmoeStream));
-        FLASHMOE_CHECK_CUDA(cudaPeekAtLastError());
-        FLASHMOE_CHECK_CUDA(cudaStreamSynchronize(flashmoeStream));
-        delete hB;
-        nvshmem_free(symHeap);
-        nvshmem_free(symBook);
-    }
-
-    __host__ __forceinline__
-    bool runDecider(EPG* __restrict__ const& ePg,
-        Expert* __restrict__ const& experts,
-        Worker* __restrict__ const& wG,
-        Worker* __restrict__ const& ePwG,
-        uint* __restrict__ const& dTg,
-        uint* __restrict__ const& pT,
-        uint* __restrict__ const& pTs,
-        uint* __restrict__ const& ePs,
-        uint* __restrict__ const& ePsX,
-        uint16_t* __restrict__ const& scratch,
-        const floatPair* __restrict__ const& aP,
-        const WorkerAttribute* __restrict__ const& attributes,
-        const uint& rank, const uint& world) {
-        #if FLASHMOE_NVTX
-        flashmoeRange decRange{__func__};
-        #endif
-        constexpr auto E = ACC::E::value;
-        constexpr cutlass::NumericConverter<float, cute::half_t> h2f{};
-        for (uint16_t i = 0; i < world; ++i) {
-            const auto [t, m] = attributes[i];
-            wG[i] = Worker{i, h2f(t), m};
-        }
-        const auto adj = make_tensor(aP, make_layout(cute::make_shape(world, world), cute::LayoutRight{}));
-        constexpr Decider<ACC::JT::value> decider{};
-        if (!decider(adj, wG, E, E, dTg)) {
-            // this means there isn't enough device memory for the input model configuration.
-            // we propagate this information above
-            return false;
-        }
-        const auto epWorld = subsets(dTg, pT, world, dTg[rank]);
-        for (uint i = 0; i < E; ++i) {
-            // assuming homogenous experts, where each has normalized compute cost of 1
-            experts[i] = Expert{i, 1};
-        }
-        // repurpose memory as the expert parallel group
-        uint16_t epRank = 0U;
-        for (uint16_t i = 0; i < epWorld; ++i) {
-            const auto wRank = pT[i];
-            if (wRank == rank) {
-                epRank = i;
-            }
-            ePwG[i] = Worker{i, wG[wRank].processingRate, wG[wRank].memoryCapacity};
-        }
-        assign(ePwG, epWorld, experts, E, ePs);
-        uint16_t expertSlots = 0U;
-        std::ranges::fill(scratch, scratch + world, 0U);
-        // compute expert slots for our group
-        for (uint16_t i = 0; i < E; ++i) {
-            const auto wIdx = ePs[i];
-            const uint16_t tally = scratch[wIdx] + 1U;
-            scratch[wIdx] = tally;
-            expertSlots = cuda::std::max(tally, expertSlots);
-        }
-        const auto numLocalExperts = scratch[epRank];
-        auto epg = EPG{
-            epRank,
-            expertSlots,
-            numLocalExperts,
-            epWorld
-        };
-        if (epWorld < world) {
-            // Get other group ids
-            // The global maximum of epW and expertSlots is necessary for allocating a uniformly sized symmetric heap
-            // across all PEs.
-            std::unordered_set<uint> groups{};
-            for (uint i = 0; i < world; ++i) {
-                groups.emplace(dTg[i]);
-            }
-            const auto myGroup = dTg[rank];
-            for (const auto& group : groups) {
-                if (group != myGroup) {
-                    std::ranges::fill(scratch, scratch + world, 0U);
-                    const auto ePw = subsets(dTg, pTs, world, group);
-                    epg.epWorldM = cute::max(epg.epWorldM, ePw);
-                    for (uint i = 0; i < ePw; ++i) {
-                        const auto wRank = pTs[i];
-                        ePwG[i] = Worker{
-                            static_cast<uint16_t>(wRank),
-                            wG[wRank].processingRate,
-                            wG[wRank].memoryCapacity
-                        };
-                    }
-                    assign(ePwG, ePw, experts, E, ePsX);
-                    for (uint16_t i = 0; i < E; ++i) {
-                        const auto wIdx = ePsX[i];
-                        const uint16_t tally = scratch[wIdx] + 1U;
-                        scratch[wIdx] = tally;
-                        epg.expertSlots = cuda::std::max(tally, epg.expertSlots);
-                    }
-                }
-            }
-        }
-        *ePg = epg;
-        return true;
-    }
-
-    __host__ __forceinline__
     void cleanup() {
         #if FLASHMOE_NVTX
         flashmoeRange finalRange{__PRETTY_FUNCTION__};
@@ -275,18 +77,22 @@ namespace flashmoe{
         nvshmem_finalize();
     }
 
-    template<EP e = EP::yes>
+    struct MoEConfig {
+        int S;
+        int E;
+        int H;
+        int typeBytes;
+    };
     __host__ __forceinline__
     void distributedInit() {
         #if FLASHMOE_NVTX
         flashmoeRange distRange{__PRETTY_FUNCTION__};
         #endif
-        static_assert(e == EP::yes);
-        constexpr auto blocks = ACC::PeakHardware::blocks::value;
-        using Element = ACC::Element;
-        constexpr uint E = ACC::E::value;
-        // Below forces NVSHMEM to statically allocate memory, which is desirable
-        uEI("NVSHMEM_DISABLE_CUDA_VMM", 1);
+        const auto nss = gEI("NVSHMEM_SYMMETRIC_SIZE", ACC::SZD::value); // default is 1GB
+        if (tHB >= nss) {
+            const auto nGB = cute::ceil_div(tHB, nss) * nss;
+            uEI("NVSHMEM_SYMMETRIC_SIZE", nGB);
+        }
         // initialize communication backend
         {
             #if FLASHMOE_NVTX
@@ -332,29 +138,13 @@ namespace flashmoe{
         auto* ePsX = ePs + E; // scratch
         auto* scratch = CAST_TO(uint16_t, ePsX + E);
 
-        estimateMemory(&wAp[rank]);
-        mT(wAp + rank);
-
-        discoverTopology(aP, globalWorld, rank, wAp[rank], wAp);
         auto ePgD = EPG{};
-        // The topology adjacency matrix is ready, let's map devices to optimal cooperative process groups
-        const auto isFeasible = runDecider(&ePgD, experts, workers, ePWorkers, dTg, pT, pTs, ePs, ePsX,
-            scratch, aP, wAp, rank, globalWorld);
-        if (!isFeasible) {
-            cleanup();
-            FLASHMOE_ASSERT(isFeasible, "Insufficient Memory for Experts");
-        }
         // Now allocate memory
         const auto heapElems = STAGES * CELLS * ePgD.epWorldM * ePgD.expertSlots * ACC::pEC::value *
             ACC::H::value;
         const auto flagElems = (ePgD.epWorldM * ePgD.expertSlots + E * ACC::TCM::value * ACC::TNx::value);
         auto tHB = flagElems * sizeof(flagsType) + heapElems * sizeof(Element);
         // Required for large allocations
-        const auto nss = gEI("NVSHMEM_SYMMETRIC_SIZE", ACC::SZD::value); // default is 1GB
-        if (tHB >= nss) {
-            const auto nGB = cute::ceil_div(tHB, nss) * nss;
-            uEI("NVSHMEM_SYMMETRIC_SIZE", nGB);
-        }
         // Note every symmetric memory allocation's size has to be identical across all PEs
         auto* flags = static_cast<flagsType*>(nvshmem_calloc(flagElems, sizeof(flagsType)));
         auto* sHeap = static_cast<cuda::std::byte*>(nvshmem_align(16, heapElems * sizeof(Element)));
@@ -511,23 +301,6 @@ namespace flashmoe{
         std::free(mP);
     }
 
-    template<>
-    __host__ __forceinline__
-    void distributedInit<EP::no>() {
-        BookType* book = nullptr;
-        cuda::std::byte* bookElement = nullptr;
-        FLASHMOE_CHECK_CUDA(cudaMallocAsync(&book,
-            sizeof(BookType) * Bookkeeping::b4lt(), flashmoeStream));
-        FLASHMOE_CHECK_CUDA(cudaMallocAsync(&bookElement,
-            sizeof(ACC::Element) * Bookkeeping::xMlt(), flashmoeStream));
-        hostBookkeeping = Bookkeeping{book, bookElement};
-        FLASHMOE_CHECK_CUDA(cudaMemcpyToSymbolAsync(bookkeeping, &hostBookkeeping,
-            sizeof(Bookkeeping), 0,
-            cudaMemcpyHostToDevice, flashmoeStream));
-        FLASHMOE_CHECK_CUDA(cudaPeekAtLastError());
-        FLASHMOE_CHECK_CUDA(cudaStreamSynchronize(flashmoeStream));
-    }
-
     // Should be called before loading the model
     __host__ __forceinline__
     void initialize() {
@@ -536,15 +309,8 @@ namespace flashmoe{
         #endif
         FLASHMOE_ASSERT(!isInitialized, "Already Initialized");
         FLASHMOE_CHECK_CUDA(cudaStreamCreate(&flashmoeStream));
-        using GPUType = flashmoe::Hardware<FLASHMOE_ARCH, 255>;
-        constexpr auto blocks = GPUType::OS::processorBlocks::value;
-        static_assert(FLASHMOE_ARCH >= 700, "Volta and above is required!");
         isInitialized = true;
-        static_assert(ACC::S::value % BLOCK_M == 0 && ACC::S::value < BLOCK_M * blocks * ACC::TMU::value &&
-        ACC::P::value % BLOCK_N == 0 && ACC::H::value % BLOCK_N == 0);
-        static_assert(NUM_EXPERTS <= cuda::std::numeric_limits<uint16_t>::max(),
-            "For performance, we assume number of experts <= UINT16_MAX");
-        distributedInit<(ACC::E::value > 1) ? EP::yes : EP::no>();
+        distributedInit();
     }
 
     __host__ __forceinline__

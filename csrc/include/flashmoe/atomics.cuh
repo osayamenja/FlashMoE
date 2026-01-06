@@ -13,9 +13,11 @@
 #ifndef CSRC_ATOMICS_CUH
 #define CSRC_ATOMICS_CUH
 
-#include "types.cuh"
+#include <cuda/bit>
+#include <cuda/atomic>
 
 namespace flashmoe{
+    using ull_t = unsigned long long int;
     template<typename B>
     concept AtomicType = cuda::std::same_as<B, int> || cuda::std::same_as<B, unsigned int>
     || cuda::std::same_as<B, ull_t>;
@@ -28,36 +30,6 @@ namespace flashmoe{
     concept AtomicScope = scope == cuda::thread_scope_thread ||
         scope == cuda::thread_scope_block || scope == cuda::thread_scope_device || scope == cuda::thread_scope_system;
 
-    template<cuda::thread_scope scope = cuda::thread_scope_device, typename T>
-    requires AtomicType<T> && AtomicScope<scope>
-    __device__ __forceinline__
-    auto atomicLoad(T* __restrict__ const& addr){
-        if constexpr (scope == cuda::thread_scope_block || scope == cuda::thread_scope_thread) {
-            return atomicAdd_block(addr, 0);
-        }
-        else if constexpr (scope == cuda::thread_scope_system) {
-            return atomicAdd_system(addr, 0);
-        }
-        else {
-            return atomicAdd(addr, 0);
-        }
-    }
-
-    template<cuda::thread_scope scope = cuda::thread_scope_device,
-    unsigned int bound = cuda::std::numeric_limits<unsigned int>::max()>
-    requires(AtomicScope<scope> && bound <= cuda::std::numeric_limits<unsigned int>::max())
-    __device__ __forceinline__
-    unsigned int atomicIncrement(unsigned int* __restrict__ const& addr) {
-        if constexpr (scope == cuda::thread_scope_block || scope == cuda::thread_scope_thread) {
-            return atomicInc_block(addr, bound);
-        }
-        else if constexpr (scope == cuda::thread_scope_system) {
-            return atomicInc_system(addr, bound);
-        }
-        else {
-            return atomicInc(addr, bound);
-        }
-    }
 
     // Atomic Test and set
     template<cuda::thread_scope scope = cuda::thread_scope_device, typename T>
@@ -91,7 +63,7 @@ namespace flashmoe{
             g.store(initialized, cuda::memory_order_release);
         }
     }
-    // Enables in-kernel initialization of accumulators
+    // Enables in-kernel initialization of global accumulators
     __device__ __forceinline__
     auto guardedAtomicAdd(int* __restrict__ const& guard, int* __restrict__ const& vals, const int& val) {
         const cuda::atomic_ref<int, cuda::thread_scope_device> g{*guard};
@@ -103,7 +75,6 @@ namespace flashmoe{
             return 0;
         }
         while (expected != initialized) {
-            // the idea here is that the load+acquire is a "slow enough" read to moonlight as a quasi-backoff
             expected = g.load(cuda::memory_order_acquire);
         }
         return atomicAdd(vals, val);
@@ -116,7 +87,7 @@ namespace flashmoe{
         __syncthreads();
         if (!threadIdx.x) {
             const cuda::atomic_ref<int, cuda::thread_scope_device> c{*checkpoint};
-            *isLastBlock = c.fetch_add(1, cuda::memory_order_release) + 1 == blocks;
+            *isLastBlock = c.fetch_add(1, cuda::memory_order_acq_rel) + 1 == blocks;
         }
         __syncthreads();
         if (*isLastBlock) {
@@ -124,80 +95,6 @@ namespace flashmoe{
                 guards[i] = 0;
             }
         }
-    }
-
-    template<cuda::thread_scope scope = cuda::thread_scope_device>
-    requires(AtomicScope<scope>)
-    __device__ __forceinline__
-    void fence() {
-        if constexpr (scope == cuda::thread_scope_block) {
-            __threadfence_block();
-        }
-        else if constexpr (scope == cuda::thread_scope_device) {
-            __threadfence();
-        }
-        else {
-            __threadfence_system();
-        }
-    }
-
-    template<cuda::thread_scope scope = cuda::thread_scope_device, typename Notification, typename T>
-    requires(sizeof(Notification) == sizeof(ull_t) && alignof(Notification) == alignof(ull_t))
-    __device__ __forceinline__
-    void awaitNotification(Notification* __restrict__ const& addr, Notification* __restrict__ const& dest,
-        const T& previous) {
-        static_assert(cuda::std::is_same_v<decltype(dest->signal), T>, "Signal types should be the same!");
-        auto mail = atomicLoad<scope>(CAST_TO(ull_t, addr));
-        auto* __restrict__ payload = CAST_TO(Notification, &mail);
-        while (!payload->interrupt && payload->signal == previous) {
-            mail = atomicLoad<scope>(CAST_TO(ull_t, addr));
-            payload = CAST_TO(Notification, &mail);
-        }
-        *dest = *payload;
-    }
-
-    template<cuda::thread_scope scope = cuda::thread_scope_device, typename Notification, typename T>
-    requires(sizeof(Notification) == sizeof(ull_t) && alignof(Notification) == alignof(ull_t))
-    __device__ __forceinline__
-    void awaitBarrier(Notification* __restrict__ const& addr, Notification* __restrict__ const& dest,
-        const T& token) {
-        static_assert(cuda::std::is_same_v<decltype(addr->signal), T>, "Signal types should be the same!");
-        auto mail = atomicLoad<scope>(CAST_TO(ull_t, addr));
-        auto* __restrict__ payload = CAST_TO(Notification, &mail);
-        while (payload->signal < token) {
-            mail = atomicLoad<scope>(CAST_TO(ull_t, addr));
-            payload = CAST_TO(Notification, &mail);
-        }
-        *dest = *payload;
-    }
-
-    template<
-        cuda::thread_scope scope = cuda::thread_scope_device,
-        typename Payload
-    >
-    requires(AtomicScope<scope>
-        && sizeof(ull_t) == sizeof(Payload) && alignof(Payload) == alignof(ull_t))
-    __device__ __forceinline__
-    void signalPayload(Payload* __restrict__ const& addr, const Payload* __restrict__ const& payload) {
-        if constexpr (scope == cuda::thread_scope_block || scope == cuda::thread_scope_thread) {
-            atomicExch_block(reinterpret_cast<ull_t*>(addr), *reinterpret_cast<const ull_t*>(payload));
-        }
-        else if constexpr (scope == cuda::thread_scope_system) {
-            atomicExch_system(reinterpret_cast<ull_t*>(addr), *reinterpret_cast<const ull_t*>(payload));
-        }
-        else {
-            atomicExch(reinterpret_cast<ull_t*>(addr), *reinterpret_cast<const ull_t*>(payload));
-        }
-    }
-
-    __device__ __forceinline__
-    void gridBarrier() {
-        __syncthreads();
-        if (!threadIdx.x) {
-            __threadfence();
-            bookkeeping.dB()->arrive_and_wait();
-        }
-        __syncthreads();
     }
 }
 #endif //CSRC_ATOMICS_CUH

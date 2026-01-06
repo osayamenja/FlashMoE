@@ -2,8 +2,6 @@
  * Copyright (c) 2024, Osayamen Jonathan Aimuyo.
  ******************************************************************************/
 #include <fmt/ranges.h>
-#include <thrust/generate.h>
-#include <thrust/random.h>
 
 #include "../include/flashmoe/flashmoe.cuh"
 
@@ -11,21 +9,13 @@ __host__ __forceinline__
 void runOS() {
     flashmoe::initialize();
     const auto rank = flashmoe::getRank();
-    // generate random input tile and eye weights
     constexpr auto S = flashmoe::ACC::S::value;
     constexpr auto H = flashmoe::ACC::H::value;
     constexpr auto E = flashmoe::ACC::E::value;
     constexpr auto P = flashmoe::ACC::P::value;
     constexpr auto PX = flashmoe::ACC::PX::value;
     const auto nLx = flashmoe::hostBookkeeping.nLx;
-    constexpr unsigned long aZ =  S * H;
-    constexpr auto gwZ = aZ + PX * H;
-    // scale this to number of experts
-    const auto bZ =  gwZ + nLx * P * H;
-    const auto b2Z =  bZ + nLx * P * H;
-    const auto dZ =  b2Z + nLx * (P + H);
-    const auto gZ = dZ + S * PX;
-    const auto cZ = gZ + S * H;
+
     using Element = flashmoe::ACC::Element;
     auto stream = flashmoe::flashmoeStream;
     Element* activations = nullptr;
