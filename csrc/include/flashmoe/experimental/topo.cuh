@@ -13,11 +13,44 @@
 #ifndef TOPO_CUH
 #define TOPO_CUH
 
+#define TOPO_LOOP_TRIP 4 // this may be too much
+#define BETA_BUFFER (1024L * 1024L) // 1MiB
+#define ALPHA_BUFFER 1024L // 1KiB
+#define BYTE_MAX cuda::std::numeric_limits<cuda::std::underlying_type_t<cuda::std::byte>>::max()
+#define TO_MB(b) (static_cast<float>(b) / (1000.0f*1000.0f))
+#define BETA_MB 1024.0f // 1GiB
 #define TOPO_BLOCK_SIZE 128
 #define NANO_TO_MILLI 1e6
 
 #include <cuda/atomic>
 #include <nvshmem.h>
+namespace flashmoe
+{
+    struct __align__(8) floatPair {
+        float alpha;
+        float beta;
+
+        __device__ __forceinline__
+        friend bool operator<(const floatPair &lhs, const floatPair &rhs) {
+            return fmaf(lhs.beta, BETA_MB, lhs.alpha) < fmaf(rhs.beta, BETA_MB, rhs.alpha);
+        }
+
+        __device__ __forceinline__
+        friend bool operator<=(const floatPair &lhs, const floatPair &rhs) {
+            return rhs >= lhs;
+        }
+
+        __device__ __forceinline__
+        friend bool operator>(const floatPair &lhs, const floatPair &rhs) {
+            return rhs < lhs;
+        }
+
+        __device__ __forceinline__
+        friend bool operator>=(const floatPair &lhs, const floatPair &rhs) {
+            return !(lhs < rhs);
+        }
+    };
+}
 namespace flashmoe::topology{
     struct __align__(4) WorkerAttribute{
         cute::half_t throughput; // expert per ms; could be fractional

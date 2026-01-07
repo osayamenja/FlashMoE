@@ -5,7 +5,7 @@
 #ifndef FLASHMOE_HEAP_CUH
 #define FLASHMOE_HEAP_CUH
 
-/// Number of communication stages S
+/// Number of communication stages
 #define STAGES 2U
 /// Per stage, there is one cell for sending and another for reception
 #define CELLS 2U
@@ -31,20 +31,20 @@ namespace flashmoe {
         >
         requires (stage < STAGES && cell < CELLS)
         __device__ __forceinline__
-        constexpr cuda::std::byte* advance(const int& peer, const int& expert, const int& token = 0) const {
-                return sHeap + elementBytes * tokenDim * (EC * (CELLS * (STAGES * (peer * expertSlots +
-                    static_cast<long int>(expert)) + stage) + cell) + token);
-            }
+        constexpr long int advanceOffset(const int& peer, const int& expert, const int& token = 0) const {
+            return elementBytes * tokenDim * (EC * (CELLS * (STAGES * (peer * expertSlots +
+                static_cast<long int>(expert)) + stage) + cell) + token);
+        }
         template<
             int stage,
             int cell
         >
         requires (stage < STAGES && cell < CELLS)
         __device__ __forceinline__
-        constexpr long int advanceOffset(const int& peer, const int& expert, const int& token = 0) const {
-            return elementBytes * tokenDim * (EC * (CELLS * (STAGES * (peer * expertSlots +
-                static_cast<long int>(expert)) + stage) + cell) + token);
-        }
+        constexpr cuda::std::byte* advance(const int& peer, const int& expert, const int& token = 0) const {
+                return sHeap + advanceOffset<stage, cell>(peer, expert, token);
+            }
+
     };
 }
 #endif //FLASHMOE_HEAP_CUH

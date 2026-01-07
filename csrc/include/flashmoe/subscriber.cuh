@@ -21,8 +21,9 @@
 #include "task.cuh"
 
 namespace flashmoe::subscriber{
-    struct Args {
-        uint64_t* const signals; // symmetric global
+    constexpr int WARP_SIZE = 32;
+    struct __align__(16) Args {
+        uint64_t* const flags; // symmetric global
         Task* const tQ; // global
         const int* tileIndices; // global
         cuda::std::byte* const GEMM0Staging;
@@ -44,9 +45,11 @@ namespace flashmoe::subscriber{
         const int nLx; // number of local experts
         const int epRank;
         const int E; // number of experts
-        const int tilesN0;
-        const int tilesN1;
+        const int P; // FFN intermediate size
+        const int tilesN0; // tiles across FFN intermediate size
+        const int tilesN1; // tiles across hidden dim
         const int ecTilesM; // ceil_div(EC, tileM)
+        const int ecSignalCount;
         const uint16_t tIdx;
         const uint16_t seqNumber;
 
@@ -68,10 +71,10 @@ namespace flashmoe::subscriber{
             const int& _ssfC,
             const int& _gfSfC, const int& _world,
             const int& nLx,
-            const int& _epRank, const int& _experts,
+            const int& _epRank, const int& _experts, const int& _p,
             const uint threadIdx, const int& _tilesN0, const int& _tilesN1, const int& _eCTilesM,
             const uint16_t seqNo):
-        signals(_signals),
+        flags(_signals),
         tQ(tq + threadIdx),
         tileIndices(_tileIndices),
         GEMM0Staging(gemm0Staging),
@@ -92,8 +95,8 @@ namespace flashmoe::subscriber{
         world(_world),
         nLx(nLx),
         epRank(_epRank),
-        E(_experts),
-        tilesN0(_tilesN0), tilesN1(_tilesN1), ecTilesM(_eCTilesM),
+        E(_experts), P(_p),
+        tilesN0(_tilesN0), tilesN1(_tilesN1), ecTilesM(_eCTilesM), ecSignalCount(ecTilesM * tilesN1),
         tIdx(threadIdx),
         seqNumber(seqNo) {}
     };
@@ -102,93 +105,68 @@ namespace flashmoe::subscriber{
         int subscriberCount,
         PacketStage s,
         PeerConnectivity p,
+        int bM = -1,
         typename Element = void
     >
     struct Decoder {
-        static_assert(flashmoe::TensorValueType<Element>);
         static_assert(s == PacketStage::initial);
         __device__ __forceinline__
-        void operator()(const DecoderArg& dA,
-            cuda::std::byte* const& sHeap,
-            flagsType* const& flags,
+        void operator()(const Args& args,
+            const Heap& heap,
+            cuda::std::byte* __restrict__ sHeap,
+            Ingredients& ingredients,
+            uint64_t* const& flags,
             const cuda::std::byte* const& packet,
-            uint const& routedTokens,
-            unsigned int const& localExpertIdx,
-            cuda::std::byte* __restrict__ const& pGB, //postGEMM buffer
-            const cuda::std::array<const cuda::std::byte*, GEMMs>& weights,
-            const cuda::std::array<const cuda::std::byte*, GEMMs>& bias,
+            unsigned int const& routedTokens,
             unsigned int const& peer, // relative to the EP group
-            unsigned int const& gPeer, // relative to the global group, needed for network operations
             const uint& laneId,
-            int& lTQHead,
-            int* __restrict__ const& tQHead) const {
-            constexpr auto tN = ACC::TN::value;
+            int& lTQHead) const {
+            static_assert(flashmoe::TensorValueType<Element> && bM > 0);
             const auto qIdx = DQ::sNext<subscriberCount>(lTQHead);
-            const auto fTilesM = routedTokens / BLOCK_M;
-            // pad here to meet tile requirements
-            const auto padM = Bookkeeping::pad<BLOCK_M>(routedTokens);
+            const auto fTilesM = routedTokens / bM;
             // expert, peer offset
-            const auto sO = ACC::TCM::value * (peer * dA.nLx + localExpertIdx);
+            const auto sO = args.ecTilesM * (peer * args.nLx + ingredients.localExpertIdx);
             cuda::std::array<cuda::std::byte*, GEMMs> taskResults{};
             // Staging buffer for results of preGEMM
-            taskResults[0] = pGB + (peer * dA.nLx * ACC::pEC::value * ACC::P::value * sizeof(Element));
+            taskResults[0] = args.GEMM0Staging + (peer * args.nLx * heap.EC * args.P * sizeof(Element));
             // Egress packet buffer
-            auto* rcData = heap::advance<1, 1>(sHeap, dA.epRank, localExpertIdx);
-            taskResults[1] = p == PeerConnectivity::remote ?
-                heap::advance<1, 0>(sHeap, peer, localExpertIdx) : rcData;
-            const auto wT = fTilesM * tN;
+            auto* rcData = sHeap + heap.advanceOffset<1, 1>(args.epRank, ingredients.localExpertIdx);
+            auto* intraStaging = sHeap + heap.advanceOffset<1, 0>(peer, ingredients.localExpertIdx);
+            taskResults[1] = p == PeerConnectivity::remote ? intraStaging : rcData;
+            const auto wT = fTilesM * args.tilesN0;
             const auto fS = wT / WARP_SIZE + (laneId < wT % WARP_SIZE);
-            constexpr auto rT = tN % WARP_SIZE;
-            const auto lS = tN / WARP_SIZE + (rT > 0 ? laneId < rT : 0);
-            const auto tSlice = fS + (routedTokens % BLOCK_M == 0 ? 0 : lS);
+            const auto rT = args.tilesN0 % WARP_SIZE;
+            const auto lS = args.tilesN0 / WARP_SIZE + (rT > 0 ? laneId < rT : 0);
+            const auto tSlice = fS + (routedTokens % bM == 0 ? 0 : lS);
 
-            for (uint i = 0; i < fS; ++i) {
+            for (int i = 0; i < fS; ++i) {
                 const auto tileIdx = laneId + i * WARP_SIZE;
-                const auto rowIdx = tileIdx / tN;
-                dA.tQ[DQ::next<subscriberCount>(qIdx, i)] = Task{
-                    TaskType::GEMM0,
-                    packet,
-                    weights,
-                    taskResults,
-                    bias,
-                    rcData,
-                    flags,
-                    sO + rowIdx,
-                    tileIdx,
-                    padM,
-                    static_cast<uint16_t>(BLOCK_M),
-                    gPeer,
-                    rowIdx,
-                    p == PeerConnectivity::remote
+                const auto rowIdx = tileIdx / args.tilesN0;
+                const auto syncIdx = sO + rowIdx;
+                ingredients.stash = rowIdx;
+                ingredients.tileSize = bM;
+                args.tQ[DQ::next<subscriberCount>(qIdx, i)] = Task{
+                    ingredients, packet, taskResults, rcData, flags, syncIdx, tileIdx
                 };
             }
 
             // residue tile
-            if (const auto residue = routedTokens - fTilesM * BLOCK_M; residue) {
+            if (const auto residue = routedTokens - fTilesM * bM; residue) {
                 for (uint j = 0; j < lS; j++) {
-                    const auto tileIdx = fTilesM * tN + laneId + j * WARP_SIZE;
-                    dA.tQ[DQ::next<subscriberCount>(qIdx, fS + j)] = Task{
-                        TaskType::GEMM0,
-                        packet,
-                        weights,
-                        taskResults,
-                        bias,
-                        rcData,
-                        flags,
-                        sO + fTilesM,
-                        tileIdx,
-                        padM,
-                        static_cast<uint16_t>(residue),
-                        gPeer,
-                        fTilesM,
-                        p == PeerConnectivity::remote
+                    const auto tileIdx = fTilesM * args.tilesN0 + laneId + j * WARP_SIZE;
+                    const auto syncIdx = sO + fTilesM;
+                    const auto rowIdx = fTilesM;
+                    ingredients.stash = rowIdx;
+                    ingredients.tileSize = static_cast<uint16_t>(residue);
+                    args.tQ[DQ::next<subscriberCount>(qIdx, fS + j)] = Task{
+                        ingredients, packet, taskResults, rcData, flags, syncIdx, tileIdx
                     };
                 }
             }
 
             if (tSlice) {
                 lTQHead += tSlice;
-                cuda::atomic_ref<int, cuda::thread_scope_block> tqh{*tQHead};
+                cuda::atomic_ref<int, cuda::thread_scope_block> tqh{*args.tQHead};
                 cuda::std::ignore = tqh.fetch_add(tSlice, cuda::memory_order_release);
             }
         }
@@ -198,24 +176,12 @@ namespace flashmoe::subscriber{
     template<int subscriberCount>
     struct Decoder<subscriberCount, PacketStage::last, PeerConnectivity::p2p> {
         __device__ __forceinline__
-        void operator()(Task* __restrict__ const& tQ,
-            unsigned int& lTQHead,
-            const cuda::std::byte* const& packet,
-            const cuda::std::byte* const& tokenIndices,
-            const unsigned int& nTokens,
-            const unsigned int& tileIdx,
-            int* __restrict__ const& tQHead,
-            const unsigned int& expertIdx) const {
+        void operator()(const Args& args, const Ingredients& ingredients, unsigned int& lTQHead) const {
             // now let's decode this single tile
-            tQ[DQ::sNext<subscriberCount>(lTQHead++)] = Task{
-                TaskType::combine,
-                tokenIndices,
-                cuda::std::array<const cuda::std::byte*, GEMMs>{packet},
-                nTokens,
-                tileIdx,
-                expertIdx
-            };
-            cuda::atomic_ref<int, cuda::thread_scope_block> tqh{*tQHead};
+            // Note: we intentionally modeled the Task struct so that the below compiles to a single 128B
+            // instruction rather than 4 of them, which would have been the case if we updated the entire object.
+            args.tQ[DQ::sNext<subscriberCount>(lTQHead++)].ingredients = ingredients;
+            cuda::atomic_ref<int, cuda::thread_scope_block> tqh{*args.tQHead};
             // notifies scheduler of work
             cuda::std::ignore = tqh.fetch_add(1, cuda::memory_order_release);
         }
@@ -224,27 +190,15 @@ namespace flashmoe::subscriber{
     template<int subscriberCount>
     struct Decoder<subscriberCount, PacketStage::last, PeerConnectivity::remote> {
         __device__ __forceinline__
-        void operator()(const DecoderArg& dA,
-            const cuda::std::byte* const& packet,
-            const cuda::std::byte* const& tokenIndices,
-            const unsigned int& nTokens,
-            unsigned int& lTQHead,
-            int* __restrict__ const& tQHead,
-            const unsigned int& expertIdx) const {
+            void operator()(const Args& args, Ingredients& ingredients, unsigned int& lTQHead) const {
             const auto qIdx = DQ::sNext<subscriberCount>(lTQHead);
-            for (uint i = 0; i < tNx; ++i) {
-                dA.tQ[DQ::next<subscriberCount>(qIdx, i)] = Task{
-                    TaskType::combine,
-                    tokenIndices,
-                    cuda::std::array<const cuda::std::byte*, GEMMs>{packet},
-                    nTokens,
-                    i,
-                    expertIdx
-                };
+            for (uint i = 0; i < args.tilesN1; ++i) {
+                ingredients.stash = i;
+                args.tQ[DQ::next<subscriberCount>(qIdx, i)].ingredients = ingredients;
             }
-            lTQHead += tNx;
-            cuda::atomic_ref<int, cuda::thread_scope_block> tqh{*tQHead};
-            cuda::std::ignore = tqh.fetch_add(tNx, cuda::memory_order_release);
+            lTQHead += args.tilesN1;
+            cuda::atomic_ref<int, cuda::thread_scope_block> tqh{*args.tQHead};
+            cuda::std::ignore = tqh.fetch_add(args.tilesN1, cuda::memory_order_release);
         }
     };
     __device__
@@ -255,14 +209,10 @@ namespace flashmoe::subscriber{
 
     // Self-correct Termination Bound
     __device__ __forceinline__
-    void sTB(int* __restrict__ const& taskCount,
-        int* __restrict__ const& status,
-        const int& peer, const int& nLx,
-        const int& tilesN1, const int& tilesN2, const int& tcm,
-        const int& peerTaskTiles = 0U) {
-        if (!atomicTAS<cuda::thread_scope_block>(status + peer)) {
-            const auto superfluous = (tilesN1 + tilesN2) * ((nLx * tcm) - peerTaskTiles);
-            atomicSub_block(taskCount, superfluous);
+    void sTB(const Args& args, const int& peer, const int& peerTaskTiles = 0U) {
+        if (!atomicTAS<cuda::thread_scope_block>(args.status + peer)) {
+            const auto superfluous = (args.tilesN0 + args.tilesN1) * ((args.nLx * args.ecTilesM) - peerTaskTiles);
+            atomicSub_block(args.taskCount, superfluous);
         }
     }
 
@@ -270,6 +220,7 @@ namespace flashmoe::subscriber{
         SubscriberStage s,
         typename Element,
         int subscriberCount,
+        int bM,
         int sNW = subscriberCount / WARP_SIZE
     >
     struct Subscriber {
@@ -280,14 +231,13 @@ namespace flashmoe::subscriber{
             uint64_t* __restrict__ const& flags,
             BitSet* __restrict__ const& bitSet,
             const int& stageLength,
-            int& stagePending, int& ltQHead) const {
+            int& pending, int& ltQHead) const {
             /// Flags has dimension [W, L], where W is expert parallel world and L is number of local experts
-            constexpr Decoder<subscriberCount, PacketStage::initial, PeerConnectivity::p2p, Element> fPd{};
-            constexpr Decoder<subscriberCount, PacketStage::initial, PeerConnectivity::remote, Element> fRd{};
+            constexpr Decoder<subscriberCount, PacketStage::initial, PeerConnectivity::p2p, bM, Element> fPd{};
+            constexpr Decoder<subscriberCount, PacketStage::initial, PeerConnectivity::remote, bM, Element> fRd{};
             constexpr int bSw = sizeof(uint) * 8U;
             const auto laneId = args.tIdx % WARP_SIZE;
             const auto warpId = args.tIdx / WARP_SIZE;
-            #pragma unroll 2
             for (int i = 0; i < stageLength; ++i) {
                 const auto vSIdx = i / bSw;
                 const auto vIdx = i % bSw;
@@ -305,22 +255,21 @@ namespace flashmoe::subscriber{
                             if (sigPayload.seqNumber == args.seqNumber) {
                                 // set visited bit
                                 // self-correct the termination bound
-                                sTB(args.taskCount, args.status, peerIdx, args.nLx,
-                                    args.tilesN0, args.tilesN1,
-                                    args.ecTilesM, sigPayload.totalTilesM);
+                                sTB(args, peerIdx, sigPayload.totalTilesM);
                                 visitedSet.set(vIdx);
 
                                 // enforce memory consistency of expected packet
                                 const bool isPacketHere = nvshmem_uint64_test(flags + flagIdx,
                                     NVSHMEM_CMP_EQ, signal);
                                 if (!isPacketHere) {
-                                    // this scenario means that this peer sent another packet in between us
-                                    // observing the signal and testing the signal's presence.
-                                    // This is fine, specifically within our protocol,
-                                    // this occurs if the producer previously sent a noop,
-                                    // advanced to the next epoch and sent another packet.
-                                    // we simply do nothing in this scenario as
-                                    // we will process the new packet in the next epoch.
+                                    /*this scenario means that this peer sent another packet in between us
+                                    observing the signal and testing the signal's presence.
+                                    This is fine, specifically within our protocol,
+                                    this occurs if the producer previously sent a noop,
+                                    advanced to the next epoch and sent another packet.
+                                    we simply do nothing in this scenario as
+                                    we will process the new packet in the next epoch.
+                                    */
                                     if (__builtin_expect(sigPayload.routedTokens > 0, 0)) {
                                         __trap(); // protocol violation
                                     }
@@ -337,9 +286,7 @@ namespace flashmoe::subscriber{
                                 Thus, as we catch up to them, we self-correct
                                 our termination bound to avoid a deadlock.
                                 */
-                                sTB(args.taskCount, args.status, peerIdx, args.nLx,
-                                    args.tilesN0, args.tilesN1,
-                                    args.ecTilesM);
+                                sTB(args, peerIdx);
                                 // set visited bit
                                 visitedSet.set(vIdx);
                             }
@@ -350,14 +297,11 @@ namespace flashmoe::subscriber{
                             signal = f.load(cuda::memory_order::acquire);
                             const auto sigPayload = cuda::std::bit_cast<SignalPayload<PacketStage::initial>>(signal);
                             if (sigPayload.seqNumber == args.seqNumber) {
-                                sTB(args.taskCount, args.status, peerIdx, args.nLx,
-                                    args.tilesN0, args.tilesN1, args.ecTilesM, sigPayload.totalTilesM);
+                                sTB(args, peerIdx, sigPayload.totalTilesM);
                                 visitedSet.set(vIdx);
                             }
                             else if (sbs::ahead(sigPayload.seqNumber, args.seqNumber)) {
-                                sTB(args.taskCount, args.status, peerIdx, args.nLx,
-                                    args.tilesN0, args.tilesN1,
-                                    args.ecTilesM);
+                                sTB(args, peerIdx);
                                 // set visited bit
                                 visitedSet.set(vIdx);
                             }
@@ -371,189 +315,191 @@ namespace flashmoe::subscriber{
                 signal = __shfl_sync(0xffffffff, signal, 0);
                 const auto sigPayload = cuda::std::bit_cast<SignalPayload<PacketStage::initial>>(signal);
                 if (sigPayload.seqNumber == args.seqNumber && sigPayload.routedTokens > 0) {
-                    stagePending -= 1;
+                    pending -= 1;
                     const auto myLocalExIdx = flagIdx % args.nLx;
                     const auto lXI = args.lX[myLocalExIdx];
                     const auto* packet = symHeap.advance<0, 1>(peerIdx, myLocalExIdx);
+
+                    Ingredients ingredients{};
+                    ingredients.localExpertIdx = myLocalExIdx;
+                    ingredients.taskType = TaskType::GEMM0;
+                    ingredients.peerIdx = pLI.pe;
+                    // pad here for compatibility
+                    ingredients.M = cute::ceil_div(sigPayload.routedTokens, bM) * bM;
                     if (!pLI.isRemote) {
                         auto* nFlags = pLI.remoteSFlags + args.gfSfC + lXI.expertIndex * (args.ecTilesM * args.tilesN1);
-                        fPd(dA, pLI.remoteSHeap, nFlags, packet, sigPayload.routedTokens,
-                                myLocalExIdx, pGB, weights, bias, peerIdx, pLI.pe,
-                                laneId, ltQHead, tQHead);
+                        // fpd
+                        ingredients.isPeerRemote = 0;
+                        fPd(args, symHeap, pLI.remoteSHeap, ingredients, nFlags, packet,
+                            sigPayload.routedTokens, peerIdx, laneId, ltQHead);
                     }
                     else {
-                        auto* nFlags = dA.sFlags + args.gfSfC + lXI.expertIndex * (args.ecTilesM * args.tilesN1);
-                        fRd(dA, dA.sHeap, nFlags, packet, sigPayload.routedTokens,
-                                myLocalExIdx, pGB, weights, bias, peerIdx, pLI.pe, laneId, ltQHead, tQHead);
+                        auto* nFlags = args.flags + args.gfSfC + lXI.expertIndex * (args.ecTilesM * args.tilesN1);
+                        // frd
+                        ingredients.isPeerRemote = 1;
+                        fRd(args, symHeap, symHeap.sHeap, ingredients, nFlags, packet,
+                            sigPayload.routedTokens, peerIdx, laneId, ltQHead);
                     }
                 }
             }
         }
     };
 
-    template<int subscriberCount, typename Element>
-    struct Subscriber<SubscriberStage::final, Element, subscriberCount> {
-        template<
-            typename WorkSet,
-            typename TokenIds,
-            //unsigned int TN = ACC::TNx::value,
-            //unsigned int CS = ACC::TCM::value * TN
-        >
-        requires(isRegisterV<WorkSet>)
+    template<int subscriberCount, int bM, typename Element>
+    struct Subscriber<SubscriberStage::final, Element, subscriberCount, bM> {
         __device__ __forceinline__
-        void operator()(
-            WorkSet& workSet,
-            BitSet* __restrict__ const& bitSet,
-            const DecoderArg& dA,
-            /// Task Arguments
-            TokenIds const& tokenIds,
-            /// Data Structures
-            const uint* __restrict__ const& tileIndices,
-            /// Lookup Table
-            const ELI* __restrict__ const& eL,
-            /// State
-            uint* __restrict__ const& scratch,
-            flagsType* __restrict__ const& flags,
-            BookType* __restrict__ tQHead,
-            uint& ltQHead,
-            /// Constants
-            const uint& stageLength,
-            const uint& stageTrips,
-            const uint& tIdx,
-            const uint16_t& localSeqBit,
-            uint16_t* __restrict__ const& sSeqBit) const {
-            constexpr auto bSw = sizeof(uint) * 8U;
-            static_assert(WorkSet::kElements == 16 || WorkSet::kElements % bSw == 0);
-            constexpr Decoder<PacketStage::last, PeerConnectivity::p2p> lPd{};
-            constexpr Decoder<PacketStage::last, PeerConnectivity::remote> lRd{};
+        void operator()(const Args& args, const uint* __restrict__ const& tileIndices,
+            BitSet* __restrict__ const& bitSet, uint64_t* __restrict__ const& flags,
+            int& ltQHead, const int& stageLength) const {
+            constexpr int wSet = 16;
+            constexpr int bSw = sizeof(uint) * 8U;
+            static_assert(wSet == 16 || wSet == 32);
+            const int stageTrips = stageLength / wSet;
+            cutlass::AlignedArray<uint, wSet> workSet{};
+            constexpr Decoder<subscriberCount, PacketStage::last, PeerConnectivity::p2p> lPd{};
+            constexpr Decoder<subscriberCount, PacketStage::last, PeerConnectivity::remote> lRd{};
             // prefetch
-            if (stageTrips) {
-                // global -> shared
-                #pragma unroll
-                for (uint j = 0; j < WorkSet::kElements; ++j) {
-                    scratch[tIdx + j * subscriberCount] = tileIndices[tIdx + j * subscriberCount];
-                }
-            }
-            for (uint i = 0; i < stageTrips; ++i) {
-                const uint sBIdx = tIdx + (i * WorkSet::kElements / bSw) * subscriberCount;
+            for (int i = 0; i < stageTrips; ++i) {
+                const uint sBIdx = args.tIdx + (i * wSet / bSw) * subscriberCount;
                 auto sBS = bitSet[sBIdx];
-                // shared -> registers
+                // gmem -> registers
                 #pragma unroll
-                for (uint j = 0; j < WorkSet::kElements; ++j) {
-                    workSet[j] = scratch[tIdx + j * subscriberCount];
-                    if (i + 1 < stageTrips) {
-                        // Eagerly initiate global memory loads
-                        scratch[tIdx + j * subscriberCount] =
-                            tileIndices[tIdx + (j + (i + 1) * WorkSet::kElements) * subscriberCount];
-                    }
+                for (uint j = 0; j < wSet; ++j) {
+                    workSet[j] = tileIndices[args.tIdx + j * subscriberCount];
                 }
                 #pragma unroll
-                for (uint j = 0; j < WorkSet::kElements; ++j) {
-                    const uint bIdx = (i * WorkSet::kElements + j) % bSw;
+                for (uint j = 0; j < wSet; ++j) {
+                    const uint bIdx = (i * wSet + j) % bSw;
                     const auto flagIdx = workSet[j];
-                    if (const auto isVisited = sBS.get(bIdx); !isVisited) {
-                        const auto signal = atomicExch_system(CAST_TO(ull_t, flags + flagIdx),
-                            SignalConstants::ground);
-                        const auto* __restrict__ sP = CONST_CAST_TO(SignalPayload<PacketStage::last>, &signal);
-                        if (sP->seqNumber == localSeqBit) {
-                            // let's decode this packet
-                            // set visited bit
-                            sBS.set(bIdx);
-                            const auto expertIdx = flagIdx / CS;
-                            const auto lookup = eL[expertIdx];
-                            const auto tokenIdx = sP->batchIdx * BLOCK_M;
-                            const auto* tI = &tokenIds(expertIdx, tokenIdx);
-                            const auto* packet = heap::advance<1, 1>(dA.sHeap, lookup.epRank,
-                                    lookup.localExpertIndex,tokenIdx);
-                            if (lookup.isRemote) {
-                                // enforce memory consistency
-                                eMC(sSeqBit, localSeqBit);
-                                lRd(dA, packet, CONST_CAST_TO(cuda::std::byte, tI), sP->tokensM,
-                                    ltQHead, tQHead, expertIdx);
-                            }
-                            else {
-                                // enforce memory consistency
-                                __threadfence_system();
-                                lPd(dA.tQ, ltQHead, packet, CONST_CAST_TO(cuda::std::byte, tI),
-                                    sP->tokensM, flagIdx % TN, tQHead, expertIdx);
-                            }
-                        }
-                    }
-                }
-                // update checkpoint state
-                bitSet[sBIdx] = sBS;
-            }
-            if (const auto residue = stageLength - stageTrips * WorkSet::kElements; residue) {
-                for (uint j = 0; j < residue; ++j) {
-                    scratch[tIdx + j * subscriberCount] = tileIndices[tIdx +
-                        (j + stageTrips * WorkSet::kElements) * subscriberCount];
-                }
-                const uint sBIdx = tIdx + (stageTrips * WorkSet::kElements / bSw) * subscriberCount;
-                auto sBS = bitSet[sBIdx];
-                #pragma unroll
-                for (uint j = 0; j < WorkSet::kElements; ++j) {
-                    if (j < residue) {
-                        workSet[j] = scratch[tIdx + j * subscriberCount];
-                    }
-                }
-                #pragma unroll
-                for (uint j = 0; j < WorkSet::kElements; ++j) {
-                    if (j < residue) {
-                        const uint bIdx = (stageTrips * WorkSet::kElements + j) % bSw;
-                        const auto flagIdx = workSet[j];
-                        if (const auto isVisited = sBS.get(bIdx); !isVisited) {
-                            const auto signal = atomicExch_system(CAST_TO(ull_t, flags + flagIdx),
-                                SignalConstants::ground);
-                            const auto* __restrict__ sP = CONST_CAST_TO(SignalPayload<PacketStage::last>, &signal);
-                            if (sP->seqNumber == localSeqBit) {
+                    const auto expertIdx = flagIdx / args.ecSignalCount;
+                    const auto lookup = args.eL[expertIdx];
+                    if (!sBS.get(bIdx)) {
+                        if (lookup.isRemote) {
+                            // RDMA peer
+                            const auto signal = nvshmem_signal_fetch(flags + flagIdx);
+                            const auto sigPayload = cuda::std::bit_cast<SignalPayload<PacketStage::last>>(signal);
+                            if (sigPayload.seqNumber == args.seqNumber) {
                                 // set visited bit
                                 sBS.set(bIdx);
-                                // let's decode this packet
-                                const auto expertIdx = flagIdx / CS;
-                                const auto lookup = eL[expertIdx];
-                                const auto tokenIdx = sP->batchIdx * BLOCK_M;
-                                const auto* tI = &tokenIds(expertIdx, tokenIdx);
-                                const auto* packet = heap::advance<1, 1>(dA.sHeap, lookup.epRank,
-                                        lookup.localExpertIndex, tokenIdx);
-                                if (lookup.isRemote) {
-                                    // enforce memory consistency
-                                    eMC(sSeqBit, localSeqBit);
-                                    lRd(dA, packet, CONST_CAST_TO(cuda::std::byte, tI), sP->tokensM,
-                                        ltQHead, tQHead, expertIdx);
+                                // enforce memory consistency
+                                const bool isPacketHere = nvshmem_uint64_test(flags + flagIdx, NVSHMEM_CMP_EQ,
+                                    signal);
+                                if (__builtin_expect(!isPacketHere, 0)) {
+                                    // protocol violation, this should be impossible
+                                    // if we are here, something insanely wrong has happened external to our program
+                                    __trap(); 
                                 }
-                                else {
-                                    // enforce memory consistency
-                                    __threadfence_system();
-                                    lPd(dA.tQ, ltQHead, packet,
-                                        CONST_CAST_TO(cuda::std::byte, tI),
-                                        sP->tokensM, flagIdx % TN, tQHead, expertIdx);
+                                // construct combine ingredients
+                                Ingredients ingredients{};
+                                const auto tokenIdx = sigPayload.batchIdx * bM;
+                                ingredients.M = tokenIdx;
+                                ingredients.localExpertIdx = lookup.localExpertIndex;
+                                ingredients.peerIdx = args.epRank;
+                                ingredients.tileSize = sigPayload.tokensM;
+                                ingredients.taskType = TaskType::combine;
+                                ingredients.isPeerRemote = 1;
+                                lRd(args, ingredients, ltQHead);
+                            }
+                        }
+                        else {
+                            // NVLink peer
+                            cuda::atomic_ref<uint64_t, cuda::thread_scope_system> f{*(flags + flagIdx)};
+                            const auto sigPayload = cuda::std::bit_cast<SignalPayload<PacketStage::last>>(
+                                f.load(cuda::memory_order_acquire));
+                            if (sigPayload.seqNumber == args.seqNumber) {
+                                sBS.set(bIdx);
+                                const auto tokenIdx = sigPayload.batchIdx * bM;
+                                // construct combine ingredients
+                                Ingredients ingredients{};
+                                ingredients.M = tokenIdx;
+                                ingredients.localExpertIdx = lookup.localExpertIndex;
+                                ingredients.peerIdx = args.epRank;
+                                ingredients.tileSize = sigPayload.tokensM;
+                                ingredients.stash = flagIdx % args.tilesN1;
+                                ingredients.taskType = TaskType::combine;
+                                ingredients.isPeerRemote = 0;
+                                lPd(args, ingredients, ltQHead);
+                            }
+                        }
+                    }
+                }
+                bitSet[sBIdx] = sBS;
+            }
+            if (const auto residue = stageLength - stageTrips * wSet; residue) {
+                const uint sBIdx = args.tIdx + (stageTrips * wSet / bSw) * subscriberCount;
+                auto sBS = bitSet[sBIdx];
+                #pragma unroll
+                for (uint j = 0; j < wSet; ++j) {
+                    if (j < residue) {
+                        workSet[j] = tileIndices[args.tIdx + (j + stageTrips * wSet) * subscriberCount];
+                    }
+                }
+                #pragma unroll
+                for (uint j = 0; j < wSet; ++j) {
+                    if (j < residue) {
+                        const uint bIdx = (stageTrips * wSet + j) % bSw;
+                        const auto flagIdx = workSet[j];
+                        const auto expertIdx = flagIdx / args.ecSignalCount;
+                        const auto lookup = args.eL[expertIdx];
+                        if (!sBS.get(bIdx)) {
+                            if (lookup.isRemote) {
+                                const auto signal = nvshmem_signal_fetch(flags + flagIdx);
+                                const auto sigPayload = cuda::std::bit_cast<SignalPayload<PacketStage::last>>(signal);
+                                if (sigPayload.seqNumber == args.seqNumber) {
+                                    sBS.set(bIdx);
+                                    const bool isPacketHere = nvshmem_uint64_test(flags + flagIdx, NVSHMEM_CMP_EQ,
+                                        signal);
+                                    if (__builtin_expect(!isPacketHere, 0)) {
+                                        __trap();
+                                    }
+                                    Ingredients ingredients{};
+                                    const auto tokenIdx = sigPayload.batchIdx * bM;
+                                    ingredients.M = tokenIdx;
+                                    ingredients.localExpertIdx = lookup.localExpertIndex;
+                                    ingredients.peerIdx = args.epRank;
+                                    ingredients.tileSize = sigPayload.tokensM;
+                                    ingredients.taskType = TaskType::combine;
+                                    ingredients.isPeerRemote = 1;
+                                    lRd(args, ingredients, ltQHead);
+                                }
+                            }
+                            else {
+                                cuda::atomic_ref<uint64_t, cuda::thread_scope_system> f{*(flags + flagIdx)};
+                                const auto sigPayload = cuda::std::bit_cast<SignalPayload<PacketStage::last>>(
+                                    f.load(cuda::memory_order_acquire));
+                                if (sigPayload.seqNumber == args.seqNumber) {
+                                    sBS.set(bIdx);
+                                    const auto tokenIdx = sigPayload.batchIdx * bM;
+                                    // construct combine ingredients
+                                    Ingredients ingredients{};
+                                    ingredients.M = tokenIdx;
+                                    ingredients.localExpertIdx = lookup.localExpertIndex;
+                                    ingredients.peerIdx = args.epRank;
+                                    ingredients.tileSize = sigPayload.tokensM;
+                                    ingredients.stash = flagIdx % args.tilesN1;
+                                    ingredients.taskType = TaskType::combine;
+                                    ingredients.isPeerRemote = 0;
+                                    lPd(args, ingredients, ltQHead);
                                 }
                             }
                         }
                     }
                 }
-                // update checkpoint state
+                // update bitset
                 bitSet[sBIdx] = sBS;
             }
         }
     };
 
-    /// Decode packets deposited
     template<
-        unsigned int wSet,
         unsigned int subscriberCount,
+        int bM,
         typename Element
     >
-    requires(subscriberCount % WARP_SIZE == 0 && wSet <= sizeof(uint) * 8U)
+    requires(subscriberCount % WARP_SIZE == 0)
     __device__ __forceinline__
     void start(const Heap& symHeap, const Args& args){
-        cutlass::AlignedArray<uint, wSet> rWSet{};
-
-        // lookup tables
-        const auto tokenIds = make_tensor(cute::make_gmem_ptr(bookkeeping.tP()),
-            cute::make_layout(cute::make_shape(args.E, symHeap.EC), cute::LayoutRight{}));
-
-        auto ltQHead = 0U; // local tQ Head
+        int ltQHead = 0; // local tQ Head
 
         // first stage
         constexpr auto sNW = subscriberCount / WARP_SIZE;
@@ -563,37 +509,21 @@ namespace flashmoe::subscriber{
 
         // second stage
         const auto ssL = args.ssfC / subscriberCount + (args.tIdx < args.ssfC % subscriberCount);
-        const auto ssT = ssL / wSet;
-
-        constexpr Subscriber<SubscriberStage::initial, Element, subscriberCount> initialSubscriber{};
-        constexpr Subscriber<SubscriberStage::final, Element, subscriberCount> finalSubscriber{};
-
+        constexpr Subscriber<SubscriberStage::initial, Element, subscriberCount, bM> initialSubscriber{};
+        constexpr Subscriber<SubscriberStage::final, Element, subscriberCount, bM> finalSubscriber{};
         const auto pSI = nSI<subscriberCount>(args.ssfC);
 
         cuda::atomic_ref<int, cuda::thread_scope_block> interrupt{*args.interrupt};
         while (!interrupt.load(cuda::memory_order_relaxed)) {
-            auto* __restrict__ flags = args.signals;
+            auto* __restrict__ flags = args.flags;
             // sweep through flags by stages
             // start with the first stage
             if (fSp) {
-                initialSubscriber(symHeap, args, flags,
-                    args.bitSet + pSI, fSl, fSp, ltQHead);
+                auto* __restrict bitset = args.bitSet + pSI;
+                initialSubscriber(symHeap, args, flags, bitset, fSl, fSp, ltQHead);
             }
-            flags += gfSfC;
-            finalSubscriber(rWSet,
-                bitSet,
-                dA,
-                tokenIds,
-                tileIndices,
-                eL,
-                workspace,
-                flags,
-                tQHead,
-                ltQHead,
-                ssL,
-                ssT,
-                tIdx,
-                lSeqBit);
+            flags += args.gfSfC;
+            finalSubscriber(args, args.bitSet, flags, ltQHead, ssL);
         }
     }
 }

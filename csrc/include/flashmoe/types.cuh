@@ -20,22 +20,6 @@
 #define CONST_CAST_TO(T, p) static_cast<const T*>(static_cast<const void*>(p))
 
 // Hardware description
-#define WARP_SIZE 32
-#define SUBSCRIBERS (THREADS - WARP_SIZE)
-// GEMM configuration constants
-#define BLOCK_M 128U
-#define BLOCK_M_EXP 64U
-#define BLOCK_N 64U
-#define BLOCK_K_HALF 16U
-#define BLOCK_K_FULL 8U
-#define MAX_REGS (BLOCK_M * BLOCK_N) / THREADS
-
-#define TOPO_LOOP_TRIP 4U // this may be too much
-#define BETA_BUFFER (1024UL * 1024UL) // 1MiB
-#define ALPHA_BUFFER 1024UL // 1KiB
-#define BYTE_MAX cuda::std::numeric_limits<cuda::std::underlying_type_t<cuda::std::byte>>::max()
-#define TO_MB(b) (static_cast<float>(b) / (1000.0f*1000.0f))
-#define BETA_MB 1024.0f // 1GiB
 #define FLASHMOE_DEBUG 1
 #define NOOP_SIGNAL 0
 
@@ -150,31 +134,6 @@ namespace flashmoe{
     using ull_t = unsigned long long int;
     static_assert(sizeof(ull_t) == sizeof(flagsType) && alignof(ull_t) == alignof(flagsType));
 
-    struct __align__(8) floatPair {
-        float alpha;
-        float beta;
-
-        __device__ __forceinline__
-        friend bool operator<(const floatPair &lhs, const floatPair &rhs) {
-            return fmaf(lhs.beta, BETA_MB, lhs.alpha) < fmaf(rhs.beta, BETA_MB, rhs.alpha);
-        }
-
-        __device__ __forceinline__
-        friend bool operator<=(const floatPair &lhs, const floatPair &rhs) {
-            return rhs >= lhs;
-        }
-
-        __device__ __forceinline__
-        friend bool operator>(const floatPair &lhs, const floatPair &rhs) {
-            return rhs < lhs;
-        }
-
-        __device__ __forceinline__
-        friend bool operator>=(const floatPair &lhs, const floatPair &rhs) {
-            return !(lhs < rhs);
-        }
-    };
-
     __device__
     struct __align__(8) TQState {
         uint tQTail;
@@ -225,12 +184,6 @@ namespace flashmoe{
     enum class CombineMode {
         single,
         plural
-    };
-
-    __device__
-    enum class JobType : uint8_t {
-        training,
-        inference
     };
 
     __device__

@@ -5,85 +5,67 @@
 #ifndef FLASHMOE_TASK_CUH
 #define FLASHMOE_TASK_CUH
 namespace flashmoe {
-#define GEMMs 2U // per expert
+    constexpr int GEMMs = 2; // within
     enum class TaskType : uint8_t {
         GEMM0,
         GEMM1,
         combine,
-        none
     };
+    static_assert(cuda::std::is_same_v<cuda::std::underlying_type_t<TaskType>, uint8_t>);
+
+    struct __align__(16) Ingredients{
+        unsigned int M = 0; // GEMM0->number of tokens or Combine->token
+        uint16_t localExpertIdx = 0;
+        uint16_t expertIdx = 0; // global
+        uint16_t peerIdx = 0; // owner of the output
+        uint16_t tileSize = 0; // <= BLOCK_M
+        uint16_t stash = 0; // GEMM0->flagBatchIdx or Combine->tileIdx
+        TaskType taskType;
+        uint8_t isPeerRemote;
+
+        Ingredients() = default;
+
+        // GEMM0 and GEMM1
+        __device__ __forceinline__
+        Ingredients(const uint16_t& lei, const uint16_t& pei, const TaskType& tt, const uint8_t& ipr):
+        localExpertIdx(lei), peerIdx(pei), taskType(tt), isPeerRemote(ipr){}
+
+        __device__ __forceinline__
+        Ingredients(const unsigned int& m, const uint16_t& lei, const uint16_t& ei,
+            const uint16_t& pei, const uint16_t& ts, const uint16_t& sta,
+            const TaskType& tt, const uint8_t& ipr):
+        M(m), localExpertIdx(lei), expertIdx(ei), peerIdx(pei), tileSize(ts), stash(sta),
+        taskType(tt), isPeerRemote(ipr){}
+    };
+    static_assert(sizeof(Ingredients) == 16);
 
     struct __align__(16) Task {
-        const cuda::std::byte* const aData = nullptr;
-        cuda::std::array<cuda::std::byte*, GEMMs> const cData = {};
-        cuda::std::byte* const rcData = nullptr;
-        flagsType* const flags = nullptr;
-        const unsigned int syncIdx = 0U;
-        const unsigned int tileIdx = 0U;
-        const unsigned int M = 0U;
-        const uint16_t batchIdx = 0U;
-        const uint16_t localExpertIdx = 0U;
-        const uint16_t expertIdx = 0U;
-        const uint16_t peerIdx = 0U;
-        const uint16_t tileSize = 0U; // <= BLOCK_M
-        const uint8_t isPeerRemote = 0U;
-        const TaskType taskType = TaskType::none;
+        Ingredients ingredients{};
+        const cuda::std::byte* aData = nullptr;
+        cuda::std::array<cuda::std::byte*, GEMMs> cData = {};
+        cuda::std::byte* rcData = nullptr;
+        flagsType* flags = nullptr;
+        unsigned int syncIdx = 0U;
+        unsigned int tileIdx = 0U;
 
-        __forceinline__ __device__
         Task() = default;
 
         // GEMM0->GEMM1
         __device__ __forceinline__
-        Task(const TaskType& _taskType,
+        Task(const Ingredients& _ingredients,
             const cuda::std::byte* const& _aData,
             const cuda::std::array<cuda::std::byte*, GEMMs>& _cData,
             cuda::std::byte* const& _rcData,
             flagsType* const& _flags,
-            const unsigned int& _syncIdx,
-            const unsigned int& _tile,
-            const unsigned int& m,
-            const uint16_t& _size,
-            const uint16_t& _peerIdx,
-            const uint16_t& _batchIdx,
-            const uint& _isPeerRemote):
-        aData(_aData), cData(_cData), rcData(_rcData), flags(_flags),
-        syncIdx(_syncIdx), tileIdx(_tile),  M(m),
-        batchIdx(_batchIdx), peerIdx(_peerIdx), tileSize(_size), isPeerRemote(_isPeerRemote), taskType(_taskType){}
+            const unsigned int& _syncIdx, const unsigned int& tile):
+        ingredients(_ingredients), aData(_aData), cData(_cData), rcData(_rcData), flags(_flags),
+        syncIdx(_syncIdx), tileIdx(tile){}
 
         // Combine
         __device__ __forceinline__
-        Task(const TaskType& _taskType,
-        const cuda::std::byte*  const& _aData,
-        const unsigned int& _size,
-        const unsigned int& _tile,
-        const unsigned int& _expertIdx):
-        aData(_aData), tileIdx(_tile), expertIdx(_expertIdx), taskType(_taskType),
-        tileSize(_size){}
+        explicit Task(const Ingredients& _ingredients):
+        ingredients(_ingredients){}
 
-        __device__ __forceinline__
-        void dump() const {
-            printf("{\n\t"
-                   "this: %p,\n\t"
-                   "aData: %p,\n\t"
-                   "cData[0]: %p,\n\t"
-                   "cData[1]: %p,\n\t"
-                   "rcData: %p,\n\t"
-                   "flags: %p,\n\t"
-                   "syncIdx: %u,\n\t"
-                   "tileIdx: %u,\n\t"
-                   "M: %u,\n\t"
-                   "batchIdx: %u,\n\t"
-                   "peerIdx: %u,\n\t"
-                   "expertIdx: %u,\n\t"
-                   "isPeerRemote: %s,\n\t"
-                   "taskType: %u,\n\t"
-                   "tileSize: %u"
-                   "\n}\n",
-                   this, aData, cData[0], cData[1],
-                   rcData, flags, syncIdx, tileIdx, M,
-                   batchIdx, peerIdx, expertIdx, isPeerRemote ? "True" : "False",
-                   taskType, tileSize);
-        }
     };
     static_assert(sizeof(Task) == 64);
 }

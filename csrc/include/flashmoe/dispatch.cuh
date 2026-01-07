@@ -156,7 +156,7 @@ namespace flashmoe {
                     if (dS.fetch_add(1, cuda::memory_order_acq_rel) + 1 == superBlockSize) {
                         // acq_rel above allows us to safely do the below.
                         // We assume this counter is used _once_ (this function)
-                        // per kernel because for safety we defer grid-wide synchronization to kernel teardown.
+                        // per kernel because we defer grid-wide synchronization to kernel teardown.
                         dS.store(0, cuda::memory_order_relaxed);
                         // I am in the last block, let's finalize this transfer.
                         const auto sigPayload = SignalPayload<PacketStage::initial>{
@@ -198,7 +198,7 @@ namespace flashmoe {
                 }
                 else {
                     cuda::atomic_ref<uint64_t, cuda::thread_scope_system> sf{*(lI.remoteSFlags + flagOffset)};
-                    // fine to use relaxed here as there are no memory operations which the consumer synchronizes with?
+                    // fine to use relaxed here as there are no memory operations which the consumer synchronizes with
                     sf.store(cuda::std::bit_cast<uint64_t>(sigPayload), cuda::memory_order_relaxed);
                 }
             }

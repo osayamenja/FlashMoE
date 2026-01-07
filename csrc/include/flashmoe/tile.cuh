@@ -31,12 +31,6 @@ namespace flashmoe
 namespace flashmoe::tile
 {
     constexpr int MAX_ALIGN = 16;
-    template<int M, int N, int K, typename Element>
-    struct Heuristics {
-        using BM = cute::Int<cute::min(M, 128)>;
-        using BN = cuda::std::conditional_t<N <= 64, cute::Int<N>, cute::Int<256 / sizeof(Element)>>;
-        using BK = cute::Int<cute::min(K, 32)>;
-    };
     template<int N>
     __device__ __forceinline__
     void cpWait() {
@@ -161,13 +155,14 @@ namespace flashmoe::tile
         using PipeStages = cute::C<pipeStages>;
 
         template<typename Accumulator, typename TileCoord>
-        requires(cute::rank_v<TileCoord> == 3)
+        requires(cute::rank_v<TileCoord> == 3 && cublasdx::is_blas_execution_v<BLAS>)
         __device__ __forceinline__
         void operator()(void* __restrict__ const& workspace,
         const Element* __restrict__ const& a,
         const Element* __restrict__ const& b,
         Accumulator& accumulator,
         const int& M, const int& N, const int& K, const TileCoord& tileCoord) const {
+            // assert(__isShared(workspace));
             accumulator.clear();
             const int tilesK = K / bK;
             const auto gA = tile::get<bM, bK, ar>(a, M, K, cute::select<0, 2>(tileCoord)); //  M, K

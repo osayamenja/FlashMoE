@@ -12,8 +12,6 @@
 
 #ifndef CSRC_ATOMICS_CUH
 #define CSRC_ATOMICS_CUH
-
-#include <cuda/bit>
 #include <cuda/atomic>
 
 namespace flashmoe{
@@ -91,7 +89,7 @@ namespace flashmoe{
         }
         __syncthreads();
         if (*isLastBlock) {
-            for (int i = threadIdx.x; i < guardsLength; i += threads) {
+            for (int i = static_cast<int>(threadIdx.x); i < guardsLength; i += threads) {
                 guards[i] = 0;
             }
         }
