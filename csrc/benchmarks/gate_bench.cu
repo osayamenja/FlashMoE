@@ -227,8 +227,8 @@ template<int Arch, int sharedSize,
 >
 __host__ __forceinline__
 auto gk_run(matx::cudaExecutor& exec, const GateArgs& gArgs, const int& blocks, const int& checkCorrectness) {
-    constexpr auto runs = 1;
-    constexpr auto warmup = 1;
+    constexpr auto runs = 128;
+    constexpr auto warmup = 32;
     cudaEvent_t start, stop;
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
