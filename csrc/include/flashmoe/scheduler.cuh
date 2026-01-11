@@ -28,49 +28,49 @@ namespace flashmoe::scheduler {
     constexpr int WARP_SIZE = 32;
     constexpr int SCHEDULER_COUNT = WARP_SIZE; // warp_size
     constexpr int RMEM_STATE_PER_PROCESSOR = 16; // 16 -> 128 regs/thread
+    constexpr int WORK_SET_SIZE = 8;
     static_assert(RMEM_STATE_PER_PROCESSOR <= 64);
     constexpr int MAX_PROCESSORS = WARP_SIZE * RMEM_STATE_PER_PROCESSOR; // can be relaxed but with slower perf
     template<
         DQType dqt = DQType::stride,
-        int nQ = 0,
-        typename WSet
+        int nQ = 0
     >
-    requires(isRegisterV<WSet>)
     __device__ __forceinline__
-    void schedule(WSet& wSet, const int& processors, const uint& cSetB,
+    void schedule(const int& processors, const uint& cSetB,
     const uint& canSchedule, const uint& qIdx, uint& lRQIdx,
     const uint& gRQIdx, uint* __restrict__ const& rQ,
     TQSignal* __restrict__ const& pDB) {
+        cutlass::Array<uint, WORK_SET_SIZE> wSet{};
         static_assert(sizeof(TQSignal) == sizeof(uint64_t) && alignof(TQSignal) == alignof(uint64_t));
         auto sig = TQSignal{0U, 0U};
         for (uint k = 0; k < cSetB; ++k) {
             #pragma unroll
-            for (uint l = 0; l < WSet::kElements; ++l) {
+            for (uint l = 0; l < WORK_SET_SIZE; ++l) {
                 wSet[l] = rQ[(gRQIdx + lRQIdx++) % processors];
             }
             #pragma unroll
-            for (uint l = 0; l < WSet::kElements; ++l) {
+            for (uint l = 0; l < WORK_SET_SIZE; ++l) {
                 // signal processor
                 auto* __restrict__ pdbAddr = reinterpret_cast<uint64_t*>(pDB + wSet[l]);
                 cuda::atomic_ref<uint64_t, cuda::thread_scope_device> pdb{*pdbAddr};
-                sig.encodeSig(DQ::next<dqt, nQ>(qIdx, k * WSet::kElements + l));
+                sig.encodeSig(DQ::next<dqt, nQ>(qIdx, k * WORK_SET_SIZE + l));
                 pdb.store(cuda::std::bit_cast<uint64_t>(sig), cuda::memory_order_release);
             }
         }
         // Residual scheduling
-        const auto residue = canSchedule - cSetB * WSet::kElements;
+        const auto residue = canSchedule - cSetB * WORK_SET_SIZE;
         #pragma unroll
-        for (uint l = 0; l < WSet::kElements; ++l) {
+        for (uint l = 0; l < WORK_SET_SIZE; ++l) {
             if (l < residue) {
                 wSet[l] = rQ[(gRQIdx + lRQIdx++) % processors];
             }
         }
         #pragma unroll
-        for (uint l = 0; l < WSet::kElements; ++l) {
+        for (uint l = 0; l < WORK_SET_SIZE; ++l) {
             if (l < residue) {
                 auto* __restrict__ pdbAddr = reinterpret_cast<uint64_t*>(pDB + wSet[l]);
                 cuda::atomic_ref<uint64_t, cuda::thread_scope_device> pdb{*pdbAddr};
-                sig.encodeSig(DQ::next<dqt, nQ>(qIdx, cSetB * WSet::kElements + l));
+                sig.encodeSig(DQ::next<dqt, nQ>(qIdx, cSetB * WORK_SET_SIZE + l));
                 pdb.store(cuda::std::bit_cast<uint64_t>(sig), cuda::memory_order_release);
             }
         }
@@ -95,9 +95,7 @@ namespace flashmoe::scheduler {
         uint* __restrict__ const& rQ,
         TQSignal* __restrict__ const& pDB,
         const bool& isMedley = false) {
-        constexpr auto workSetSize = 16U;
-        cutlass::Array<uint, workSetSize> wSet{};
-        __shared__ cub::WarpScan<uint>::TempStorage wSt[2];
+        __shared__ WarpScan::TempStorage wSt[2];
         uint queueSlot;
         uint taskTally;
         // things are about to get warped :)
@@ -163,8 +161,8 @@ namespace flashmoe::scheduler {
                                 tqState[j].tasks -= canSchedule;
                                 // have to increment tails as we will revisit this queue later on
                                 tqState[j].tQTail += canSchedule;
-                                const auto cSetB = canSchedule / wSet.kElements;
-                                schedule<DQType::stride, subscriberCount>(wSet, processors, cSetB, canSchedule, qIdx,
+                                const auto cSetB = canSchedule / WORK_SET_SIZE;
+                                schedule<DQType::stride, subscriberCount>(processors, cSetB, canSchedule, qIdx,
                                     queueSlot, gRQIdx, rQ, pDB);
                             }
                         }
@@ -180,8 +178,8 @@ namespace flashmoe::scheduler {
                         tqState[j].tasks -= canSchedule;
                         // checkpoint state in case of partial scheduling
                         tqState[j].tQTail += canSchedule;
-                        const auto cSetB = canSchedule / wSet.kElements;
-                        schedule<DQType::block>(wSet, processors, cSetB, canSchedule,
+                        const auto cSetB = canSchedule / WORK_SET_SIZE;
+                        schedule<DQType::block>(processors, cSetB, canSchedule,
                             qIdx, queueSlot, gRQIdx, rQ, pDB);
                     }
                 }
