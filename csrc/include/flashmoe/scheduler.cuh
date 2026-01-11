@@ -14,23 +14,34 @@
 #define SCHEDULER_CUH
 
 #include <cub/cub.cuh>
+#include <cuda/atomic>
+#include <cute/numeric/integral_constant.hpp>
 #include <cutlass/array.h>
 
-#include "atomics.cuh"
-#include "types.cuh"
+#include "bitset.cuh"
+#include "checks.cuh"
+#include "dq.cuh"
+#include "tq.cuh"
 
 namespace flashmoe::scheduler {
+    using WarpScan = cub::WarpScan<uint>;
+    constexpr int WARP_SIZE = 32;
+    constexpr int SCHEDULER_COUNT = WARP_SIZE; // warp_size
+    constexpr int RMEM_STATE_PER_PROCESSOR = 16; // 16 -> 128 regs/thread
+    static_assert(RMEM_STATE_PER_PROCESSOR <= 64);
+    constexpr int MAX_PROCESSORS = WARP_SIZE * RMEM_STATE_PER_PROCESSOR; // can be relaxed but with slower perf
     template<
-        unsigned int processors,
         DQType dqt = DQType::stride,
+        int nQ = 0,
         typename WSet
     >
-    requires(processors > 0 && isRegisterV<WSet>)
+    requires(isRegisterV<WSet>)
     __device__ __forceinline__
-    void schedule(WSet& wSet, const uint& cSetB,
+    void schedule(WSet& wSet, const int& processors, const uint& cSetB,
     const uint& canSchedule, const uint& qIdx, uint& lRQIdx,
     const uint& gRQIdx, uint* __restrict__ const& rQ,
     TQSignal* __restrict__ const& pDB) {
+        static_assert(sizeof(TQSignal) == sizeof(uint64_t) && alignof(TQSignal) == alignof(uint64_t));
         auto sig = TQSignal{0U, 0U};
         for (uint k = 0; k < cSetB; ++k) {
             #pragma unroll
@@ -40,8 +51,10 @@ namespace flashmoe::scheduler {
             #pragma unroll
             for (uint l = 0; l < WSet::kElements; ++l) {
                 // signal processor
-                sig.encodeSig(DQ::next<dqt>(qIdx, k * WSet::kElements + l));
-                signalPayload(pDB + wSet[l], &sig);
+                auto* __restrict__ pdbAddr = reinterpret_cast<uint64_t*>(pDB + wSet[l]);
+                cuda::atomic_ref<uint64_t, cuda::thread_scope_device> pdb{*pdbAddr};
+                sig.encodeSig(DQ::next<dqt, nQ>(qIdx, k * WSet::kElements + l));
+                pdb.store(cuda::std::bit_cast<uint64_t>(sig), cuda::memory_order_release);
             }
         }
         // Residual scheduling
@@ -55,61 +68,59 @@ namespace flashmoe::scheduler {
         #pragma unroll
         for (uint l = 0; l < WSet::kElements; ++l) {
             if (l < residue) {
-                sig.encodeSig(DQ::next<dqt>(qIdx, cSetB * WSet::kElements + l));
-                signalPayload(pDB + wSet[l], &sig);
+                auto* __restrict__ pdbAddr = reinterpret_cast<uint64_t*>(pDB + wSet[l]);
+                cuda::atomic_ref<uint64_t, cuda::thread_scope_device> pdb{*pdbAddr};
+                sig.encodeSig(DQ::next<dqt, nQ>(qIdx, cSetB * WSet::kElements + l));
+                pdb.store(cuda::std::bit_cast<uint64_t>(sig), cuda::memory_order_release);
             }
         }
     }
 
     template<
-        unsigned int processors,
-        unsigned int sL = (THREADS - WARP_SIZE) / WARP_SIZE,
-        unsigned int wS = WARP_SIZE,
-        unsigned int blockQStride = ACC::TNx::value,
-        typename WarpScan = cub::WarpScan<uint>,
-        typename SQState,
-        typename TQState,
-        typename WSet
+        int subscriberCount,
+        int sL,
+        int schedulerCount,
+        typename TQState
     >
-    requires (processors > 0 && wS == 32 &&
-        isRegisterV<SQState> && isRegisterV<TQState> && isRegisterV<WSet>)
+    requires (schedulerCount == 32 && isRegisterV<TQState>)
     __device__ __forceinline__
-    void schedulerLoop(SQState& sQState, TQState& tqState, WSet& wSet,
+    void schedulerLoop(TQState& tqState,
+        const int& processors,
+        const unsigned int& tilesN1,
         const unsigned int& tQOffset,
         const unsigned int& gTbO,
         uint& lTt, uint& processorTally,
         uint& gRQIdx, uint& scheduled,
-        typename WarpScan::TempStorage* __restrict__ const& wSt,
         unsigned int* __restrict__ const& sQ,
         uint* __restrict__ const& rQ,
         TQSignal* __restrict__ const& pDB,
         const bool& isMedley = false) {
+        constexpr auto workSetSize = 16U;
+        cutlass::Array<uint, workSetSize> wSet{};
+        __shared__ cub::WarpScan<uint>::TempStorage wSt[2];
         uint queueSlot;
         uint taskTally;
         // things are about to get warped :)
         // Aggregate tally across the warp
-        WarpScan(wSt[0]).InclusiveSum(lTt, queueSlot, taskTally);
         __syncwarp();
+        WarpScan(wSt[0]).InclusiveSum(lTt, queueSlot, taskTally);
         queueSlot -= lTt;
         auto prefixTaskSum = 0U;
-        constexpr auto pL = processors / wS;
         while (taskTally) {
             // Find processors if we are not currently aware of any
             while (!processorTally) {
+                cutlass::Array<uint, RMEM_STATE_PER_PROCESSOR> sQState{};
                 // sweep sQ to identify ready processes
                 uint lPt = 0U; // local processor tally
                 #pragma unroll
-                for (uint j = 0; j < pL; ++j) {
-                    const auto readiness = atomicExch(sQ + (j * wS + threadIdx.x),
+                for (int j = 0; j < sQState.kElements; ++j) {
+                    const auto idx = j * schedulerCount + threadIdx.x;
+                    if (idx < processors) {
+                        const auto readiness = atomicExch(sQ + (j * schedulerCount + threadIdx.x),
                         observed) == ready;
-                    lPt += readiness;
-                    sQState[j] = readiness;
-                }
-                if (threadIdx.x < processors - pL * wS) {
-                    const auto readiness = atomicExch(sQ + (pL * wS + threadIdx.x),
-                        observed) == ready;
-                    lPt += readiness;
-                    sQState[pL] = readiness;
+                        lPt += readiness;
+                        sQState[j] = readiness;
+                    }
                 }
                 uint startIdx;
                 // Aggregate tally across the warp
@@ -118,10 +129,11 @@ namespace flashmoe::scheduler {
                 // write to rQ
                 const auto qSIdx = gRQIdx + prefixTaskSum;
                 #pragma unroll
-                for (uint j = 0; j < SQState::kElements; ++j) {
-                    if (sQState[j]) {
+                for (uint j = 0; j < sQState.kElements; ++j) {
+                    const auto idx = j * schedulerCount + threadIdx.x;
+                    if (idx < processors && sQState[j]) {
                         // write ready process pid to rQ
-                        rQ[(qSIdx + startIdx++) % processors] = j * wS + threadIdx.x;
+                        rQ[(qSIdx + startIdx++) % processors] = idx;
                     }
                 }
                 if (processorTally) {
@@ -145,13 +157,14 @@ namespace flashmoe::scheduler {
                         for (uint j = 0; j < sL; ++j) {
                             if (tqState[j].tasks > 0 && tasksToSchedule) {
                                 const auto canSchedule = cute::min(tasksToSchedule, tqState[j].tasks);
-                                const auto qIdx = DQ::next(j * wS + threadIdx.x, tqState[j].tQTail);
+                                const auto qIdx = DQ::next<DQType::stride, subscriberCount>(j * schedulerCount + threadIdx.x,
+                                    tqState[j].tQTail);
                                 tasksToSchedule -= canSchedule;
                                 tqState[j].tasks -= canSchedule;
                                 // have to increment tails as we will revisit this queue later on
                                 tqState[j].tQTail += canSchedule;
-                                const auto cSetB = canSchedule / WSet::kElements;
-                                schedule<processors>(wSet, cSetB, canSchedule, qIdx,
+                                const auto cSetB = canSchedule / wSet.kElements;
+                                schedule<DQType::stride, subscriberCount>(wSet, processors, cSetB, canSchedule, qIdx,
                                     queueSlot, gRQIdx, rQ, pDB);
                             }
                         }
@@ -161,14 +174,14 @@ namespace flashmoe::scheduler {
                 for (uint j = sL; j < TQState::kElements; ++j) {
                     if (tqState[j].tasks && tasksToSchedule) {
                         const auto canSchedule = cute::min(tasksToSchedule, tqState[j].tasks);
-                        const auto qHead = (wS * (gTbO + (j - sL)) + threadIdx.x) * blockQStride + tqState[j].tQTail;
+                        const auto qHead = (schedulerCount * (gTbO + (j - sL)) + threadIdx.x) * tilesN1 + tqState[j].tQTail;
                         const auto qIdx = tQOffset + qHead;
                         tasksToSchedule -= canSchedule;
                         tqState[j].tasks -= canSchedule;
                         // checkpoint state in case of partial scheduling
                         tqState[j].tQTail += canSchedule;
-                        const auto cSetB = canSchedule / WSet::kElements;
-                        schedule<processors, DQType::block>(wSet, cSetB, canSchedule,
+                        const auto cSetB = canSchedule / wSet.kElements;
+                        schedule<DQType::block>(wSet, processors, cSetB, canSchedule,
                             qIdx, queueSlot, gRQIdx, rQ, pDB);
                     }
                 }
@@ -183,99 +196,94 @@ namespace flashmoe::scheduler {
         gRQIdx = (gRQIdx + prefixTaskSum) % processors;
     }
 
-    template<
-        unsigned int processors,
-        unsigned int wS = WARP_SIZE,
-        typename WarpScan = cub::WarpScan<uint>,
-        typename SQState
-    >
+    template<unsigned int schedulerCount>
     /// Schedule Processor interrupts
     __device__ __forceinline__
-    void sPI(SQState& sQState,
-        unsigned int* __restrict__ const& rQ,
+    void sPI(unsigned int* __restrict__ const& rQ,
         uint* __restrict__ const& sQ,
         TQSignal* __restrict__ const& pDB,
         uint& gRQIdx,
-        typename WarpScan::TempStorage* __restrict__ const& wSt,
-        uint* __restrict__ scratch, // pre-filled with 1
+        uint* __restrict__ const& scratch, // pre-filled with 1
+        const uint& processors,
         const uint& processorTally) {
-        static_assert(cuda::std::is_same_v<typename SQState::value_type, uint>);
-        __syncwarp();
+        __shared__ WarpScan::TempStorage wSt;
+        cutlass::Array<uint, RMEM_STATE_PER_PROCESSOR> sQState{};
         /// read through the ready queue first
         constexpr auto sig = TQSignal{0U, 1U}; // set interrupt to 1
         // Below must be <= ceil(processors / wS) == sQsL, so we can repurpose sQState registers as temporary storage
-        const auto tS = processorTally / wS + (threadIdx.x < processorTally % wS);
-        const auto gRO = gRQIdx + (threadIdx.x * (processorTally / wS) +
-            cute::min(threadIdx.x, processorTally % wS));
+        const auto tS = processorTally / schedulerCount + (threadIdx.x < processorTally % schedulerCount);
+        const auto gRO = gRQIdx + (threadIdx.x * (processorTally / schedulerCount) +
+            cute::min(threadIdx.x, processorTally % schedulerCount));
         // index can only wrap around once
         gRQIdx = gRO % processors;
         #pragma unroll
-        for (uint i = 0; i < SQState::kElements; ++i) {
+        for (uint i = 0; i < sQState.kElements; ++i) {
             if (i < tS) {
                 // shared -> registers
                 sQState[i] = rQ[(gRQIdx + i) % processors];
             }
         }
         #pragma unroll
-        for (uint i = 0; i < SQState::kElements; ++i) {
+        for (uint i = 0; i < sQState.kElements; ++i) {
             if (i < tS) {
                 // notify interrupts
                 const auto pid = sQState[i];
-                signalPayload(pDB + pid, &sig);
+                auto* __restrict__ db_p = reinterpret_cast<uint64_t*>(pDB + pid);
+                cuda::atomic_ref<uint64_t, cuda::thread_scope_device> pdb{*db_p};
+                pdb.store(cuda::std::bit_cast<uint64_t>(sig), cuda::memory_order_release);
                 scratch[pid] = 0U;
             }
         }
         __syncwarp();
-        constexpr auto pL = processors / wS;
         // Consolidate findings and populate the ready queue
         uint uI = 0U;
         // shared -> registers
         #pragma unroll
-        for (uint i = 0; i < pL; ++i) {
-            sQState[i] = scratch[i * wS + threadIdx.x];
-        }
-        if (threadIdx.x < processors % wS) {
-            sQState[pL] = scratch[pL * wS + threadIdx.x];
+        for (uint i = 0; i < sQState.kElements; ++i) {
+            const auto idx = i * schedulerCount + threadIdx.x;
+            if (idx < processors) {
+                sQState[i] = scratch[idx];
+            }
         }
 
         #pragma unroll
-        for (uint i = 0; i < pL; ++i) {
-            uI += sQState[i];
-        }
-        if (threadIdx.x < processors % wS) {
-            uI += sQState[pL];
+        for (uint i = 0; i < sQState.kElements; ++i) {
+            if ((i * schedulerCount + threadIdx.x) < processors) {
+                uI += sQState[i];
+            }
         }
 
         uint startIdx;
         uint pending;
-        WarpScan(*wSt).InclusiveSum(uI, startIdx, pending);
+        WarpScan(wSt).InclusiveSum(uI, startIdx, pending);
         startIdx -= uI;
         // enqueue all pending processes we discovered into the rQ
         #pragma unroll
-        for (uint i = 0; i < pL; ++i) {
-            if (sQState[i]) {
-                rQ[startIdx++] = i * wS + threadIdx.x;
+        for (uint i = 0; i < sQState.kElements; ++i) {
+            const auto idx = i * schedulerCount + threadIdx.x;
+            if (idx < processors && sQState[i]) {
+                rQ[startIdx++] = idx;
             }
         }
-        if (threadIdx.x < processors % wS && sQState[pL]) {
-            rQ[startIdx] = pL * wS + threadIdx.x;
-        }
         __syncwarp();
-        auto remaining = pending / wS + (threadIdx.x < pending % wS);
-        cuda::std::array<uint, SQState::kElements> pids{};
+        auto remaining = pending / schedulerCount + (threadIdx.x < pending % schedulerCount);
+        cuda::std::array<uint, sQState.kElements> pids{};
         // read from rQ to registers
         #pragma unroll
-        for (uint i = 0; i < SQState::kElements; ++i) {
-            const auto idx = i * wS + threadIdx.x;
-            sQState[i] = idx < pending;
-            if (sQState[i]) {
+        for (uint i = 0; i < sQState.kElements; ++i) {
+            const auto idx = i * schedulerCount + threadIdx.x;
+            if (idx < pending) {
+                sQState[i] = 1;
                 pids[i] = rQ[idx];
+            }
+            else {
+                sQState[i] = 0;
             }
         }
 
         while (remaining) {
             #pragma unroll
-            for (uint j = 0; j < SQState::kElements; ++j) {
+            for (uint j = 0; j < sQState.kElements; ++j) {
                 if (sQState[j]) {
                     const auto pid = pids[j];
                     const auto isReady = atomicExch(sQ + pid, observed) == ready;
@@ -283,26 +291,23 @@ namespace flashmoe::scheduler {
                     if (isReady) {
                         // interrupt processor
                         remaining -= 1;
-                        signalPayload(pDB + pid, &sig);
+                        auto* __restrict__ db_p = reinterpret_cast<uint64_t*>(pDB + pid);
+                        cuda::atomic_ref<uint64_t, cuda::thread_scope_device> pdb{*db_p};
+                        pdb.store(cuda::std::bit_cast<uint64_t>(sig), cuda::memory_order_release);
                     }
                 }
             }
         }
     }
 
-    /// Making processorCount a compile-time constant is not a functional requirement but rather strictly
-    /// for globally optimizing the modulo operation, which is incredibly expensive.
-    /// Benchmarks confirm an order of magnitude performance improvement for that operation.
     template<
-        unsigned int processors,
-        unsigned int subscribers = SUBSCRIBERS,
-        typename WST
+        unsigned int subscribers
     >
-    requires(processors > 0 && cuda::std::is_same_v<WST, cub::WarpScan<uint>::TempStorage>)
     __device__ __forceinline__
-    void start(WST* __restrict__ const& wSt,
-        uint* __restrict__ const& interruptScratch,
+    void start(uint* __restrict__ const& interruptScratch,
         BitSet* __restrict__ const& bitSet,
+        const uint& processors,
+        const unsigned int& tilesN1,
         const unsigned int& sO,
         const unsigned int& gtQCL,
         unsigned int* __restrict__ const& sInterrupts,
@@ -312,35 +317,34 @@ namespace flashmoe::scheduler {
         unsigned int* __restrict__ const& rQ, // shared
         unsigned int* __restrict__ const& sQ, // global
         TQSignal* __restrict__ const& pDB) { //  global
+        static_assert(sizeof(TQSignal) == sizeof(uint64_t) && alignof(TQSignal) == alignof(uint64_t));
+        // Assumptions are below, will assert them host-side
+        // RMEM_STATE_PER_THREAD * schedulerCount >= processors
         uint scheduled = 0U;
-        constexpr auto wS = 32U;
-        constexpr auto sQsL = cute::ceil_div(processors, wS);
-        static_assert(sQsL <= 32);
-
-        static_assert(subscribers % wS == 0);
-        constexpr auto sL = subscribers / wS;
+        constexpr auto schedulerCount = SCHEDULER_COUNT; // number of scheduler threads
+        static_assert(subscribers % schedulerCount == 0);
+        constexpr auto sL = subscribers / schedulerCount;
         // initialize register buffers
         constexpr auto dQL = 2;
-        constexpr auto wSz = 16U;
         constexpr auto bSw = sizeof(uint) * 8U;
         static_assert(dQL <= bSw);
         cutlass::Array<TQState, dQL + sL> tqState{};
-        cutlass::Array<uint, sQsL> sQState{};
-        cutlass::Array<uint, wSz> wSet{};
+        //cutlass::Array<uint, sQsL> sQState{};sQState.fill(0U);
         tqState.fill({0U,0U});
-        sQState.fill(0U);
-        const uint dT = gtQCL / (wS * dQL);
+        const uint dT = gtQCL / (schedulerCount * dQL);
 
         uint gRQIdx = 0U;
         uint processorTally = processors; // initially, all processors are available, ensure that rQ has all pids
-        auto tTB = atomicLoad<cuda::thread_scope_block>(taskBound);
+        cuda::atomic_ref<unsigned int, cuda::thread_scope_block> tb{*taskBound};
+        auto tTB = tb.load(cuda::memory_order_relaxed);
         while (scheduled < tTB) {
             // statically sweep tQ for tasks
             uint lTt = 0U; // local task tally
             #pragma unroll
             for (uint i = 0; i < sL; ++i) {
-                const auto tasks = atomicLoad<cuda::thread_scope_block>(tQHeads +
-                    (i * wS + threadIdx.x)) - tqState[i].tQTail;
+                auto* __restrict__ tqHp = tQHeads + (i * schedulerCount + threadIdx.x);
+                cuda::atomic_ref<unsigned int, cuda::thread_scope_block> tqh{*tqHp};
+                const auto tasks = tqh.load(cuda::memory_order_acquire) - tqState[i].tQTail;
                 tqState[i].tasks = tasks;
                 lTt += tasks;
             }
@@ -357,8 +361,9 @@ namespace flashmoe::scheduler {
                 for (uint j = sL; j < decltype(tqState)::kElements; ++j) {
                     const auto pJ = j - sL;
                     if (const auto isVisited = sBS.get(pJ % bSw); !isVisited) {
-                        const auto qIdx = wS * pJ + threadIdx.x;
-                        const auto tasks = atomicExch(gtQHeads + qIdx, tQHeadGroundState);
+                        const auto qIdx = schedulerCount * pJ + threadIdx.x;
+                        cuda::atomic_ref<unsigned int, cuda::thread_scope_device> gtqH{*(gtQHeads + qIdx)};
+                        const auto tasks = gtqH.exchange(tQHeadGroundState, cuda::memory_order_acquire);
                         if (tasks) {
                             // one and done
                             sBS.set(pJ % bSw);
@@ -369,12 +374,11 @@ namespace flashmoe::scheduler {
                 }
                 bitSet[threadIdx.x] = sBS;
                 // schedule observed tasks
-                schedulerLoop<processors>(sQState, tqState, wSet, sO, 0, lTt,
-                    processorTally, gRQIdx, scheduled,
-                    wSt, sQ, rQ, pDB, true);
+                schedulerLoop<subscribers, sL, schedulerCount>(tqState, processors, tilesN1, sO, 0, lTt,
+                    processorTally, gRQIdx, scheduled, sQ, rQ, pDB, true);
 
                 for (uint i = 1; i < dT; ++i) {
-                    const uint sBIdx = threadIdx.x + (i * dQL / bSw) * wS;
+                    const uint sBIdx = threadIdx.x + (i * dQL / bSw) * schedulerCount;
                     sBS = bitSet[sBIdx];
                     // Needed to enforce register storage
                     #pragma unroll
@@ -382,8 +386,9 @@ namespace flashmoe::scheduler {
                         const auto pJ = j - sL;
                         const uint bIdx = (i * dQL + pJ) % bSw;
                         if (const auto isVisited = sBS.get(bIdx); !isVisited) {
-                            const auto qIdx = wS * (dQL * i + pJ) + threadIdx.x;
-                            const auto tasks = atomicExch(gtQHeads + qIdx, tQHeadGroundState);
+                            const auto qIdx = schedulerCount * (dQL * i + pJ) + threadIdx.x;
+                            cuda::atomic_ref<unsigned int, cuda::thread_scope_device> gtqH{*(gtQHeads + qIdx)};
+                            const auto tasks = gtqH.exchange(tQHeadGroundState, cuda::memory_order_acquire);
                             if (tasks) {
                                 sBS.set(bIdx);
                             }
@@ -393,22 +398,22 @@ namespace flashmoe::scheduler {
                     }
                     bitSet[sBIdx] = sBS;
                     // schedule observed tasks
-                    schedulerLoop<processors>(sQState, tqState, wSet, sO, i * dQL,
-                        lTt, processorTally, gRQIdx, scheduled,
-                        wSt, sQ, rQ, pDB);
+                    schedulerLoop<subscribers, sL, schedulerCount>(tqState,processors, tilesN1, sO, i * dQL,
+                        lTt, processorTally, gRQIdx, scheduled, sQ, rQ, pDB);
                 }
             }
-            if (threadIdx.x < gtQCL - dT * dQL * wS) {
-                const uint sBIdx = threadIdx.x + (dT * dQL / bSw) * wS;
+            if (threadIdx.x < gtQCL - dT * dQL * schedulerCount) {
+                const uint sBIdx = threadIdx.x + (dT * dQL / bSw) * schedulerCount;
                 auto sBS = bitSet[sBIdx];
                 // residue
                 #pragma unroll
                 for (uint j = sL; j < decltype(tqState)::kElements; ++j) {
                     const auto pJ = j - sL;
-                    if (const auto qIdx = wS * (dQL * dT + pJ) + threadIdx.x; qIdx < gtQCL) {
+                    if (const auto qIdx = schedulerCount * (dQL * dT + pJ) + threadIdx.x; qIdx < gtQCL) {
                         const uint bIdx = (dT * dQL + pJ) % bSw;
                         if (const auto isVisited = sBS.get(bIdx); !isVisited) {
-                            const auto tasks = atomicExch(gtQHeads + qIdx, tQHeadGroundState);
+                            cuda::atomic_ref<unsigned int, cuda::thread_scope_device> gtqH{*(gtQHeads + qIdx)};
+                            const auto tasks = gtqH.exchange(tQHeadGroundState, cuda::memory_order_acquire);
                             if (tasks) {
                                 sBS.set(bIdx);
                             }
@@ -420,24 +425,23 @@ namespace flashmoe::scheduler {
                 bitSet[sBIdx] = sBS;
             }
             // schedule observed tasks
-            schedulerLoop<processors>(sQState, tqState, wSet, sO, dQL * dT,
-                lTt, processorTally, gRQIdx, scheduled,
-                wSt, sQ, rQ, pDB, dT == 0);
+            schedulerLoop<subscribers, sL, schedulerCount>(tqState, processors, tilesN1, sO, dQL * dT,
+                lTt, processorTally, gRQIdx, scheduled, sQ, rQ, pDB, dT == 0);
 
             if (!threadIdx.x) {
-                tTB = atomicLoad<cuda::thread_scope_block>(taskBound);
+                tTB = tb.load(cuda::memory_order_relaxed);
             }
+            __syncwarp();
             tTB = __shfl_sync(0xffffffff, tTB, 0);
         }
         // interrupt subscribers
-        static_assert(subscribers % wS == 0);
         #pragma unroll
-        for (uint i = 0; i < sL; ++i) {
-            const auto sid = i * wS + threadIdx.x;
-            atomicExch_block(sInterrupts + sid, 1U);
+        for (uint sid = threadIdx.x; sid < subscribers; sid += SCHEDULER_COUNT) {
+            cuda::atomic_ref<uint, cuda::thread_scope_block> inr{*(sInterrupts + sid)};
+            inr.store(1U, cuda::memory_order_release);
         }
         // interrupt processors
-        sPI<processors, wS>(sQState, rQ, sQ, pDB, gRQIdx, wSt, interruptScratch, processorTally);
+        sPI<schedulerCount>(rQ, sQ, pDB, gRQIdx, interruptScratch, processors, processorTally);
     }
 }
 #endif //SCHEDULER_CUH

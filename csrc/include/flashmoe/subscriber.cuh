@@ -33,12 +33,12 @@ namespace flashmoe::subscriber{
         cuda::std::byte* const biasDown; // global
         BitSet* const bitSet; // shared
         int* const interrupt; // shared
-        int* const tQHead; // shared
+        unsigned int* const tQHead; // shared
         const PLI* const pL; // shared
         const LXI* const lX; // shared
         const ELI* const eL; // shared
         int* const status; // shared
-        int* const taskCount; // shared
+        unsigned int* const taskCount; // shared
         const int ssfC; // second stage flag count
         const int gfSfC; // global first stage flag count -> global expert slots * epWorld
         const int world; // ep world
@@ -62,12 +62,12 @@ namespace flashmoe::subscriber{
             cuda::std::byte* const& _biasDown,
             BitSet* const& _bitSet,
             int* const& _interrupt,
-            int* const& _tQHead,
+            unsigned int* const& _tQHead,
             const PLI* const& _pL,
             const LXI* const& _lX,
             const ELI* const& _eL,
             int* const& _status,
-            int* const& _taskCount,
+            unsigned int* const& _taskCount,
             const int& _ssfC,
             const int& _gfSfC, const int& _world,
             const int& nLx,
@@ -118,11 +118,11 @@ namespace flashmoe::subscriber{
             uint64_t* const& flags,
             const cuda::std::byte* const& packet,
             unsigned int const& routedTokens,
-            unsigned int const& peer, // relative to the EP group
+            int const& peer, // relative to the EP group
             const uint& laneId,
             int& lTQHead) const {
             static_assert(flashmoe::TensorValueType<Element> && bM > 0);
-            const auto qIdx = DQ::sNext<subscriberCount>(lTQHead);
+            const auto qIdx = DQ::sNext<DQType::stride, subscriberCount>(lTQHead);
             const auto fTilesM = routedTokens / bM;
             // expert, peer offset
             const auto sO = args.ecTilesM * (peer * args.nLx + ingredients.localExpertIdx);
@@ -145,7 +145,7 @@ namespace flashmoe::subscriber{
                 const auto syncIdx = sO + rowIdx;
                 ingredients.stash = rowIdx;
                 ingredients.tileSize = bM;
-                args.tQ[DQ::next<subscriberCount>(qIdx, i)] = Task{
+                args.tQ[DQ::next<DQType::stride, subscriberCount>(qIdx, i)] = Task{
                     ingredients, packet, taskResults, rcData, flags, syncIdx, tileIdx
                 };
             }
@@ -158,7 +158,7 @@ namespace flashmoe::subscriber{
                     const auto rowIdx = fTilesM;
                     ingredients.stash = rowIdx;
                     ingredients.tileSize = static_cast<uint16_t>(residue);
-                    args.tQ[DQ::next<subscriberCount>(qIdx, fS + j)] = Task{
+                    args.tQ[DQ::next<DQType::stride, subscriberCount>(qIdx, fS + j)] = Task{
                         ingredients, packet, taskResults, rcData, flags, syncIdx, tileIdx
                     };
                 }
@@ -166,7 +166,7 @@ namespace flashmoe::subscriber{
 
             if (tSlice) {
                 lTQHead += tSlice;
-                cuda::atomic_ref<int, cuda::thread_scope_block> tqh{*args.tQHead};
+                cuda::atomic_ref<unsigned int, cuda::thread_scope_block> tqh{*args.tQHead};
                 cuda::std::ignore = tqh.fetch_add(tSlice, cuda::memory_order_release);
             }
         }
@@ -180,8 +180,8 @@ namespace flashmoe::subscriber{
             // now let's decode this single tile
             // Note: we intentionally modeled the Task struct so that the below compiles to a single 128B
             // instruction rather than 4 of them, which would have been the case if we updated the entire object.
-            args.tQ[DQ::sNext<subscriberCount>(lTQHead++)].ingredients = ingredients;
-            cuda::atomic_ref<int, cuda::thread_scope_block> tqh{*args.tQHead};
+            args.tQ[DQ::sNext<DQType::stride, subscriberCount>(lTQHead++)].ingredients = ingredients;
+            cuda::atomic_ref<unsigned int, cuda::thread_scope_block> tqh{*args.tQHead};
             // notifies scheduler of work
             cuda::std::ignore = tqh.fetch_add(1, cuda::memory_order_release);
         }
@@ -191,13 +191,13 @@ namespace flashmoe::subscriber{
     struct Decoder<subscriberCount, PacketStage::last, PeerConnectivity::remote> {
         __device__ __forceinline__
             void operator()(const Args& args, Ingredients& ingredients, unsigned int& lTQHead) const {
-            const auto qIdx = DQ::sNext<subscriberCount>(lTQHead);
+            const auto qIdx = DQ::sNext<DQType::stride, subscriberCount>(lTQHead);
             for (uint i = 0; i < args.tilesN1; ++i) {
                 ingredients.stash = i;
-                args.tQ[DQ::next<subscriberCount>(qIdx, i)].ingredients = ingredients;
+                args.tQ[DQ::next<DQType::stride, subscriberCount>(qIdx, i)].ingredients = ingredients;
             }
             lTQHead += args.tilesN1;
-            cuda::atomic_ref<int, cuda::thread_scope_block> tqh{*args.tQHead};
+            cuda::atomic_ref<unsigned int, cuda::thread_scope_block> tqh{*args.tQHead};
             cuda::std::ignore = tqh.fetch_add(args.tilesN1, cuda::memory_order_release);
         }
     };

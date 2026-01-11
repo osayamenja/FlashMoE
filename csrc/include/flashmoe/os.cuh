@@ -93,9 +93,6 @@ namespace flashmoe::os {
         static_assert(alignof(BitSet) % alignof(uint) == 0);
         auto* __restrict__ interruptScratch = CAST_TO(uint, schedulerBitSet + rTCL<BitSet>(sBz));
         auto* __restrict__ status = interruptScratch + rTCL<uint>(processors);
-        using WarpScan = cub::WarpScan<uint>;
-        static_assert(alignof(uint) % alignof(WarpScan::TempStorage) == 0);
-        auto* __restrict__ wSt = CAST_TO(WarpScan::TempStorage, status + rTCL<uint>(world));
 
         auto* __restrict__ eCs = scratch;
         if (!threadIdx.x) {
@@ -177,7 +174,7 @@ namespace flashmoe::os {
             auto* __restrict__ gtQHeads = bookkeeping.tQH();
             auto* __restrict__ sQ = bookkeeping.sQ();
             auto* __restrict__ pDB = bookkeeping.pDB();
-            scheduler::start<processors>(wSt, interruptScratch, schedulerBitSet,
+            scheduler::start<processors>(interruptScratch, schedulerBitSet,
                 sO, gtQCl, interrupt, tQHeads,
                 gtQHeads, taskBound, rQ, sQ, pDB);
         }

@@ -16,5 +16,18 @@ namespace flashmoe {
             storage |= 1U << idx;
         }
     };
+
+    /// Computes precise number of integers needed to represent a consecutive set of bits
+    /// each of T threads has stride ownership of a single bit
+    /// and requires an integer to store 32 of such bits.
+    template<
+        unsigned int T,
+        unsigned int integerBitWidth = 32U,
+        unsigned int width = integerBitWidth * T
+    >
+    __host__ __device__ __forceinline__
+    constexpr uint nSI(const unsigned int& numBits) {
+        return (numBits / width) * T + cute::min(numBits % width, T);
+    }
 }
 #endif //FLASHMOE_BITSET_CUH

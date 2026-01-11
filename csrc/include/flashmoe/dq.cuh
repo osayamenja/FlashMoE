@@ -4,15 +4,17 @@
 
 #ifndef FLASHMOE_DQ_CUH
 #define FLASHMOE_DQ_CUH
-namespace DQ {
+namespace flashmoe {
     enum class DQType {
         stride,
         block
     };
+}
+namespace flashmoe::DQ {
     /// Decoupled Queue, comprises tail and doorbell
     template<
-        int nQ,
-        DQType dqt = DQType::stride
+        DQType dqt = DQType::stride,
+        int nQ = 0
     >
         __device__ __forceinline__
     constexpr auto next(const int& prev, const int& slot) {
@@ -22,8 +24,8 @@ namespace DQ {
         return prev + slot;
     }
     template<
-        int nQ,
-        DQType dqt = DQType::stride
+        DQType dqt = DQType::stride,
+        int nQ
     >
     __device__ __forceinline__
     constexpr auto sNext(const int& slot) {

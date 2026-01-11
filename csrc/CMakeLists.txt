@@ -55,15 +55,15 @@ include(CheckCompilerFlag)
 check_compiler_flag(CUDA -t4 NVCC_THREADS)
 
 find_package(CUDAToolkit REQUIRED)
-string(SUBSTRING "${CMAKE_CUDA_ARCHITECTURES_NATIVE}" 0 2 COMPUTE_CAPABILITY) # xx-real -> xx
-math(EXPR GPU_ARCH "${COMPUTE_CAPABILITY} * 10" OUTPUT_FORMAT DECIMAL)
-message(STATUS "GPU 0 Compute Capability: ${COMPUTE_CAPABILITY}")
-set(ENV{CUTLASS_NVCC_ARCHS} "${COMPUTE_CAPABILITY}")
+string(SUBSTRING "${CMAKE_CUDA_ARCHITECTURES_NATIVE}" 0 2 ARCH) # xx-real -> xx
+math(EXPR GPU_ARCH "${ARCH} * 10" OUTPUT_FORMAT DECIMAL)
+message(STATUS "GPU 0 Compute Capability: ${ARCH}")
+set(ENV{CUTLASS_NVCC_ARCHS} "${ARCH}")
 
 set(ENV{CPM_SOURCE_CACHE} "./cmake/cache")
 set(CCCL_ENABLE_UNSTABLE ON)
 include(cmake/CPM.cmake)
-# add dependencies
+# CCCL
 CPMAddPackage(
         NAME CCCL
         GITHUB_REPOSITORY nvidia/cccl
@@ -76,7 +76,7 @@ CPMAddPackage(
         GIT_TAG main
         DOWNLOAD_ONLY TRUE
         OPTIONS
-        "CUTLASS_NVCC_ARCHS=${COMPUTE_CAPABILITY}"
+        "CUTLASS_NVCC_ARCHS=${ARCH}"
 )
 
 set(FMT_SYSTEM_HEADERS ON)
@@ -97,7 +97,6 @@ CPMAddPackage(
 
 # MatX
 set(MATX_NVTX_FLAGS ON)
-set(MATX_ENABLE_FILEIO ON)
 CPMAddPackage(
         NAME MATX
         GITHUB_REPOSITORY NVIDIA/MatX
@@ -159,7 +158,7 @@ message(STATUS "torch_dtype: ${DTYPE_V}")
 string(JSON VOCAB_SIZE_V GET ${FLASHMOE_CONFIG} "vocab_size")
 message(STATUS "vocab_size: ${VOCAB_SIZE_V}")
 
-function(flash_target_common tgt)
+function(flash_target_test tgt)
     target_link_libraries(${tgt} PRIVATE CUDA::cudart CUDA::cuda_driver CUDA::nvtx3)
     target_link_libraries(${tgt} PRIVATE atomic)
     if(CCCL_ADDED)
@@ -168,11 +167,28 @@ function(flash_target_common tgt)
     if(CUTLASS_ADDED)
         target_include_directories(${tgt} SYSTEM PRIVATE "${CUTLASS_SOURCE_DIR}/include")
     endif ()
-    if(${tgt} STREQUAL "fb" AND FMT_ADDED)
-        if(FMT_ADDED)
-            target_link_libraries(${tgt} PRIVATE fmt::fmt)
-        endif ()
-        target_link_libraries(${tgt} PRIVATE nvshmem::nvshmem_host nvshmem::nvshmem_device)
+    target_compile_options(${tgt} PRIVATE
+            $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-Xfatbin -compress-all>
+            $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
+            $<$<COMPILE_LANGUAGE:CUDA>:-t0;--generate-line-info> #use sm_xxa for xx >= 90
+            $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-gencode=arch=compute_${ARCH},code=sm_${ARCH}>
+    )
+    set_property(TARGET ${tgt} PROPERTY CUDA_ARCHITECTURES "native")
+    target_compile_options(${tgt} PRIVATE
+            $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CXX>>:-O0;-g>
+            $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CUDA>>:-O0;-g;-G;--expt-relaxed-constexpr;--generate-line-info;-Xptxas=-v>
+            $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CXX>>:-O3>
+            $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:--expt-relaxed-constexpr;--generate-line-info;-Xptxas=-v>
+    )
+endfunction()
+function(flash_target_common tgt)
+    target_link_libraries(${tgt} PRIVATE CUDA::cudart CUDA::cuda_driver CUDA::nvtx3)
+    target_link_libraries(${tgt} PRIVATE atomic)
+    if(CCCL_ADDED)
+        target_link_libraries(${tgt} PRIVATE CCCL::CCCL)
+    endif()
+    if(CUTLASS_ADDED)
+        target_include_directories(${tgt} SYSTEM PRIVATE "${CUTLASS_SOURCE_DIR}/include")
     endif ()
     if(NVTX3_ADDED)
         target_link_libraries(${tgt} PRIVATE nvtx3-cpp)
@@ -190,28 +206,24 @@ function(flash_target_common tgt)
             $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-Xfatbin -compress-all>
             $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
             $<$<COMPILE_LANGUAGE:CUDA>:-t0;--generate-line-info> #use sm_xxa for xx >= 90
-            $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-gencode=arch=compute_${COMPUTE_CAPABILITY},code=sm_${COMPUTE_CAPABILITY}>
+            $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-gencode=arch=compute_${ARCH},code=sm_${ARCH}>
     )
-    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    # Debug vs Release flags
+    target_compile_options(${tgt} PRIVATE
+            $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CXX>>:-O0;-g>
+            $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CXX>>:-O3>
+            $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:-Xptxas -v;--expt-relaxed-constexpr>
+    )
+    
+    if("${tgt}" STREQUAL "fb")
         target_compile_options(${tgt} PRIVATE
-                $<$<COMPILE_LANGUAGE:CXX>:-O0;-g;>
-                # $<$<COMPILE_LANGUAGE:CUDA>:-O0; -g; -G>
+                $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:SHELL:-gencode=arch=compute_${ARCH},code=lto_${ARCH}>
         )
-    elseif(CMAKE_BUILD_TYPE STREQUAL "Release")
-        if(${tgt} STREQUAL "fb")
-            target_compile_options(${tgt} PRIVATE
-                    $<$<COMPILE_LANGUAGE:CXX>:-O3>
-                    $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-gencode=arch=compute_${COMPUTE_CAPABILITY},code=lto_${COMPUTE_CAPABILITY}>
-                    $<$<COMPILE_LANGUAGE:CUDA>:-Xptxas -v;--expt-relaxed-constexpr; -diag-suppress 186>
-            )
-        else ()
-            target_compile_options(${tgt} PRIVATE
-                    $<$<COMPILE_LANGUAGE:CXX>:-O3>
-                    $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-gencode=arch=compute_${COMPUTE_CAPABILITY},code=sm_${COMPUTE_CAPABILITY}>
-                    $<$<COMPILE_LANGUAGE:CUDA>:-Xptxas -v;--expt-relaxed-constexpr;--extended-lambda;-diag-suppress 186>
-            )
-        endif ()
-    endif ()
+    else()
+        target_compile_options(${tgt} PRIVATE
+                $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:SHELL:-gencode=arch=compute_${ARCH},code=sm_${ARCH}>
+        )
+    endif()
     # TODO (Jonathan): make the below opt-in
     target_compile_definitions(${tgt}
             PRIVATE
@@ -236,27 +248,35 @@ function(flash_target_common tgt)
     )
 endfunction()
 
-add_executable(fb benchmarks/flash_bench.cu
-        include/flashmoe/flashmoe.cuh
-        include/flashmoe/tile.cuh
+add_executable(fb
+        tests/flashmoe.cu
 )
 set_target_properties(fb PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
         CUDA_RESOLVE_DEVICE_SYMBOLS ON
 )
 flash_target_common(fb)
+if(FMT_ADDED)
+    target_link_libraries(fb PRIVATE fmt::fmt)
+endif ()
+target_link_libraries(fb PRIVATE nvshmem::nvshmem_host nvshmem::nvshmem_device)
+
+add_executable(testScheduler
+        tests/scheduler.cu
+)
+flash_target_test(testScheduler)
 
 add_executable(gb
-        benchmarks/gemm_bench.cu
+        tests/gemm.cu
 )
 flash_target_common(gb)
 
 add_executable(pl
-        benchmarks/playground.cu
+        tests/playground.cu
 )
 flash_target_common(pl)
 
 add_executable(gtb_x
-        benchmarks/gate_bench.cu
+        tests/gate.cu
 )
 flash_target_common(gtb_x)

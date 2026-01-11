@@ -14,8 +14,8 @@
 #define CSRC_DEBUG_CUH
 
 #include <cstdio>
-#if !defined(FLASHMOE_CHECK_CUDA)
-#  define FLASHMOE_CHECK_CUDA(e)                                \
+#if !defined(CHECK_CUDA)
+#  define CHECK_CUDA(e)                                      \
 do {                                                         \
     cudaError_t code = (e);                                  \
     if (code != cudaSuccess) {                               \

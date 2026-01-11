@@ -134,27 +134,6 @@ namespace flashmoe{
     using ull_t = unsigned long long int;
     static_assert(sizeof(ull_t) == sizeof(flagsType) && alignof(ull_t) == alignof(flagsType));
 
-    __device__
-    struct __align__(8) TQState {
-        uint tQTail;
-        uint tasks;
-    };
-
-    __device__
-    struct __align__(8) TQSignal{
-        uint signal; // one ahead
-        uint interrupt;
-
-        __device__ __forceinline__
-        void encodeSig(const uint& sig) {
-            signal = sig + 1;
-        }
-        __device__ __forceinline__
-        auto decodeSig() const {
-            return signal - 1;
-        }
-    };
-
     // These could be much more, as supported by CUTLASS
     __host__ __device__
     enum ActivationFunction: uint8_t {
@@ -175,21 +154,9 @@ namespace flashmoe{
     };
 
     __device__
-    enum ReadySignal : uint {
-        observed,
-        ready
-    };
-
-    __device__
     enum class CombineMode {
         single,
         plural
-    };
-
-    __device__
-    enum SchedulerConstants : uint {
-        interruptSignal = 0,
-        tQHeadGroundState = 0
     };
 
     /// Expert lookup info: key is global expert index
@@ -276,37 +243,6 @@ namespace flashmoe{
                    peer, pe, isRemote ? "True" : "False", nLocalExperts);
         }
     };
-
-    /// Computes precise number of integers needed to represent a consecutive set of bits
-    /// each of T threads has stride ownership of a single bit
-    /// and requires an integer to store 32 of such bits.
-    template<
-        unsigned int T,
-        unsigned int integerBitWidth = 32U,
-        unsigned int width = integerBitWidth * T
-    >
-    __host__ __device__ __forceinline__
-    constexpr uint nSI(const unsigned int& numBits) {
-        return (numBits / width) * T + cute::min(numBits % width, T);
-    }
-
-    /// A more apropos name would be "static storage" rather than registers.
-    template<class T>
-    struct isRegister : cuda::std::false_type {};
-
-    template<class T, int N, int Alignment>
-    struct isRegister<cutlass::AlignedArray<T, N, Alignment>> : cuda::std::true_type {};
-
-    template<class T, int N, bool RegisterSized>
-    struct isRegister<cutlass::Array<T, N, RegisterSized>> : cuda::std::true_type {};
-
-    template<class Engine, class Layout>
-    struct isRegister<cute::Tensor<Engine, Layout>> :
-    cuda::std::conditional_t<cute::is_rmem_v<cute::Tensor<Engine, Layout>>,
-    cuda::std::true_type, cuda::std::false_type> {};
-
-    template <class T>
-    constexpr bool isRegisterV = isRegister<T>::value;
 
     // Index and gate combine weight
 

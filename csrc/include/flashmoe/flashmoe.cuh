@@ -15,7 +15,7 @@
 
 #include "types.cuh"
 #include "atomics.cuh"
-#include "debug.cuh"
+#include "../../tests/debug.cuh"
 
 #include "scheduler.cuh"
 #include "subscriber.cuh"
@@ -28,6 +28,7 @@
 #include "signal.cuh"
 #include "heap.cuh"
 #include "task.cuh"
+#include "tq.cuh"
 #include "vt.cuh"
 #include "packed.cuh"
 #include "dq.cuh"

@@ -10,7 +10,7 @@
 #define FLASHMOE_MOE_CUH
 
 #include "arch.cuh"
-#include "debug.cuh"
+#include "../../tests/debug.cuh"
 #include "os.cuh"
 #include "processor.cuh"
 #include "moe/fffn.cuh"

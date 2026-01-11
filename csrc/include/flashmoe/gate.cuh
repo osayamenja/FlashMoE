@@ -23,9 +23,7 @@
 namespace flashmoe
 {
     enum class SoftMaxOptimizationLevel {
-        // slower (maybe?) but closest to the actual result of online softmax
         none,
-        // eliminates bank conflicts but introduces permuted fp addition
         // use fast exponential and float division
         highest,
     };
@@ -36,12 +34,6 @@ namespace flashmoe
     };
 }
 namespace flashmoe::gate {
-    enum class InsideFusedKernel {
-        // If inside fused kernel, we would need to limit the resource consumption of the router
-        // to minimize its influence on occupancy.
-        yes,
-        no
-    };
     template<SoftMaxOptimizationLevel level = SoftMaxOptimizationLevel::none>
     __device__ __forceinline__
     float fexp(const float& x) {
@@ -557,7 +549,6 @@ namespace flashmoe::gate {
         typename TileGEMM,
         GateReductionLevel grl = GateReductionLevel::singleBlock,
         SoftMaxOptimizationLevel sro = SoftMaxOptimizationLevel::none,
-        InsideFusedKernel ifk = InsideFusedKernel::yes,
         typename Element,
         typename ElementR
     >
@@ -595,9 +586,6 @@ namespace flashmoe::gate {
             else {
                 gateMainLoop(workspace, tokens, _gateWeights, _routing, i,
                     tokenIds, expertCounts, eCGuards, S, H, E, k, EC, rSp, rTp);
-            }
-            if constexpr (ifk == InsideFusedKernel::yes) {
-                cublasdx::copy_wait();
             }
         }
         // clear guards

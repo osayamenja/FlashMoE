@@ -530,6 +530,7 @@ namespace flashmoe::processor{
                     __threadfence();
                     // Eagerly indicate readiness for the next task as the above fence allows us to do so correctly
                     globalInterrupt = tqs.interrupt;
+                    // set sQ to zero if interrupt
                     atomicExch(pA.sQ, ready);
                 }
                 // The below is necessary as it guarantees memory ordering

@@ -57,7 +57,6 @@ template<
         int threads,
         flashmoe::GateReductionLevel grl = flashmoe::GateReductionLevel::singleBlock,
         flashmoe::SoftMaxOptimizationLevel sro = flashmoe::SoftMaxOptimizationLevel::none,
-        flashmoe::gate::InsideFusedKernel ifk = flashmoe::gate::InsideFusedKernel::yes,
         typename AccumType = float,
         typename Element,
         typename ElementR
@@ -85,7 +84,7 @@ __global__ void gateKernel(const Element* __restrict__ tokens,
             bM, bN, bK, Arch, Element, AccumType, threads, pipeStages
         >;
     extern __shared__ __align__(TileGEMM::GeneralAlignment::value) cuda::std::byte gateWorkspace[];
-    flashmoe::gate::forward<TileGEMM, grl, sro, ifk>(gateWorkspace, tokens, _gateWeights,
+    flashmoe::gate::forward<TileGEMM, grl, sro>(gateWorkspace, tokens, _gateWeights,
         _routing, tokenIds, expertCounts, eCGuards,
         S, H, E, k, EC, static_cast<int>(gridDim.x), rSp, rTp);
 }
@@ -222,7 +221,6 @@ template<int Arch, int sharedSize,
     typename TileShape,
     flashmoe::GateReductionLevel grl = flashmoe::GateReductionLevel::singleBlock,
     flashmoe::SoftMaxOptimizationLevel sro = flashmoe::SoftMaxOptimizationLevel::none,
-    flashmoe::gate::InsideFusedKernel ifk = flashmoe::gate::InsideFusedKernel::no,
     int threads, typename AccumType, typename Element, typename ElementC
 >
 __host__ __forceinline__
@@ -233,7 +231,7 @@ auto gk_run(matx::cudaExecutor& exec, const GateArgs& gArgs, const int& blocks, 
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
     auto kernel = [&]() {
-        gateKernel<TileShape, Arch, threads, grl, sro, ifk, AccumType>
+        gateKernel<TileShape, Arch, threads, grl, sro, AccumType>
         <<<blocks, threads, sharedSize, exec.getStream()>>>(
             static_cast<Element*>(gArgs.tokens),
             static_cast<Element*>(gArgs.gateWeights),
@@ -271,7 +269,6 @@ template<
     int bM, int bN, int bK, int pipeStages,
     flashmoe::GateReductionLevel grl = flashmoe::GateReductionLevel::singleBlock,
     flashmoe::SoftMaxOptimizationLevel sro = flashmoe::SoftMaxOptimizationLevel::none,
-    flashmoe::gate::InsideFusedKernel ifk = flashmoe::gate::InsideFusedKernel::no,
     typename Element, typename ElementC
 >
 __host__ __forceinline__
@@ -330,7 +327,7 @@ void driver(const int& S, const int& E, const int& H, const int& k, const float&
     using AccumType = float;
     using TileShape = cute::Shape<cute::Int<bM>, cute::Int<bN>, cute::Int<bK>, cute::Int<pipeStages>>;
     constexpr int threads = flashmoe::tile::suggest_thread_count<bM, bN, bK, Arch, Element, AccumType>();
-    auto kernel = gateKernel<TileShape, Arch, threads, grl, sro, ifk, AccumType, Element, ElementC>;
+    auto kernel = gateKernel<TileShape, Arch, threads, grl, sro, AccumType, Element, ElementC>;
     int bps = 0;
     constexpr auto sharedSize = cute::max(bK * pipeStages * (bM + bN) * sizeof(Element),
         bM * bN * sizeof(AccumType));
@@ -361,7 +358,7 @@ void driver(const int& S, const int& E, const int& H, const int& k, const float&
         rtol, atol
     };
     // returns [kernel_ms, [m_time_ms, ep_gs, ep_ec, ep_tIds]]
-    const auto results = gk_run<Arch, sharedSize, TileShape, grl, sro, ifk, threads, AccumType, Element, ElementC>
+    const auto results = gk_run<Arch, sharedSize, TileShape, grl, sro, threads, AccumType, Element, ElementC>
     (exec, gArgs, blocks, checkCorrectness);
     const float kernel_ms = std::get<0>(results);
     const auto r_tuple = std::get<1>(results);
@@ -437,9 +434,7 @@ void kickStart(const int argc, char** argv) {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
     matx::cudaExecutor exec{stream};
-    // gives anywhere from 10-16% speedup with no increased error
     constexpr auto sro = flashmoe::SoftMaxOptimizationLevel::highest;
-    constexpr auto ifk = flashmoe::gate::InsideFusedKernel::no;
     // tiling heuristics
     constexpr int bM = cute::min(S, 128);
     constexpr int bK = cute::min(H, 64);
@@ -450,7 +445,7 @@ void kickStart(const int argc, char** argv) {
             {
                 constexpr int bM_x = 64;
                 constexpr int bN = 2;
-                driver<Arch, bM_x, bN, bK, pS, flashmoe::GateReductionLevel::singleBlock, sro, ifk,
+                driver<Arch, bM_x, bN, bK, pS, flashmoe::GateReductionLevel::singleBlock, sro,
                         Element, ElementC>(S, i, H, k, rtol, atol, checkCorrectness, exec);
             }
             break;
@@ -458,7 +453,7 @@ void kickStart(const int argc, char** argv) {
             {
                 constexpr int bM_x = 64;
                 constexpr int bN = 4;
-                driver<Arch, bM_x, bN, bK, pS, flashmoe::GateReductionLevel::singleBlock, sro, ifk,
+                driver<Arch, bM_x, bN, bK, pS, flashmoe::GateReductionLevel::singleBlock, sro,
                         Element, ElementC>(S, i, H, k, rtol, atol, checkCorrectness, exec);
             }
             break;
@@ -466,7 +461,7 @@ void kickStart(const int argc, char** argv) {
             {
                 constexpr int bM_x = 64;
                 constexpr int bN = 8;
-                driver<Arch, bM_x, bN, bK, pS, flashmoe::GateReductionLevel::singleBlock, sro, ifk,
+                driver<Arch, bM_x, bN, bK, pS, flashmoe::GateReductionLevel::singleBlock, sro,
                         Element, ElementC>(S, i, H, k, rtol, atol, checkCorrectness, exec);
             }
             break;
@@ -474,7 +469,7 @@ void kickStart(const int argc, char** argv) {
             {
                 constexpr int bM_x = 64;
                 constexpr int bN = 16;
-                driver<Arch, bM_x, bN, bK, pS, flashmoe::GateReductionLevel::singleBlock, sro, ifk,
+                driver<Arch, bM_x, bN, bK, pS, flashmoe::GateReductionLevel::singleBlock, sro,
                         Element, ElementC>(S, i, H, k, rtol, atol, checkCorrectness, exec);
             }
             break;
@@ -482,14 +477,14 @@ void kickStart(const int argc, char** argv) {
             {
                 constexpr int bM_x = 64;
                 constexpr int bN = 32;
-                driver<Arch, bM_x, bN, bK, pS, flashmoe::GateReductionLevel::singleBlock, sro, ifk,
+                driver<Arch, bM_x, bN, bK, pS, flashmoe::GateReductionLevel::singleBlock, sro,
                         Element, ElementC>(S, i, H, k, rtol, atol, checkCorrectness, exec);
             }
             break;
         case 64:
             {
                 constexpr int bN = 64;
-                driver<Arch, bM, bN, bK, pS, flashmoe::GateReductionLevel::singleBlock, sro, ifk,
+                driver<Arch, bM, bN, bK, pS, flashmoe::GateReductionLevel::singleBlock, sro,
                         Element, ElementC>(S, i, H, k, rtol, atol, checkCorrectness, exec);
             }
             break;
@@ -497,7 +492,7 @@ void kickStart(const int argc, char** argv) {
             {
                 if (i > 64) {
                     constexpr int bN = 64;
-                    driver<Arch, bM, bN, bK, pS, flashmoe::GateReductionLevel::multiBlock, sro, ifk,
+                    driver<Arch, bM, bN, bK, pS, flashmoe::GateReductionLevel::multiBlock, sro,
                             Element, ElementC>(S, i, H, k, rtol, atol, checkCorrectness, exec);
                 }
             }

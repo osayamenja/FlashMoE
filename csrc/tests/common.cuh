@@ -10,20 +10,6 @@
 #include <matx.h>
 #include <cuda_runtime.h>
 
-#if !defined(CHECK_CUDA)
-#  define CHECK_CUDA(e)                                      \
-do {                                                         \
-    cudaError_t code = (e);                                  \
-    if (code != cudaSuccess) {                               \
-        fprintf(stderr, "<%s:%d> %s:\n    %s: %s\n",         \
-            __FILE__, __LINE__, #e,                          \
-            cudaGetErrorName(code),                          \
-            cudaGetErrorString(code));                       \
-        fflush(stderr);                                      \
-        exit(1);                                             \
-    }                                                        \
-} while (0)
-#endif
 
 template<typename T, typename S>
     struct Converter {
@@ -74,9 +60,9 @@ __device__ __forceinline__ float u01_from_u64(const uint64_t& x) {
 }
 
 // jitter in [-eps/2, +eps/2], deterministic from 64-bit idx + seed
-__device__ __forceinline__ float tie_jitter64(const int64_t& linear_idx,
+__device__ __forceinline__ float tie_jitter64(const uint64_t& linear_idx,
     const float& eps, const uint64_t seed = 0x12345678abcdefULL) {
-    const uint64_t h = mix64(static_cast<uint64_t>(linear_idx) ^ seed);
+    const uint64_t h = mix64(linear_idx ^ seed);
     const float u = u01_from_u64(h);     // [0,1)
     return (u - 0.5f) * eps;       // [-eps/2, +eps/2]
 }
@@ -156,7 +142,7 @@ void randUniform(Element* __restrict__ const& out,
     const  size_t& n, const long int& seed, const float& minv,
     const float& maxv, cudaStream_t stream) {
     constexpr int threads = 128;
-    const int blocks = cute::ceil_div(n, threads * 4);
+    const int blocks = static_cast<int>(cute::ceil_div(n, threads * 4));
     if (n % 4 == 0) {
         generateRandUniform<Arch, true, addJitter><<<blocks, threads, 0, stream>>>(out, n, seed, minv, maxv);
     }
