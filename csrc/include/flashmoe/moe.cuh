@@ -29,12 +29,11 @@ namespace flashmoe::moe{
     }
 
     template<
-        int _Arch, //  GPU Architecture, Volta - Blackwell (700 - 1200), See cuBLASDx docs
+        int arch, //  GPU Architecture, Volta - Blackwell (700 - 1200), See cuBLASDx docs
         int _threads, // see tile::suggest_thread_count
         bool isKG1, // is k greater than 1
         DropTokens _dTk, // yes or no,
         GateReductionLevel gRl, // E > GateTileShape.N ? single : multi
-        gate::InsideFusedKernel ifk, // yes or no,
         typename GateTile, // cute::Shape<M,N,K,pipeStages>, will be ignored if ifk == no
         typename GEMM1Tile, // cute::Shape<M,N,K,pipeStages>
         typename GEMM2Tile // cute::Shape<M,N,K,pipeStages>
@@ -46,16 +45,16 @@ namespace flashmoe::moe{
         using G1TS = GEMM1Tile;
         static_assert(cute::is_tuple_v<GEMM2Tile> && cute::rank_v<GEMM2Tile> == 4);
         using G2TS = GEMM2Tile;
-        using Arch = cute::Int<_Arch>;
+        using Arch = cute::Int<arch>;
         using Threads = cute::Int<_threads>;
         using GRL = cute::C<gRl>;
         using DTK = cute::C<_dTk>;
         using CM = cute::C<isKG1 ? CombineMode::plural : CombineMode::single>;
-        using IFK = cute::C<ifk>;
     };
 
     template<
         typename Config,
+        bool doGate,
         typename Element
     >
     __global__ __launch_bounds__(Config::Threads::value, 1) void forward(
@@ -73,7 +72,7 @@ namespace flashmoe::moe{
         Element* __restrict__ _gateOut, // [S, E]
         Element* __restrict__ _moeOut, //  [S, H]
         const __grid_constant__ Bookkeeping bookkeeping) {
-        if constexpr (Config::IFK::value == gate::InsideFusedKernel::yes) {
+        if constexpr (doGate) {
             gate::forward<
                 Config::GTS,
                 Config::Arch::value,

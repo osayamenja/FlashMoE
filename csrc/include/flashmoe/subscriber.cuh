@@ -26,12 +26,8 @@ namespace flashmoe::subscriber{
     struct __align__(16) Args {
         uint64_t* const flags; // symmetric global
         Task* const tQ; // global
-        const int* tileIndices; // global
+        const uint* tileIndices; // global
         cuda::std::byte* const GEMM0Staging;
-        cuda::std::byte* const expertsUp; // global
-        cuda::std::byte* const expertsDown; // global
-        cuda::std::byte* const biasUp; // global
-        cuda::std::byte* const biasDown; // global
         BitSet* const bitSet; // shared
         int* const interrupt; // shared
         unsigned int* const tQHead; // shared
@@ -55,12 +51,8 @@ namespace flashmoe::subscriber{
         const uint16_t seqNumber;
 
         Args(uint64_t* const& _signals, Task* const& tq,
-            const int* const& _tileIndices,
+            const uint* const& _tileIndices,
             cuda::std::byte* const& gemm0Staging,
-            cuda::std::byte* const& _expertsUp,
-            cuda::std::byte* const& _expertsDown,
-            cuda::std::byte* const& _biasUp,
-            cuda::std::byte* const& _biasDown,
             BitSet* const& _bitSet,
             int* const& _interrupt,
             unsigned int* const& _tQHead,
@@ -79,10 +71,6 @@ namespace flashmoe::subscriber{
         tQ(tq + threadIdx),
         tileIndices(_tileIndices),
         GEMM0Staging(gemm0Staging),
-        expertsUp(_expertsUp),
-        expertsDown(_expertsDown),
-        biasUp(_biasUp),
-        biasDown(_biasDown),
         bitSet(_bitSet),
         interrupt(_interrupt),
         tQHead(_tQHead),
@@ -350,7 +338,7 @@ namespace flashmoe::subscriber{
     template<int subscriberCount, int bM, typename Element>
     struct Subscriber<SubscriberStage::final, Element, subscriberCount, bM> {
         __device__ __forceinline__
-        void operator()(const Args& args, const uint* __restrict__ const& tileIndices,
+        void operator()(const Args& args,
             BitSet* __restrict__ const& bitSet, uint64_t* __restrict__ const& flags,
             int& ltQHead, const int& stageLength) const {
             constexpr int wSet = 16;
@@ -367,7 +355,7 @@ namespace flashmoe::subscriber{
                 // gmem -> registers
                 #pragma unroll
                 for (uint j = 0; j < wSet; ++j) {
-                    workSet[j] = tileIndices[args.tIdx + j * subscriberCount];
+                    workSet[j] = args.tileIndices[args.tIdx + j * subscriberCount];
                 }
                 #pragma unroll
                 for (uint j = 0; j < wSet; ++j) {
@@ -433,7 +421,7 @@ namespace flashmoe::subscriber{
                 #pragma unroll
                 for (uint j = 0; j < wSet; ++j) {
                     if (j < residue) {
-                        workSet[j] = tileIndices[args.tIdx + (j + stageTrips * wSet) * subscriberCount];
+                        workSet[j] = args.tileIndices[args.tIdx + (j + stageTrips * wSet) * subscriberCount];
                     }
                 }
                 #pragma unroll

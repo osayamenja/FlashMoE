@@ -26,13 +26,13 @@ namespace flashmoe {
         sHeap(_sHeap), expertSlots(_expertSlots), EC(_EC),
         tokenDim(_tokenDim), elementBytes(_elementBytes){}
         template<
-            int stage,
-            int cell
+            unsigned long int stage,
+            unsigned long int cell
         >
         requires (stage < STAGES && cell < CELLS)
         __device__ __forceinline__
         constexpr long int advanceOffset(const int& peer, const int& expert, const int& token = 0) const {
-            return elementBytes * tokenDim * (EC * (CELLS * (STAGES * (peer * expertSlots +
+            return static_cast<long int>(elementBytes) * tokenDim * (EC * (CELLS * (STAGES * (peer * expertSlots +
                 static_cast<long int>(expert)) + stage) + cell) + token);
         }
         template<
@@ -41,9 +41,9 @@ namespace flashmoe {
         >
         requires (stage < STAGES && cell < CELLS)
         __device__ __forceinline__
-        constexpr cuda::std::byte* advance(const int& peer, const int& expert, const int& token = 0) const {
+        cuda::std::byte* advance(const int& peer, const int& expert, const int& token = 0) const {
                 return sHeap + advanceOffset<stage, cell>(peer, expert, token);
-            }
+        }
 
     };
 }

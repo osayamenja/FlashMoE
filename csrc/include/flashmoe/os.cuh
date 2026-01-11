@@ -21,12 +21,7 @@
 
 namespace flashmoe::os {
     template<
-        unsigned int processors = 1,
-        DropTokens d = DropTokens::yes,
-        typename ExpertsUp,
-        typename ExpertsDown,
-        typename BiasUp,
-        typename BiasDown
+        DropTokens d = DropTokens::yes
     >
     __device__ __forceinline__
     void start(ExpertsUp const& expertsUp,
@@ -34,7 +29,6 @@ namespace flashmoe::os {
         BiasUp const& biasUp,
         BiasDown const& biasDown,
         const uint16_t& lSeqBit) {
-        __shared__ __align__(16) cuda::std::byte workspace[32*1024];
         const auto ssfC = __ldg(bookkeeping.ssFc());
         const auto* __restrict__ eC = bookkeeping.eC();
         const auto world = bookkeeping.world;

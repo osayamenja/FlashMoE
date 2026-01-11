@@ -27,7 +27,7 @@ namespace flashmoe::scheduler {
     using WarpScan = cub::WarpScan<uint>;
     constexpr int WARP_SIZE = 32;
     constexpr int SCHEDULER_COUNT = WARP_SIZE; // warp_size
-    constexpr int RMEM_STATE_PER_PROCESSOR = 16; // 16 -> 128 regs/thread
+    constexpr int RMEM_STATE_PER_PROCESSOR = 16;
     constexpr int WORK_SET_SIZE = 8;
     static_assert(RMEM_STATE_PER_PROCESSOR <= 64);
     constexpr int MAX_PROCESSORS = WARP_SIZE * RMEM_STATE_PER_PROCESSOR; // can be relaxed but with slower perf
@@ -45,32 +45,32 @@ namespace flashmoe::scheduler {
         auto sig = TQSignal{0U, 0U};
         for (uint k = 0; k < cSetB; ++k) {
             #pragma unroll
-            for (uint l = 0; l < WORK_SET_SIZE; ++l) {
+            for (uint l = 0; l < wSet.size(); ++l) {
                 wSet[l] = rQ[(gRQIdx + lRQIdx++) % processors];
             }
             #pragma unroll
-            for (uint l = 0; l < WORK_SET_SIZE; ++l) {
+            for (uint l = 0; l < wSet.size(); ++l) {
                 // signal processor
                 auto* __restrict__ pdbAddr = reinterpret_cast<uint64_t*>(pDB + wSet[l]);
                 cuda::atomic_ref<uint64_t, cuda::thread_scope_device> pdb{*pdbAddr};
-                sig.encodeSig(DQ::next<dqt, nQ>(qIdx, k * WORK_SET_SIZE + l));
+                sig.encodeSig(DQ::next<dqt, nQ>(qIdx, k * wSet.size() + l));
                 pdb.store(cuda::std::bit_cast<uint64_t>(sig), cuda::memory_order_release);
             }
         }
         // Residual scheduling
-        const auto residue = canSchedule - cSetB * WORK_SET_SIZE;
+        const auto residue = canSchedule - cSetB * wSet.size();
         #pragma unroll
-        for (uint l = 0; l < WORK_SET_SIZE; ++l) {
+        for (uint l = 0; l < wSet.size(); ++l) {
             if (l < residue) {
                 wSet[l] = rQ[(gRQIdx + lRQIdx++) % processors];
             }
         }
         #pragma unroll
-        for (uint l = 0; l < WORK_SET_SIZE; ++l) {
+        for (uint l = 0; l < wSet.size(); ++l) {
             if (l < residue) {
                 auto* __restrict__ pdbAddr = reinterpret_cast<uint64_t*>(pDB + wSet[l]);
                 cuda::atomic_ref<uint64_t, cuda::thread_scope_device> pdb{*pdbAddr};
-                sig.encodeSig(DQ::next<dqt, nQ>(qIdx, cSetB * WORK_SET_SIZE + l));
+                sig.encodeSig(DQ::next<dqt, nQ>(qIdx, cSetB * wSet.size() + l));
                 pdb.store(cuda::std::bit_cast<uint64_t>(sig), cuda::memory_order_release);
             }
         }
@@ -111,7 +111,7 @@ namespace flashmoe::scheduler {
                 // sweep sQ to identify ready processes
                 uint lPt = 0U; // local processor tally
                 #pragma unroll
-                for (int j = 0; j < sQState.kElements; ++j) {
+                for (int j = 0; j < sQState.size(); ++j) {
                     const auto idx = j * schedulerCount + threadIdx.x;
                     if (idx < processors) {
                         const auto readiness = atomicExch(sQ + (j * schedulerCount + threadIdx.x),
@@ -127,7 +127,7 @@ namespace flashmoe::scheduler {
                 // write to rQ
                 const auto qSIdx = gRQIdx + prefixTaskSum;
                 #pragma unroll
-                for (uint j = 0; j < sQState.kElements; ++j) {
+                for (uint j = 0; j < sQState.size(); ++j) {
                     const auto idx = j * schedulerCount + threadIdx.x;
                     if (idx < processors && sQState[j]) {
                         // write ready process pid to rQ
@@ -169,7 +169,7 @@ namespace flashmoe::scheduler {
                     }
                 }
                 #pragma unroll
-                for (uint j = sL; j < TQState::kElements; ++j) {
+                for (uint j = sL; j < tqState.size(); ++j) {
                     if (tqState[j].tasks && tasksToSchedule) {
                         const auto canSchedule = cute::min(tasksToSchedule, tqState[j].tasks);
                         const auto qHead = (schedulerCount * (gTbO + (j - sL)) + threadIdx.x) * tilesN1 + tqState[j].tQTail;
@@ -187,7 +187,7 @@ namespace flashmoe::scheduler {
         }
         // clear checkpoints
         #pragma unroll
-        for (uint j = sL; j < TQState::kElements; ++j) {
+        for (uint j = sL; j < tqState.size(); ++j) {
             tqState[j].tQTail = 0;
         }
         // Advance global rQ index
@@ -215,14 +215,14 @@ namespace flashmoe::scheduler {
         // index can only wrap around once
         gRQIdx = gRO % processors;
         #pragma unroll
-        for (uint i = 0; i < sQState.kElements; ++i) {
+        for (uint i = 0; i < sQState.size(); ++i) {
             if (i < tS) {
                 // shared -> registers
                 sQState[i] = rQ[(gRQIdx + i) % processors];
             }
         }
         #pragma unroll
-        for (uint i = 0; i < sQState.kElements; ++i) {
+        for (uint i = 0; i < sQState.size(); ++i) {
             if (i < tS) {
                 // notify interrupts
                 const auto pid = sQState[i];
@@ -237,7 +237,7 @@ namespace flashmoe::scheduler {
         uint uI = 0U;
         // shared -> registers
         #pragma unroll
-        for (uint i = 0; i < sQState.kElements; ++i) {
+        for (uint i = 0; i < sQState.size(); ++i) {
             const auto idx = i * schedulerCount + threadIdx.x;
             if (idx < processors) {
                 sQState[i] = scratch[idx];
@@ -245,7 +245,7 @@ namespace flashmoe::scheduler {
         }
 
         #pragma unroll
-        for (uint i = 0; i < sQState.kElements; ++i) {
+        for (uint i = 0; i < sQState.size(); ++i) {
             if ((i * schedulerCount + threadIdx.x) < processors) {
                 uI += sQState[i];
             }
@@ -257,7 +257,7 @@ namespace flashmoe::scheduler {
         startIdx -= uI;
         // enqueue all pending processes we discovered into the rQ
         #pragma unroll
-        for (uint i = 0; i < sQState.kElements; ++i) {
+        for (uint i = 0; i < sQState.size(); ++i) {
             const auto idx = i * schedulerCount + threadIdx.x;
             if (idx < processors && sQState[i]) {
                 rQ[startIdx++] = idx;
@@ -265,10 +265,10 @@ namespace flashmoe::scheduler {
         }
         __syncwarp();
         auto remaining = pending / schedulerCount + (threadIdx.x < pending % schedulerCount);
-        cuda::std::array<uint, sQState.kElements> pids{};
+        cuda::std::array<uint, sQState.size()> pids{};
         // read from rQ to registers
         #pragma unroll
-        for (uint i = 0; i < sQState.kElements; ++i) {
+        for (uint i = 0; i < sQState.size(); ++i) {
             const auto idx = i * schedulerCount + threadIdx.x;
             if (idx < pending) {
                 sQState[i] = 1;
@@ -281,7 +281,7 @@ namespace flashmoe::scheduler {
 
         while (remaining) {
             #pragma unroll
-            for (uint j = 0; j < sQState.kElements; ++j) {
+            for (uint j = 0; j < sQState.size(); ++j) {
                 if (sQState[j]) {
                     const auto pid = pids[j];
                     const auto isReady = atomicExch(sQ + pid, observed) == ready;
@@ -356,7 +356,7 @@ namespace flashmoe::scheduler {
                 // One-shot scheduling, so tails are irrelevant.
                 // Special case, where i == 0
                 #pragma unroll
-                for (uint j = sL; j < decltype(tqState)::kElements; ++j) {
+                for (uint j = sL; j < tqState.size(); ++j) {
                     const auto pJ = j - sL;
                     if (const auto isVisited = sBS.get(pJ % bSw); !isVisited) {
                         const auto qIdx = schedulerCount * pJ + threadIdx.x;
@@ -380,7 +380,7 @@ namespace flashmoe::scheduler {
                     sBS = bitSet[sBIdx];
                     // Needed to enforce register storage
                     #pragma unroll
-                    for (uint j = sL; j < decltype(tqState)::kElements; ++j) {
+                    for (uint j = sL; j < tqState.size(); ++j) {
                         const auto pJ = j - sL;
                         const uint bIdx = (i * dQL + pJ) % bSw;
                         if (const auto isVisited = sBS.get(bIdx); !isVisited) {
@@ -405,7 +405,7 @@ namespace flashmoe::scheduler {
                 auto sBS = bitSet[sBIdx];
                 // residue
                 #pragma unroll
-                for (uint j = sL; j < decltype(tqState)::kElements; ++j) {
+                for (uint j = sL; j < tqState.size(); ++j) {
                     const auto pJ = j - sL;
                     if (const auto qIdx = schedulerCount * (dQL * dT + pJ) + threadIdx.x; qIdx < gtQCL) {
                         const uint bIdx = (dT * dQL + pJ) % bSw;
