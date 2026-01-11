@@ -10,8 +10,9 @@
 // Created by Jonathan on 7/4/24.
 //
 
-#ifndef FLASHMOE_QUEUE_CUH
-#define FLASHMOE_QUEUE_CUH
+#ifndef FLASHMOE_SUBSCRIBER_CUH
+#define FLASHMOE_SUBSCRIBER_CUH
+#include <cuda/atomic>
 #include <nvshmem.h>
 
 #include "bitset.cuh"
@@ -271,7 +272,8 @@ namespace flashmoe::subscriber{
                                     we will process the new packet in the next epoch.
                                     */
                                     if (__builtin_expect(sigPayload.routedTokens > 0, 0)) {
-                                        __trap(); // protocol violation
+                                        // protocol violation
+                                        __trap();
                                     }
                                 }
                             }
@@ -527,4 +529,4 @@ namespace flashmoe::subscriber{
         }
     }
 }
-#endif //FLASHMOE_QUEUE_CUH
+#endif //FLASHMOE_SUBSCRIBER_CUH

@@ -107,6 +107,11 @@ __device__ void run_consumer(MockTask* __restrict__ const& taskQueue,
                 taskQueue[qIdx] = task; // for verification
                 c.task = task;
             }
+            else {
+                // we need to clear out our mailbox to ensure it's ready for s subsequent iteration
+                constexpr auto TQSZero = cuda::std::bit_cast<uint64_t>(flashmoe::TQSignal{0, 0});
+                doorbell.store(TQSZero, cuda::memory_order_relaxed);
+            }
             state = c;
         }
         __syncthreads();
@@ -147,7 +152,7 @@ __global__ void testSchedulerE2E(
     const uint32_t num_spawned_tasks = producers * tN;
     // each producer produces one which gets spawned as tN additional tasks.
     const auto taskBoundV = num_primary_tasks + num_spawned_tasks;
-    const uint32_t L_bitset = flashmoe::nSI<flashmoe::scheduler::SCHEDULER_COUNT>(num_spawned_tasks);
+    constexpr uint32_t L_bitset = flashmoe::nSI<flashmoe::scheduler::SCHEDULER_COUNT>(producers);
     static_assert(threads > flashmoe::scheduler::SCHEDULER_COUNT);
     using namespace flashmoe;
 
@@ -188,14 +193,15 @@ __global__ void testSchedulerE2E(
         for (uint32_t i = threadIdx.x; i < L_bitset; i += threads) {
             bitset[i] = BitSet{};
         }
-        if (threadIdx.x == 0) *taskBound = taskBoundV;
+        if (threadIdx.x == 0) {
+            *taskBound = taskBoundV;
+        }
         __syncthreads();
 
-        // Warp0 calls your scheduler start() as a black box.
         if (warp_id() == 0) {
             // call scheduler
             scheduler::start<producers>(scratch, bitset, num_consumers, tN,
-                num_primary_tasks, num_spawned_tasks, interrupts, tQHeads_sh, gTQHeads, taskBound,
+                num_primary_tasks, producers, interrupts, tQHeads_sh, gTQHeads, taskBound,
                 readyQ, statusQueue, tqSignalQ);
         }
         else {
@@ -225,15 +231,19 @@ __global__ void verify(const MockTask* __restrict__ tQ, const uint n, uint* __re
         atomicAdd(failures, total);
     }
 }
-// testScheduler <blocks> <n_spawned>
+// ./testScheduler <blocks> <n_spawned>
 int main(const int argc, char** argv) {
     uint32_t blocks = 64;
     uint32_t n_spawned = 64;
+    uint32_t post_runs = 0;
     if (argc > 1) {
         blocks = std::stoi(argv[1]);
     }
     if (argc > 2) {
         n_spawned = std::stoi(argv[2]);
+    }
+    if (argc > 3) {
+        post_runs = std::stoi(argv[3]);
     }
     constexpr uint threads = 128;
     if (blocks < 2) {
@@ -251,8 +261,8 @@ int main(const int argc, char** argv) {
     const auto totalTasks = num_primary_tasks + num_spawned_tasks;
     const auto consumers = blocks - 1;
     if (consumers > flashmoe::scheduler::SCHEDULER_COUNT * flashmoe::scheduler::MAX_PROCESSORS) {
-        throw std::invalid_argument(std::string("consumers must be <= ")
-            .append(std::to_string(flashmoe::scheduler::MAX_PROCESSORS).c_str()));
+        throw std::invalid_argument(std::string("blocks - 1 must be <= ")
+            .append(std::to_string(flashmoe::scheduler::MAX_PROCESSORS)));
     }
 
     cudaSetDevice(0);
@@ -269,8 +279,8 @@ int main(const int argc, char** argv) {
     cudaMallocAsync(&tqs, sizeof(flashmoe::TQSignal) * consumers, stream);
     cudaMemsetAsync(tqs, 0, sizeof(flashmoe::TQSignal) * consumers, stream);
 
-    const size_t sharedSize = sizeof(uint32_t) * (2 * (producers + consumers)
-    + flashmoe::nSI<flashmoe::scheduler::SCHEDULER_COUNT>(num_spawned_tasks) + 1);
+    constexpr auto bitSetSize = flashmoe::nSI<flashmoe::scheduler::SCHEDULER_COUNT>(producers);
+    const size_t sharedSize = sizeof(uint32_t) * (2 * (producers + consumers) + bitSetSize + 1);
     testSchedulerE2E<threads><<<blocks, threads, sharedSize, stream>>>(taskQ, statusQueue, tqs, tQHeads, n_spawned);
     CHECK_CUDA(cudaPeekAtLastError());
     cudaMallocAsync(&failures, sizeof(uint), stream);
@@ -280,14 +290,17 @@ int main(const int argc, char** argv) {
     uint h_failures;
     cudaMemcpyAsync(&h_failures, failures, sizeof(uint), cudaMemcpyDeviceToHost, stream);
     CHECK_CUDA(cudaStreamSynchronize(stream));
+    for (int i = 0; i < post_runs; ++i) {
+        testSchedulerE2E<threads><<<blocks, threads, sharedSize, stream>>>(taskQ, statusQueue, tqs, tQHeads, n_spawned);
+    }
     cudaFreeAsync(taskQ, stream);
     cudaFreeAsync(tqs, stream);
     cudaFreeAsync(tQHeads, stream);
     cudaFreeAsync(statusQueue, stream);
     cudaFreeAsync(failures, stream);
-    const float failure_percent = static_cast<float>(h_failures) / static_cast<float>(totalTasks);
-    printf("blocks,threads,producers,consumers,spawned,totalTasks,error(%%)\n");
-    printf("%d,%d,%d,%d,%d,%d,%f\n", blocks, threads, producers, consumers,n_spawned,totalTasks,failure_percent);
+    const float failure_percent = (static_cast<float>(h_failures) / static_cast<float>(totalTasks)) * 100.f;
+    printf("blocks,threads,producers,consumers,totalTasks,error(%%)\n");
+    printf("%d,%d,%d,%d,%d,%f\n", blocks, threads, producers, consumers, totalTasks,failure_percent);
     CHECK_CUDA(cudaStreamSynchronize(stream));
     cudaStreamDestroy(stream);
 }
