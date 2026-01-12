@@ -27,6 +27,22 @@ namespace flashmoe
         }
     };
 
+    template<typename V>
+        concept TensorValueType = cuda::std::is_same_v<V, __half> ||
+            cuda::std::is_same_v<V, __nv_bfloat16> ||
+            cuda::std::is_same_v<V, cublasdx::tfloat32_t> ||
+            cuda::std::is_same_v<V, float> ||
+            cuda::std::is_same_v<V, cublasdx::float_e4m3_t> ||
+            cuda::std::is_same_v<V, cublasdx::float_e5m2_t>;
+
+    template <class T>
+    struct isTensor : cuda::std::false_type {};
+    template <class Engine, class Layout>
+    requires(TensorValueType<typename Engine::value_type>)
+    struct isTensor<cute::Tensor<Engine,Layout>> : cuda::std::true_type {};
+    template <class Engine, class Layout>
+    requires(TensorValueType<typename Engine::value_type>)
+    struct isTensor<const cute::Tensor<Engine,Layout>> : cuda::std::true_type {};
 }
 namespace flashmoe::tile
 {

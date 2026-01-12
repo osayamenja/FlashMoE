@@ -24,6 +24,7 @@
 #include "moe.cuh"
 #include "bitset.cuh"
 #include "bootstrap.cuh"
+#include "combine.cuh"
 #include "dispatch.cuh"
 #include "signal.cuh"
 #include "heap.cuh"
@@ -31,6 +32,7 @@
 #include "tq.cuh"
 #include "vt.cuh"
 #include "packed.cuh"
+#include "structures.cuh"
 #include "dq.cuh"
 
 #endif //FLASHMOE_CUH

@@ -356,7 +356,7 @@ namespace flashmoe::gate {
                     const auto expertIdx = bN * cute::get<1>(tileCoord) + i;
                     tokenIds(expertIdx, myIndices[i]) = TPS{
                         bM * cute::get<0>(tileCoord) + threadIdx.x,
-                        mCw};
+                        fdividef(reginald[i], mCw)};
                 }
             }
         }
@@ -539,7 +539,7 @@ namespace flashmoe::gate {
                 if (rTK[i] && myIndices[i] < expertCap) {
                     tokenIds(i, myIndices[i]) = TPS{
                         bM * cute::get<0>(tileCoord) + threadIdx.x,
-                        mCw};
+                        fdividef(reginald[i], mCw)};
                 }
             }
         }

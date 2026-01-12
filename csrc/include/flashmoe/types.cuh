@@ -30,26 +30,6 @@
 #include <cutlass/epilogue/thread/activation.h>
 
 namespace flashmoe{
-    template<typename V>
-        concept TensorValueType = cuda::std::is_same_v<V, cute::half_t> ||
-            cuda::std::is_same_v<V, cute::bfloat16_t> ||
-            cuda::std::is_same_v<V, cute::tfloat32_t> ||
-            cuda::std::is_same_v<V, float> /*||
-            cuda::std::is_same_v<V, cute::float_e4m3_t> ||
-            cuda::std::is_same_v<V, cute::float_e5m2_t>*/;
-
-    template <class T>
-    struct isTensor : cuda::std::false_type {};
-    template <class Engine, class Layout>
-    requires(TensorValueType<typename Engine::value_type>)
-    struct isTensor<cute::Tensor<Engine,Layout>> : cuda::std::true_type {};
-    template <class Engine, class Layout>
-    requires(TensorValueType<typename Engine::value_type>)
-    struct isTensor<const cute::Tensor<Engine,Layout>> : cuda::std::true_type {};
-
-    template<typename T>
-    concept isMatrix = isTensor<T>::value && cuda::std::is_same_v<decltype(rank(T{})), cute::Int<2>>;
-
     template<typename S>
     struct ToCute {
         using T = S;
@@ -157,91 +137,6 @@ namespace flashmoe{
     enum class CombineMode {
         single,
         plural
-    };
-
-    /// Expert lookup info: key is global expert index
-    __device__
-    struct __align__(8) ELI {
-        uint epRank; // host peer
-        uint16_t localExpertIndex;
-        uint16_t isRemote;
-
-        __host__ __device__ __forceinline__
-        void dump() const {
-            printf("{\n\t"
-                   "this: %p,\n\t"
-                   "epRank: %u,\n\t"
-                   "localExpertIndex: %u,\n\t"
-                   "isRemote: %s"
-                   "\n}\n",
-                   this,
-                   epRank, localExpertIndex, isRemote ? "True" : "False");
-        }
-    };
-
-    /// Local expert lookup: key is local expert index
-    __device__
-    struct __align__(4) LXI {
-        uint expertIndex;
-        __host__ __device__ __forceinline__
-        void dump() const {
-            printf("{\n\t"
-                   "expertIndex: %u\n}\n", expertIndex);
-        }
-    };
-
-    /// Peer lookup info: key is ep rank
-    __device__
-    struct __align__(16) PLI {
-        cuda::std::byte* remoteSHeap;
-        flagsType* remoteSFlags;
-        uint pe;
-        uint isRemote;
-
-        __host__ __device__ __forceinline__
-        void dump() const {
-            printf("{\n\t"
-                   "this: %p,\n\t"
-                   "remoteSHeap: %p,\n\t"
-                   "remoteSFlags: %p,\n\t"
-                   "pe: %u,\n\t"
-                   "isRemote: %s"
-                   "\n}\n",
-                   this, remoteSHeap, remoteSFlags, pe, isRemote ? "True" : "False");
-        }
-    };
-
-    /// Packet Encoding Lookup info, retrievable in a single memory lookup
-    /// Key is global expert index
-    __device__
-    struct __align__(16) PEL {
-        cuda::std::byte* remoteSHeap;
-        flagsType* remoteSFlags;
-        uint eC;
-        uint16_t pTTt;
-        uint16_t expertLocalIdx;
-        uint16_t peer;
-        uint16_t pe;
-        uint16_t isRemote;
-        uint16_t nLocalExperts;
-
-        __host__ __device__ __forceinline__
-        void dump() const {
-            printf("{\n\t"
-                   "this: %p,\n\t"
-                   "remoteSHeap: %p,\n\t"
-                   "remoteSFlags: %p,\n\t"
-                   "eC: %u,\n\t"
-                   "pTTt: %u,\n\t"
-                   "expertLocalIndex: %u,\n\t"
-                   "peer: %u,\n\t"
-                   "pe: %u,\n\t"
-                   "isRemote: %s,\n\t"
-                   "nLocalExperts: %u"
-                   "\n}\n",
-                   this, remoteSHeap, remoteSFlags, eC, pTTt, expertLocalIdx,
-                   peer, pe, isRemote ? "True" : "False", nLocalExperts);
-        }
     };
 
     // Index and gate combine weight
@@ -605,10 +500,5 @@ namespace flashmoe{
                     sizeof(ACC::Element) * xMlt(_nLx, _world);
         }
     };
-
-    __constant__ static __inline__ Bookkeeping bookkeeping{};
-    __inline__ Bookkeeping hostBookkeeping{};
-    __inline__ bool isInitialized = false;
-    cudaStream_t flashmoeStream = nullptr;
 }
 #endif //FLASHMOE_TYPES_CUH

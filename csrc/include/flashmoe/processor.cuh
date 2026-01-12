@@ -11,333 +11,65 @@
 
 #ifndef FLASHMOE_COMPUTE_CUH
 #define FLASHMOE_COMPUTE_CUH
-
-#include <cutlass/array.h>
-#include <cute/tensor.hpp>
+#include <cub/cub.cuh>
+#include <cuda/atomic>
 #include <nvshmem.h>
 
-#include "gemm.cuh"
-#include "types.cuh"
-
+#include "combine.cuh" //  combine function
+#include "packed.cuh" // TPS
+#include "signal.cuh" // SignalPayload
+#include "task.cuh" // Task
+#include "tile.cuh" // cublasdx and tileGEMM
+#include "tq.cuh"  // TQSignal
 namespace flashmoe::processor{
-    enum class ReleaseType {
-        stable,
-        experimental
-    };
+    constexpr int WARP_SIZE = 32;
+    // fused GEMM, epilogue and data transfer
     template<
-        CombineMode c = CombineMode::single,
-        unsigned int gM = BLOCK_M,
-        unsigned int M = ACC::S::value,
-        unsigned int N = ACC::H::value,
-        class ScaleWeights,
+        typename TileGEMM,
+        typename Activation,
         typename Element,
-        unsigned int elems = ACC::Elems::value,
-        unsigned int threads = ACC::PeakHardware::OS::threads::value,
-        unsigned int sharedSize = ACC::PeakHardware::sharedMemory::value + ACC::PeakHardware::spare::value,
-        unsigned int wS = WARP_SIZE
-    >
-    requires(TensorValueType<Element> &&
-            elems % wS == 0 && // guarantees warp convergence
-            flashmoe::isMatrix<ScaleWeights> &&
-            cuda::std::is_same_v<typename ScaleWeights::value_type, Element>)
-    __device__ __forceinline__
-    void combine(cuda::std::byte* __restrict__ const& workspace,
-            const TPS* __restrict__ const& tokenIndices,
-            const Element* __restrict__ const& inputs,
-            Element* __restrict__ const& moeOutput,
-            ScaleWeights const& scale,
-            const unsigned int& tileIdx,
-            const uint16_t& tileSize,
-            const uint16_t& expertIdx) {
-        using BlockTiler = cute::Shape<cute::Int<BLOCK_M>, cute::Int<BLOCK_N>>;
-        constexpr BlockTiler tiler{};
-        constexpr auto bM = cute::get<0>(tiler);
-        constexpr auto bN = cute::get<1>(tiler);
-        cutlass::Array<Element, bN> registers{};
-        constexpr auto mTe = cutlass::NumericConverter<Element, mp_t>{};
-        constexpr auto eTm = cutlass::NumericConverter<mp_t, Element>{};
-        // Row-major
-        const auto mA = make_tensor(cute::make_gmem_ptr(inputs),
-            cute::Layout<cute::Shape<cute::Int<gM>, cute::Int<N>>,
-                cute::Stride<cute::Int<N>, cute::_1>>{});
-        const auto mC = make_tensor(cute::make_gmem_ptr(moeOutput),
-            cute::Layout<cute::Shape<cute::Int<M>, cute::Int<N>>,
-                cute::Stride<cute::Int<N>, cute::_1>>{});
-
-        // We assert the below prior to this point
-        static_assert(gM % bM == 0);
-        constexpr auto tilesM = gM / bM;
-        constexpr auto tilesN = N / bN;
-
-        const auto tileCoord = idx2crd(tileIdx,
-            cute::Shape<cute::Int<tilesM>, cute::Int<tilesN>>{},
-                cute::Stride<cute::Int<tilesN>, cute::_1>{});
-        const auto ctaCoord = cute::make_coord(cute::get<0>(tileCoord), cute::get<1>(tileCoord));
-        const auto gA = cute::local_tile(mA, tiler, ctaCoord);
-
-        const auto tileCoordOut = idx2crd(tileIdx,
-            cute::Shape<cute::_1, cute::Int<tilesN>>{},
-                cute::Stride<cute::Int<tilesN>, cute::_1>{});
-        const auto gC = cute::local_tile(mC,
-            cute::Shape<cute::Int<M>, cute::Int<bN>>{},
-                cute::make_coord(cute::get<0>(tileCoordOut),
-                    cute::get<1>(tileCoordOut)));
-        static_assert(bN % elems == 0);
-        constexpr auto trips = bN / elems;
-        // ensures we have enough shared memory
-        static_assert(sizeof(TPS) * bM <= sharedSize);
-        static_assert(bM % elems == 0);
-        // slice and dice token indices
-        constexpr auto phases = bM / elems;
-        const auto phaseIdx = threadIdx.x / elems;
-        static_assert(elems % wS == 0);
-        constexpr auto wE = elems / wS;
-        auto* __restrict__ sTPS = CAST_TO(TPS, workspace);
-        static_assert(bM == threads);
-        sTPS[threadIdx.x] = tokenIndices[threadIdx.x];
-        __syncthreads();
-        // Eagerly prefetch inputs to registers
-        #pragma unroll
-        for (uint i = 0; i < trips; ++i) {
-            // global -> registers
-            #pragma unroll
-            for (uint j = 0; j < elems; ++j) {
-                const auto rIdx = phaseIdx + j * phases;
-                const auto cIdx =  threadIdx.x % elems + i * elems;
-                registers[j + i * elems] = gA(rIdx, cIdx);
-            }
-        }
-        if constexpr (c == CombineMode::plural) {
-            TPS wT[wE];
-            Element rS[wE];
-            #pragma unroll
-            for (uint i = 0; i < wE; ++i) {
-                const auto tid = threadIdx.x % wS;
-                wT[i] = sTPS[phaseIdx + (tid + i * wS) * phases];
-                rS[i] = scale(wT[i].tokenIdx, expertIdx);
-            }
-            __syncwarp();
-            cutlass::Array<uint, elems> tIds{};
-            using CDxT = typename ToCDx<Element>::T;
-            constexpr auto cTCx = cutlass::NumericConverter<CDxT, Element>{};
-            const auto rC = cute::make_tensor(cute::make_rmem_ptr(CAST_TO(CDxT, registers.data())),
-                cute::Layout<cute::Shape<cute::_1, cute::Int<bN>>, cute::Stride<cute::Int<bN>, cute::_1>>{});
-            #pragma unroll
-            for (uint j = 0; j < elems; ++j) {
-                const auto msg = wT[j / wS];
-                const auto* __restrict__ mP = CONST_CAST_TO(ull_t, &msg);
-                const auto rM = __shfl_sync(0xffffffff, *mP, j % wS);
-                const auto [tokenIdx, probability] = *CONST_CAST_TO(TPS, &rM);
-                tIds[j] = tokenIdx;
-                // apply division operation
-                #pragma unroll
-                for (uint i = 0; i < trips; ++i) {
-                    registers[i + j * elems] = mTe(__fdividef(eTm(registers[i + j * elems]), probability));
-                }
-            }
-            #pragma unroll
-            for (uint j = 0; j < elems; ++j) {
-                const auto msg = rS[j / wS];
-                const auto* __restrict__ mP = CONST_CAST_TO(CDxT, &msg);
-                const auto rM = __shfl_sync(0xffffffff, *mP, j % wS);
-                // apply scale
-                #pragma unroll
-                for (uint i = 0; i < trips; ++i) {
-                    rC(j + i * elems) = cTCx(*CONST_CAST_TO(Element, &rM) * registers[j + i * elems]);
-                }
-            }
-            #pragma unroll
-            for (uint i = 0; i < trips; ++i) {
-                // do atomic addition
-                if (tileSize < gM) {
-                    #pragma unroll
-                    for (uint j = 0; j < elems; ++j) {
-                        const auto cIdx = threadIdx.x % elems + i * elems;
-                        if (phaseIdx + j * phases < tileSize) {
-                            atomicAdd(CAST_TO(CDxT, &gC(tIds[j], cIdx)), rC(j + i * elems));
-                        }
-                    }
-                }
-                else {
-                    #pragma unroll
-                    for (uint j = 0; j < elems; ++j) {
-                        const auto cIdx = threadIdx.x % elems + i * elems;
-                        atomicAdd(CAST_TO(CDxT, &gC(tIds[j], cIdx)), rC(j + i * elems));
-                    }
-                }
-            }
-        }
-        else {
-            uint wT[wE];
-            const auto tid = threadIdx.x % wS;
-            #pragma unroll
-            for (uint i = 0; i < wE; ++i) {
-                wT[i] = sTPS[phaseIdx + (tid + i * wS) * phases].tokenIdx;
-            }
-            // vector copy from registers to global directly and call it a day
-            cutlass::AlignedArray<uint, elems> tIds{};
-            __syncwarp();
-            #pragma unroll
-            for (uint j = 0; j < elems; ++j) {
-                const auto msg = wT[j / wS];
-                tIds[j] = __shfl_sync(0xffffffff, msg, j % wS);
-            }
-            #pragma unroll
-            for (uint i = 0; i < trips; ++i) {
-                const auto cIdx = threadIdx.x % elems + i * elems;
-                if (tileSize < gM) {
-                    #pragma unroll
-                    for (uint j = 0; j < elems; ++j) {
-                        // predicated writes
-                        if (phaseIdx + j * phases < tileSize) {
-                            gC(tIds[j], cIdx) = registers[j + i * elems];
-                        }
-                    }
-                }
-                else {
-                    #pragma unroll
-                    for (uint j = 0; j < elems; ++j) {
-                        gC(tIds[j], cIdx) = registers[j + i * elems];
-                    }
-                }
-            }
-        }
-    }
-
-    // fused GEMM, epilogue and data transfer, with dynamic M and static N and K
-    template<
-        typename BlockGEMM,
-        unsigned int N,
-        unsigned int K,
-        unsigned int elems = ACC::Elems::value,
-        unsigned int threads = ACC::PeakHardware::OS::threads::value
+        typename ElementC
     >
     __forceinline__ __device__
-    void fGET(typename BlockGEMM::MatrixDType* __restrict__ const& workspace,
-        const typename BlockGEMM::MatrixAType* __restrict__ const& inputs,
-        const typename BlockGEMM::MatrixBType* __restrict__ const& weights,
-        typename BlockGEMM::MatrixDType* __restrict__ const& output,
-        const typename BlockGEMM::MatrixDType* __restrict__ const& bias,
-        const unsigned int& M,
-        const unsigned int& tileIdx) {
-        auto accumulator = cute::partition_fragment_C(typename BlockGEMM::MMA{}, typename BlockGEMM::TilerOut{});
-        static_assert(cute::size(accumulator) % elems == 0);
-        constexpr auto bM = cute::get<0>(typename BlockGEMM::BlockTiler{});
-        constexpr auto bN = cute::get<1>(typename BlockGEMM::BlockTiler{});
-        constexpr auto bK = cute::get<2>(typename BlockGEMM::BlockTiler{});
-        static_assert(cute::size(accumulator) == bN);
-        // Instantiate mainloop
-        typename BlockGEMM::CollectiveMainloop mainLoop{};
-        cute::clear(accumulator);
-
-        // Row-major
-        const auto mA = make_tensor(cute::make_gmem_ptr(inputs),
-            make_layout(cute::make_shape(M, K), cute::Stride<cute::Int<K>, cute::_1>{}));
-        // Row-major, transposed
-        const auto mB = make_tensor(cute::make_gmem_ptr(weights),
-            cute::Layout<cute::Shape<cute::Int<N>, cute::Int<K>>,
-                cute::Stride<cute::Int<K>, cute::_1>>{});
-        // Row-major
-        const auto mC = make_tensor(cute::make_gmem_ptr(output),
-            make_layout(cute::make_shape(M, N), cute::Stride<cute::Int<N>, cute::_1>{}));
-
-        // M is padded, such that the below is correct
-        const auto tilesM = M / bM;
-        // We assert the below prior to this point
-        constexpr auto tilesN = N / bN;
-        constexpr auto tilesK = K / bK;
-
-        const auto tileCoord = idx2crd(tileIdx, cute::Shape(tilesM, tilesN),
-            cute::Stride<cute::Int<tilesN>, cute::_1>{});
-        const auto ctaCoord = make_coord(cute::get<0>(tileCoord), cute::get<1>(tileCoord), cute::_);
-        const auto gA = cute::local_tile(mA, typename BlockGEMM::BlockTiler{}, ctaCoord,
-            cute::Step<cute::_1, cute::X,cute::_1>{});
-        const auto gB = cute::local_tile(mB, typename BlockGEMM::BlockTiler{}, ctaCoord,
-            cute::Step< cute::X,cute::_1,cute::_1>{});
-        const auto gC = cute::local_tile(mC, typename BlockGEMM::BlockTiler{}, ctaCoord,
-            cute::Step<cute::_1,cute::_1, cute::X>{});
-        const auto k_tile_iter = cute::make_coord_iterator(tilesK);
-        using Element = typename BlockGEMM::MatrixDType;
-        // prefetch bias from global memory
-        constexpr auto trips = cute::ceil_div(bN, threads);
-        Element biasCache[trips];
-        const int biasOffset = (tileIdx % tilesN) * bN;
-        const auto* __restrict__ bP = bias + biasOffset;
-        if constexpr (threads >= bN) {
-            biasCache[0] = bP[threadIdx.x % bN];
-        }
-        else {
-            // below is not strictly necessary, but it makes my life easier :)
-            static_assert(bN % threads == 0);
-            #pragma unroll
-            for (int i = 0; i < trips; ++i) {
-                biasCache[i] = bP[threadIdx.x + i * bN];
-            }
-        }
-        using ElementC = typename decltype(accumulator)::value_type;
-        mainLoop(
-            accumulator,
-            gA,
-            gB,
-            accumulator,
-            k_tile_iter, tilesK,
-            cute::Underscore{},
-            threadIdx.x,
-            CAST_TO(char, workspace));
-        __syncthreads();
-
+    void fGET(void* __restrict__ const& workspace,
+        const Element* __restrict__ const& a,
+        const Element* __restrict__ const& b,
+        ElementC* __restrict__ const& c,
+        const ElementC* __restrict__ const& bias,
+        const int& M, const int& N, const int& K, const int& tileIdx) {
+        using BLAS = TileGEMM::BLAS;
+        auto accumulator = BLAS::suggest_accumulator();
+        using BM = cute::Int<cublasdx::size_of<BLAS>::m>;
+        using BN = cute::Int<cublasdx::size_of<BLAS>::n>;
+        const auto tileCoord = tile::idx2Coord(M / BM{}, N / BN{}, tileIdx);
+        // gmem -> rmem: prefetch bias
+        const auto gD = tile::getBias<BM{}, BN{}>(bias, M, N, cute::select<0, 1>(tileCoord));
+        auto d_frag = cublasdx::make_fragment_like<ElementC>(accumulator.get_results());
+        cublasdx::copy_fragment<cublasdx::alignment_of<BLAS>::c>(gD, d_frag, accumulator);
+        // compute Tile
+        constexpr TileGEMM tileMainloop{};
+        tileMainloop(workspace, a, b, accumulator, M, N, K, tileCoord);
         // Epilogue
-        typename BlockGEMM::MMA tiledMMA{};
-        constexpr auto gCStoreOp = cutlass::NumericConverter<Element, ElementC>{};
-        // Assume elementwise operator
-        typename BlockGEMM::FusedEpilogue epilogueOp{};
-        constexpr auto sCLay = cute::make_layout(cute::Shape<cute::Int<bM>, cute::Int<elems>>{},
-            cute::LayoutRight{});
-        const auto sC = cute::make_tensor(cute::make_smem_ptr(CAST_TO(ElementC, workspace)), sCLay);
-        const auto rC = cute::make_tensor(cute::make_rmem_ptr(CAST_TO(Element, accumulator.data())),
-            cute::Layout<cute::Shape<cute::_1, cute::Int<bN>>,
-                cute::Stride<cute::Int<bN>, cute::_1>>{});
-        const auto tCsC = tiledMMA.get_slice(threadIdx.x).partition_C(sC);
-        static_assert(elems == bN);
-
-        // Reorder to striped arrangement
-        // A lot of performance badness happens down there.
-        // I haven't sat down to think about a solution yet.
-        // First idea that comes to mind is some form of warp register shuffling.
-        #pragma unroll
-        for (unsigned int j = 0; j < elems; ++j) {
-            tCsC(j) = accumulator(j);
-        }
-        __syncthreads();
-        const auto rIdx = threadIdx.x / elems * elems;
-        const auto cIdx = threadIdx.x % elems;
-        #pragma unroll
-        for (unsigned int j = 0; j < elems; ++j) {
-            accumulator(j) = sC(rIdx + j, cIdx);
-        }
-
-        // apply epilogue
-        #pragma unroll
-        for (uint i = 0; i < trips; ++i) {
-            #pragma unroll
-            for (int j = 0; j < elems; ++j) {
-                rC(j + i * elems) = gCStoreOp(epilogueOp(accumulator(j + i * elems), biasCache[i]));
-            }
-        }
-        // Coalesced copy from registers to global memory
-        #pragma unroll
-        for (uint i = 0; i < trips; ++i) {
-            #pragma unroll
-            for (unsigned int j = 0; j < elems; ++j) {
-                gC(rIdx + j, cIdx + i * elems) = rC(j + i * elems);
-            }
-        }
+        constexpr Activation act{}; // activation function like relu, etc
+        // ElementC -> accum type
+        constexpr Converter<typename decltype(accumulator)::value_type, ElementC> loadConv{};
+        // accum type -> ElementC
+        constexpr Converter<ElementC, typename decltype(accumulator)::value_type> storeConv{};
+        const auto c_frag = accumulator.get_results();
+        constexpr int accum_size = cublasdx::size(c_frag);
+        cute::for_each(cute::make_int_sequence<accum_size>{}, [&c_frag, &d_frag](auto i) {
+            d_frag(i) = storeConv(act(c_frag(i) + loadConv(d_frag(i))));
+        });
+        auto gC = tile::getC<BM{}, BN{}, cublasdx::arrangement_of_v_c<BLAS>>(c, M, N,
+            cute::select<0, 1>(tileCoord));
+        // rmem -> gmem
+        cublasdx::copy_fragment<cublasdx::alignment_of<BLAS>::c>(d_frag, gC, accumulator);
     }
 
     struct __align__(16) ProcessorArgs{
         // sensible sentinel values
         unsigned int* __restrict__ sQ = nullptr;
-        TQSignal* __restrict__ pDB = nullptr;
+        uint64_t* __restrict__ pDB = nullptr;
         unsigned int* __restrict__ tQH = nullptr;
         Task* __restrict__ tQ = nullptr;
         Task* __restrict__ ptQ = nullptr;
@@ -351,157 +83,77 @@ namespace flashmoe::processor{
             Task* const& _tQ,
             Task* const& _ptQ,
             unsigned int* const& _tQS) :
-        sQ(_sQ), pDB(_pDB), tQH(_tQH), tQ(_tQ), ptQ(_ptQ), tQS(_tQS) {}
+        sQ(_sQ), pDB(reinterpret_cast<uint64_t*>(_pDB)), tQH(_tQH), tQ(_tQ), ptQ(_ptQ), tQS(_tQS) {}
     };
 
     template<
         PeerConnectivity p,
-        unsigned int tasks = ACC::TNx::value
+        int threads
     >
     __device__ __forceinline__
-    void notifyNext(uint* __restrict__ const& workspace, const Task& rCurrentTask, const ProcessorArgs& pA) {
-        static_assert(sizeof(Task) == 128);
-        constexpr auto eS = sizeof(Task) / sizeof(uint);
-        static_assert(eS == WARP_SIZE);
-        constexpr auto threads = ACC::PeakHardware::OS::threads::value;
-        constexpr auto sharedSize = ACC::sharedSize::value;
-        static_assert(sharedSize % sizeof(Task) == 0);
-        static_assert(sharedSize / sizeof(Task) >= threads);
-        constexpr auto capacity = threads;
-        constexpr auto trips = tasks / capacity;
-        static_assert(threads % eS == 0);
-        static_assert(capacity % threads == 0);
-        constexpr auto elems = capacity * eS / threads;
-        constexpr unsigned int preIndex = 0;
-
-        const auto offset = ACC::TNx::value * rCurrentTask.batchIdx;
-        auto* __restrict__ tQ = CAST_TO(uint, pA.ptQ + (rCurrentTask.syncIdx * ACC::TNx::value));
-        const auto cIdx = threadIdx.x % eS;
-        // prep memory-view tensors
-        const auto sTQ = make_tensor(cute::make_smem_ptr(workspace),
-            cute::Layout<cute::Shape<cute::Int<threads>, cute::Int<eS>>,
-                cute::Stride<cute::Int<eS>, cute::_1>>{});
-        const auto gTQ = make_tensor(cute::make_gmem_ptr(tQ),
-            cute::Layout<cute::Shape<cute::Int<tasks>, cute::Int<eS>>,
-                cute::Stride<cute::Int<eS>, cute::_1>>{});
-        // copy from registers to shared memory using swizzle
-        if constexpr (trips) {
-            const auto rIdx = threadIdx.x / eS * eS;
-            #pragma unroll
-            for (uint i = 0; i < trips; ++i) {
-                // each thread does a copy from registers to shared memory
-                const auto taskIdx = threadIdx.x + i * capacity;
-                const auto tileIdx = offset + taskIdx;
-                const auto nextTask = Task {
-                    TaskType::GEMM1,
-                    rCurrentTask.cData[preIndex],
-                    rCurrentTask.bData,
-                    rCurrentTask.cData,
-                    rCurrentTask.dData,
-                    rCurrentTask.rcData,
-                    rCurrentTask.flags + offset + (p == PeerConnectivity::p2p ? taskIdx : 0),
-                    rCurrentTask.syncIdx,
-                    tileIdx,
-                    rCurrentTask.M,
-                    rCurrentTask.tileSize,
-                    rCurrentTask.peerIdx,
-                    rCurrentTask.batchIdx,
-                    rCurrentTask.isPeerRemote,
-                };
-                // Directive to the compiler to reinterpret the Task structure as a stream of 4-byte blocks
-                const auto* __restrict__ uT = CONST_CAST_TO(uint, &nextTask);
-                #pragma unroll
-                for (uint j = 0; j < eS; ++j) {
-                    // temporal shift of indices to eliminate bank conflicts
-                    const auto swizzleIdx = (j + threadIdx.x) % eS;
-                    sTQ(threadIdx.x, swizzleIdx) = uT[j];
-                }
-                __syncthreads();
-                // now copy from shared memory to global memory
-                #pragma unroll
-                for (uint j = 0; j < elems; ++j) {
-                    gTQ(rIdx + (j + i * capacity), cIdx) = sTQ(rIdx + j, (cIdx + j) % eS);
-                }
-            }
-            // before reusing shared memory below
-            __syncthreads();
+    void notifyNext(void* __restrict__ const& workspace, const Task& task, Task* __restrict__ const& tQ,
+        const uint& tasks, const uint& offset, uint* __restrict__ const& tQH) {
+        auto* __restrict__ sTQ = static_cast<Task*>(workspace);
+        // registers -> shared memory
+        for (int i = threadIdx.x; i < tasks; i += threads) {
+            sTQ[i] = Task{task.ingredients, task.cData[0], task.cData, task.rcData,
+            task.flags + offset + (p == PeerConnectivity::p2p ? i : 0), task.syncIdx, offset + i};
         }
-        if constexpr (constexpr auto residue = tasks - trips * capacity; residue) {
-            if (threadIdx.x < residue) {
-                const auto taskIdx = threadIdx.x + trips * capacity;
-                const auto tileIdx = offset + taskIdx;
-                const auto nextTask = Task {
-                    TaskType::GEMM1,
-                    rCurrentTask.cData[preIndex],
-                    rCurrentTask.bData,
-                    rCurrentTask.cData,
-                    rCurrentTask.dData,
-                    rCurrentTask.rcData,
-                    rCurrentTask.flags + offset + (p == PeerConnectivity::p2p ? taskIdx : 0),
-                    rCurrentTask.syncIdx,
-                    tileIdx,
-                    rCurrentTask.M,
-                    rCurrentTask.tileSize,
-                    rCurrentTask.peerIdx,
-                    rCurrentTask.batchIdx,
-                    rCurrentTask.isPeerRemote,
-                };
-                // Directive to the compiler to reinterpret the Task structure as a stream of 4-byte blocks
-                const auto* __restrict__ uT = CONST_CAST_TO(uint, &nextTask);
-                #pragma unroll
-                for (uint j = 0; j < eS; ++j) {
-                    // temporal shift of indices to eliminate bank conflicts
-                    const auto swizzleIdx = (j + threadIdx.x) % eS;
-                    sTQ(threadIdx.x, swizzleIdx) = uT[j];
-                }
-            }
-            __syncthreads();
-            constexpr auto stride = threads / eS;
-            const auto pIdx = threadIdx.x / eS;
-            constexpr auto length = residue / stride;
-            // now copy from shared memory to global memory by multiplexing each row across available warps
-            #pragma unroll
-            for (uint j = 0; j < length; ++j) {
-                const auto idx = j * stride + pIdx;
-                gTQ(idx + trips * capacity, cIdx) = sTQ(idx, (cIdx + idx) % eS);
-            }
-            if constexpr (constexpr auto rS = residue % stride; rS) {
-                if (pIdx < rS) {
-                    const auto idx = length * stride + pIdx;
-                    gTQ(idx + trips * capacity, cIdx) = sTQ(idx, (cIdx + idx) % eS);
-                }
-            }
+        __syncthreads();
+        // shared memory to global memory
+        static_assert(sizeof(Task) % sizeof(uint4) == 0 && alignof(Task) % alignof(uint4) == 0);
+        constexpr int nRows = sizeof(Task) / sizeof(uint4);
+        const int numElems = tasks * nRows;
+        // project TaskQ as a [tasks, nRows] matrix of 128B elements
+        auto gT = cute::make_tensor(cute::make_gmem_ptr(reinterpret_cast<uint4*>(tQ)),
+            cute::make_layout(cute::make_shape(tasks, nRows), cute::LayoutRight{}));
+        auto sT = cute::make_tensor(cute::make_smem_ptr(static_cast<uint4*>(workspace)),
+            cute::make_layout(cute::make_shape(tasks, nRows), cute::LayoutRight{}));
+        for (int i = threadIdx.x; i < numElems; i += threads) {
+            const auto rowIdx = i / nRows;
+            const auto colIdx = i % nRows;
+            gT(rowIdx, colIdx) = sT(rowIdx, colIdx);
         }
-
         __syncthreads();
         if (!threadIdx.x) {
-            __threadfence();
+            cuda::atomic_ref<uint, cuda::thread_scope_device> tqh{*(tQH + task.syncIdx)};
             // notify scheduler
-            atomicAdd(pA.tQH + rCurrentTask.syncIdx, tasks);
+            cuda::std::ignore = tqh.fetch_add(tasks, cuda::memory_order_release);
         }
     }
 
     template<
-        typename ScaleWeights,
-        typename Output
+        int threads,
+        typename TileGEMM0, // Descriptor for GEMM0
+        typename TileGEMM1, // Descriptor for GEMM1
+        typename Activation, // Activation function after GEMM0
+        typename Element
     >
     __device__ __forceinline__
-    void start(cuda::std::byte* const& workspace,
-        ScaleWeights const& sW, Output const& moeOutput,
-        const uint16_t& _seqBit){
-        using Element = ACC::Element;
-        static_assert(sizeof(SignalPayload<PacketStage::last>) == sizeof(flagsType)
-            && alignof(SignalPayload<PacketStage::last>) == alignof(flagsType));
-
-        static_assert(sizeof(Task) == 128);
+    void start(void* __restrict__ const& workspace, // shared memory
+        const int& S, // sequence length
+        const int& H, // token hidden dimension
+        const int& I, // FFN intermediate size
+        const int& E, // total number of experts
+        const int& k, // top k
+        const uint& tilesN0, // I / bN0
+        const uint& tilesN1, // H / bN1
+        const Element* __restrict__ const& expertUpWeights, // [num_local_experts, H, I]
+        const Element* __restrict__ const& biasUp, // [num_local_experts, I]
+        const Element* __restrict__ const& expertDownWeights, // [num_local_experts, I, H]
+        const Element* __restrict__ const& biasDown, // [num_local_experts, H]
+        const TPS* __restrict__ const& tokenIds, // [E, roundEC]
+        Element* __restrict__ const& moeOutput,
+        const uint16_t& seqNumber, const Bookkeeping& bookkeeping){
         __shared__ Task currentTask;
         __shared__ uint globalInterrupt;
         __shared__ uint enqueue;
-
         // Register allocations
-        const auto rSeqBit = _seqBit;
-        Task rCurrentTask{};
+        Task task{};
         TQSignal tqs{0U, 0U};
+        static_assert(sizeof(TQSignal) == sizeof(uint64_t) && alignof(TQSignal) == alignof(uint64_t));
+        static_assert(sizeof(SignalPayload<PacketStage::last>) == sizeof(uint64_t) &&
+            alignof(SignalPayload<PacketStage::last>) == alignof(uint64_t));
         const auto pA = ProcessorArgs{
             bookkeeping.sQ() + blockIdx.x,
             bookkeeping.pDB() + blockIdx.x,
@@ -510,125 +162,127 @@ namespace flashmoe::processor{
             bookkeeping.ptQ(),
             bookkeeping.tSA()
         };
-
         if (!threadIdx.x) {
             atomicExch_block(&globalInterrupt, 0U);
             atomicExch_block(&enqueue, 0U);
         }
-        using PreGEMM = BlockMM<ACC::ActivationOp, Element>;
-        using PostGEMM = BlockMM<ACC::ActivationOpX, Element>;
-        constexpr uint H = ACC::H::value;
-        constexpr auto tN = ACC::TN::value;
-        constexpr auto tNx = ACC::TNx::value;
         __syncthreads();
+        using SQT = cuda::std::underlying_type_t<flashmoe::ReadySignal>;
+        using WarpScan = cub::WarpScan<uint64_t>;
+        __shared__ WarpScan::TempStorage tempS;
+        constexpr auto taskWidth = sizeof(Task) / sizeof(uint4);
+        const long int expertWeightSize = I * H;
+        static_assert(taskWidth > 0 && taskWidth < WARP_SIZE);
         while (!tqs.interrupt) {
-            if (constexpr auto wS = 32; threadIdx.x / wS == 0) {
-                if (!threadIdx.x) {
-                    auto* __restrict__ tQSignal = pA.pDB;
-                    // Grabs next task
-                    awaitNotification(tQSignal, &tqs, tqs.signal);
-                    __threadfence();
-                    // Eagerly indicate readiness for the next task as the above fence allows us to do so correctly
-                    globalInterrupt = tqs.interrupt;
-                    // set sQ to zero if interrupt
-                    atomicExch(pA.sQ, ready);
+            if (threadIdx.x / WARP_SIZE == 0) {
+                if (threadIdx.x == 0) {
+                    cuda::atomic_ref<uint64_t, cuda::thread_scope_device> doorbell{*pA.pDB};
+                    auto payload = cuda::std::bit_cast<TQSignal>(doorbell.load(cuda::memory_order_acquire));
+                    while (payload.signal == tqs.signal && payload.interrupt == 0) {
+                        payload = cuda::std::bit_cast<TQSignal>(doorbell.load(cuda::memory_order_acquire));
+                    }
+                    if (payload.interrupt) {
+                        // we need to clear out our mailbox to ensure it's ready for s subsequent iteration
+                        constexpr auto TQSZero = cuda::std::bit_cast<uint64_t>(TQSignal{0, 0});
+                        doorbell.store(TQSZero, cuda::memory_order_relaxed);
+                    }
+                    else {
+                        cuda::atomic_ref<SQT, cuda::thread_scope_device> sqd{*pA.sQ};
+                        // Eagerly indicate readiness for the next task
+                        sqd.store(flashmoe::ready, cuda::memory_order_relaxed);
+                    }
+                    globalInterrupt = payload.interrupt;
+                    // replace old payload with new one
+                    tqs = payload;
                 }
-                // The below is necessary as it guarantees memory ordering
+                // The below is necessary as it ensures memory ordering
                 __syncwarp();
-                auto* __restrict__ tqsP = CAST_TO(ull_t, &tqs);
-                *tqsP = __shfl_sync(0xffffffff, *tqsP, 0);
+                auto payload = cuda::std::bit_cast<uint64_t>(tqs);
+                // broadcast new payload from thread 0 to other threads in the warp
+                payload = WarpScan(tempS).Broadcast(payload, 0);
+                tqs = cuda::std::bit_cast<TQSignal>(payload);
                 const auto* __restrict__ gtQ = pA.tQ + tqs.decodeSig();
-                if (!tqs.interrupt) {
-                    // coalesced copy from global to shared memory
-                    CAST_TO(uint, &currentTask)[threadIdx.x] = __ldg(CONST_CAST_TO(uint, gtQ) + threadIdx.x);
+                if (!tqs.interrupt && threadIdx.x < taskWidth) {
+                    reinterpret_cast<uint4*>(&currentTask)[threadIdx.x] = reinterpret_cast<const uint4*>(gtQ)[threadIdx.x];
                 }
             }
             __syncthreads();
             tqs.interrupt = globalInterrupt;
-            // if we received an interrupt, there is nothing to do next
             if (!tqs.interrupt) {
                 // shared -> registers
-                rCurrentTask = currentTask;
-                switch (rCurrentTask.taskType) {
+                task = currentTask;
+                switch (task.getTaskType()) {
                     case TaskType::GEMM0: {
-                        constexpr unsigned int preIndex = 0;
-                        fGET<PreGEMM, ACC::P::value, ACC::H::value>(
-                            CAST_TO(typename PreGEMM::MatrixDType, workspace),
-                            CONST_CAST_TO(typename PreGEMM::MatrixAType, rCurrentTask.aData),
-                            CONST_CAST_TO(typename PreGEMM::MatrixBType, rCurrentTask.bData[preIndex]),
-                            CAST_TO(typename PreGEMM::MatrixDType, rCurrentTask.cData[preIndex]),
-                            CONST_CAST_TO(typename PreGEMM::MatrixDType, rCurrentTask.dData[preIndex]),
-                            rCurrentTask.M,
-                            rCurrentTask.tileIdx);
+                        const auto* aP = reinterpret_cast<const Element*>(task.aData);
+                        const auto* bP = expertUpWeights + expertWeightSize * task.localExpertIdx();
+                        auto* __restrict__ cP = reinterpret_cast<Element*>(task.cData[0]);
+                        const auto* __restrict__ biasP = biasUp + I * task.localExpertIdx();
+                        fGET<TileGEMM0, Activation>(workspace, aP, bP, cP, biasP, task.M(), I, H,
+                            task.tileIdx);
                         __syncthreads();
                         if (!threadIdx.x) {
-                            __threadfence();
-                            enqueue = atomicAdd(pA.tQS + rCurrentTask.syncIdx, 1U) + 1 == tN;
+                            cuda::atomic_ref<uint, cuda::thread_scope_device> tileSync{*(pA.tQS + task.syncIdx)};
+                            enqueue = tileSync.fetch_add(1, cuda::memory_order_acq_rel) + 1 == tilesN0;
                         }
                         __syncthreads();
                         if (enqueue) {
-                            if (!rCurrentTask.isPeerRemote) {
-                                notifyNext<PeerConnectivity::p2p>(CAST_TO(uint, workspace), rCurrentTask, pA);
+                            const auto offset = tilesN1 * task.flagBatchIdx();
+                            auto* __restrict__ tQ = pA.ptQ + (task.syncIdx * tilesN1);
+                            if (!task.isPeerRemote()) {
+                                notifyNext<PeerConnectivity::p2p,threads>(workspace, task, tQ, tilesN1, offset, pA.tQH);
                             }
                             else {
-                                notifyNext<PeerConnectivity::remote>(CAST_TO(uint, workspace), rCurrentTask, pA);
+                                notifyNext<PeerConnectivity::remote,threads>(workspace, task, tQ, tilesN1, offset, pA.tQH);
                             }
                         }
+                        __syncthreads();
                     }
                     break;
                     case TaskType::GEMM1: {
-                        constexpr unsigned int postIndex = 1;
-                        fGET<PostGEMM, ACC::H::value, ACC::P::value>(
-                            CAST_TO(typename PostGEMM::MatrixDType, workspace),
-                            CONST_CAST_TO(typename PostGEMM::MatrixAType, rCurrentTask.aData),
-                            CONST_CAST_TO(typename PostGEMM::MatrixBType, rCurrentTask.bData[postIndex]),
-                            CAST_TO(typename PostGEMM::MatrixDType, rCurrentTask.cData[postIndex]),
-                            CONST_CAST_TO(typename PostGEMM::MatrixDType, rCurrentTask.dData[postIndex]),
-                            rCurrentTask.M,
-                            currentTask.tileIdx);
+                        const auto* aP = reinterpret_cast<const Element*>(task.aData);
+                        const auto* bP = expertDownWeights + expertWeightSize * task.localExpertIdx();
+                        auto* __restrict__ cP = reinterpret_cast<Element*>(task.cData[1]);
+                        const auto* __restrict__ biasP = biasDown + H * task.localExpertIdx();
+                        fGET<TileGEMM1, cublasdx::identity>(workspace, aP, bP, cP, biasP, task.M(), H, I,
+                            task.tileIdx);
                         __syncthreads();
                         if (!threadIdx.x) {
                             // Pack payload into single signal word of 8 bytes
                             const auto flagSignal = SignalPayload<PacketStage::last>{
-                                rCurrentTask.batchIdx,
-                                rCurrentTask.tileSize,
-                                rSeqBit,
+                                task.flagBatchIdx(),
+                                task.tileSize(),
+                                seqNumber,
                             };
-                            if (rCurrentTask.isPeerRemote) {
+                            const auto sigPayload = cuda::std::bit_cast<uint64_t>(flagSignal);
+                            if (task.isPeerRemote()) {
                                 // Remote; check if we need to do the transfer
-                                __threadfence();
-                                if (atomicIncrement(pA.tQS + rCurrentTask.syncIdx) + 1 == tN + tNx) {
-                                    nvshmem_putmem_signal_nbi(rCurrentTask.rcData,
-                                        rCurrentTask.cData[postIndex],
-                                        // Batched remote network transfer to avoid overwhelming the NIC
-                                        rCurrentTask.tileSize * H * sizeof(Element),
-                                        rCurrentTask.flags,
-                                        *CONST_CAST_TO(flagsType, &flagSignal), NVSHMEM_SIGNAL_SET,
-                                        rCurrentTask.peerIdx);
+                                cuda::atomic_ref<uint, cuda::thread_scope_device> tileSync{*(pA.tQS + task.syncIdx)};
+                                const auto doTransfer = tileSync.fetch_add(1,
+                                    cuda::memory_order_acq_rel) + 1 == (tilesN0 + tilesN1);
+                                if (doTransfer) {
+                                    nvshmem_putmem_signal_nbi(task.rcData,
+                                         task.cData[1],
+                                         // Batched remote network transfer to avoid overwhelming the NIC
+                                         task.tileSize() * H * sizeof(Element),
+                                         task.flags,
+                                         sigPayload,
+                                         NVSHMEM_SIGNAL_SET,
+                                         task.peerIdx());
                                 }
                             }
                             else {
                                 // individual tile, no batching here
                                 // Already did the network transfer,
                                 // so set signal only
-                                __threadfence_system();
-                                atomicExch_system(CAST_TO(ull_t, rCurrentTask.flags),
-                                    *CONST_CAST_TO(ull_t, &flagSignal));
+                                cuda::atomic_ref<uint64_t, cuda::thread_scope_system> remoteFlags{*task.flags};
+                                remoteFlags.store(sigPayload, cuda::memory_order_release);
                             }
                         }
+                        __syncthreads();
                     }
                     break;
                     case TaskType::combine: {
-                        constexpr unsigned int combineIndex = 0;
-                        combine<ACC::CM::value>(
-                            workspace,
-                            CONST_CAST_TO(TPS, rCurrentTask.aData),
-                            CONST_CAST_TO(typename PostGEMM::MatrixAType, rCurrentTask.bData[combineIndex]),
-                            moeOutput.data().get(),
-                            sW,
-                            rCurrentTask.tileIdx,
-                            rCurrentTask.tileSize,
-                            rCurrentTask.expertIdx);
+                        // do combine
                     }
                     break;
                 }

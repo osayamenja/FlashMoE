@@ -27,10 +27,12 @@ namespace flashmoe::scheduler {
     using WarpScan = cub::WarpScan<uint>;
     constexpr int WARP_SIZE = 32;
     constexpr int SCHEDULER_COUNT = WARP_SIZE; // warp_size
-    constexpr int RMEM_STATE_PER_PROCESSOR = 16;
-    constexpr int WORK_SET_SIZE = 8;
-    static_assert(RMEM_STATE_PER_PROCESSOR <= 64);
-    constexpr int MAX_PROCESSORS = WARP_SIZE * RMEM_STATE_PER_PROCESSOR; // can be relaxed but with slower perf
+    // register state sizes
+    constexpr int PROCESSOR_STATE_SIZE = 16; // 8 is recommended
+    static_assert(PROCESSOR_STATE_SIZE <= 64);
+    constexpr int MAX_PROCESSORS = WARP_SIZE * PROCESSOR_STATE_SIZE; // can be relaxed but with slower perf
+    constexpr int WORK_SET_SIZE = 4;
+    constexpr int QUEUE_STATE_SIZE = 2;
     template<
         DQType dqt = DQType::stride,
         int nQ = 0
@@ -107,7 +109,7 @@ namespace flashmoe::scheduler {
         while (taskTally) {
             // Find processors if we are not currently aware of any
             while (!processorTally) {
-                cutlass::Array<uint, RMEM_STATE_PER_PROCESSOR> sQState{};
+                cutlass::Array<uint, PROCESSOR_STATE_SIZE> sQState{};
                 // sweep sQ to identify ready processes
                 uint lPt = 0U; // local processor tally
                 #pragma unroll
@@ -205,7 +207,7 @@ namespace flashmoe::scheduler {
         const uint& processors,
         const uint& processorTally) {
         __shared__ WarpScan::TempStorage wSt;
-        cutlass::Array<uint, RMEM_STATE_PER_PROCESSOR> sQState{};
+        cutlass::Array<uint, PROCESSOR_STATE_SIZE> sQState{};
         /// read through the ready queue first
         constexpr auto sig = TQSignal{0U, 1U}; // set interrupt to 1
         // Below must be <= ceil(processors / wS) == sQsL, so we can repurpose sQState registers as temporary storage
@@ -323,11 +325,10 @@ namespace flashmoe::scheduler {
         static_assert(subscribers % schedulerCount == 0);
         constexpr auto sL = subscribers / schedulerCount;
         // initialize register buffers
-        constexpr auto dQL = 2;
+        constexpr auto dQL = QUEUE_STATE_SIZE;
         constexpr auto bSw = sizeof(uint) * 8U;
         static_assert(dQL <= bSw);
         cutlass::Array<TQState, dQL + sL> tqState{};
-        //cutlass::Array<uint, sQsL> sQState{};sQState.fill(0U);
         tqState.fill({0U,0U});
         const uint dT = gtQCL / (schedulerCount * dQL);
 
@@ -361,10 +362,11 @@ namespace flashmoe::scheduler {
                     if (const auto isVisited = sBS.get(pJ % bSw); !isVisited) {
                         const auto qIdx = schedulerCount * pJ + threadIdx.x;
                         cuda::atomic_ref<unsigned int, cuda::thread_scope_device> gtqH{*(gtQHeads + qIdx)};
-                        const auto tasks = gtqH.exchange(tQHeadGroundState, cuda::memory_order_acquire);
+                        const auto tasks = gtqH.load(cuda::memory_order_acquire);
                         if (tasks) {
                             // one and done
                             sBS.set(pJ % bSw);
+                            gtqH.store(tQHeadGroundState, cuda::memory_order_relaxed);
                         }
                         tqState[j].tasks = tasks;
                         lTt += tasks;
@@ -386,9 +388,10 @@ namespace flashmoe::scheduler {
                         if (const auto isVisited = sBS.get(bIdx); !isVisited) {
                             const auto qIdx = schedulerCount * (dQL * i + pJ) + threadIdx.x;
                             cuda::atomic_ref<unsigned int, cuda::thread_scope_device> gtqH{*(gtQHeads + qIdx)};
-                            const auto tasks = gtqH.exchange(tQHeadGroundState, cuda::memory_order_acquire);
+                            const auto tasks = gtqH.load(cuda::memory_order_acquire);
                             if (tasks) {
                                 sBS.set(bIdx);
+                                gtqH.store(tQHeadGroundState, cuda::memory_order_relaxed);
                             }
                             tqState[j].tasks = tasks;
                             lTt += tasks;
@@ -411,9 +414,10 @@ namespace flashmoe::scheduler {
                         const uint bIdx = (dT * dQL + pJ) % bSw;
                         if (const auto isVisited = sBS.get(bIdx); !isVisited) {
                             cuda::atomic_ref<unsigned int, cuda::thread_scope_device> gtqH{*(gtQHeads + qIdx)};
-                            const auto tasks = gtqH.exchange(tQHeadGroundState, cuda::memory_order_acquire);
+                            const auto tasks = gtqH.load(cuda::memory_order_acquire);
                             if (tasks) {
                                 sBS.set(bIdx);
+                                gtqH.store(tQHeadGroundState, cuda::memory_order_relaxed);
                             }
                             tqState[j].tasks = tasks;
                             lTt += tasks;

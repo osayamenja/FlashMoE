@@ -60,6 +60,11 @@ math(EXPR GPU_ARCH "${ARCH} * 10" OUTPUT_FORMAT DECIMAL)
 message(STATUS "GPU 0 Compute Capability: ${ARCH}")
 set(ENV{CUTLASS_NVCC_ARCHS} "${ARCH}")
 
+set(ARCH_TAG "${ARCH}")
+if(ARCH GREATER_EQUAL 90)
+    string(APPEND ARCH_TAG "a") # accelerated arch-specific instruction set
+endif()
+
 set(ENV{CPM_SOURCE_CACHE} "./cmake/cache")
 set(CCCL_ENABLE_UNSTABLE ON)
 include(cmake/CPM.cmake)
@@ -76,7 +81,7 @@ CPMAddPackage(
         GIT_TAG main
         DOWNLOAD_ONLY TRUE
         OPTIONS
-        "CUTLASS_NVCC_ARCHS=${ARCH}"
+        "CUTLASS_NVCC_ARCHS=${ARCH_TAG}"
 )
 
 set(FMT_SYSTEM_HEADERS ON)
@@ -171,7 +176,7 @@ function(flash_target_test tgt)
             $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-Xfatbin -compress-all>
             $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
             $<$<COMPILE_LANGUAGE:CUDA>:-t0;--generate-line-info> #use sm_xxa for xx >= 90
-            $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-gencode=arch=compute_${ARCH},code=sm_${ARCH}>
+            $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-gencode=arch=compute_${ARCH_TAG},code=sm_${ARCH_TAG}>
     )
     set_property(TARGET ${tgt} PROPERTY CUDA_ARCHITECTURES "native")
     target_compile_options(${tgt} PRIVATE
@@ -206,7 +211,7 @@ function(flash_target_common tgt)
             $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-Xfatbin -compress-all>
             $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
             $<$<COMPILE_LANGUAGE:CUDA>:-t0;--generate-line-info> #use sm_xxa for xx >= 90
-            $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-gencode=arch=compute_${ARCH},code=sm_${ARCH}>
+            $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-gencode=arch=compute_${ARCH_TAG},code=sm_${ARCH_TAG}>
     )
     # Debug vs Release flags
     target_compile_options(${tgt} PRIVATE
@@ -215,13 +220,13 @@ function(flash_target_common tgt)
             $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:-Xptxas -v;--expt-relaxed-constexpr>
     )
     
-    if("${tgt}" STREQUAL "fb")
+    if("${tgt}" STREQUAL "testFlashMoE")
         target_compile_options(${tgt} PRIVATE
-                $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:SHELL:-gencode=arch=compute_${ARCH},code=lto_${ARCH}>
+                $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:SHELL:-gencode=arch=compute_${ARCH_TAG},code=lto_${ARCH_TAG}>
         )
     else()
         target_compile_options(${tgt} PRIVATE
-                $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:SHELL:-gencode=arch=compute_${ARCH},code=sm_${ARCH}>
+                $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:SHELL:-gencode=arch=compute_${ARCH_TAG},code=sm_${ARCH_TAG}>
         )
     endif()
     # TODO (Jonathan): make the below opt-in
@@ -248,35 +253,35 @@ function(flash_target_common tgt)
     )
 endfunction()
 
-add_executable(fb
+add_executable(testFlashMoE
         tests/flashmoe.cu
 )
-set_target_properties(fb PROPERTIES
+set_target_properties(testFlashMoE PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
         CUDA_RESOLVE_DEVICE_SYMBOLS ON
 )
-flash_target_common(fb)
+flash_target_common(testFlashMoE)
 if(FMT_ADDED)
-    target_link_libraries(fb PRIVATE fmt::fmt)
+    target_link_libraries(testFlashMoE PRIVATE fmt::fmt)
 endif ()
-target_link_libraries(fb PRIVATE nvshmem::nvshmem_host nvshmem::nvshmem_device)
+target_link_libraries(testFlashMoE PRIVATE nvshmem::nvshmem_host nvshmem::nvshmem_device)
 
 add_executable(testScheduler
         tests/scheduler.cu
 )
 flash_target_test(testScheduler)
 
-add_executable(gb
+add_executable(testGEMM
         tests/gemm.cu
 )
-flash_target_common(gb)
+flash_target_common(testGEMM)
 
-add_executable(pl
+add_executable(playground
         tests/playground.cu
 )
-flash_target_common(pl)
+flash_target_common(playground)
 
-add_executable(gtb_x
+add_executable(testGate
         tests/gate.cu
 )
-flash_target_common(gtb_x)
+flash_target_common(testGate)

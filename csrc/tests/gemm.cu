@@ -10,6 +10,7 @@
 #include <cublasdx.hpp>
 
 #include "common.cuh"
+#include "debug.cuh"
 #include "../include/flashmoe/tile.cuh"
 
 template<typename TileGEMM, typename Activation, typename ElementC, typename Element>

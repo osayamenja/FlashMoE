@@ -20,8 +20,8 @@ namespace flashmoe {
         uint16_t peerIdx = 0; // owner of the output
         uint16_t tileSize = 0; // <= BLOCK_M
         uint16_t stash = 0; // GEMM0->flagBatchIdx or Combine->tileIdx
-        TaskType taskType;
-        uint8_t isPeerRemote;
+        TaskType taskType = TaskType::GEMM0;
+        uint8_t isPeerRemote = 0;
 
         Ingredients() = default;
 
@@ -44,7 +44,7 @@ namespace flashmoe {
         const cuda::std::byte* aData = nullptr;
         cuda::std::array<cuda::std::byte*, GEMMs> cData = {};
         cuda::std::byte* rcData = nullptr;
-        flagsType* flags = nullptr;
+        uint64_t* flags = nullptr;
         unsigned int syncIdx = 0U;
         unsigned int tileIdx = 0U;
 
@@ -56,7 +56,7 @@ namespace flashmoe {
             const cuda::std::byte* const& _aData,
             const cuda::std::array<cuda::std::byte*, GEMMs>& _cData,
             cuda::std::byte* const& _rcData,
-            flagsType* const& _flags,
+            uint64_t* const& _flags,
             const unsigned int& _syncIdx, const unsigned int& tile):
         ingredients(_ingredients), aData(_aData), cData(_cData), rcData(_rcData), flags(_flags),
         syncIdx(_syncIdx), tileIdx(tile){}
@@ -65,6 +65,35 @@ namespace flashmoe {
         __device__ __forceinline__
         explicit Task(const Ingredients& _ingredients):
         ingredients(_ingredients){}
+
+        __device__ __forceinline__
+        auto getTaskType() const {
+            return ingredients.taskType;
+        }
+        __device__ __forceinline__
+        auto isPeerRemote() const {
+            return ingredients.isPeerRemote;
+        }
+        __device__ __forceinline__
+        auto localExpertIdx() const {
+            return ingredients.localExpertIdx;
+        }
+        __device__ __forceinline__
+        auto M() const {
+            return ingredients.M;
+        }
+        __device__ __forceinline__
+        auto tileSize() const {
+            return ingredients.tileSize;
+        }
+        __device__ __forceinline__
+        auto flagBatchIdx() const {
+            return ingredients.stash;
+        }
+        __device__ __forceinline__
+        auto peerIdx() const {
+            return ingredients.peerIdx;
+        }
 
     };
     static_assert(sizeof(Task) == 64);

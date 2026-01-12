@@ -19,6 +19,7 @@
 #include "dq.cuh"
 #include "heap.cuh"
 #include "signal.cuh"
+#include "structures.cuh"
 #include "task.cuh"
 
 namespace flashmoe::subscriber{
@@ -110,7 +111,7 @@ namespace flashmoe::subscriber{
             int const& peer, // relative to the EP group
             const uint& laneId,
             int& lTQHead) const {
-            static_assert(flashmoe::TensorValueType<Element> && bM > 0);
+            static_assert(bM > 0);
             const auto qIdx = DQ::sNext<DQType::stride, subscriberCount>(lTQHead);
             const auto fTilesM = routedTokens / bM;
             // expert, peer offset

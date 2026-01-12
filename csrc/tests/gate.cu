@@ -10,6 +10,7 @@
 #include <nvtx3/nvtx3.hpp>
 
 #include "common.cuh"
+#include "debug.cuh"
 #include "../include/flashmoe/gate.cuh"
 
 struct IndexSanitizer {

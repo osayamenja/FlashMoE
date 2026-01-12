@@ -22,11 +22,11 @@ namespace flashmoe {
     /// and requires an integer to store 32 of such bits.
     template<
         unsigned int T,
-        unsigned int integerBitWidth = 32U,
-        unsigned int width = integerBitWidth * T
+        unsigned int integerBitWidth = 32U
     >
     __host__ __device__ __forceinline__
     constexpr uint nSI(const unsigned int& numBits) {
+        constexpr auto width = integerBitWidth * T;
         return (numBits / width) * T + cute::min(numBits % width, T);
     }
 }
