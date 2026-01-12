@@ -14,23 +14,17 @@
 #define OS_CUH
 
 #include <cuda/std/cstddef>
-#include "../types.cuh"
+#include "types.cuh"
 
 #include "scheduler.cuh"
 #include "subscriber.cuh"
 
 namespace flashmoe::os {
     template<
-        unsigned int processors,
-        DropTokens d = DropTokens::yes,
-        typename ExpertsUp,
-        typename ExpertsDown,
-        typename BiasUp,
-        typename BiasDown
+        DropTokens d = DropTokens::yes
     >
     __device__ __forceinline__
-    void start(cuda::std::byte* __restrict__ const& workspace,
-        ExpertsUp const& expertsUp,
+    void start(ExpertsUp const& expertsUp,
         ExpertsDown const& expertsDown,
         BiasUp const& biasUp,
         BiasDown const& biasDown,
@@ -93,9 +87,6 @@ namespace flashmoe::os {
         static_assert(alignof(BitSet) % alignof(uint) == 0);
         auto* __restrict__ interruptScratch = CAST_TO(uint, schedulerBitSet + rTCL<BitSet>(sBz));
         auto* __restrict__ status = interruptScratch + rTCL<uint>(processors);
-        using WarpScan = cub::WarpScan<uint>;
-        static_assert(alignof(uint) % alignof(WarpScan::TempStorage) == 0);
-        auto* __restrict__ wSt = CAST_TO(WarpScan::TempStorage, status + rTCL<uint>(world));
 
         auto* __restrict__ eCs = scratch;
         if (!threadIdx.x) {
@@ -109,28 +100,6 @@ namespace flashmoe::os {
             eCs[i] = __ldg(eC + i);
         }
         __syncthreads();
-        if (threadIdx.x / WARP_SIZE == 0) {
-            uint clearEC = 0U;
-            if (!threadIdx.x) {
-                constexpr auto expected = ACC::DBZ::value + 1;
-                __threadfence();
-                clearEC = atomicIncrement(bookkeeping.eCSync()) + 1 == expected;
-            }
-            __syncwarp();
-            clearEC = __shfl_sync(0xffffffff, clearEC, 0);
-            if (clearEC) {
-                auto* __restrict__ bEC = bookkeeping.eC();
-                constexpr auto tL = ACC::E::value / WARP_SIZE;
-                for (uint i = 0; i < tL; ++i) {
-                    bEC[threadIdx.x + i * WARP_SIZE] = 0U;
-                }
-                if constexpr (constexpr auto residue = ACC::E::value % WARP_SIZE; residue != 0) {
-                    if (threadIdx.x < residue) {
-                        bEC[threadIdx.x + tL * WARP_SIZE] = 0U;
-                    }
-                }
-            }
-        }
         // Combine tasks
         // known a priori
         #pragma unroll
@@ -199,7 +168,7 @@ namespace flashmoe::os {
             auto* __restrict__ gtQHeads = bookkeeping.tQH();
             auto* __restrict__ sQ = bookkeeping.sQ();
             auto* __restrict__ pDB = bookkeeping.pDB();
-            scheduler::start<processors>(wSt, interruptScratch, schedulerBitSet,
+            scheduler::start<processors>(interruptScratch, schedulerBitSet,
                 sO, gtQCl, interrupt, tQHeads,
                 gtQHeads, taskBound, rQ, sQ, pDB);
         }

@@ -15,19 +15,24 @@
 
 #include "types.cuh"
 #include "atomics.cuh"
-#include "indexing.cuh"
-#include "debug.cuh"
+#include "../../tests/debug.cuh"
 
-#include "os/scheduler.cuh"
-#include "os/subscriber.cuh"
-#include "os/decider/decider.cuh"
-#include "os/processor/gemm.cuh"
-#include "os/processor/mmaConfig.cuh"
-#include "os/processor/processor.cuh"
+#include "scheduler.cuh"
+#include "subscriber.cuh"
+#include "processor.cuh"
 
-#include "moe/moe.cuh"
-
-#include "topo.cuh"
+#include "moe.cuh"
+#include "bitset.cuh"
 #include "bootstrap.cuh"
+#include "combine.cuh"
+#include "dispatch.cuh"
+#include "signal.cuh"
+#include "heap.cuh"
+#include "task.cuh"
+#include "tq.cuh"
+#include "vt.cuh"
+#include "packed.cuh"
+#include "structures.cuh"
+#include "dq.cuh"
 
 #endif //FLASHMOE_CUH
