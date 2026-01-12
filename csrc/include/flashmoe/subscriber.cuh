@@ -199,7 +199,7 @@ namespace flashmoe::subscriber{
 
     // Self-correct Termination Bound
     __device__ __forceinline__
-    void sTB(const Args& args, const int& peer, const int& peerTaskTiles = 0U) {
+    void sTB(const Args& args, const int& peer, const int& peerTaskTiles = 0) {
         if (!atomicTAS<cuda::thread_scope_block>(args.status + peer)) {
             const auto superfluous = (args.tilesN0 + args.tilesN1) * ((args.nLx * args.ecTilesM) - peerTaskTiles);
             atomicSub_block(args.taskCount, superfluous);
@@ -235,7 +235,7 @@ namespace flashmoe::subscriber{
                 const auto peerIdx = flagIdx / args.nLx;
                 const auto pLI = args.pL[peerIdx];
                 uint64_t signal = SignalConstants::ground;
-                if (!laneId) {
+                if (laneId == 0) {
                     auto visitedSet = bitSet[warpId + vSIdx * sNW];
                     if (!visitedSet.get(vIdx)) {
                         if (pLI.isRemote) {
@@ -383,6 +383,7 @@ namespace flashmoe::subscriber{
                                 // construct combine ingredients
                                 Ingredients ingredients{};
                                 const auto tokenIdx = sigPayload.batchIdx * bM;
+                                ingredients.expertIdx = expertIdx;
                                 ingredients.M = tokenIdx;
                                 ingredients.localExpertIdx = lookup.localExpertIndex;
                                 ingredients.peerIdx = args.epRank;
@@ -402,6 +403,7 @@ namespace flashmoe::subscriber{
                                 const auto tokenIdx = sigPayload.batchIdx * bM;
                                 // construct combine ingredients
                                 Ingredients ingredients{};
+                                ingredients.expertIdx = expertIdx;
                                 ingredients.M = tokenIdx;
                                 ingredients.localExpertIdx = lookup.localExpertIndex;
                                 ingredients.peerIdx = args.epRank;

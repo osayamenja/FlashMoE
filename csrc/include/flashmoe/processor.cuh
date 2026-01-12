@@ -11,7 +11,6 @@
 
 #ifndef FLASHMOE_COMPUTE_CUH
 #define FLASHMOE_COMPUTE_CUH
-#include <cub/cub.cuh>
 #include <cuda/atomic>
 #include <nvshmem.h>
 
@@ -124,6 +123,7 @@ namespace flashmoe::processor{
 
     template<
         int threads,
+        CombineMode combineMode,
         typename TileGEMM0, // Descriptor for GEMM0
         typename TileGEMM1, // Descriptor for GEMM1
         typename Activation, // Activation function after GEMM0
@@ -144,7 +144,9 @@ namespace flashmoe::processor{
         const Element* __restrict__ const& biasDown, // [num_local_experts, H]
         const TPS* __restrict__ const& tokenIds, // [E, roundEC]
         Element* __restrict__ const& moeOutput,
-        const uint16_t& seqNumber, const Bookkeeping& bookkeeping){
+        const uint16_t& seqNumber,
+        const Heap& symHeap,
+        const Bookkeeping& bookkeeping){
         __shared__ Task currentTask;
         __shared__ uint globalInterrupt;
         __shared__ uint enqueue;
@@ -168,8 +170,6 @@ namespace flashmoe::processor{
         }
         __syncthreads();
         using SQT = cuda::std::underlying_type_t<flashmoe::ReadySignal>;
-        using WarpScan = cub::WarpScan<uint64_t>;
-        __shared__ WarpScan::TempStorage tempS;
         constexpr auto taskWidth = sizeof(Task) / sizeof(uint4);
         const long int expertWeightSize = I * H;
         static_assert(taskWidth > 0 && taskWidth < WARP_SIZE);
@@ -177,12 +177,13 @@ namespace flashmoe::processor{
             if (threadIdx.x / WARP_SIZE == 0) {
                 if (threadIdx.x == 0) {
                     cuda::atomic_ref<uint64_t, cuda::thread_scope_device> doorbell{*pA.pDB};
+                    // await new task from scheduler
                     auto payload = cuda::std::bit_cast<TQSignal>(doorbell.load(cuda::memory_order_acquire));
                     while (payload.signal == tqs.signal && payload.interrupt == 0) {
                         payload = cuda::std::bit_cast<TQSignal>(doorbell.load(cuda::memory_order_acquire));
                     }
                     if (payload.interrupt) {
-                        // we need to clear out our mailbox to ensure it's ready for s subsequent iteration
+                        // we need to clear out our mailbox to ensure it's ready for a subsequent epoch
                         constexpr auto TQSZero = cuda::std::bit_cast<uint64_t>(TQSignal{0, 0});
                         doorbell.store(TQSZero, cuda::memory_order_relaxed);
                     }
@@ -199,7 +200,7 @@ namespace flashmoe::processor{
                 __syncwarp();
                 auto payload = cuda::std::bit_cast<uint64_t>(tqs);
                 // broadcast new payload from thread 0 to other threads in the warp
-                payload = WarpScan(tempS).Broadcast(payload, 0);
+                payload = __shfl_sync(0xffffffff, payload, 0);
                 tqs = cuda::std::bit_cast<TQSignal>(payload);
                 const auto* __restrict__ gtQ = pA.tQ + tqs.decodeSig();
                 if (!tqs.interrupt && threadIdx.x < taskWidth) {
@@ -222,7 +223,12 @@ namespace flashmoe::processor{
                         __syncthreads();
                         if (!threadIdx.x) {
                             cuda::atomic_ref<uint, cuda::thread_scope_device> tileSync{*(pA.tQS + task.syncIdx)};
-                            enqueue = tileSync.fetch_add(1, cuda::memory_order_acq_rel) + 1 == tilesN0;
+                            const auto isLast = tileSync.fetch_add(1, cuda::memory_order_acq_rel) + 1 == tilesN0;
+                            enqueue = isLast;
+                            if (isLast && !task.isPeerRemote()) {
+                                // clear the counter as it would no longer be used in this epoch
+                                tileSync.store(0, cuda::memory_order_relaxed);
+                            }
                         }
                         __syncthreads();
                         if (enqueue) {
@@ -260,6 +266,8 @@ namespace flashmoe::processor{
                                 const auto doTransfer = tileSync.fetch_add(1,
                                     cuda::memory_order_acq_rel) + 1 == (tilesN0 + tilesN1);
                                 if (doTransfer) {
+                                    // clear the counter as it would no longer be used in this epoch
+                                    tileSync.store(0, cuda::memory_order_relaxed);
                                     nvshmem_putmem_signal_nbi(task.rcData,
                                          task.cData[1],
                                          // Batched remote network transfer to avoid overwhelming the NIC
@@ -282,7 +290,8 @@ namespace flashmoe::processor{
                     }
                     break;
                     case TaskType::combine: {
-                        // do combine
+                        combine<TileGEMM1, threads, combineMode>(symHeap, workspace, tokenIds, S, E, H,
+                            moeOutput, task);
                     }
                     break;
                 }

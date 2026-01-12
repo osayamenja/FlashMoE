@@ -26,6 +26,19 @@ struct SplitFunctor {
 };
 
 int main() {
+    using BLAS = decltype(
+            cublasdx::Size<128, 128, 64>() +
+            cublasdx::Precision<__half, __half, float>() +
+            cublasdx::Type<cublasdx::type::real>() +
+            cublasdx::Function<cublasdx::function::MM>() +
+            cublasdx::Arrangement<cublasdx::row_major, cublasdx::col_major, cublasdx::row_major>() +
+            cublasdx::Block() +
+            cublasdx::MaxAlignment() +
+            cublasdx::StaticBlockDim() +
+            cublasdx::EnableInputStreaming() +
+            cublasdx::SM<FLASHMOE_ARCH,
+            FLASHMOE_ARCH >= 900 ? cublasdx::sm_modifier::arch_specific : cublasdx::sm_modifier::generic>());
+    constexpr auto l = BLAS::get_layout_smem_c();
     cudaSetDevice(0);
     cudaStream_t stream;
     cudaStreamCreate(&stream);

@@ -35,16 +35,18 @@ namespace flashmoe::moe{
         DropTokens _dTk, // yes or no,
         GateReductionLevel gRl, // E > GateTileShape.N ? single : multi
         typename GateTile, // cute::Shape<M,N,K,pipeStages>, will be ignored if ifk == no
-        typename GEMM1Tile, // cute::Shape<M,N,K,pipeStages>
-        typename GEMM2Tile // cute::Shape<M,N,K,pipeStages>
+        typename GEMM0Tile, // cute::Shape<M,N,K,pipeStages>
+        typename GEMM1Tile // cute::Shape<M,N,K,pipeStages>
     >
     struct MoEConfig {
         static_assert(cute::is_tuple_v<GateTile> && cute::rank_v<GateTile> == 4);
         using GTS = GateTile;
+        static_assert(cute::is_tuple_v<GEMM0Tile> && cute::rank_v<GEMM0Tile> == 4);
+        using G1TS = GEMM0Tile;
         static_assert(cute::is_tuple_v<GEMM1Tile> && cute::rank_v<GEMM1Tile> == 4);
-        using G1TS = GEMM1Tile;
-        static_assert(cute::is_tuple_v<GEMM2Tile> && cute::rank_v<GEMM2Tile> == 4);
-        using G2TS = GEMM2Tile;
+        using G2TS = GEMM1Tile;
+        static_assert(cute::get<0>(GateTile{}) == cute::get<0>(GEMM0Tile{}) &&
+            cute::get<0>(GEMM0Tile{}) == cute::get<0>(GEMM1Tile{}));
         using Arch = cute::Int<arch>;
         using Threads = cute::Int<_threads>;
         using GRL = cute::C<gRl>;

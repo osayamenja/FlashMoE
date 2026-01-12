@@ -133,12 +133,6 @@ namespace flashmoe{
         no
     };
 
-    __device__
-    enum class CombineMode {
-        single,
-        plural
-    };
-
     // Index and gate combine weight
 
     __device__

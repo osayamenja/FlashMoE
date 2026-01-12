@@ -14,7 +14,7 @@ namespace flashmoe {
     static_assert(cuda::std::is_same_v<cuda::std::underlying_type_t<TaskType>, uint8_t>);
 
     struct __align__(16) Ingredients{
-        unsigned int M = 0; // GEMM0->number of tokens or Combine->token
+        unsigned int M = 0; // GEMM0->number of tokens or Combine->tokenBatchStart
         uint16_t localExpertIdx = 0;
         uint16_t expertIdx = 0; // global
         uint16_t peerIdx = 0; // owner of the output
@@ -92,6 +92,25 @@ namespace flashmoe {
         }
         __device__ __forceinline__
         auto peerIdx() const {
+            return ingredients.peerIdx;
+        }
+        __device__ __forceinline__
+        auto tokenBatchStart() const {
+            return ingredients.M;
+        }
+
+        __device__ __forceinline__
+        auto combineTileIdx() const{
+            return ingredients.stash;
+        }
+
+        __device__ __forceinline__
+        auto expertIdx() const{
+            return ingredients.expertIdx;
+        }
+
+        __device__ __forceinline__
+        auto epRank() const{
             return ingredients.peerIdx;
         }
 

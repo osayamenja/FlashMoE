@@ -31,6 +31,7 @@
 #include "task.cuh"
 #include "tq.cuh"
 #include "vt.cuh"
+#include "rvt.cuh"
 #include "packed.cuh"
 #include "structures.cuh"
 #include "dq.cuh"

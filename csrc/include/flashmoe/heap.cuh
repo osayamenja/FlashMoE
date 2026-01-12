@@ -36,15 +36,14 @@ namespace flashmoe {
                 static_cast<long int>(expert)) + stage) + cell) + token);
         }
         template<
-            int stage,
-            int cell
+            unsigned long int stage,
+            unsigned long int cell
         >
         requires (stage < STAGES && cell < CELLS)
         __device__ __forceinline__
         cuda::std::byte* advance(const int& peer, const int& expert, const int& token = 0) const {
                 return sHeap + advanceOffset<stage, cell>(peer, expert, token);
         }
-
     };
 }
 #endif //FLASHMOE_HEAP_CUH

@@ -5,11 +5,11 @@
 #ifndef FLASHMOE_VT_CUH
 #define FLASHMOE_VT_CUH
 
-#define MAX_ALIGNMENT 16
 namespace flashmoe {
+    constexpr int MAX_ALIGNMENT = 16;
     template<typename T, int Alignment = MAX_ALIGNMENT>
     struct VectorTypeDescriptor {
-        using VectorWidth = cute::C<Alignment / sizeof(T)>;
+        using VectorWidth = cute::Int<Alignment / sizeof(T)>;
         using VectorType = cutlass::AlignedArray<T, VectorWidth::value, Alignment>;
     };
     template<typename Element, int dim>
