@@ -23,6 +23,10 @@
 #include "infra/task.cuh"
 
 namespace flashmoe::subscriber{
+    enum class Topology {
+        NVLINK_ONLY,
+        MIXED // NVLink + RDMA
+    };
     constexpr int WARP_SIZE = 32;
     struct __align__(16) Args {
         uint64_t* const flags; // symmetric global

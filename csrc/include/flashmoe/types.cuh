@@ -13,16 +13,6 @@
 #ifndef FLASHMOE_TYPES_CUH
 #define FLASHMOE_TYPES_CUH
 
-#define FLASHMOE_BLOCK_SIZE_WARP (128U / 32)
-#define FLASHMOE_STATIC_SBZ 32U
-
-#define CAST_TO(T, p) static_cast<T*>(static_cast<void*>(p))
-#define CONST_CAST_TO(T, p) static_cast<const T*>(static_cast<const void*>(p))
-
-// Hardware description
-#define FLASHMOE_DEBUG 1
-#define NOOP_SIGNAL 0
-
 #include <cuda/barrier>
 #include <cuda/std/array>
 #include <cute/numeric/integral_constant.hpp>
@@ -30,117 +20,7 @@
 #include <cutlass/epilogue/thread/activation.h>
 
 namespace flashmoe{
-    template<typename S>
-    struct ToCute {
-        using T = S;
-        static_assert(flashmoe::TensorValueType<T>);
-    };
-    template<>
-    struct ToCute<__half> {
-        using T = cute::half_t;
-    };
-    template<>
-    struct ToCute<__nv_bfloat16> {
-        using T = cute::bfloat16_t;
-    };
-
-    template<typename S>
-    requires(flashmoe::TensorValueType<S>)
-    struct ToCDx {
-        using T = S;
-    };
-    template<>
-    struct ToCDx<cute::tfloat32_t> {
-        using T = float;
-    };
-    template<>
-    struct ToCDx<cute::half_t> {
-        using T = __half;
-    };
-    template<>
-    struct ToCDx<cute::bfloat16_t> {
-        using T = __nv_bfloat16;
-    };
-
-    template<unsigned int dType>
-    struct DType {
-        static_assert(dType <= 3);
-    };
-
-    template<>
-    struct DType<0U> {
-        using DT = float;
-    };
-
-    template<>
-    struct DType<1U> {
-        using DT = cute::tfloat32_t;
-    };
-
-    template<>
-    struct DType<2U> {
-        using DT = cute::bfloat16_t;
-    };
-
-    template<>
-    struct DType<3U> {
-        using DT = cute::half_t;
-    };
-
-    template<
-        unsigned int aFunction,
-        typename Element
-    > requires(TensorValueType<Element>)
-    struct AFunction {
-        static_assert(aFunction <= 2U);
-    };
-
-    template<typename Element>
-    struct AFunction<0U, Element> {
-        using DT = cutlass::epilogue::thread::ReLU<Element>;
-    };
-
-    template<typename Element>
-    struct AFunction<1U, Element> {
-        using DT = cutlass::epilogue::thread::GELU<Element>;
-    };
-
-    using mp_t = float; // or tf32
-    using specType = unsigned int;
-    using flagsType = uint64_t;
-
-    using Nano = cuda::std::chrono::duration<float, cuda::std::nano>;
-    using Milli = cuda::std::chrono::duration<float, cuda::std::milli>;
     using ull_t = unsigned long long int;
-    static_assert(sizeof(ull_t) == sizeof(flagsType) && alignof(ull_t) == alignof(flagsType));
-
-    // These could be much more, as supported by CUTLASS
-    __host__ __device__
-    enum ActivationFunction: uint8_t {
-        ReLu,
-        GeLU
-    };
-
-    __device__
-    enum class PeerConnectivity {
-        remote,
-        p2p
-    };
-
-    __device__
-    enum class DropTokens {
-        yes,
-        no
-    };
-
-    // Index and gate combine weight
-
-    __device__
-    enum class FlagState {
-        unidentified,
-        identified,
-        completed
-    };
 
     // Also applies to shared memory banks
     template<typename Element>

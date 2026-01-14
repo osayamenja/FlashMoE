@@ -16,34 +16,34 @@
 #include <cuda/std/cstddef>
 #include "types.cuh"
 
+#include "infra/heap.cuh"
 #include "scheduler.cuh"
 #include "subscriber.cuh"
 
 namespace flashmoe::os {
     template<
-        DropTokens d = DropTokens::yes
+        int subscriberCount,
+        int threads,
+        int bM,
+        DropTokens d,
+        typename ElementC
     >
     __device__ __forceinline__
-    void start(ExpertsUp const& expertsUp,
-        ExpertsDown const& expertsDown,
-        BiasUp const& biasUp,
-        BiasDown const& biasDown,
-        const uint16_t& lSeqBit) {
+    void start(cuda::std::byte* __restrict__ const& workspace,
+        const Heap& symHeap, const int& EC, // not-padded EC
+        const Bookkeeping& bookkeeping,
+        const int& dispatchBlocks,
+        const int& E, const uint& processors,
+        const uint16_t& seqNumber) {
+        // no funny business
+        static_assert(scheduler::WARP_SIZE == subscriber::WARP_SIZE);
         const auto ssfC = __ldg(bookkeeping.ssFc());
         const auto* __restrict__ eC = bookkeeping.eC();
         const auto world = bookkeeping.world;
         const auto nLx = bookkeeping.nLx;
-        constexpr auto threads = ACC::PeakHardware::OS::threads::value;
-        constexpr auto subscriberCount = threads - WARP_SIZE;
-        constexpr auto sNW = subscriberCount / WARP_SIZE;
-        // each subscriber thread gets wSet * sizeof(uint) bytes of workspace
-        constexpr auto uSfC = ACC::TCM::value * ACC::TNx::value / subscriberCount;
-        constexpr auto wSet = uSfC >= 32 ? 32U : 16U;
+        constexpr auto sNW = subscriberCount / subscriber::WARP_SIZE;
         const auto bSSI = nSI<sNW>(nLx * world) +
             nSI<subscriberCount>(ssfC);
-        constexpr auto E = ACC::E::value;
-        constexpr auto TNx = ACC::TNx::value;
-        constexpr auto EC = ACC::EC::value;
 
         // subscriber shared memory allocation
         auto* __restrict__ pL = CAST_TO(PLI, workspace);
@@ -57,12 +57,11 @@ namespace flashmoe::os {
         auto* __restrict__ bitSet = CAST_TO(BitSet, workspace + dZ);
         const auto bSSIz = bSSI * sizeof(uint);
         static_assert(alignof(BitSet) % alignof(uint) == 0);
-        auto* __restrict__ subscriberScratch = CAST_TO(uint, workspace + dZ + bSSIz);
-        auto* __restrict__ taskBound = subscriberScratch + (SUBSCRIBERS * wSet);
+        auto* __restrict__ taskBound = reinterpret_cast<uint*>(workspace + dZ + bSSIz);
         const auto* __restrict__ geL = bookkeeping.eL();
         const auto* __restrict__ gpL = bookkeeping.pL();
         const auto* __restrict__ gLx = bookkeeping.lX();
-        const auto z = dZ + bSSIz + (SUBSCRIBERS * wSet + 1) * sizeof(uint);
+        const auto z = dZ + bSSIz + sizeof(uint);
         for (uint i = threadIdx.x; i < bSSI; i += threads) {
             bitSet[i] = BitSet{0U};
         }
@@ -77,7 +76,7 @@ namespace flashmoe::os {
             lX[i] = gLx[i];
         }
         // Scheduler shared memory allocation
-        const auto sBz = nSI<WARP_SIZE>(bookkeeping.gtQCl);
+        const auto sBz = nSI<scheduler::WARP_SIZE>(bookkeeping.gtQCl);
         auto* __restrict__ scratch = CAST_TO(uint, workspace + rTCL<uint>(z));
         auto* __restrict__ tQHeads = scratch;
         auto* __restrict__ interrupt = tQHeads + subscriberCount;
@@ -104,7 +103,7 @@ namespace flashmoe::os {
         // known a priori
         #pragma unroll
         for (uint i = threadIdx.x; i < E; i += threads) {
-            const auto eCt = Bookkeeping::tiles<BLOCK_M>(d == DropTokens::yes ?
+            const auto eCt = Bookkeeping::tiles<bM>(d == DropTokens::yes ?
                 cute::min(eCs[i], EC) : eCs[i]);
             atomicAdd_block(taskBound, eCt * TNx);
         }
@@ -112,27 +111,27 @@ namespace flashmoe::os {
         // Pre-populate rQ under the assumption that all processors are initially ready.
         // However, some processors are currently specialized for packet dispatch, while others are idle.
         // To maximize utilization, we time-shift idle brethren to earlier slots in the rQ.
-        constexpr auto fL  = processors - ACC::DBZ::value;
+        const auto fL  = processors - dispatchBlocks;
         constexpr auto sL = fL / threads;
         constexpr auto rL = fL % threads;
-        if constexpr (sL > 0) {
+        if (sL > 0) {
             #pragma unroll
-            for (uint i = 0; i < sL; ++i) {
+            for (int i = 0; i < sL; ++i) {
                 const auto idx = i * threads + threadIdx.x;
-                rQ[idx] = ACC::DBZ::value + idx;
+                rQ[idx] = dispatchBlocks + idx;
             }
         }
-        if constexpr (fL % threads != 0) {
+        if (fL % threads != 0) {
             if (threadIdx.x < rL) {
                 const auto idx = sL * threads + threadIdx.x;
-                rQ[idx] = ACC::DBZ::value + idx;
+                rQ[idx] = dispatchBlocks + idx;
             }
         }
-        constexpr auto psL = ACC::DBZ::value / threads;
-        constexpr auto prL = ACC::DBZ::value % threads;
+        const auto psL = dispatchBlocks / threads;
+        const auto prL = dispatchBlocks % threads;
         if constexpr (psL > 0) {
             #pragma unroll
-            for (uint i = 0; i < psL; ++i) {
+            for (int i = 0; i < psL; ++i) {
                 const auto idx = i * threads + threadIdx.x;
                 rQ[fL + idx] = idx;
             }
@@ -146,23 +145,23 @@ namespace flashmoe::os {
 
         const auto gtQCl = bookkeeping.gtQCl;
         #pragma unroll
-        for (uint i = threadIdx.x; i < processors; i += threads) {
+        for (int i = threadIdx.x; i < processors; i += threads) {
             interruptScratch[i] = 1U; // pre-fill the scheduler's bitmask
         }
         #pragma unroll
-        for (uint i = threadIdx.x; i < SUBSCRIBERS; i += threads) {
+        for (int i = threadIdx.x; i < subscriberCount; i += threads) {
             tQHeads[i] = 0U;
             interrupt[i] = 0U;
         }
-        for (uint i = threadIdx.x; i < world; i += threads) {
+        for (int i = threadIdx.x; i < world; i += threads) {
             status[i] = 0U;
         }
-        for (uint i = threadIdx.x; i < sBz; i += threads) {
+        for (int i = threadIdx.x; i < sBz; i += threads) {
             schedulerBitSet[i] = BitSet{0U};
         }
         __syncthreads();
         // build arguments for scheduler and subscriber
-        if (threadIdx.x / WARP_SIZE == 0) {
+        if (threadIdx.x / scheduler::WARP_SIZE == 0) {
             // scheduler
             const auto sO = bookkeeping.sT;
             auto* __restrict__ gtQHeads = bookkeeping.tQH();
@@ -173,14 +172,9 @@ namespace flashmoe::os {
                 gtQHeads, taskBound, rQ, sQ, pDB);
         }
         else {
-            __shared__ uint16_t sSeqBit[SUBSCRIBERS];
-            const auto tIdx = threadIdx.x - WARP_SIZE;
-            // Operand for a NOOP instruction
-            sSeqBit[tIdx] = lSeqBit;
+            // build subscriber::Args args{};
             // subscriber
-            subscriber::start<wSet>(bitSet, subscriberScratch, sSeqBit + tIdx,
-                interrupt, tQHeads + tIdx, pL, lX, eL, ssfC, status, taskBound,
-                expertsUp, expertsDown, biasUp, biasDown, lSeqBit, tIdx);
+            subscriber::start<subscriberCount>(symHeap, {});
         }
     }
 }

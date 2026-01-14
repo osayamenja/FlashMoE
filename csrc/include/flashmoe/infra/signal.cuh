@@ -5,6 +5,10 @@
 #ifndef FLASHMOE_SIGNAL_CUH
 #define FLASHMOE_SIGNAL_CUH
 namespace flashmoe {
+    enum class PeerConnectivity {
+        remote,
+        p2p
+    };
     // Captures transitory states of a finite state machine
     enum SignalConstants {
         ground = 0U,

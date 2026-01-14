@@ -6,12 +6,16 @@
 #define FLASHMOE_STRUCTURES_CUH
 namespace flashmoe
 {
+    enum class DropTokens {
+        yes,
+        no
+    };
     /// Packet Encoding Lookup info, retrievable in a single memory lookup
     /// Key is global expert index
     __device__
     struct __align__(16) PEL {
         cuda::std::byte* remoteSHeap;
-        flagsType* remoteSFlags;
+        uint64_t* remoteSFlags;
         uint eC;
         uint16_t pTTt;
         uint16_t expertLocalIdx;
@@ -74,7 +78,7 @@ namespace flashmoe
     __device__
     struct __align__(16) PLI {
         cuda::std::byte* remoteSHeap;
-        flagsType* remoteSFlags;
+        uint64_t* remoteSFlags;
         uint pe;
         uint isRemote;
 

@@ -113,56 +113,6 @@ find_package(NVSHMEM REQUIRED HINTS "$ENV{NVSHMEM_HOME}/lib/cmake/nvshmem")
 find_package(mathdx REQUIRED COMPONENTS cublasdx CONFIG)
 find_package(mathdx REQUIRED COMPONENTS curanddx CONFIG)
 
-
-# Pre-compile constants
-# Read JSON file content
-file(READ "flashmoe_config.json" FLASHMOE_CONFIG)
-
-string(JSON CAP_FACTOR_V GET ${FLASHMOE_CONFIG} "capacity_factor")
-message(STATUS "capacity_factor: ${CAP_FACTOR_V}")
-
-string(JSON DROP_TOKENS_V GET ${FLASHMOE_CONFIG} "drop_tokens")
-message(STATUS "drop_tokens: ${DROP_TOKENS_V}")
-
-string(JSON E_TOP_K_V GET ${FLASHMOE_CONFIG} "expert_top_k")
-message(STATUS "expert_top_k: ${E_TOP_K_V}")
-
-string(JSON GLOBAL_BATCH_V GET ${FLASHMOE_CONFIG} "global_batch")
-message(STATUS "global_batch: ${GLOBAL_BATCH_V}")
-
-string(JSON IS_TRAINING_V GET ${FLASHMOE_CONFIG} "is_training")
-message(STATUS "is_training: ${IS_TRAINING_V}")
-
-string(JSON HIDDEN_ACT_V GET ${FLASHMOE_CONFIG} "hidden_act")
-message(STATUS "hidden_act: ${HIDDEN_ACT_V}")
-
-string(JSON HIDDEN_SIZE_V GET ${FLASHMOE_CONFIG} "hidden_size")
-message(STATUS "hidden_size: ${HIDDEN_SIZE_V}")
-
-string(JSON I_SIZE_V GET ${FLASHMOE_CONFIG} "intermediate_size")
-message(STATUS "intermediate_size: ${I_SIZE_V}")
-
-string(JSON MINI_BATCH_V GET ${FLASHMOE_CONFIG} "mini_batch")
-message(STATUS "mini_batch: ${MINI_BATCH_V}")
-
-string(JSON MOE_FREQ_V GET ${FLASHMOE_CONFIG} "moe_frequency")
-message(STATUS "moe_frequency: ${MOE_FREQ_V}")
-
-string(JSON NUM_EXPERTS_V GET ${FLASHMOE_CONFIG} "num_experts")
-message(STATUS "num_experts: ${NUM_EXPERTS_V}")
-
-string(JSON NUM_LAYERS_V GET ${FLASHMOE_CONFIG} "num_layers")
-message(STATUS "num_layers: ${NUM_LAYERS_V}")
-
-string(JSON SEQ_LEN_V GET ${FLASHMOE_CONFIG} "sequence_len")
-message(STATUS "sequence_len: ${SEQ_LEN_V}")
-
-string(JSON DTYPE_V GET ${FLASHMOE_CONFIG} "torch_dtype")
-message(STATUS "torch_dtype: ${DTYPE_V}")
-
-string(JSON VOCAB_SIZE_V GET ${FLASHMOE_CONFIG} "vocab_size")
-message(STATUS "vocab_size: ${VOCAB_SIZE_V}")
-
 function(flash_target_test tgt)
     target_link_libraries(${tgt} PRIVATE CUDA::cudart CUDA::cuda_driver CUDA::nvtx3)
     target_link_libraries(${tgt} PRIVATE atomic)
@@ -229,25 +179,9 @@ function(flash_target_common tgt)
                 $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:SHELL:-gencode=arch=compute_${ARCH_TAG},code=sm_${ARCH_TAG}>
         )
     endif()
-    # TODO (Jonathan): make the below opt-in
     target_compile_definitions(${tgt}
             PRIVATE
             FLASHMOE_ARCH=${GPU_ARCH}
-            CAP_FACTOR=${CAP_FACTOR_V}
-            DROP_TOKENS=${DROP_TOKENS_V}
-            E_TOP_K=${E_TOP_K_V}
-            GLOBAL_BATCH=${GLOBAL_BATCH_V}
-            IS_TRAINING=${IS_TRAINING_V}
-            HIDDEN_ACT=${HIDDEN_ACT_V}
-            HIDDEN_SIZE=${HIDDEN_SIZE_V}
-            I_SIZE=${I_SIZE_V}
-            MOE_FREQ=${MOE_FREQ_V}
-            MINI_BATCH=${MINI_BATCH_V}
-            NUM_EXPERTS=${NUM_EXPERTS_V}
-            NUM_LAYERS=${NUM_LAYERS_V}
-            SEQ_LEN=${SEQ_LEN_V}
-            DTYPE=${DTYPE_V}
-            VOCAB_SIZE=${VOCAB_SIZE_V}
             NUM_SMS=${CUDA_NUM_SMS}
             FLASHMOE_NVTX=1
     )
@@ -285,3 +219,8 @@ add_executable(testGate
         tests/gate.cu
 )
 flash_target_common(testGate)
+
+add_executable(testCombine
+        tests/combine.cu
+)
+flash_target_common(testCombine)

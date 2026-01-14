@@ -5,7 +5,7 @@
 #ifndef FLASHMOE_TILE_CUH
 #define FLASHMOE_TILE_CUH
 #include <cublasdx.hpp>
-
+#include <cutlass/numeric_conversion.h>
 namespace flashmoe
 {
     template<typename T, typename S>
@@ -62,22 +62,27 @@ namespace flashmoe
             return  __float22bfloat162_rn(x);
         }
     };
+    template<>
+    struct Converter<cublasdx::tfloat32_t, float> {
+        __device__ auto operator()(const float& x) const {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+            uint32_t storage = cuda::std::bit_cast<uint32_t>(x);
+            // PTX supports: cvt.rna.tf32.f32 (round-to-nearest-away)
+            asm("cvt.rna.tf32.f32 %0, %1;" : "=r"(storage) : "r"(storage));
+            return cuda::std::bit_cast<cublasdx::tfloat32_t>(storage);
+#else
+            constexpr cutlass::NumericConverter<cutlass::tfloat32_t, float> c{};
+            return cuda::std::bit_cast<cublasdx::tfloat32_t>(c(x));
+#endif
+        }
+    };
 
-    template<typename V>
-        concept TensorValueType = cuda::std::is_same_v<V, __half> ||
-            cuda::std::is_same_v<V, __nv_bfloat16> ||
-            cuda::std::is_same_v<V, cublasdx::tfloat32_t> ||
-            cuda::std::is_same_v<V, float> ||
-            cuda::std::is_same_v<V, cublasdx::float_e4m3_t> ||
-            cuda::std::is_same_v<V, cublasdx::float_e5m2_t>;
 
     template <class T>
     struct isTensor : cuda::std::false_type {};
     template <class Engine, class Layout>
-    requires(TensorValueType<typename Engine::value_type>)
     struct isTensor<cute::Tensor<Engine,Layout>> : cuda::std::true_type {};
     template <class Engine, class Layout>
-    requires(TensorValueType<typename Engine::value_type>)
     struct isTensor<const cute::Tensor<Engine,Layout>> : cuda::std::true_type {};
 }
 namespace flashmoe::tile
@@ -167,6 +172,10 @@ namespace flashmoe::tile
             cublasdx::SM<Arch, Arch >= 900 ? cublasdx::sm_modifier::arch_specific : cublasdx::sm_modifier::generic>());
         return GhostBLAS::max_threads_per_block;
     }
+    enum class TF32Compute {
+        yes,
+        no
+    };
     template<
         int bM, int bN, int bK, // tile shape
         int Arch, // compute capability
@@ -174,6 +183,7 @@ namespace flashmoe::tile
         typename MMA_C,  // compute type
         int threads,
         int pipeStages = 1, // pipeline stages
+        TF32Compute tfc = TF32Compute::yes,
         cublasdx::arrangement ar = cublasdx::row_major,
         cublasdx::arrangement br = cublasdx::col_major,
         cublasdx::arrangement cr = cublasdx::row_major,
@@ -183,7 +193,10 @@ namespace flashmoe::tile
     >
     requires(pipeStages > 0 && Arch >= 700)
     struct CollectiveMainloop {
-        using BLAS = decltype(
+        using TranslatedElement = cuda::std::conditional_t<
+            tfc == TF32Compute::yes && cuda::std::is_same_v<Element, float>, cublasdx::tfloat32_t, Element>;
+        using BLAS = cuda::std::conditional_t<cuda::std::is_same_v<TranslatedElement, Element>,
+        decltype(
             cublasdx::Size<bM, bN, bK>() +
             cublasdx::Precision<Element, Element, MMA_C>() +
             cublasdx::Type<cublasdx::type::real>() +
@@ -194,7 +207,18 @@ namespace flashmoe::tile
             cublasdx::BlockDim<threads>() +
             cublasdx::StaticBlockDim() +
             cublasdx::EnableInputStreaming() +
-            cublasdx::SM<Arch, Arch >= 900 ? cublasdx::sm_modifier::arch_specific : cublasdx::sm_modifier::generic>());
+            cublasdx::SM<Arch, Arch >= 900 ? cublasdx::sm_modifier::arch_specific : cublasdx::sm_modifier::generic>()),
+        decltype(
+            cublasdx::Size<bM, bN, bK>() +
+            cublasdx::Precision<TranslatedElement, TranslatedElement, MMA_C>() +
+            cublasdx::Type<cublasdx::type::real>() +
+            cublasdx::Function<cublasdx::function::MM>() +
+            cublasdx::Arrangement<ar, br, cr>() +
+            cublasdx::Block() +
+            cublasdx::Alignment<aAlignment, bAlignment, cAlignment>() +
+            cublasdx::BlockDim<threads>() +
+            cublasdx::StaticBlockDim() +
+            cublasdx::SM<Arch, Arch >= 900 ? cublasdx::sm_modifier::arch_specific : cublasdx::sm_modifier::generic>())>;
         using Threads = cute::C<threads>;
         using TileShape = cute::Shape<cute::Int<bM>, cute::Int<bN>, cute::Int<bK>>;
         using SharedSize = cute::Int<bK * pipeStages * (bM + bN) * sizeof(Element)>;
@@ -214,6 +238,9 @@ namespace flashmoe::tile
         const Element* __restrict__ const& b,
         Accumulator& accumulator,
         const int& M, const int& N, const int& K, const TileCoord& tileCoord) const {
+            using TransformType = cuda::std::conditional_t<cuda::std::is_same_v<TranslatedElement, Element>,
+            cublasdx::identity, Converter<TranslatedElement, Element>>;
+            constexpr TransformType transformOp{};
             // assert(__isShared(workspace));
             accumulator.clear();
             const int tilesK = K / bK;
@@ -239,7 +266,7 @@ namespace flashmoe::tile
                 update_buffer<sASS>(sA, sAP, ps);
                 update_buffer<sBSS>(sB, sBP, ps);
                 cpWait<pipeStages - 1>();
-                BLAS().execute(sA, sB, accumulator);
+                BLAS().execute(sA, sB, accumulator, transformOp, transformOp);
                 __syncthreads();
                 cublasdx::copy<BLAS, aAlignment>(gA(cute::_, cute::_, kStage), sA);
                 cublasdx::copy<BLAS, bAlignment>(gB(cute::_, cute::_, kStage), sB);
@@ -251,7 +278,7 @@ namespace flashmoe::tile
                 update_buffer<sASS>(sA, sAP, ps);
                 update_buffer<sBSS>(sB, sBP, ps);
                 cpWait<(pipeStages - 1) - stage>();
-                BLAS().execute(sA, sB, accumulator);
+                BLAS().execute(sA, sB, accumulator, transformOp, transformOp);
             });
         }
     };

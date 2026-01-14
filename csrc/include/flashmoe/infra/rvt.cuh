@@ -6,6 +6,8 @@
 #define FLASHMOE_RVT_CUH
 namespace flashmoe
 {
+    template<int Arch>
+    constexpr int RedArch = Arch < 800 ? 700 : (Arch < 900 ? 800 : 900);
     constexpr int RED_MAX_ALIGNMENT = 16;
     template<typename Element, int Alignment>
     requires(Alignment > 0 && Alignment <= RED_MAX_ALIGNMENT && cutlass::is_pow2<Alignment>::value)

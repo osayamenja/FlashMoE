@@ -23,7 +23,8 @@ namespace flashmoe
         typename TileGEMM1,
         int threads,
         CombineMode c,
-        typename Element
+        typename Element,
+        typename TileCoord
     >
     void combine(const Heap& symHeap,
         const int& S, const int& E, const int& H, const int& k,
@@ -31,18 +32,15 @@ namespace flashmoe
         const TPS* __restrict__ const& tokenIndices, // [E, EC], where EC is padded to a multiple of bM
         int* __restrict__ const& tokenGuards, // [S, vH], where vH = H / RVD::VectorWidth::value, only needed k > 1
         Element* __restrict__ const& moeOutput, // [S, H]
-        const Task& task) {
+        const Element* __restrict__ const& tokens, // [bM, H]
+        const Task& task, const TileCoord& tileCoord) {
         using BLAS = TileGEMM1::BLAS;
-        const uint tileIdx = task.combineTileIdx();
         const uint tbs = task.tokenBatchStart();
         constexpr auto bM = cublasdx::size_of<BLAS>::m;
         constexpr auto bN = cublasdx::size_of<BLAS>::n;
         __shared__ TPS stIds[bM];
-        const auto tileCoord = cute::make_coord(cute::_0{}, tileIdx);
         const auto tIds = cute::make_tensor(cute::make_gmem_ptr(tokenIndices),
             cute::make_layout(cute::make_shape(E, symHeap.EC), cute::LayoutRight{}));
-        const auto* __restrict__ tokens = reinterpret_cast<Element*>(symHeap.advance<1,1>(task.epRank(),
-            task.localExpertIdx(), tbs));
         auto sC = cublasdx::make_tensor(static_cast<Element*>(workspace), BLAS::get_layout_smem_c());
         const auto gC = tile::getC<bM, bN, cublasdx::arrangement_of_v_c<BLAS>>(tokens, bM, H, tileCoord);
         static_assert(cute::is_compatible<decltype(gC.layout()), decltype(sC.layout())>::value);
@@ -124,13 +122,12 @@ namespace flashmoe
         else {
             // we need to atomically reduce to the output buffer here
             constexpr auto arch = cublasdx::sm_of_v<BLAS>;
-            constexpr auto redArch = arch < 800 ? 700 : (arch < 900 ? 800 : 900);
             // promotes to fp16x2 or bf16x2, if it can.
             using RAD = RedAddType<Element, ElementAlignment<Element, bN>>;
             using RAT = RAD::Type;
             constexpr int bNp = bN / RAD::Width::value;
             static_assert(RAD::Width::value == 1 || RAD::Width::value == 2);
-            using RedAddOp = RedAdd<redArch, RAT, ElementAlignment<RAT, bNp>>;
+            using RedAddOp = RedAdd<RedArch<arch>, RAT, ElementAlignment<RAT, bNp>>;
             using RVD = VectorTypeDescriptor<RAT, RAD::Width * sizeof(RAT)>;
             using RV = RVD::VectorType;
             constexpr auto rbN = bN / RVD::VectorWidth::value;

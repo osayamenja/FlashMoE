@@ -290,6 +290,10 @@ namespace flashmoe::processor{
                     }
                     break;
                     case TaskType::combine: {
+                        const auto tileCoord = cute::make_coord(cute::_0{}, task.combineTileIdx());
+                        const auto* __restrict__ tokens = reinterpret_cast<Element*>(symHeap.advance<1,1>(task.epRank(),
+                            task.localExpertIdx(), task.tokenBatchStart()));
+                        // TOOD clean up
                         combine<TileGEMM1, threads, combineMode>(symHeap, workspace, tokenIds, S, E, H,
                             moeOutput, task);
                     }
