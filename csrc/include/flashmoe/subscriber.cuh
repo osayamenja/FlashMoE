@@ -15,12 +15,12 @@
 #include <cuda/atomic>
 #include <nvshmem.h>
 
-#include "bitset.cuh"
-#include "dq.cuh"
-#include "heap.cuh"
-#include "signal.cuh"
-#include "structures.cuh"
-#include "task.cuh"
+#include "infra/bitset.cuh"
+#include "infra/dq.cuh"
+#include "infra/heap.cuh"
+#include "infra/signal.cuh"
+#include "infra/structures.cuh"
+#include "infra/task.cuh"
 
 namespace flashmoe::subscriber{
     constexpr int WARP_SIZE = 32;

@@ -18,10 +18,10 @@
 #include <cute/numeric/integral_constant.hpp>
 #include <cutlass/array.h>
 
-#include "bitset.cuh"
-#include "checks.cuh"
-#include "dq.cuh"
-#include "tq.cuh"
+#include "infra/bitset.cuh"
+#include "infra/checks.cuh"
+#include "infra/dq.cuh"
+#include "infra/tq.cuh"
 
 namespace flashmoe::scheduler {
     using WarpScan = cub::WarpScan<uint>;

@@ -15,10 +15,10 @@
 
 #include <cub/cub.cuh>
 
-#include "atomics.cuh"
-#include "packed.cuh"
+#include "infra/atomics.cuh"
+#include "infra/packed.cuh"
 #include "tile.cuh"
-#include "vt.cuh"
+#include "infra/vt.cuh"
 
 namespace flashmoe
 {
@@ -342,7 +342,7 @@ namespace flashmoe::gate {
                 if (idx < bN) {
                     const int expertIdx = bN * cute::get<1>(tileCoord) + idx;
                     startIndices[idx] = guardedAtomicAdd(eCGuards + expertIdx,
-                    expertCounts + expertIdx, stash[i]);
+                    expertCounts + expertIdx, stash[i], tilesM);
                 }
             }
             __syncthreads();
@@ -526,7 +526,7 @@ namespace flashmoe::gate {
                 const int expertIdx = threadIdx.x + i * threads;
                 if (expertIdx < bN) {
                     startIndices[expertIdx] = guardedAtomicAdd(eCGuards + expertIdx,
-                    expertCounts + expertIdx, stash[i]);
+                    expertCounts + expertIdx, stash[i], tilesM);
                 }
             }
             __syncthreads();
@@ -565,12 +565,6 @@ namespace flashmoe::gate {
         SoftmaxStatePacked* __restrict__ const& rSp = nullptr, // only needed for grl == multiblock
         RingTopKPayload* __restrict__ const& rTp = nullptr // only needed for grl == multiblock
         ){
-        constexpr int threads = TileGEMM::Threads::value;
-        if (!blockIdx.x) {
-            for (int i = static_cast<int>(threadIdx.x); i < E; i += threads) {
-                tryGuardInit(eCGuards + i, expertCounts + i);
-            }
-        }
         // assert(blocks >= E / bN)
         using TileShape = TileGEMM::TileShape;
         constexpr int bM = cute::get<0>(TileShape{});
@@ -588,9 +582,6 @@ namespace flashmoe::gate {
                     tokenIds, expertCounts, eCGuards, S, H, E, k, EC, rSp, rTp);
             }
         }
-        // clear guards
-        clearGuardsCoop<threads>(eCGuards, E + 1,
-            eCGuards + E, blocks, static_cast<int*>(workspace));
     }
 }
 #endif //GATE_CUH

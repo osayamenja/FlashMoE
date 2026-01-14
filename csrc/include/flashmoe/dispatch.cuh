@@ -7,10 +7,10 @@
 #include <cuda/std/bit>
 #include <nvshmem.h>
 
-#include "heap.cuh"
-#include "packed.cuh"
-#include "structures.cuh"
-#include "vt.cuh"
+#include "infra/heap.cuh"
+#include "infra/packed.cuh"
+#include "infra/structures.cuh"
+#include "infra/vt.cuh"
 namespace flashmoe {
     // MoE tokens dispatch
     template<

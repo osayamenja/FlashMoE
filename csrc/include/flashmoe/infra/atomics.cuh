@@ -47,23 +47,43 @@ namespace flashmoe{
     }
 
     enum InitState: int {
-        stale = 0,
-        initializing = 1,
-        initialized = 2
+        stale = -1,
+        initializing = 0,
+        initialized = 1
     };
+    // Set every byte to 0xFF → each int becomes 0xFFFFFFFF → -1
+    // needed for cudaMemSet
+    constexpr auto STALE_AS_BYTE= 0xFF;
+    static_assert(cuda::std::is_same_v<cuda::std::underlying_type_t<InitState>, int>);
+    static_assert(initialized == 1 && stale != initializing && initialized != initializing);
 
+    template<typename RedOp, typename RedType, typename PackedRedType>
     __device__ __forceinline__
-    void tryGuardInit(int* __restrict__ const& guards, int* __restrict__ const& vals) {
-        cuda::atomic_ref<int, cuda::thread_scope_device> g{*guards};
-        if (int expected = stale;
-            g.compare_exchange_strong(expected, initializing, cuda::memory_order_relaxed)) {
-            *vals = 0;
+    void guardedRedAdd(int* __restrict__ const& guard, RedType* __restrict__ const& vals, const PackedRedType& val,
+        const int& participants) {
+        static_assert(cuda::std::is_same_v<typename PackedRedType::value_type, RedType>);
+        const cuda::atomic_ref<int, cuda::thread_scope_device> g{*guard};
+        int expected = stale;
+        if (g.compare_exchange_strong(expected, initializing, cuda::memory_order_acquire)) {
+            // initialize with my value
+            *vals = val;
             g.store(initialized, cuda::memory_order_release);
+            return;
         }
+        while (expected == initializing) {
+            expected = g.load(cuda::memory_order_acquire);
+        }
+        if (g.fetch_add(1, cuda::memory_order_relaxed) + 1 == participants) {
+            // below assumes this function will be invoked exactly once by "participants" threads within a kernel
+            g.store(stale, cuda::memory_order_relaxed);
+        }
+        constexpr RedOp op{};
+        op(vals, val);
     }
     // Enables in-kernel initialization of global accumulators
     __device__ __forceinline__
-    auto guardedAtomicAdd(int* __restrict__ const& guard, int* __restrict__ const& vals, const int& val) {
+    auto guardedAtomicAdd(int* __restrict__ const& guard, int* __restrict__ const& vals, const int& val,
+        const int& participants) {
         const cuda::atomic_ref<int, cuda::thread_scope_device> g{*guard};
         int expected = stale;
         if (g.compare_exchange_strong(expected, initializing, cuda::memory_order_acquire)) {
@@ -72,27 +92,14 @@ namespace flashmoe{
             g.store(initialized, cuda::memory_order_release);
             return 0;
         }
-        while (expected != initialized) {
+        while (expected == initializing) {
             expected = g.load(cuda::memory_order_acquire);
         }
+        if (g.fetch_add(1, cuda::memory_order_relaxed) + 1 == participants) {
+            // everyone has arrived at this point, but I am the last.
+            g.store(stale, cuda::memory_order_relaxed);
+        }
         return atomicAdd(vals, val);
-    }
-
-    template<int threads>
-    __device__ __forceinline__
-    void clearGuardsCoop(int* __restrict__ guards, const int& guardsLength, int* __restrict__ const& checkpoint,
-        const int& blocks, int* __restrict__ const& isLastBlock) {
-        __syncthreads();
-        if (!threadIdx.x) {
-            const cuda::atomic_ref<int, cuda::thread_scope_device> c{*checkpoint};
-            *isLastBlock = c.fetch_add(1, cuda::memory_order_acq_rel) + 1 == blocks;
-        }
-        __syncthreads();
-        if (*isLastBlock) {
-            for (int i = static_cast<int>(threadIdx.x); i < guardsLength; i += threads) {
-                guards[i] = 0;
-            }
-        }
     }
 }
 #endif //CSRC_ATOMICS_CUH

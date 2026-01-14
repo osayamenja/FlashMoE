@@ -21,9 +21,45 @@ namespace flashmoe
         }
     };
     template<>
+    struct Converter<float, __half> {
+        __device__ auto operator()(const __half& x) const {
+            return  __half2float(x);
+        }
+    };
+    template<>
     struct Converter<__nv_bfloat16, float> {
         __device__ auto operator()(const float& x) const {
             return  __float2bfloat16(x);
+        }
+    };
+    template<>
+    struct Converter<float, __nv_bfloat16> {
+        __device__ auto operator()(const __nv_bfloat16& x) const {
+            return  __bfloat162float(x);
+        }
+    };
+    template<>
+    struct Converter<float2, __half2> {
+        __device__ auto operator()(const __half2& x) const {
+            return  __half22float2(x);
+        }
+    };
+    template<>
+    struct Converter<__half2, float2> {
+        __device__ auto operator()(const float2& x) const {
+            return  __float22half2_rn(x);
+        }
+    };
+    template<>
+    struct Converter<float2, __nv_bfloat162> {
+        __device__ auto operator()(const __nv_bfloat162& x) const {
+            return  __bfloat1622float2(x);
+        }
+    };
+    template<>
+    struct Converter<__nv_bfloat162, float2> {
+        __device__ auto operator()(const float2& x) const {
+            return  __float22bfloat162_rn(x);
         }
     };
 

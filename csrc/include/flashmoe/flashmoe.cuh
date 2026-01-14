@@ -14,26 +14,25 @@
 #define FLASHMOE_CUH
 
 #include "types.cuh"
-#include "atomics.cuh"
-#include "../../tests/debug.cuh"
+#include "infra/atomics.cuh"
 
 #include "scheduler.cuh"
 #include "subscriber.cuh"
 #include "processor.cuh"
 
 #include "moe.cuh"
-#include "bitset.cuh"
+#include "infra/bitset.cuh"
 #include "bootstrap.cuh"
 #include "combine.cuh"
 #include "dispatch.cuh"
-#include "signal.cuh"
-#include "heap.cuh"
-#include "task.cuh"
-#include "tq.cuh"
-#include "vt.cuh"
-#include "rvt.cuh"
-#include "packed.cuh"
-#include "structures.cuh"
-#include "dq.cuh"
+#include "infra/signal.cuh"
+#include "infra/heap.cuh"
+#include "infra/task.cuh"
+#include "infra/tq.cuh"
+#include "infra/vt.cuh"
+#include "infra/rvt.cuh"
+#include "infra/packed.cuh"
+#include "infra/structures.cuh"
+#include "infra/dq.cuh"
 
 #endif //FLASHMOE_CUH

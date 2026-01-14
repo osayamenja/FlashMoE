@@ -15,11 +15,11 @@
 #include <nvshmem.h>
 
 #include "combine.cuh" //  combine function
-#include "packed.cuh" // TPS
-#include "signal.cuh" // SignalPayload
-#include "task.cuh" // Task
+#include "infra/packed.cuh"
+#include "infra/signal.cuh"
+#include "infra/task.cuh"
 #include "tile.cuh" // cublasdx and tileGEMM
-#include "tq.cuh"  // TQSignal
+#include "infra/tq.cuh"
 namespace flashmoe::processor{
     constexpr int WARP_SIZE = 32;
     // fused GEMM, epilogue and data transfer
@@ -297,6 +297,7 @@ namespace flashmoe::processor{
                 }
             }
         }
+        // last block clears tguardGuar
     }
 }
 #endif //FLASHMOE_COMPUTE_CUH

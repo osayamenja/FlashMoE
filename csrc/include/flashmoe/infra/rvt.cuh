@@ -6,9 +6,28 @@
 #define FLASHMOE_RVT_CUH
 namespace flashmoe
 {
+    constexpr int RED_MAX_ALIGNMENT = 16;
+    template<typename Element, int Alignment>
+    requires(Alignment > 0 && Alignment <= RED_MAX_ALIGNMENT && cutlass::is_pow2<Alignment>::value)
+    struct RedAddType {
+        using Type = Element;
+        using Width = cute::Int<1>;
+    };
+    template<int Alignment>
+    struct RedAddType<__half, Alignment> {
+        // Alignment > sizeof(__half) means that Alignment is 2, 4, 8 or 16
+        // This means we can safely promote to __half2
+        using Type = cuda::std::conditional_t<(Alignment > sizeof(__half)), __half2, __half>;
+        using Width = cute::Int<sizeof(Type) / sizeof(__half)>;
+    };
+    template<int Alignment>
+    struct RedAddType<__nv_bfloat16, Alignment> {
+        using Type = cuda::std::conditional_t<(Alignment > sizeof(__nv_bfloat16)), __nv_bfloat162, __nv_bfloat16>;
+        using Width = cute::Int<sizeof(Type) / sizeof(__nv_bfloat16)>;
+    };
     template<int Arch, typename Element, int VectorWidth>
     struct RedAdd {
-        static_assert(VectorWidth >= 1 && VectorWidth <= (16 / sizeof(Element)) &&
+        static_assert(VectorWidth >= 1 && VectorWidth <= (RED_MAX_ALIGNMENT / sizeof(Element)) &&
             cutlass::is_pow2<VectorWidth>::value);
         static_assert(Arch == 700 || Arch == 800 || Arch == 900);
         static_assert(cuda::std::is_same_v<Element, float> ||
@@ -19,6 +38,7 @@ namespace flashmoe
     struct RedAdd<700, float, MaxVectorWidth> {
         using VectorWidth = cute::Int<1>;
         template<typename T>
+        requires(cuda::std::is_same_v<typename T::value_type, float>)
         void operator()(float* __restrict__ const& addr, const T& v) const {
             asm volatile("red.global.add.f32 [%0], %1;"
                      :
@@ -30,6 +50,7 @@ namespace flashmoe
     struct RedAdd<700, __half, MaxVectorWidth> {
         using VectorWidth = cute::Int<1>;
         template<typename T>
+        requires(cuda::std::is_same_v<typename T::value_type, __half>)
         void operator()(__half* __restrict__ const& addr, const T& v) const {
             asm volatile("red.global.add.noftz.f16 [%0], %1;"
                      :
@@ -41,6 +62,7 @@ namespace flashmoe
     struct RedAdd<700, __half2, MaxVectorWidth> {
         using VectorWidth = cute::Int<1>;
         template<typename T>
+        requires(cuda::std::is_same_v<typename T::value_type, __half2>)
         void operator()(__half2* __restrict__ const& addr, const T& v) const {
             // __half2 is packed 32-bit => use f16x2
             asm volatile("red.global.add.noftz.f16x2 [%0], %1;"
@@ -53,6 +75,7 @@ namespace flashmoe
     struct RedAdd<800, float, MaxVectorWidth> {
         using VectorWidth = cute::Int<1>;
         template<typename T>
+        requires(cuda::std::is_same_v<typename T::value_type, float>)
         void operator()(float* __restrict__ const& addr, const T& v) const {
             asm volatile("red.global.add.f32 [%0], %1;"
                      :
@@ -64,6 +87,7 @@ namespace flashmoe
     struct RedAdd<800, __half, MaxVectorWidth> {
         using VectorWidth = cute::Int<1>;
         template<typename T>
+        requires(cuda::std::is_same_v<typename T::value_type, __half>)
         void operator()(__half* __restrict__ const& addr, const T& v) const {
             asm volatile("red.global.add.noftz.f16 [%0], %1;"
                      :
@@ -75,6 +99,7 @@ namespace flashmoe
     struct RedAdd<800, __half2, MaxVectorWidth> {
         using VectorWidth = cute::Int<1>;
         template<typename T>
+        requires(cuda::std::is_same_v<typename T::value_type, __half2>)
         void operator()(__half2* __restrict__ const& addr, const T& v) const {
             asm volatile("red.global.add.noftz.f16x2 [%0], %1;"
                      :
@@ -86,6 +111,7 @@ namespace flashmoe
     struct RedAdd<800, __nv_bfloat16, MaxVectorWidth> {
         using VectorWidth = cute::Int<1>;
         template<typename T>
+        requires(cuda::std::is_same_v<typename T::value_type, __nv_bfloat16>)
         void operator()(__nv_bfloat16* __restrict__ const& addr, const T& v) const {
             atomicAdd(addr, v[0]);
         }
@@ -94,6 +120,7 @@ namespace flashmoe
     struct RedAdd<800, __nv_bfloat162, MaxVectorWidth> {
         using VectorWidth = cute::Int<1>;
         template<typename T>
+        requires(cuda::std::is_same_v<typename T::value_type, __nv_bfloat162>)
         void operator()(__nv_bfloat162* __restrict__ const& addr, const T& v) const {
             atomicAdd(addr, v[0]);
         }
@@ -103,6 +130,7 @@ namespace flashmoe
     struct RedAdd<900, float, MaxVectorWidth> {
         using VectorWidth = cute::Int<cute::min(MaxVectorWidth, 4)>;
         template<typename T>
+        requires(cuda::std::is_same_v<typename T::value_type, float>)
         void operator()(float* __restrict__ const& addr, const T& v) const {
             if constexpr (VectorWidth::value == 1) {
                 asm volatile("red.global.add.f32 [%0], %1;"
@@ -128,6 +156,7 @@ namespace flashmoe
     struct RedAdd<900, __half, MaxVectorWidth> {
         using VectorWidth = cute::Int<cute::min(MaxVectorWidth, 8)>;
         template<typename T>
+        requires(cuda::std::is_same_v<typename T::value_type, __half>)
         void operator()(__half* __restrict__ const& addr, const T& v) const {
             if constexpr (VectorWidth::value == 1) {
                 asm volatile("red.global.add.noftz.f16 [%0], %1;"
@@ -161,6 +190,7 @@ namespace flashmoe
     struct RedAdd<900, __half2, MaxVectorWidth> {
         using VectorWidth = cute::Int<cute::min(MaxVectorWidth, 4)>;
         template<typename T>
+        requires(cuda::std::is_same_v<typename T::value_type, __half2>)
         void operator()(__half2* __restrict__ const& addr, const T& v) const {
             if constexpr (VectorWidth::value == 1) {
                 asm volatile("red.global.add.noftz.f16x2 [%0], %1;"
@@ -186,6 +216,7 @@ namespace flashmoe
     struct RedAdd<900, __nv_bfloat16, MaxVectorWidth> {
         using VectorWidth = cute::Int<cute::min(MaxVectorWidth, 8)>;
         template<typename T>
+        requires(cuda::std::is_same_v<typename T::value_type, __nv_bfloat16>)
         void operator()(__nv_bfloat16* __restrict__ const& addr, const T& v) const {
             if constexpr (VectorWidth::value == 1) {
                 asm volatile("red.global.add.noftz.bf16 [%0], %1;"
@@ -219,6 +250,7 @@ namespace flashmoe
     struct RedAdd<900, __nv_bfloat162, MaxVectorWidth> {
         using VectorWidth = cute::Int<cute::min(MaxVectorWidth, 4)>;
         template<typename T>
+        requires(cuda::std::is_same_v<typename T::value_type, __nv_bfloat162>)
         void operator()(__nv_bfloat162* __restrict__ const& addr, const T& v) const {
             if constexpr (VectorWidth::value == 1) {
                 asm volatile("red.global.add.noftz.bf16x2 [%0], %1;"

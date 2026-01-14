@@ -22,7 +22,7 @@
 #include "throughput.cuh"
 #include "experimental/topo.cuh"
 #include "../../tests/debug.cuh"
-#include "telemetry.cuh"
+#include "infra/telemetry.cuh"
 #include "types.cuh"
 #include "moe/expert.cuh"
 #include "experimental/decider/decider.cuh"

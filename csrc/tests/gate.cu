@@ -300,8 +300,8 @@ void driver(const int& S, const int& E, const int& H, const int& k, const float&
 
     auto stream = exec.getStream();
     cudaMallocAsync(&eCounts, E * sizeof(int), stream);
-    cudaMallocAsync(&eCGuards, (E + 1) * sizeof(int), stream);
-    cudaMemsetAsync(eCGuards, 0, (E + 1) * sizeof(int), stream);
+    cudaMallocAsync(&eCGuards, E * sizeof(int), stream);
+    cudaMemsetAsync(eCGuards, flashmoe::STALE_AS_BYTE, E * sizeof(int), stream);
     cudaMallocAsync(&tokens, M * K * sizeof(Element), stream);
     cudaMallocAsync(&gateWeights, K * N * sizeof(Element), stream);
     cudaMallocAsync(&routing, M * N * sizeof(ElementC), stream);
@@ -436,63 +436,51 @@ void kickStart(const int argc, char** argv) {
     cudaStreamCreate(&stream);
     matx::cudaExecutor exec{stream};
     constexpr auto sro = flashmoe::SoftMaxOptimizationLevel::highest;
-    // tiling heuristics
-    constexpr int bM = cute::min(S, 128);
-    constexpr int bK = cute::min(H, 64);
-    constexpr int pS = H >= bK * 2 ? 2 : 1;
+    // tiling for A100 (not tuned)
+    constexpr int bM = cute::min(S, 64);
+    constexpr int bK = cute::min(H, 128);
+    constexpr int pS = H >= bK * 2 ? (FLASHMOE_ARCH > 700 ? 2 : 1) : 1;
     for (int i = E; i <= E_max; i *= 2) {
         switch (i) {
         case 2:
             {
-                constexpr int bM_x = 64;
                 constexpr int bN = 2;
-                driver<Arch, bM_x, bN, bK, pS, flashmoe::GateReductionLevel::singleBlock, sro,
+                driver<Arch, bM, bN, bK, pS, flashmoe::GateReductionLevel::singleBlock, sro,
                         Element, ElementC>(S, i, H, k, rtol, atol, checkCorrectness, exec);
             }
             break;
         case 4:
             {
-                constexpr int bM_x = 64;
                 constexpr int bN = 4;
-                driver<Arch, bM_x, bN, bK, pS, flashmoe::GateReductionLevel::singleBlock, sro,
+                driver<Arch, bM, bN, bK, pS, flashmoe::GateReductionLevel::singleBlock, sro,
                         Element, ElementC>(S, i, H, k, rtol, atol, checkCorrectness, exec);
             }
             break;
         case 8:
             {
-                constexpr int bM_x = 64;
                 constexpr int bN = 8;
-                driver<Arch, bM_x, bN, bK, pS, flashmoe::GateReductionLevel::singleBlock, sro,
+                driver<Arch, bM, bN, bK, pS, flashmoe::GateReductionLevel::singleBlock, sro,
                         Element, ElementC>(S, i, H, k, rtol, atol, checkCorrectness, exec);
             }
             break;
         case 16:
             {
-                constexpr int bM_x = 64;
                 constexpr int bN = 16;
-                driver<Arch, bM_x, bN, bK, pS, flashmoe::GateReductionLevel::singleBlock, sro,
+                driver<Arch, bM, bN, bK, pS, flashmoe::GateReductionLevel::singleBlock, sro,
                         Element, ElementC>(S, i, H, k, rtol, atol, checkCorrectness, exec);
             }
             break;
         case 32:
             {
-                constexpr int bM_x = 64;
                 constexpr int bN = 32;
-                driver<Arch, bM_x, bN, bK, pS, flashmoe::GateReductionLevel::singleBlock, sro,
-                        Element, ElementC>(S, i, H, k, rtol, atol, checkCorrectness, exec);
-            }
-            break;
-        case 64:
-            {
-                constexpr int bN = 64;
                 driver<Arch, bM, bN, bK, pS, flashmoe::GateReductionLevel::singleBlock, sro,
                         Element, ElementC>(S, i, H, k, rtol, atol, checkCorrectness, exec);
             }
             break;
         default:
             {
-                if (i > 64) {
-                    constexpr int bN = 64;
+                if (i > 32) {
+                    constexpr int bN = 32;
                     driver<Arch, bM, bN, bK, pS, flashmoe::GateReductionLevel::multiBlock, sro,
                             Element, ElementC>(S, i, H, k, rtol, atol, checkCorrectness, exec);
                 }

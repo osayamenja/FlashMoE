@@ -15,7 +15,7 @@
 #include "processor.cuh"
 #include "moe/fffn.cuh"
 #include "gate.cuh"
-#include "telemetry.cuh"
+#include "infra/telemetry.cuh"
 
 namespace flashmoe::moe{
     __device__ __forceinline__
