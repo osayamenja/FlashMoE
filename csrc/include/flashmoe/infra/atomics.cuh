@@ -66,7 +66,11 @@ namespace flashmoe{
         int expected = stale;
         if (g.compare_exchange_strong(expected, initializing, cuda::memory_order_acquire)) {
             // initialize with my value
-            *vals = val;
+            constexpr int packWidth = PackedRedType::kElements;
+            static_assert(packWidth == 1 || packWidth == 2 || packWidth == 4 || packWidth == 8);
+            cute::for_each(cute::make_int_sequence<packWidth>{}, [&](auto i) {
+                vals[i] = val[i];
+            });
             g.store(initialized, cuda::memory_order_release);
             return;
         }

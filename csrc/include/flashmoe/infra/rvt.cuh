@@ -4,6 +4,7 @@
 
 #ifndef FLASHMOE_RVT_CUH
 #define FLASHMOE_RVT_CUH
+#include <cuda/std/bit>
 namespace flashmoe
 {
     template<int Arch>
@@ -41,6 +42,7 @@ namespace flashmoe
         using VectorWidth = cute::Int<1>;
         template<typename T>
         requires(cuda::std::is_same_v<typename T::value_type, float>)
+        __device__ __forceinline__
         void operator()(float* __restrict__ const& addr, const T& v) const {
             asm volatile("red.global.add.f32 [%0], %1;"
                      :
@@ -53,6 +55,7 @@ namespace flashmoe
         using VectorWidth = cute::Int<1>;
         template<typename T>
         requires(cuda::std::is_same_v<typename T::value_type, __half>)
+        __device__ __forceinline__
         void operator()(__half* __restrict__ const& addr, const T& v) const {
             asm volatile("red.global.add.noftz.f16 [%0], %1;"
                      :
@@ -65,11 +68,13 @@ namespace flashmoe
         using VectorWidth = cute::Int<1>;
         template<typename T>
         requires(cuda::std::is_same_v<typename T::value_type, __half2>)
+        __device__ __forceinline__
         void operator()(__half2* __restrict__ const& addr, const T& v) const {
             // __half2 is packed 32-bit => use f16x2
+            auto v0 = cuda::std::bit_cast<uint32_t>(static_cast<__half2_raw>(v[0]));
             asm volatile("red.global.add.noftz.f16x2 [%0], %1;"
                          :
-                         : "l"(addr), "r"(v[0])
+                         : "l"(addr), "r"(v0)
                          : "memory");
         }
     };
@@ -78,6 +83,7 @@ namespace flashmoe
         using VectorWidth = cute::Int<1>;
         template<typename T>
         requires(cuda::std::is_same_v<typename T::value_type, float>)
+        __device__ __forceinline__
         void operator()(float* __restrict__ const& addr, const T& v) const {
             asm volatile("red.global.add.f32 [%0], %1;"
                      :
@@ -90,6 +96,7 @@ namespace flashmoe
         using VectorWidth = cute::Int<1>;
         template<typename T>
         requires(cuda::std::is_same_v<typename T::value_type, __half>)
+        __device__ __forceinline__
         void operator()(__half* __restrict__ const& addr, const T& v) const {
             asm volatile("red.global.add.noftz.f16 [%0], %1;"
                      :
@@ -102,10 +109,12 @@ namespace flashmoe
         using VectorWidth = cute::Int<1>;
         template<typename T>
         requires(cuda::std::is_same_v<typename T::value_type, __half2>)
+        __device__ __forceinline__
         void operator()(__half2* __restrict__ const& addr, const T& v) const {
+            auto v0 = cuda::std::bit_cast<uint32_t>(static_cast<__half2_raw>(v[0]));
             asm volatile("red.global.add.noftz.f16x2 [%0], %1;"
                      :
-                     : "l"(addr), "r"(v[0])
+                     : "l"(addr), "r"(v0)
                      : "memory");
         }
     };
@@ -114,6 +123,7 @@ namespace flashmoe
         using VectorWidth = cute::Int<1>;
         template<typename T>
         requires(cuda::std::is_same_v<typename T::value_type, __nv_bfloat16>)
+        __device__ __forceinline__
         void operator()(__nv_bfloat16* __restrict__ const& addr, const T& v) const {
             atomicAdd(addr, v[0]);
         }
@@ -123,6 +133,7 @@ namespace flashmoe
         using VectorWidth = cute::Int<1>;
         template<typename T>
         requires(cuda::std::is_same_v<typename T::value_type, __nv_bfloat162>)
+        __device__ __forceinline__
         void operator()(__nv_bfloat162* __restrict__ const& addr, const T& v) const {
             atomicAdd(addr, v[0]);
         }
@@ -133,6 +144,7 @@ namespace flashmoe
         using VectorWidth = cute::Int<cute::min(MaxVectorWidth, 4)>;
         template<typename T>
         requires(cuda::std::is_same_v<typename T::value_type, float>)
+        __device__ __forceinline__
         void operator()(float* __restrict__ const& addr, const T& v) const {
             if constexpr (VectorWidth::value == 1) {
                 asm volatile("red.global.add.f32 [%0], %1;"
@@ -159,6 +171,7 @@ namespace flashmoe
         using VectorWidth = cute::Int<cute::min(MaxVectorWidth, 8)>;
         template<typename T>
         requires(cuda::std::is_same_v<typename T::value_type, __half>)
+        __device__ __forceinline__
         void operator()(__half* __restrict__ const& addr, const T& v) const {
             if constexpr (VectorWidth::value == 1) {
                 asm volatile("red.global.add.noftz.f16 [%0], %1;"
@@ -193,23 +206,31 @@ namespace flashmoe
         using VectorWidth = cute::Int<cute::min(MaxVectorWidth, 4)>;
         template<typename T>
         requires(cuda::std::is_same_v<typename T::value_type, __half2>)
+        __device__ __forceinline__
         void operator()(__half2* __restrict__ const& addr, const T& v) const {
             if constexpr (VectorWidth::value == 1) {
+                auto v0 = cuda::std::bit_cast<uint32_t>(static_cast<__half2_raw>(v[0]));
                 asm volatile("red.global.add.noftz.f16x2 [%0], %1;"
                              :
-                             : "l"(addr), "r"(v[0])
+                             : "l"(addr), "r"(v0)
                              : "memory");
             }
             else if constexpr (VectorWidth::value == 2) {
+                auto v0 = cuda::std::bit_cast<uint32_t>(static_cast<__half2_raw>(v[0]));
+                auto v1 = cuda::std::bit_cast<uint32_t>(static_cast<__half2_raw>(v[1]));
                 asm volatile("red.global.v2.f16x2.add.noftz [%0], {%1, %2};"
                              :
-                             : "l"(addr), "r"(v[0]), "r"(v[1])
+                             : "l"(addr), "r"(v0), "r"(v1)
                              : "memory");
             }
             else if constexpr (VectorWidth::value == 4) {
+                auto v0 = cuda::std::bit_cast<uint32_t>(static_cast<__half2_raw>(v[0]));
+                auto v1 = cuda::std::bit_cast<uint32_t>(static_cast<__half2_raw>(v[1]));
+                auto v2 = cuda::std::bit_cast<uint32_t>(static_cast<__half2_raw>(v[2]));
+                auto v3 = cuda::std::bit_cast<uint32_t>(static_cast<__half2_raw>(v[3]));
                 asm volatile("red.global.v4.f16x2.add.noftz [%0], {%1, %2, %3, %4};"
                              :
-                             : "l"(addr), "r"(v[0]), "r"(v[1]), "r"(v[2]), "r"(v[3])
+                             : "l"(addr), "r"(v0), "r"(v1), "r"(v2), "r"(v3)
                              : "memory");
             }
         }
@@ -219,6 +240,7 @@ namespace flashmoe
         using VectorWidth = cute::Int<cute::min(MaxVectorWidth, 8)>;
         template<typename T>
         requires(cuda::std::is_same_v<typename T::value_type, __nv_bfloat16>)
+        __device__ __forceinline__
         void operator()(__nv_bfloat16* __restrict__ const& addr, const T& v) const {
             if constexpr (VectorWidth::value == 1) {
                 asm volatile("red.global.add.noftz.bf16 [%0], %1;"
@@ -253,23 +275,31 @@ namespace flashmoe
         using VectorWidth = cute::Int<cute::min(MaxVectorWidth, 4)>;
         template<typename T>
         requires(cuda::std::is_same_v<typename T::value_type, __nv_bfloat162>)
+        __device__ __forceinline__
         void operator()(__nv_bfloat162* __restrict__ const& addr, const T& v) const {
             if constexpr (VectorWidth::value == 1) {
+                auto v0 = cuda::std::bit_cast<uint32_t>(static_cast<__nv_bfloat162_raw>(v[0]));
                 asm volatile("red.global.add.noftz.bf16x2 [%0], %1;"
                              :
-                             : "l"(addr), "r"(v[0])
+                             : "l"(addr), "r"(v0)
                              : "memory");
             }
             else if constexpr (VectorWidth::value == 2) {
+                auto v0 = cuda::std::bit_cast<uint32_t>(static_cast<__nv_bfloat162_raw>(v[0]));
+                auto v1 = cuda::std::bit_cast<uint32_t>(static_cast<__nv_bfloat162_raw>(v[1]));
                 asm volatile("red.global.v2.bf16x2.add.noftz [%0], {%1, %2};"
                              :
-                             : "l"(addr), "r"(v[0]), "r"(v[1])
+                             : "l"(addr), "r"(v0), "r"(v1)
                              : "memory");
             }
             else if constexpr (VectorWidth::value == 4) {
+                auto v0 = cuda::std::bit_cast<uint32_t>(static_cast<__nv_bfloat162_raw>(v[0]));
+                auto v1 = cuda::std::bit_cast<uint32_t>(static_cast<__nv_bfloat162_raw>(v[1]));
+                auto v2 = cuda::std::bit_cast<uint32_t>(static_cast<__nv_bfloat162_raw>(v[2]));
+                auto v3 = cuda::std::bit_cast<uint32_t>(static_cast<__nv_bfloat162_raw>(v[3]));
                 asm volatile("red.global.v4.bf16x2.add.noftz [%0], {%1, %2, %3, %4};"
                              :
-                             : "l"(addr), "r"(v[0]), "r"(v[1]), "r"(v[2]), "r"(v[3])
+                             : "l"(addr), "r"(v0), "r"(v1), "r"(v2), "r"(v3)
                              : "memory");
             }
         }

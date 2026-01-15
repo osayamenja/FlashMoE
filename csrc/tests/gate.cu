@@ -132,7 +132,7 @@ auto reference(matx::cudaExecutor& exec, const GateArgs& gArgs, cudaEvent_t star
     auto sIndices = matx::make_tensor<matx::index_t>(gArgs.topK, {gArgs.S, gArgs.E});
     // select topK
     // we use external probabilities to verify token indices which avoids
-    // unpredictable sideeffects from any numerical discrepancy between tCx and tC.
+    // unpredictable side-effects from any numerical discrepancy between tCx and tC.
     // Specifically, if tC is used instead, given a failed check,
     // we would not be able to tell if it is due to the indices being generated
     // incorrectly by the fused kernel or due to the floating point disparity in comparison to tCx.
@@ -146,7 +146,7 @@ auto reference(matx::cudaExecutor& exec, const GateArgs& gArgs, cudaEvent_t star
         auto eC = eCounts.Slice<0>({i}, {matx::matxDropDim});
         (matx::mtie(tIdx_row, eC) = matx::find_idx(topK_idx, matx::EQ<matx::index_t>{i})).run(exec);
         // converts indices from linearized [0, S*K) to [0, S).
-        // This is necessary and correct from prior experience using matx::find_idx
+        // This is necessary when using matx::find_idx
         (tIdx_row = matx::apply(IndexSanitizer{gArgs.k}, tIdx_row)).run(exec);
     }
     // check eC
@@ -397,7 +397,7 @@ __host__ __forceinline__
 void kickStart(const int argc, char** argv) {
     // we have to fix S and H to minimize instantiated templates as tile shapes are dependent on them
     constexpr auto S = 2048;
-    constexpr auto H = 128;
+    constexpr auto H = 4096;
     using Element = __half;
     using ElementC = float;
     float rtol = 2e-2f;
@@ -439,7 +439,7 @@ void kickStart(const int argc, char** argv) {
     // tiling for A100 (not tuned)
     constexpr int bM = cute::min(S, 64);
     constexpr int bK = cute::min(H, 128);
-    constexpr int pS = H >= bK * 2 ? (FLASHMOE_ARCH > 700 ? 2 : 1) : 1;
+    constexpr int pS = H >= bK * 2 ? (FLASHMOE_ARCH >= 800 ? 2 : 1) : 1;
     for (int i = E; i <= E_max; i *= 2) {
         switch (i) {
         case 2:

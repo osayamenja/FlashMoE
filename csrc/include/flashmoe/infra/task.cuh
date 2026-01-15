@@ -4,6 +4,8 @@
 
 #ifndef FLASHMOE_TASK_CUH
 #define FLASHMOE_TASK_CUH
+#include <cuda/type_traits>
+#include <cuda/std/array>
 namespace flashmoe {
     constexpr int GEMMs = 2; // within
     enum class TaskType : uint8_t {
@@ -108,7 +110,6 @@ namespace flashmoe {
         auto expertIdx() const{
             return ingredients.expertIdx;
         }
-
         __device__ __forceinline__
         auto epRank() const{
             return ingredients.peerIdx;

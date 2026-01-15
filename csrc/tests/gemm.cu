@@ -216,7 +216,7 @@ void kickStart(const int argc, char** argv) {
     float atol = 2e-3f;
     using Element = __half;
     using ElementC = Element;
-    using MMA_C = __half;
+    using MMA_C = float;
     printf("M, N, K, bM, bN, bK, pipeStages, threads, blocks/SM, SMs, blocks, rtol, atol, error(%%), Kernel_Time(ms), "
            "Matx_Time(ms)\n");
     if (argc > 1) {
@@ -257,7 +257,7 @@ void kickStart(const int argc, char** argv) {
             break;
         default:
             {
-                constexpr int pS = FLASHMOE_ARCH > 700 ? 2 : 1;
+                constexpr int pS = FLASHMOE_ARCH >= 800 ? 2 : 1;
                 constexpr int bK = cuda::std::is_same_v<Element, double> ? 32 : 64;
                 if (i >= 128 && i <= 2048) {
                     driver<128, 64, bK, pS, MMA_C, Element, ElementC>(i, i, i, rtol, atol,exec);

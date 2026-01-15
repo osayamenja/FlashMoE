@@ -232,7 +232,7 @@ namespace flashmoe::gate {
             const auto tsC = cublasdx::make_tensor(
                 static_cast<ElementC*>(gateScratch), TileGEMM::BLAS::get_layout_smem_c());
             static_assert(cute::is_compatible<decltype(gC.layout()), decltype(tsC.layout())>::value);
-            cublasdx::copy<TileGEMM::BLAS, TileGEMM::CAlign::value>(tsC, gC);
+            cublasdx::copy<TileGEMM::BLAS, ElementAlignment<ElementC, bN>>(tsC, gC);
             int rTK[bN];
             #pragma unroll
             for (int i = 0; i < bN; ++i) {
@@ -475,7 +475,7 @@ namespace flashmoe::gate {
             const auto tsC = cublasdx::make_tensor(
                 static_cast<ElementC*>(gateScratch), TileGEMM::BLAS::get_layout_smem_c());
             static_assert(cute::is_compatible<decltype(gC.layout()), decltype(tsC.layout())>::value);
-            cublasdx::copy<TileGEMM::BLAS, TileGEMM::CAlign::value>(tsC, gC);
+            cublasdx::copy<TileGEMM::BLAS, ElementAlignment<ElementC, bN>>(tsC, gC);
             int rTK[bN];
             #pragma unroll
             for (int i = 0; i < bN; ++i) {
