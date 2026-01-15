@@ -40,11 +40,6 @@ namespace flashmoe
 #endif
     }
 
-    /*constexpr int bM = 64;
-    using Element = float;
-    constexpr int bN = 64;
-    constexpr int Arch = 900;
-    constexpr int threads = 128;*/
     // MoE combine at tile granularity
     template<
         int bM,

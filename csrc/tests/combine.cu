@@ -2,10 +2,10 @@
 // Created by osayamen on 1/14/26.
 //
 // unit tests for combine
+#include <array>
 #include <vector>
 #include <tuple>
 #include <random>
-#include <unordered_set>
 #include <cassert>
 #include <stdexcept>
 
@@ -33,6 +33,8 @@ __global__ void combineKernel(const __grid_constant__ int EC,
     const auto tilesN = H / bN;
     const auto tilesPerExpert = tilesM * tilesN;
     const auto numTiles = E * tilesM * tilesN;
+    const auto tokTensor = cute::make_tensor(cute::make_gmem_ptr(tokens),
+        cute::make_layout(cute::make_shape(E, EC, H), cute::LayoutRight{}));
     for (int globalIdx = blockIdx.x; globalIdx < numTiles; globalIdx += gridDim.x) {
         const auto expertIdx = globalIdx / tilesPerExpert;
         const auto tileIdx = globalIdx % tilesPerExpert;
@@ -44,11 +46,12 @@ __global__ void combineKernel(const __grid_constant__ int EC,
         if (tileIdx < actualTiles) {
             // do combine
             // compute tileSize
-            const auto numFullTiles = expertCount / bM;
+            const auto numFullMTiles = expertCount / bM;
             // below is the actual number of tokens in the tile
-            const auto tileSize = tileIdx < numFullTiles ? bM : (expertCount - numFullTiles * bM);
+            auto* __restrict__ tP = &tokTensor(expertIdx, tileM * bM, 0);
+            const auto tileSize = tileM < numFullMTiles ? bM : (expertCount - numFullMTiles * bM);
             flashmoe::combine<bM, bN, Arch, threads, c>(EC, S, E, H, k, workspace,
-                tokenIndices, tokenGuards, output, tokens, tileM * bM,
+                tokenIndices, tokenGuards, output, tP, tileM * bM,
                 expertIdx, tileSize, tileCoord);
         }
     }
@@ -273,7 +276,6 @@ __host__ __forceinline__
 void kickStart(const int& S, const int& E, const int& k, const float& rtol, const float& atol) {
     const auto EC = getEC(S);
     const auto [counts, indices] = generate_token_ids_and_expert_counts(S, E, k);
-    printMetadata(counts, indices, EC, E);
     cudaSetDevice(0);
     cudaStream_t stream;
     cudaStreamCreate(&stream);
@@ -290,12 +292,12 @@ void kickStart(const int& S, const int& E, const int& k, const float& rtol, cons
     cudaMallocAsync(&expertCounts, sizeof(int) * E, stream);
     cudaMallocAsync(&ref_result, sizeof(Element) * S * H, stream);
     cudaMemsetAsync(ref_result, 0, sizeof(Element) * S * H, stream);
-    cudaMallocAsync(&oracleResult, sizeof(float) * S * H, stream);
-    cudaMemsetAsync(oracleResult, 0, sizeof(Element) * S * H, stream);
 
     std::random_device rd;
     cudaMallocAsync(&kut_result, sizeof(Element) * S * H, stream);
     if (k > 1) {
+        cudaMallocAsync(&oracleResult, sizeof(float) * S * H, stream);
+        cudaMemsetAsync(oracleResult, 0, sizeof(float) * S * H, stream);
         const int vH = flashmoe::getCombineScaledHiddenDim<Arch, bN, Element>(H);
         cudaMallocAsync(&tokenGuards, sizeof(int)*S*vH, stream);
         // only need to initialize below once, the kernel resets internally after use
@@ -303,8 +305,9 @@ void kickStart(const int& S, const int& E, const int& k, const float& rtol, cons
         // intentionally poison result array with random floats to test correctness of guarded add
         randUniform<Arch>(kut_result, S * H, rd(), -1.0f, 1.0f, stream);
     }
+    CHECK_CUDA(cudaPeekAtLastError());
     // fill token array
-    randUniform<Arch>(tokens, S * H, rd(), -1.0f, 1.0f, stream);
+    randUniform<Arch>(tokens, E * EC * H, rd(), -1.0f, 1.0f, stream);
     // copy expert counts
     cudaMemcpyAsync(expertCounts, counts.data(), sizeof(int) * E, cudaMemcpyHostToDevice, stream);
     // copy indices data structure
@@ -327,7 +330,7 @@ void kickStart(const int& S, const int& E, const int& k, const float& rtol, cons
             expertCounts, tokens, kut_result, tIds, tokenGuards);
     }
     else {
-        auto kernel = combineKernel<Arch, bM, bN, cThreads, flashmoe::CombineMode::plural, Element>;
+        auto kernel = combineKernel<Arch, bM, bN, cThreads, flashmoe::CombineMode::single, Element>;
         CHECK_CUDA(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&bps, kernel, cThreads, 0));
         blocks = cute::min(((E * EC) / bM) * (H / bN), bps * NUM_SMS);
         combineKernel<Arch, bM, bN, cThreads, flashmoe::CombineMode::single>
@@ -338,17 +341,22 @@ void kickStart(const int& S, const int& E, const int& k, const float& rtol, cons
     using MatXType = MXE<Element>;
     auto tKUT = matx::make_tensor<MatXType>(reinterpret_cast<MatXType*>(kut_result), {S, H});
     auto tRef = matx::make_tensor<MatXType>(reinterpret_cast<MatXType*>(ref_result), {S, H});
-    auto tOracle = matx::make_tensor<float>(oracleResult, {S, H});
     matx::cudaExecutor exec{stream};
     auto num_matches_ref = matx::make_tensor<long int>({});
     auto num_matches_oracle = matx::make_tensor<long int>({});
     (num_matches_ref = matx::sum(matx::isclose(tKUT, tRef, rtol, atol))).run(exec);
-    (num_matches_oracle = matx::sum(matx::isclose(tKUT, tOracle, rtol, atol))).run(exec);
-
-    const auto error_ref = (1.0 - static_cast<double>(num_matches_ref()) / static_cast<double>(tKUT.TotalSize()));
-    const auto error_oracle = (1.0 - static_cast<double>(num_matches_oracle()) / static_cast<double>(tKUT.TotalSize()));
+    if (k > 1) {
+        auto tOracle = matx::make_tensor<float>(oracleResult, {S, H});
+        (num_matches_oracle = matx::sum(matx::isclose(tKUT, tOracle, rtol, atol))).run(exec);
+    }
+    exec.sync();
+    const auto error_ref = (1.0 - (static_cast<double>(num_matches_ref()) / static_cast<double>(tKUT.TotalSize())))*100.0;
+    double error_oracle = -0.0;
+    if (k > 1) {
+        error_oracle = (1.0 - (static_cast<double>(num_matches_oracle()) / static_cast<double>(tKUT.TotalSize())))*100.0;
+    }
     printf("%d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %.1e, %.1e, %lf, %lf\n",
-        S, H, E, k, bM, bN, threads, bps, NUM_SMS, blocks, rtol, atol, error_ref, error_oracle);
+        S, H, E, k, bM, bN, cThreads, bps, NUM_SMS, blocks, rtol, atol, error_ref, error_oracle);
     CHECK_CUDA(cudaPeekAtLastError());
     cudaFreeAsync(tokens, stream);
     cudaFreeAsync(tIds, stream);
@@ -360,12 +368,12 @@ void kickStart(const int& S, const int& E, const int& k, const float& rtol, cons
     CHECK_CUDA(cudaStreamSynchronize(stream));
     cudaStreamDestroy(stream);
 }
-
 // ./testCombine <S> <E> <topK> <atol> <rtol>
-int main(const int argc, char** argv) {
-    int S = 64;
+__host__ __forceinline__
+void doTest(const int argc, char** argv) {
+    int S = 512;
     int E = 4;
-    int k = 1;
+    int k = 2;
     float rtol = 2e-2f;
     float atol = 2e-3f;
     if (argc > 1) {
@@ -390,37 +398,40 @@ int main(const int argc, char** argv) {
         throw std::runtime_error("S must be a power of 2");
     }
     // fix H to minimize template instantiations.
-    using Element = float;
-    constexpr int H = 128;
+    using Element = __half;
+    constexpr int H = 4096;
     constexpr int bN = cute::min(H, 64 * (sizeof(Element) == 2 ? 2 : 1));
     static_assert(H % bN == 0);
     constexpr int Arch = FLASHMOE_ARCH; // compute capability
     printf("S,H,E,k,bM,bN,threads,blocks/SM,SMs,blocks,rtol,atol, error_ref(%%),error_oracle(%%)\n");
     switch (S) {
-        case 1:
-            kickStart<Arch, H, 1, bN, Element>(S, E, k, rtol, atol);
-            break;
-        case 2:
-            kickStart<Arch, H, 2, bN, Element>(S, E, k, rtol, atol);
-            break;
-        case 4:
-            kickStart<Arch, H, 4, bN, Element>(S, E, k, rtol, atol);
-            break;
-        case 8:
-            kickStart<Arch, H, 8, bN, Element>(S, E, k, rtol, atol);
-            break;
-        case 16:
-            kickStart<Arch, H, 16, bN, Element>(S, E, k, rtol, atol);
-            break;
-        case 32:
-            kickStart<Arch, H, 32, bN, Element>(S, E, k, rtol, atol);
-            break;
-        case 64:
-            kickStart<Arch, H, 64, bN, Element>(S, E, k, rtol, atol);
-            break;
-        default:
-            if (S >= 128) {
-                kickStart<Arch, H, 128, bN, Element>(S, E, k, rtol, atol);
-            }
+    case 1:
+        kickStart<Arch, H, 1, bN, Element>(S, E, k, rtol, atol);
+        break;
+    case 2:
+        kickStart<Arch, H, 2, bN, Element>(S, E, k, rtol, atol);
+        break;
+    case 4:
+        kickStart<Arch, H, 4, bN, Element>(S, E, k, rtol, atol);
+        break;
+    case 8:
+        kickStart<Arch, H, 8, bN, Element>(S, E, k, rtol, atol);
+        break;
+    case 16:
+        kickStart<Arch, H, 16, bN, Element>(S, E, k, rtol, atol);
+        break;
+    case 32:
+        kickStart<Arch, H, 32, bN, Element>(S, E, k, rtol, atol);
+        break;
+    case 64:
+        kickStart<Arch, H, 64, bN, Element>(S, E, k, rtol, atol);
+        break;
+    default:
+        if (S >= 128) {
+            kickStart<Arch, H, 128, bN, Element>(S, E, k, rtol, atol);
+        }
     }
+}
+int main(const int argc, char** argv) {
+    doTest(argc, argv);
 }

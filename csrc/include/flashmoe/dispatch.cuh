@@ -5,6 +5,7 @@
 #ifndef FLASHMOE_DISPATCH_CUH
 #define FLASHMOE_DISPATCH_CUH
 #include <cuda/std/bit>
+#include <cuda/ptx>
 #include <nvshmem.h>
 
 #include "infra/heap.cuh"
@@ -84,10 +85,11 @@ namespace flashmoe {
         __syncthreads();
         const auto* __restrict__ expertLookup = enL;
         cutlass::AlignedArray<uint32_t, batch> rTID{};
-        using VTD = VectorTypeDescriptor<Element, ElementAlignment<Element, bN>>;
+        constexpr auto eWidth = ElementWidth<Element, bN, MAX_ACCESS_ALIGNMENT>; // 256B in Blackwell, 128B others
+        using VTD = VectorTypeDescriptor<Element, ElementAlignmentForWidth<Element, bN, eWidth>>;
         using VectorElement = VTD::VectorType;
         // below is fine because we enforce that H % bN == 0 and bN % vectorWidth == 0
-        const int vH = H / VTD::VectorWidth;
+        const int vH = H / VTD::VectorWidth::value;
         const auto* __restrict__ vTokens = reinterpret_cast<const VectorElement*>(tokens);
 
         const auto tokenIds = make_tensor(cute::make_gmem_ptr(_tokenIds),
@@ -123,7 +125,8 @@ namespace flashmoe {
                         const auto* __restrict__ aP = vTokens + tokenIdx * vH;
                         // coalesced vectorized copy
                         for (int k = threadIdx.x; k < vH; k += threads) {
-                            localPH[k] = aP[k];
+                            const auto v = cuda::ptx::ld_L1_no_allocate(cuda::ptx::space_global, aP + k);
+                            cuda::ptx::st(cuda::ptx::space_global, localPH + k, v);
                         }
                     }
                 }
@@ -145,7 +148,8 @@ namespace flashmoe {
                             auto* __restrict__ localPH = peerHeap + intraIdx * vH;
                             const auto* __restrict__ aP = vTokens + tokenIdx * vH;
                             for (int k = threadIdx.x; k < vH; k += threads) {
-                                localPH[k] = aP[k];
+                                const auto v = cuda::ptx::ld_L1_no_allocate(cuda::ptx::space_global, aP + k);
+                                cuda::ptx::st(cuda::ptx::space_global, localPH + k, v);
                             }
                         }
                     }
