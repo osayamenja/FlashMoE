@@ -13,7 +13,7 @@
 #ifndef CSRC_ATOMICS_CUH
 #define CSRC_ATOMICS_CUH
 #include <cuda/atomic>
-
+#include <cuda/barrier>
 namespace flashmoe{
     using ull_t = unsigned long long int;
     template<typename B>
@@ -57,33 +57,6 @@ namespace flashmoe{
     static_assert(cuda::std::is_same_v<cuda::std::underlying_type_t<InitState>, int>);
     static_assert(initialized == 1 && stale != initializing && initialized != initializing);
 
-    template<typename RedOp, typename RedType, typename PackedRedType>
-    __device__ __forceinline__
-    void guardedRedAdd(int* __restrict__ const& guard, RedType* __restrict__ const& vals, const PackedRedType& val,
-        const int& participants) {
-        static_assert(cuda::std::is_same_v<typename PackedRedType::value_type, RedType>);
-        const cuda::atomic_ref<int, cuda::thread_scope_device> g{*guard};
-        int expected = stale;
-        if (g.compare_exchange_strong(expected, initializing, cuda::memory_order_acquire)) {
-            // initialize with my value
-            constexpr int packWidth = PackedRedType::kElements;
-            static_assert(packWidth == 1 || packWidth == 2 || packWidth == 4 || packWidth == 8);
-            cute::for_each(cute::make_int_sequence<packWidth>{}, [&](auto i) {
-                vals[i] = val[i];
-            });
-            g.store(initialized, cuda::memory_order_release);
-            return;
-        }
-        while (expected == initializing) {
-            expected = g.load(cuda::memory_order_acquire);
-        }
-        if (g.fetch_add(1, cuda::memory_order_relaxed) + 1 == participants) {
-            // below assumes this function will be invoked exactly once by "participants" threads within a kernel
-            g.store(stale, cuda::memory_order_relaxed);
-        }
-        constexpr RedOp op{};
-        op(vals, val);
-    }
     // Enables in-kernel initialization of global accumulators
     __device__ __forceinline__
     auto guardedAtomicAdd(int* __restrict__ const& guard, int* __restrict__ const& vals, const int& val,

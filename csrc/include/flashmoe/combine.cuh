@@ -6,9 +6,9 @@
 #define FLASHMOE_COMBINE_CUH
 #include "infra/packed.cuh"
 #include "tile.cuh"
-#include "infra/atomics.cuh"
 #include "infra/rvt.cuh"
 #include "infra/vt.cuh"
+
 namespace flashmoe
 {
     template<int Arch, int bN, typename Element>
@@ -55,7 +55,6 @@ namespace flashmoe
     void combine(const int& EC, const int& S, const int& E, const int& H, const int& k,
         void* __restrict__ const& workspace,
         const TPS* __restrict__ const& tokenIndices, // [E, EC], where EC is padded to a multiple of bM
-        int* __restrict__ const& tokenGuards, // [S, vH], where vH = H / RVD::VectorWidth::value, only needed k > 1
         Element* __restrict__ const& moeOutput, // [S, H]
         const Element* __restrict__ const& tokens, // [bM, H]
         const uint& tokenBatchStart, const uint& expertIdx,
@@ -171,10 +170,7 @@ namespace flashmoe
             const auto vHo = H / RAD::Width::value;
             auto mC = cute::make_tensor(cute::make_gmem_ptr(reinterpret_cast<RAT*>(moeOutput)),
                 cute::make_layout(cute::make_shape(S, vHo), cute::LayoutRight{}));
-            auto mGuards = cute::make_tensor(cute::make_gmem_ptr(tokenGuards),
-                cute::make_layout(cute::make_shape(S, vH), cute::LayoutRight{}));
             auto tC = cute::local_tile(mC, cute::make_shape(S, cute::Int<rbN>{}), tileCoord);
-            auto tGuards = cute::local_tile(mGuards, cute::make_shape(S, cute::Int<rbN>{}), tileCoord);
 
             constexpr auto totalElems = bM * rbN; // cublasdx::cosize(RSL{})
             const auto actualElems = tileSize * rbN;
@@ -213,7 +209,8 @@ namespace flashmoe
                     // The row index is preserved because we only apply this vectorization across columns
                     // which are contiguous in memory.
                     auto* __restrict__ tCp = (&tC(tokIdx, colIdx * packWidth));
-                    guardedRedAdd<RedAddOp>(&tGuards(tokIdx, colIdx), tCp, tokenValue, k);
+                    constexpr RedAddOp op{};
+                    op(tCp, tokenValue);
                 }
             }
             else {
@@ -246,7 +243,8 @@ namespace flashmoe
                             }
                         }
                         auto* __restrict__ tCp = &tC(tokIdx, colIdx * packWidth);
-                        guardedRedAdd<RedAddOp>(&tGuards(tokIdx, colIdx), tCp, tokenValue, k);
+                        constexpr RedAddOp op{};
+                        op(tCp, tokenValue);
                     }
                 }
             }
@@ -282,7 +280,8 @@ namespace flashmoe
                             }
                         }
                         auto* __restrict__ tCp = &tC(tokIdx, colIdx * packWidth);
-                        guardedRedAdd<RedAddOp>(&tGuards(tokIdx, colIdx), tCp, tokenValue, k);
+                        constexpr RedAddOp op{};
+                        op(tCp, tokenValue);
                     }
                 }
             }

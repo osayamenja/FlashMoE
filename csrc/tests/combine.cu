@@ -59,7 +59,7 @@ __global__ void combineKernel(const __grid_constant__ int EC,
 
 // A single CTA reads each token and accumulates into the output buffer
 // Note this is not an optimal implementation
-template<typename Element, typename AccumType = Element>
+template<typename AccumType, typename Element>
 __global__ void combineReference(const __grid_constant__ int E, const __grid_constant__ int S,
     const __grid_constant__ int H, const __grid_constant__ int EC, const __grid_constant__ int topK,
     const Element* __restrict__ tokens, // [E, EC, H]
@@ -296,14 +296,14 @@ void kickStart(const int& S, const int& E, const int& k, const float& rtol, cons
     std::random_device rd;
     cudaMallocAsync(&kut_result, sizeof(Element) * S * H, stream);
     if (k > 1) {
+        // needed since we accumulate into the buffer
+        cudaMemsetAsync(kut_result, 0, sizeof(Element) * S * H, stream);
         cudaMallocAsync(&oracleResult, sizeof(float) * S * H, stream);
         cudaMemsetAsync(oracleResult, 0, sizeof(float) * S * H, stream);
         const int vH = flashmoe::getCombineScaledHiddenDim<Arch, bN, Element>(H);
         cudaMallocAsync(&tokenGuards, sizeof(int)*S*vH, stream);
         // only need to initialize below once, the kernel resets internally after use
         cudaMemsetAsync(tokenGuards, flashmoe::STALE_AS_BYTE, sizeof(int)*S*vH, stream);
-        // intentionally poison result array with random floats to test correctness of guarded add
-        randUniform<Arch>(kut_result, S * H, rd(), -1.0f, 1.0f, stream);
     }
     CHECK_CUDA(cudaPeekAtLastError());
     // fill token array
@@ -316,7 +316,7 @@ void kickStart(const int& S, const int& E, const int& k, const float& rtol, cons
     using AccumType = Element;
     // 32 <= threads <= 1024
     constexpr int threads = cute::max(cute::min(H, 1024), 32);
-    combineReference<<<1, threads, 0, stream>>>(E, S, H, EC, k, tokens, tIds, expertCounts, ref_result, oracleResult);
+    combineReference<AccumType><<<1, threads, 0, stream>>>(E, S, H, EC, k, tokens, tIds, expertCounts, ref_result, oracleResult);
     // call KUT
     constexpr int cThreads = cute::max(cute::min(bM, 128), 32);
     int bps = 0;
@@ -371,8 +371,8 @@ void kickStart(const int& S, const int& E, const int& k, const float& rtol, cons
 // ./testCombine <S> <E> <topK> <atol> <rtol>
 __host__ __forceinline__
 void doTest(const int argc, char** argv) {
-    int S = 512;
-    int E = 4;
+    int S = 8192;
+    int E = 16;
     int k = 2;
     float rtol = 2e-2f;
     float atol = 2e-3f;
