@@ -14,14 +14,21 @@
 #define OS_CUH
 
 #include <cuda/std/cstddef>
-#include "types.cuh"
 
 #include "infra/heap.cuh"
 #include "scheduler.cuh"
 #include "subscriber.cuh"
 
 namespace flashmoe::os {
+    // Also applies to shared memory banks
+    template<typename Element>
+    requires(128 % sizeof(Element) == 0)
+    __device__ __forceinline__
+    constexpr auto rTCL(uint const& zb) {
+        return cute::ceil_div(zb, 128U / sizeof(Element)) * (128U / sizeof(Element));
+    }
     template<
+        Topology topo,
         int subscriberCount,
         int threads,
         int bM,
@@ -30,16 +37,14 @@ namespace flashmoe::os {
     >
     __device__ __forceinline__
     void start(cuda::std::byte* __restrict__ const& workspace,
-        const Heap& symHeap, const int& EC, // not-padded EC
-        const Bookkeeping& bookkeeping,
+        const Heap& symHeap, const Context& ctx, const int& EC, // not-padded EC
         const int& dispatchBlocks,
-        const int& E, const uint& processors,
-        const uint16_t& seqNumber) {
+        const int& E, const uint& processors) {
         // no funny business
         static_assert(scheduler::WARP_SIZE == subscriber::WARP_SIZE);
-        const auto ssfC = __ldg(bookkeeping.ssFc());
-        const auto* __restrict__ eC = bookkeeping.eC();
-        const auto world = bookkeeping.world;
+        const auto ssfC = ctx.ssFc;
+        const auto* __restrict__ eC = ctx.expertCounts;
+        const auto world = ctx.world;
         const auto nLx = bookkeeping.nLx;
         constexpr auto sNW = subscriberCount / subscriber::WARP_SIZE;
         const auto bSSI = nSI<sNW>(nLx * world) +
@@ -174,7 +179,7 @@ namespace flashmoe::os {
         else {
             // build subscriber::Args args{};
             // subscriber
-            subscriber::start<subscriberCount>(symHeap, {});
+            subscriber::start<topo, subscriberCount, bM, ElementC>(symHeap, {});
         }
     }
 }

@@ -13,6 +13,7 @@
 #ifndef FLASHMOE_CUH
 #define FLASHMOE_CUH
 
+#include "context.cuh"
 #include "types.cuh"
 #include "infra/atomics.cuh"
 

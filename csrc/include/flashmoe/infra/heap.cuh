@@ -16,10 +16,6 @@ namespace flashmoe {
     /// The symmetric tensor from the FlashMoE paper
     struct Heap {
         cuda::std::byte* const sHeap;
-        const int expertSlots;
-        const int EC; // round to multiple of bM
-        const int tokenDim;
-        const int elementBytes;
         Heap(cuda::std::byte* const& _sHeap,
             const int& _expertSlots, const int& _EC,
             const int& _tokenDim, const int& _elementBytes) :
@@ -44,6 +40,11 @@ namespace flashmoe {
         cuda::std::byte* advance(const int& peer, const int& expert, const int& token = 0) const {
                 return sHeap + advanceOffset<stage, cell>(peer, expert, token);
         }
+    private:
+        const int expertSlots;
+        const int EC; // round to multiple of bM
+        const int tokenDim;
+        const int elementBytes;
     };
 }
 #endif //FLASHMOE_HEAP_CUH

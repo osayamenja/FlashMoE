@@ -25,8 +25,8 @@ __global__ void combineKernel(const __grid_constant__ int EC,
     const int* __restrict__ expertCounts, // [E]
     const Element* __restrict__ tokens, // [E, EC, H]
     Element* __restrict__ output, // [S, H]
-    const flashmoe::TPS* __restrict__ tokenIndices, // [E, EC]
-    int* __restrict__ tokenGuards) {
+    const flashmoe::TPS* __restrict__ tokenIndices // [E, EC]
+    ) {
     constexpr int Alignment = flashmoe::ElementAlignment<Element, bN>;
     __shared__ __align__(Alignment) cuda::std::byte workspace [bM * bN * sizeof(Element)];
     const auto tilesM = EC / bM;
@@ -44,14 +44,11 @@ __global__ void combineKernel(const __grid_constant__ int EC,
         const auto expertCount  = expertCounts[expertIdx];
         const auto actualTiles = cute::ceil_div(expertCount, bM) * tilesN;
         if (tileIdx < actualTiles) {
-            // do combine
-            // compute tileSize
             const auto numFullMTiles = expertCount / bM;
-            // below is the actual number of tokens in the tile
             auto* __restrict__ tP = &tokTensor(expertIdx, tileM * bM, 0);
             const auto tileSize = tileM < numFullMTiles ? bM : (expertCount - numFullMTiles * bM);
             flashmoe::combine<bM, bN, Arch, threads, c>(EC, S, E, H, k, workspace,
-                tokenIndices, tokenGuards, output, tP, tileM * bM,
+                tokenIndices, output, tP, tileM * bM,
                 expertIdx, tileSize, tileCoord);
         }
     }
@@ -285,7 +282,6 @@ void kickStart(const int& S, const int& E, const int& k, const float& rtol, cons
     Element* kut_result = nullptr;
     Element* ref_result = nullptr;
     float* oracleResult = nullptr;
-    int* tokenGuards = nullptr;
 
     cudaMallocAsync(&tokens, sizeof(Element) * E * EC * H, stream);
     cudaMallocAsync(&tIds, sizeof(flashmoe::TPS) * E * EC, stream);
@@ -300,10 +296,6 @@ void kickStart(const int& S, const int& E, const int& k, const float& rtol, cons
         cudaMemsetAsync(kut_result, 0, sizeof(Element) * S * H, stream);
         cudaMallocAsync(&oracleResult, sizeof(float) * S * H, stream);
         cudaMemsetAsync(oracleResult, 0, sizeof(float) * S * H, stream);
-        const int vH = flashmoe::getCombineScaledHiddenDim<Arch, bN, Element>(H);
-        cudaMallocAsync(&tokenGuards, sizeof(int)*S*vH, stream);
-        // only need to initialize below once, the kernel resets internally after use
-        cudaMemsetAsync(tokenGuards, flashmoe::STALE_AS_BYTE, sizeof(int)*S*vH, stream);
     }
     CHECK_CUDA(cudaPeekAtLastError());
     // fill token array
@@ -327,7 +319,7 @@ void kickStart(const int& S, const int& E, const int& k, const float& rtol, cons
         blocks = cute::min(((E * EC) / bM) * (H / bN), bps * NUM_SMS);
         combineKernel<Arch, bM, bN, cThreads, flashmoe::CombineMode::plural>
         <<<blocks, cThreads, 0, stream>>>(EC, S, E, H, k,
-            expertCounts, tokens, kut_result, tIds, tokenGuards);
+            expertCounts, tokens, kut_result, tIds);
     }
     else {
         auto kernel = combineKernel<Arch, bM, bN, cThreads, flashmoe::CombineMode::single, Element>;
@@ -335,7 +327,7 @@ void kickStart(const int& S, const int& E, const int& k, const float& rtol, cons
         blocks = cute::min(((E * EC) / bM) * (H / bN), bps * NUM_SMS);
         combineKernel<Arch, bM, bN, cThreads, flashmoe::CombineMode::single>
         <<<blocks, cThreads, 0, stream>>>(EC, S, E, H, k,
-            expertCounts, tokens, kut_result, tIds, tokenGuards);
+            expertCounts, tokens, kut_result, tIds);
     }
     // compare and report error
     using MatXType = MXE<Element>;
@@ -363,7 +355,6 @@ void kickStart(const int& S, const int& E, const int& k, const float& rtol, cons
     cudaFreeAsync(expertCounts, stream);
     cudaFreeAsync(ref_result, stream);
     cudaFreeAsync(oracleResult, stream);
-    cudaFreeAsync(tokenGuards, stream);
     cudaFreeAsync(kut_result, stream);
     CHECK_CUDA(cudaStreamSynchronize(stream));
     cudaStreamDestroy(stream);

@@ -221,16 +221,17 @@ namespace flashmoe::tile
             cublasdx::BlockDim<threads>() +
             cublasdx::StaticBlockDim() +
             cublasdx::SM<Arch, Arch >= 900 ? cublasdx::sm_modifier::arch_specific : cublasdx::sm_modifier::generic>())>;
-        using Threads = cute::C<threads>;
+        using TileArch = cute::Int<Arch>;
+        using Threads = cute::Int<threads>;
         using TileShape = cute::Shape<cute::Int<bM>, cute::Int<bN>, cute::Int<bK>>;
         using SharedSize = cute::Int<bK * pipeStages * (bM + bN) * sizeof(Element)>;
         using GeneralAlignment = cute::Int<MAX_ALIGN>;
         using CArr = cute::C<cr>;
-        using AAlign = cute::C<aAlignment>;
-        using BAlign = cute::C<bAlignment>;
-        using CAlign = cute::C<cAlignment>;
+        using AAlign = cute::Int<aAlignment>;
+        using BAlign = cute::Int<bAlignment>;
+        using CAlign = cute::Int<cAlignment>;
         using AccumType = MMA_C;
-        using PipeStages = cute::C<pipeStages>;
+        using PipeStages = cute::Int<pipeStages>;
 
         template<typename Accumulator, typename TileCoord>
         requires(cute::rank_v<TileCoord> == 3 && cublasdx::is_blas_execution_v<BLAS>)

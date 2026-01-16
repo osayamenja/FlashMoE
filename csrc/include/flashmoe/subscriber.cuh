@@ -23,10 +23,6 @@
 #include "infra/task.cuh"
 
 namespace flashmoe::subscriber{
-    enum class Topology {
-        NVLINK_ONLY,
-        MIXED // NVLink + RDMA
-    };
     constexpr int WARP_SIZE = 32;
     struct __align__(16) Args {
         uint64_t* const flags; // symmetric global
@@ -46,6 +42,7 @@ namespace flashmoe::subscriber{
         const int world; // ep world
         const int nLx; // number of local experts
         const int epRank;
+        const uint roundEC;
         const int E; // number of experts
         const int P; // FFN intermediate size
         const int tilesN0; // tiles across FFN intermediate size
@@ -69,7 +66,7 @@ namespace flashmoe::subscriber{
             const int& _ssfC,
             const int& _gfSfC, const int& _world,
             const int& nLx,
-            const int& _epRank, const int& _experts, const int& _p,
+            const int& _epRank, const uint& _roundEC, const int& _experts, const int& _p,
             const uint threadIdx, const int& _tilesN0, const int& _tilesN1, const int& _eCTilesM,
             const uint16_t seqNo):
         flags(_signals),
@@ -88,7 +85,7 @@ namespace flashmoe::subscriber{
         gfSfC(_gfSfC),
         world(_world),
         nLx(nLx),
-        epRank(_epRank),
+        epRank(_epRank), roundEC(_roundEC),
         E(_experts), P(_p),
         tilesN0(_tilesN0), tilesN1(_tilesN1), ecTilesM(_eCTilesM), ecSignalCount(ecTilesM * tilesN1),
         tIdx(threadIdx),
@@ -122,7 +119,7 @@ namespace flashmoe::subscriber{
             const auto sO = args.ecTilesM * (peer * args.nLx + ingredients.localExpertIdx);
             cuda::std::array<cuda::std::byte*, GEMMs> taskResults{};
             // Staging buffer for results of preGEMM
-            taskResults[0] = args.GEMM0Staging + (peer * args.nLx * heap.EC * args.P * sizeof(Element));
+            taskResults[0] = args.GEMM0Staging + (peer * args.nLx * args.roundEC * args.P * sizeof(Element));
             // Egress packet buffer
             auto* rcData = sHeap + heap.advanceOffset<1, 1>(args.epRank, ingredients.localExpertIdx);
             auto* intraStaging = sHeap + heap.advanceOffset<1, 0>(peer, ingredients.localExpertIdx);
@@ -212,6 +209,7 @@ namespace flashmoe::subscriber{
 
     template<
         SubscriberStage s,
+        Topology topo = Topology::NVLINK_ONLY,
         typename Element,
         int subscriberCount,
         int bM,
@@ -242,7 +240,7 @@ namespace flashmoe::subscriber{
                 if (laneId == 0) {
                     auto visitedSet = bitSet[warpId + vSIdx * sNW];
                     if (!visitedSet.get(vIdx)) {
-                        if (pLI.isRemote) {
+                        if (topo == Topology::MIXED && pLI.isRemote) {
                             // RDMA peer
                             signal = nvshmem_signal_fetch(flags + flagIdx);
                             const auto sigPayload = cuda::std::bit_cast<SignalPayload<PacketStage::initial>>(signal);
@@ -321,18 +319,18 @@ namespace flashmoe::subscriber{
                     ingredients.peerIdx = pLI.pe;
                     // pad here for compatibility
                     ingredients.M = cute::ceil_div(sigPayload.routedTokens, bM) * bM;
-                    if (!pLI.isRemote) {
-                        auto* nFlags = pLI.remoteSFlags + args.gfSfC + lXI.expertIndex * (args.ecTilesM * args.tilesN1);
-                        // fpd
-                        ingredients.isPeerRemote = 0;
-                        fPd(args, symHeap, pLI.remoteSHeap, ingredients, nFlags, packet,
-                            sigPayload.routedTokens, peerIdx, laneId, ltQHead);
-                    }
-                    else {
+                    if (topo == Topology::MIXED && pLI.isRemote) {
                         auto* nFlags = args.flags + args.gfSfC + lXI.expertIndex * (args.ecTilesM * args.tilesN1);
                         // frd
                         ingredients.isPeerRemote = 1;
                         fRd(args, symHeap, symHeap.sHeap, ingredients, nFlags, packet,
+                            sigPayload.routedTokens, peerIdx, laneId, ltQHead);
+                    }
+                    else {
+                        auto* nFlags = pLI.remoteSFlags + args.gfSfC + lXI.expertIndex * (args.ecTilesM * args.tilesN1);
+                        // fpd
+                        ingredients.isPeerRemote = 0;
+                        fPd(args, symHeap, pLI.remoteSHeap, ingredients, nFlags, packet,
                             sigPayload.routedTokens, peerIdx, laneId, ltQHead);
                     }
                 }
@@ -341,7 +339,7 @@ namespace flashmoe::subscriber{
     };
 
     template<int subscriberCount, int bM, typename Element>
-    struct Subscriber<SubscriberStage::final, Element, subscriberCount, bM> {
+    struct Subscriber<SubscriberStage::final, Topology::MIXED, Element, subscriberCount, bM> {
         __device__ __forceinline__
         void operator()(const Args& args,
             BitSet* __restrict__ const& bitSet, uint64_t* __restrict__ const& flags,
@@ -488,7 +486,93 @@ namespace flashmoe::subscriber{
         }
     };
 
+    template<int subscriberCount, int bM, typename Element>
+    struct Subscriber<SubscriberStage::final, Topology::NVLINK_ONLY, Element, subscriberCount, bM> {
+        // every peer is P2P-connected
+        __device__ __forceinline__
+        void operator()(const Args& args,
+            BitSet* __restrict__ const& bitSet, uint64_t* __restrict__ const& flags,
+            int& ltQHead, const int& stageLength) const {
+            constexpr int wSet = 16;
+            constexpr int bSw = sizeof(uint) * 8U;
+            static_assert(wSet == 16 || wSet == 32);
+            const int stageTrips = stageLength / wSet;
+            constexpr Decoder<subscriberCount, PacketStage::last, PeerConnectivity::p2p> lPd{};
+            constexpr Decoder<subscriberCount, PacketStage::last, PeerConnectivity::remote> lRd{};
+            for (int i = 0; i < stageTrips; ++i) {
+                const uint sBIdx = args.tIdx + (i * wSet / bSw) * subscriberCount;
+                auto sBS = bitSet[sBIdx];
+                #pragma unroll
+                for (uint j = 0; j < wSet; ++j) {
+                    const auto slotIdx = i * wSet + j;
+                    const uint bIdx = (i * wSet + j) % bSw;
+                    const auto flagIdx = args.tIdx + slotIdx * subscriberCount;
+                    const auto expertIdx = flagIdx / args.ecSignalCount;
+                    const auto lookup = args.eL[expertIdx];
+                    if (!sBS.get(bIdx)) {
+                        // NVLink peer
+                        cuda::atomic_ref<uint64_t, cuda::thread_scope_system> f{*(flags + flagIdx)};
+                        const auto sigPayload = cuda::std::bit_cast<SignalPayload<PacketStage::last>>(
+                            f.load(cuda::memory_order_acquire));
+                        if (sigPayload.seqNumber == args.seqNumber) {
+                            sBS.set(bIdx);
+                            const auto tokenIdx = sigPayload.batchIdx * bM;
+                            // construct combine ingredients
+                            Ingredients ingredients{};
+                            ingredients.expertIdx = expertIdx;
+                            ingredients.M = tokenIdx;
+                            ingredients.localExpertIdx = lookup.localExpertIndex;
+                            ingredients.peerIdx = args.epRank;
+                            ingredients.tileSize = sigPayload.tokensM;
+                            ingredients.stash = flagIdx % args.tilesN1;
+                            ingredients.taskType = TaskType::combine;
+                            ingredients.isPeerRemote = 0;
+                            lPd(args, ingredients, ltQHead);
+                        }
+                    }
+                }
+                bitSet[sBIdx] = sBS;
+            }
+            if (const auto residue = stageLength - stageTrips * wSet; residue) {
+                const uint sBIdx = args.tIdx + (stageTrips * wSet / bSw) * subscriberCount;
+                auto sBS = bitSet[sBIdx];
+                #pragma unroll
+                for (uint j = 0; j < wSet; ++j) {
+                    if (j < residue) {
+                        const uint bIdx = (stageTrips * wSet + j) % bSw;
+                        const auto slotIdx = stageTrips * wSet + j;
+                        const auto flagIdx = args.tIdx + slotIdx * subscriberCount;
+                        const auto expertIdx = flagIdx / args.ecSignalCount;
+                        const auto lookup = args.eL[expertIdx];
+                        if (!sBS.get(bIdx)) {
+                            cuda::atomic_ref<uint64_t, cuda::thread_scope_system> f{*(flags + flagIdx)};
+                            const auto sigPayload = cuda::std::bit_cast<SignalPayload<PacketStage::last>>(
+                                f.load(cuda::memory_order_acquire));
+                            if (sigPayload.seqNumber == args.seqNumber) {
+                                sBS.set(bIdx);
+                                const auto tokenIdx = sigPayload.batchIdx * bM;
+                                // construct combine ingredients
+                                Ingredients ingredients{};
+                                ingredients.M = tokenIdx;
+                                ingredients.localExpertIdx = lookup.localExpertIndex;
+                                ingredients.peerIdx = args.epRank;
+                                ingredients.tileSize = sigPayload.tokensM;
+                                ingredients.stash = flagIdx % args.tilesN1;
+                                ingredients.taskType = TaskType::combine;
+                                ingredients.isPeerRemote = 0;
+                                lPd(args, ingredients, ltQHead);
+                            }
+                        }
+                    }
+                }
+                // update bitset
+                bitSet[sBIdx] = sBS;
+            }
+        }
+    };
+
     template<
+        Topology topo,
         unsigned int subscriberCount,
         int bM,
         typename Element
@@ -505,9 +589,10 @@ namespace flashmoe::subscriber{
         auto fSp = fSl; // first stage pending
 
         // second stage
+        //assert(args.ssfC == args.E * args.ecSignalCount);
         const auto ssL = args.ssfC / subscriberCount + (args.tIdx < args.ssfC % subscriberCount);
-        constexpr Subscriber<SubscriberStage::initial, Element, subscriberCount, bM> initialSubscriber{};
-        constexpr Subscriber<SubscriberStage::final, Element, subscriberCount, bM> finalSubscriber{};
+        constexpr Subscriber<SubscriberStage::initial, topo, Element, subscriberCount, bM> initialSubscriber{};
+        constexpr Subscriber<SubscriberStage::final, topo, Element, subscriberCount, bM> finalSubscriber{};
         const auto pSI = nSI<subscriberCount>(args.ssfC);
 
         cuda::atomic_ref<int, cuda::thread_scope_block> interrupt{*args.interrupt};

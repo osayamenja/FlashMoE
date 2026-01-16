@@ -9,25 +9,17 @@
 #ifndef FLASHMOE_MOE_CUH
 #define FLASHMOE_MOE_CUH
 
-#include "arch.cuh"
-#include "../../tests/debug.cuh"
-#include "os.cuh"
+#include "infra/activation.cuh"
+#include "context.cuh"
+#include "dispatch.cuh"
 #include "processor.cuh"
-#include "moe/fffn.cuh"
+#include "os.cuh"
+#include "scheduler.cuh"
+#include "subscriber.cuh"
 #include "gate.cuh"
-#include "infra/telemetry.cuh"
 
 namespace flashmoe::moe{
-    __device__ __forceinline__
-    void gridBarrier() {
-        __syncthreads();
-        if (!threadIdx.x) {
-            __threadfence();
-            bookkeeping.dB()->arrive_and_wait();
-        }
-        __syncthreads();
-    }
-
+    using ull_t = unsigned long long int;
     template<
         int arch, //  GPU Architecture, Volta - Blackwell (700 - 1200), See cuBLASDx docs
         int _threads, // see tile::suggest_thread_count
@@ -42,9 +34,9 @@ namespace flashmoe::moe{
         static_assert(cute::is_tuple_v<GateTile> && cute::rank_v<GateTile> == 4);
         using GTS = GateTile;
         static_assert(cute::is_tuple_v<GEMM0Tile> && cute::rank_v<GEMM0Tile> == 4);
-        using G1TS = GEMM0Tile;
+        using G0TS = GEMM0Tile;
         static_assert(cute::is_tuple_v<GEMM1Tile> && cute::rank_v<GEMM1Tile> == 4);
-        using G2TS = GEMM1Tile;
+        using G0TS = GEMM1Tile;
         static_assert(cute::get<0>(GateTile{}) == cute::get<0>(GEMM0Tile{}) &&
             cute::get<0>(GEMM0Tile{}) == cute::get<0>(GEMM1Tile{}));
         using Arch = cute::Int<arch>;
@@ -56,8 +48,11 @@ namespace flashmoe::moe{
 
     template<
         typename Config,
+        Activation a,
+        Topology topo,
         bool doGate,
-        typename Element
+        typename Element,
+        typename ElementC
     >
     __global__ __launch_bounds__(Config::Threads::value, 1) void forward(
         const __grid_constant__ int S, // sequence length
@@ -65,32 +60,78 @@ namespace flashmoe::moe{
         const __grid_constant__ int I, // FFN intermediate size
         const __grid_constant__ int E, // total number of experts
         const __grid_constant__ int k, // top k
-        const Element* __restrict__ _tokens, // [S, H]
-        const Element* __restrict__ _gateWeights, // [H, E]
-        const Element* __restrict__ _expertUpWeights, // [H, I]
-        const Element* __restrict__ _biasUp, // [I]
-        const Element* __restrict__ _expertDownWeights, // [I, H]
-        const Element* __restrict__ _biasDown, // [H]
-        Element* __restrict__ _gateOut, // [S, E]
-        Element* __restrict__ _moeOut, //  [S, H]
-        const __grid_constant__ Bookkeeping bookkeeping) {
+        const __grid_constant__ int EC, // expert capacity
+        const Element* __restrict__ tokens, // [S, H]
+        const Element* __restrict__ gateWeights, // [H, E]
+        const Element* __restrict__ expertUpWeights, // [H, I]
+        const Element* __restrict__ biasUp, // [I]
+        const Element* __restrict__ expertDownWeights, // [I, H]
+        const Element* __restrict__ biasDown, // [H]
+        Element* __restrict__ gateOut, // [S, E]
+        ElementC* __restrict__ moeOut, //  [S, H]
+        const __grid_constant__ Heap& symHeap,
+        const __grid_constant__ Context ctx) {
+        extern __shared__ __align__(MAX_ALIGNMENT) cuda::std::byte flashWorkspace[];
+        constexpr int bM0 = cute::get<0>(Config::G0TS{});
+        constexpr int bN0 = cute::get<1>(Config::G0TS{});
+        constexpr int bK0 = cute::get<2>(Config::G0TS{});
+        constexpr int pS0 = cute::get<3>(Config::G0TS{});
+
+        constexpr int bM1 = cute::get<0>(Config::G1TS{});
+        constexpr int bN1 = cute::get<1>(Config::G1TS{});
+        constexpr int bK1 = cute::get<2>(Config::G1TS{});
+        constexpr int pS1 = cute::get<3>(Config::G1TS{});
+        static_assert(bM0 == bM1);
+        constexpr int bM = bM0;
+        const auto roundEC = cute::ceil_div(EC, bM) * bM;
         if constexpr (doGate) {
             gate::forward<
                 Config::GTS,
                 Config::Arch::value,
-                Config::GRL::value>(_tokens, _gateWeights, _gateOut);
-            gridBarrier();
+                Config::GRL::value>(flashWorkspace, tokens, gateWeights, gateOut,
+                    ctx.tokenIndices, ctx.expertCounts, ctx.ecGuards,
+                    S, H, E, k, EC, roundEC, gridDim.x, ctx.ssp, ctx.rtp);
+            gridBarrier(ctx.db);
         }
-        if (blockIdx.x + 1 < gridDim.x) {
-            //if (blockIdx.x < ACC::DBZ::value) {
-                // MoE dispatch
-                //packet::dispatch<ACC::DBZ::value, Config::DTK::value, ACC::SBZ::value>(activations, workspace, sb);
-            //}
-            //processor::start(workspace, gateOutput, moeOutput, sb);
+        constexpr int threads = Config::Threads::value;
+        const int processors = gridDim.x - 1;
+        const int superBlockSize = cute::min(cute::ceil_div(128, cute::max(E, 4)), processors);
+        const int dispatchBlocks = (processors / superBlockSize) * superBlockSize;
+        if (blockIdx.x == gridDim.x - 1) {
+            // call OS
+            constexpr auto subscriberCount = threads - scheduler::SCHEDULER_COUNT;
+            static_assert(subscriberCount > 0 && subscriberCount % subscriber::WARP_SIZE == 0);
+            os::start<topo, subscriberCount, threads, bM, ElementC>(flashWorkspace, symHeap, ctx, EC,
+                dispatchBlocks, E, processors);
+            return;
         }
-        else {
-            //os::start<Config::DTK::value>(expertsUp, expertsDown, biasUp, biasDown, sb);
+        if (blockIdx.x < dispatchBlocks) {
+            // dispatch
+            dispatch<topo, Config::Threads::value, bM, bN0, Config::DTK::value>(H, E, symHeap, EC, roundEC,
+                ctx.epRank, ctx.world, superBlockSize, dispatchBlocks, tokens, ctx.signals, ctx.expertCounts,
+                ctx.tokenIndices, ctx.dispatchSync, ctx.pel, flashWorkspace, ctx.seqNumber);
         }
+        // processor;
+        const auto pA = processor::ProcessorArgs{
+            ctx.statusQueue + blockIdx.x,
+            ctx.tqs + blockIdx.x,
+            ctx.gTqHeads,
+            ctx.tQ,
+            ctx.pTq,
+            ctx.tileSync
+        };
+        using GEMM0Act = ActivationType<a>;
+        using AccumType = float;
+        const auto tilesN0 = I / bN0;
+        const auto tielsN1 = H / bN1;
+
+        constexpr int arch = Config::Arch::value;
+        using TileGEMM0 = tile::CollectiveMainloop<bM0, bN0, bK0, arch, Element, AccumType, threads, pS0>;
+        using TileGEMM1 = tile::CollectiveMainloop<bM1, bN1, bK1, arch, Element, AccumType, threads, pS1>;
+        static_assert(cuda::std::is_invocable_r_v<AccumType, GEMM0Act, AccumType>, "Activation should be elementwise");
+        processor::start<topo, threads, Config::CM::value, TileGEMM0, TileGEMM1, GEMM0Act>
+        (flashWorkspace, S, H, I, E, k, roundEC, tilesN0, tielsN1, expertUpWeights, biasUp,
+            expertDownWeights, biasDown,ctx.tokenIndices, moeOut, ctx.seqNumber, symHeap, pA);
     }
 }
 #endif //FLASHMOE_MOE_CUH

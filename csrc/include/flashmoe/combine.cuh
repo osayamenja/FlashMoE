@@ -11,21 +11,6 @@
 
 namespace flashmoe
 {
-    template<int Arch, int bN, typename Element>
-    __host__ __device__ __forceinline__
-    constexpr auto getCombineScaledHiddenDim(const int& H) {
-        using RAD = RedAddType<Element, ElementAlignment<Element, bN>>;
-        using RAT = RAD::Type;
-        constexpr int bNp = bN / RAD::Width::value;
-        static_assert(RAD::Width::value == 1 || RAD::Width::value == 2);
-
-        constexpr int maxVectorWidth = ElementAlignment<RAT, bNp> / sizeof(RAT);
-        using RedAddOp = RedAdd<RedArch<Arch>, RAT, maxVectorWidth>;
-        using RVD = VectorTypeDescriptor<RAT, RedAddOp::VectorWidth::value * sizeof(RAT)>;
-
-        constexpr int totalVecWidth = RVD::VectorWidth::value * RAD::Width::value;
-        return H / totalVecWidth;
-    }
     enum class CombineMode {
         single, // top k = 1
         plural // top k > 1
@@ -55,8 +40,8 @@ namespace flashmoe
     void combine(const int& EC, const int& S, const int& E, const int& H, const int& k,
         void* __restrict__ const& workspace,
         const TPS* __restrict__ const& tokenIndices, // [E, EC], where EC is padded to a multiple of bM
-        Element* __restrict__ const& moeOutput, // [S, H]
-        const Element* __restrict__ const& tokens, // [bM, H]
+        Element* __restrict__ const& moeOutput, // [S, H] in local HBM
+        const Element* __restrict__ const& tokens, // [bM, H] in local HBM
         const uint& tokenBatchStart, const uint& expertIdx,
         const uint& tileSize, const TileCoord& tileCoord) {
         static_assert(cute::rank_v<TileCoord> == 2);

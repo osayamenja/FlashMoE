@@ -5,6 +5,10 @@
 #ifndef FLASHMOE_SIGNAL_CUH
 #define FLASHMOE_SIGNAL_CUH
 namespace flashmoe {
+    enum class Topology: uint16_t {
+        NVLINK_ONLY,
+        MIXED // NVLink + RDMA
+    };
     enum class PeerConnectivity {
         remote,
         p2p

@@ -122,6 +122,7 @@ namespace flashmoe::processor{
     }
 
     template<
+        Topology topo,
         int threads,
         CombineMode combineMode,
         typename TileGEMM0, // Descriptor for GEMM0
@@ -136,6 +137,7 @@ namespace flashmoe::processor{
         const int& I, // FFN intermediate size
         const int& E, // total number of experts
         const int& k, // top k
+        const int& roundEC,
         const uint& tilesN0, // I / bN0
         const uint& tilesN1, // H / bN1
         const Element* __restrict__ const& expertUpWeights, // [num_local_experts, H, I]
@@ -145,8 +147,7 @@ namespace flashmoe::processor{
         const TPS* __restrict__ const& tokenIds, // [E, roundEC]
         Element* __restrict__ const& moeOutput,
         const uint16_t& seqNumber,
-        const Heap& symHeap,
-        const Bookkeeping& bookkeeping){
+        const Heap& symHeap, const ProcessorArgs& pA){
         __shared__ Task currentTask;
         __shared__ uint globalInterrupt;
         __shared__ uint enqueue;
@@ -156,14 +157,6 @@ namespace flashmoe::processor{
         static_assert(sizeof(TQSignal) == sizeof(uint64_t) && alignof(TQSignal) == alignof(uint64_t));
         static_assert(sizeof(SignalPayload<PacketStage::last>) == sizeof(uint64_t) &&
             alignof(SignalPayload<PacketStage::last>) == alignof(uint64_t));
-        const auto pA = ProcessorArgs{
-            bookkeeping.sQ() + blockIdx.x,
-            bookkeeping.pDB() + blockIdx.x,
-            bookkeeping.tQH(),
-            bookkeeping.tQ(),
-            bookkeeping.ptQ(),
-            bookkeeping.tSA()
-        };
         if (!threadIdx.x) {
             atomicExch_block(&globalInterrupt, 0U);
             atomicExch_block(&enqueue, 0U);
@@ -196,7 +189,6 @@ namespace flashmoe::processor{
                     // replace old payload with new one
                     tqs = payload;
                 }
-                // The below is necessary as it ensures memory ordering
                 __syncwarp();
                 auto payload = cuda::std::bit_cast<uint64_t>(tqs);
                 // broadcast new payload from thread 0 to other threads in the warp
@@ -225,7 +217,7 @@ namespace flashmoe::processor{
                             cuda::atomic_ref<uint, cuda::thread_scope_device> tileSync{*(pA.tQS + task.syncIdx)};
                             const auto isLast = tileSync.fetch_add(1, cuda::memory_order_acq_rel) + 1 == tilesN0;
                             enqueue = isLast;
-                            if (isLast && !task.isPeerRemote()) {
+                            if (isLast && (topo == Topology::NVLINK_ONLY || !task.isPeerRemote())) {
                                 // clear the counter as it would no longer be used in this epoch
                                 tileSync.store(0, cuda::memory_order_relaxed);
                             }
@@ -234,11 +226,11 @@ namespace flashmoe::processor{
                         if (enqueue) {
                             const auto offset = tilesN1 * task.flagBatchIdx();
                             auto* __restrict__ tQ = pA.ptQ + (task.syncIdx * tilesN1);
-                            if (!task.isPeerRemote()) {
-                                notifyNext<PeerConnectivity::p2p,threads>(workspace, task, tQ, tilesN1, offset, pA.tQH);
+                            if (topo == Topology::MIXED && task.isPeerRemote()) {
+                                notifyNext<PeerConnectivity::remote,threads>(workspace, task, tQ, tilesN1, offset, pA.tQH);
                             }
                             else {
-                                notifyNext<PeerConnectivity::remote,threads>(workspace, task, tQ, tilesN1, offset, pA.tQH);
+                                notifyNext<PeerConnectivity::p2p,threads>(workspace, task, tQ, tilesN1, offset, pA.tQH);
                             }
                         }
                         __syncthreads();
@@ -260,7 +252,7 @@ namespace flashmoe::processor{
                                 seqNumber,
                             };
                             const auto sigPayload = cuda::std::bit_cast<uint64_t>(flagSignal);
-                            if (task.isPeerRemote()) {
+                            if (topo == Topology::MIXED && task.isPeerRemote()) {
                                 // Remote; check if we need to do the transfer
                                 cuda::atomic_ref<uint, cuda::thread_scope_device> tileSync{*(pA.tQS + task.syncIdx)};
                                 const auto doTransfer = tileSync.fetch_add(1,
@@ -292,10 +284,14 @@ namespace flashmoe::processor{
                     case TaskType::combine: {
                         const auto tileCoord = cute::make_coord(cute::_0{}, task.combineTileIdx());
                         const auto* __restrict__ tokens = reinterpret_cast<Element*>(symHeap.advance<1,1>(task.epRank(),
-                            task.localExpertIdx(), task.tokenBatchStart()));
-                        // TOOD clean up
-                        combine<TileGEMM1, threads, combineMode>(symHeap, workspace, tokenIds, S, E, H,
-                            moeOutput, task);
+                            task.localExpertIdx(), static_cast<int>(task.tokenBatchStart())));
+                        using Tiler = TileGEMM1::TileShape;
+                        constexpr int bM = cute::get<0>(Tiler{});
+                        constexpr int bN = cute::get<1>(Tiler{});
+                        constexpr int Arch = TileGEMM1::TileArch;
+                        combine<bM, bN, Arch, threads, combineMode>(roundEC, S, E, H, k,
+                            workspace, tokenIds, moeOutput, tokens,
+                            task.tokenBatchStart(), task.expertIdx(), task.tileSize(), tileCoord);
                     }
                     break;
                 }

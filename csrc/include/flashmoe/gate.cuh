@@ -79,7 +79,7 @@ namespace flashmoe::gate {
             ElementC* __restrict__ routing, const int& tileIdx,
             TPS* __restrict__ const& _tokenIds, int* __restrict__ const& expertCounts,
             int* __restrict__ const& eCGuards,
-            const int& S, const int& H, const int& E, const int& k, const int& expertCap,
+            const int& S, const int& H, const int& E, const int& k, const int& expertCap, const int& roundEC,
             SoftmaxStatePacked* __restrict__ const& _rSp,
             RingTopKPayload* __restrict__ const& _rTp) {
             constexpr int threads = TileGEMM::Threads::value;
@@ -89,7 +89,7 @@ namespace flashmoe::gate {
             constexpr auto bN = cute::get<1>(typename TileGEMM::TileShape{});
             constexpr auto bK = cute::get<2>(typename TileGEMM::TileShape{});
             const auto tokenIds = make_tensor(cute::make_gmem_ptr(_tokenIds),
-                cute::make_layout(cute::make_shape(E, expertCap), cute::LayoutRight{}));
+                cute::make_layout(cute::make_shape(E, roundEC), cute::LayoutRight{}));
             // assert(S % bM == 0)
             const auto tilesM = S / bM;
             // assert(E % bN == 0)
@@ -382,7 +382,7 @@ namespace flashmoe::gate {
             int* __restrict__ const& expertCounts,
             int* __restrict__ const& eCGuards,
             const int& S, const int& H, const int& E,
-            const int& k,const int& expertCap) {
+            const int& k,const int& expertCap, const int& roundEC) {
             constexpr int threads = TileGEMM::Threads::value;
             constexpr TileGEMM tileMainloop{};
             auto accumulator = TileGEMM::BLAS::suggest_accumulator();
@@ -390,7 +390,7 @@ namespace flashmoe::gate {
             constexpr auto bN = cute::get<1>(typename TileGEMM::TileShape{});
             constexpr auto bK = cute::get<2>(typename TileGEMM::TileShape{});
             const auto tokenIds = make_tensor(cute::make_gmem_ptr(_tokenIds),
-                cute::make_layout(cute::make_shape(E, expertCap), cute::LayoutRight{}));
+                cute::make_layout(cute::make_shape(E, roundEC), cute::LayoutRight{}));
             const auto tilesM = S / bM;
             constexpr int tilesN = 1;
             const auto tilesK = H / bK;
@@ -560,7 +560,7 @@ namespace flashmoe::gate {
         TPS* __restrict__ const& tokenIds,
         int* __restrict__ const& expertCounts,
         int* __restrict__ eCGuards,
-        const int& S, const int& H, const int& E, const int& k, const int& EC,
+        const int& S, const int& H, const int& E, const int& k, const int& EC, const int& roundEC,
         const int& blocks,
         SoftmaxStatePacked* __restrict__ const& rSp = nullptr, // only needed for grl == multiblock
         RingTopKPayload* __restrict__ const& rTp = nullptr // only needed for grl == multiblock
@@ -575,7 +575,7 @@ namespace flashmoe::gate {
         for (int i = static_cast<int>(blockIdx.x); i < nT; i += blocks) {
             if constexpr (grl == GateReductionLevel::singleBlock) {
                 gateMainLoop(workspace, tokens, _gateWeights, _routing, i,
-                    tokenIds, expertCounts, eCGuards, S, H, E, k, EC);
+                    tokenIds, expertCounts, eCGuards, S, H, E, k, EC, roundEC);
             }
             else {
                 gateMainLoop(workspace, tokens, _gateWeights, _routing, i,

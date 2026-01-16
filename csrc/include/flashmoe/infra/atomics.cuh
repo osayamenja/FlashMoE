@@ -78,5 +78,29 @@ namespace flashmoe{
         }
         return atomicAdd(vals, val);
     }
+
+    enum class SentinelScope {
+        invalid
+    };
+    template<class T>
+    struct ScopeOf {
+        using Scope = cuda::std::integral_constant<SentinelScope, SentinelScope::invalid>;
+    };
+    template<cuda::thread_scope _Sco, class... Args>
+    struct ScopeOf<cuda::barrier<_Sco, Args...>> {
+        using Scope = cuda::std::integral_constant<cuda::thread_scope, _Sco>;
+    };
+    template<typename CudaBarrier>
+    __device__ __forceinline__
+    void gridBarrier(CudaBarrier* const& db) {
+        __syncthreads();
+        static_assert(ScopeOf<cuda::std::remove_cvref_t<CudaBarrier>>::Scope::value == cuda::thread_scope_device,
+            "Expects device-scope barrier");
+        if (!threadIdx.x) {
+            __threadfence();
+            db->arrive_and_wait();
+        }
+        __syncthreads();
+    }
 }
 #endif //CSRC_ATOMICS_CUH
