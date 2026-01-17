@@ -43,7 +43,6 @@ namespace flashmoe {
         return (p.d_bits >> 31) != 0;
     }
 
-    __device__
     struct __align__(8) RingTopKPayload {
         uint32_t sV = 0U; // raw fp32 bits
         uint32_t sIdx = 0U; // raw index bits, sign bit used as signal

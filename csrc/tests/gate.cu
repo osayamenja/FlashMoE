@@ -377,6 +377,7 @@ void driver(const int& S, const int& E, const int& H, const int& k, const float&
     cudaFreeAsync(routing, stream);
     cudaFreeAsync(tokenIds, stream);
     cudaFreeAsync(eCounts, stream);
+    cudaFreeAsync(eCGuards, stream);
     if (checkCorrectness) {
         cudaFreeAsync(routing_ref, stream);
         cudaFreeAsync(tokenIds_idx, stream);

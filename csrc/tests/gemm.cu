@@ -100,12 +100,12 @@ auto reference(void* const& a, void* const& b,
     const auto ep =  (1.0 - (static_cast<double>(num_matches()) / static_cast<double>(M*N))) * 100;
     // warmup
     for (int i = 0; i < warmup; ++i) {
-        (tC = matx::apply(Activation{}, (matx::matmul(tA, tB) + tBias))).run(exec);
+        (tC = matx::apply(Activation{}, (matx::matmul(tA, tB.PermuteMatrix()) + tBias))).run(exec);
     }
     exec.sync();
     exec.start_timer();
     for (int i = 0; i < runs; ++i) {
-        (tC = matx::apply(Activation{}, (matx::matmul(tA, tB) + tBias))).run(exec);
+        (tC = matx::apply(Activation{}, (matx::matmul(tA, tB.PermuteMatrix()) + tBias))).run(exec);
     }
     exec.stop_timer();
     exec.sync();

@@ -55,15 +55,15 @@ include(CheckCompilerFlag)
 check_compiler_flag(CUDA -t4 NVCC_THREADS)
 
 find_package(CUDAToolkit REQUIRED)
-string(SUBSTRING "${CMAKE_CUDA_ARCHITECTURES_NATIVE}" 0 2 ARCH) # xx-real -> xx
+string(REGEX MATCH "^[0-9]+" ARCH "${CMAKE_CUDA_ARCHITECTURES_NATIVE}") # xx-real -> xx
 math(EXPR GPU_ARCH "${ARCH} * 10" OUTPUT_FORMAT DECIMAL)
 message(STATUS "GPU 0 Compute Capability: ${ARCH}")
-set(ENV{CUTLASS_NVCC_ARCHS} "${ARCH}")
 
 set(ARCH_TAG "${ARCH}")
 if(ARCH GREATER_EQUAL 90)
     string(APPEND ARCH_TAG "a") # accelerated arch-specific instruction set
 endif()
+set(ENV{CUTLASS_NVCC_ARCHS} "${ARCH_TAG}")
 
 set(ENV{CPM_SOURCE_CACHE} "./cmake/cache")
 set(CCCL_ENABLE_UNSTABLE ON)

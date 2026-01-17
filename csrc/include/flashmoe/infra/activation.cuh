@@ -20,10 +20,14 @@ namespace flashmoe
         using AT = cublasdx::identity;
     };
 
-    template<>
+    template<typename Element>
     struct ActivationType<Activation::relu> {
-        using AT = cublasdx::identity;
+        using AT = cutlass::epilogue::thread::ReLU<Element>;
+    };
 
+    template<typename Element>
+    struct ActivationType<Activation::gelu> {
+        using AT = cutlass::epilogue::thread::GELU<Element>;
     };
 }
 #endif //FLASHMOE_ACTIVATION_CUH

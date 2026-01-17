@@ -36,7 +36,7 @@ namespace flashmoe::moe{
         static_assert(cute::is_tuple_v<GEMM0Tile> && cute::rank_v<GEMM0Tile> == 4);
         using G0TS = GEMM0Tile;
         static_assert(cute::is_tuple_v<GEMM1Tile> && cute::rank_v<GEMM1Tile> == 4);
-        using G0TS = GEMM1Tile;
+        using G1TS = GEMM1Tile;
         static_assert(cute::get<0>(GateTile{}) == cute::get<0>(GEMM0Tile{}) &&
             cute::get<0>(GEMM0Tile{}) == cute::get<0>(GEMM1Tile{}));
         using Arch = cute::Int<arch>;
@@ -130,7 +130,7 @@ namespace flashmoe::moe{
         using TileGEMM0 = tile::CollectiveMainloop<bM0, bN0, bK0, arch, Element, AccumType, threads, pS0>;
         using TileGEMM1 = tile::CollectiveMainloop<bM1, bN1, bK1, arch, Element, AccumType, threads, pS1>;
         static_assert(cuda::std::is_invocable_r_v<AccumType, GEMM0Act, AccumType>, "Activation should be elementwise");
-        // TODO create or
+        // TODO create processot r bi
         processor::start<topo, threads, Config::CM::value, TileGEMM0, TileGEMM1, GEMM0Act>
         (flashWorkspace, S, H, I, E, k, roundEC, tilesN0, tielsN1, expertUpWeights, biasUp,
             expertDownWeights, biasDown,ctx.tokenIndices, moeOut, ctx.stateNumber, symHeap, pA);

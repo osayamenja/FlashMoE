@@ -24,7 +24,6 @@
 #include "comps/worker.cuh"
 
 namespace flashmoe{
-    __device__
     enum class JobType : uint8_t {
         training,
         inference

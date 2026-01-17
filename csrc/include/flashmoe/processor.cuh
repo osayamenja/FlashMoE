@@ -281,7 +281,7 @@ namespace flashmoe::processor{
                             }
                             else {
                                 // flip the bit
-                                producerBitMap(task.localPeerIdx(), task.localExpertIdx(), mCoord, nCoord) = producerBit == 1 ? 0 : 1;
+                                producerBitMap(task.localPeerIdx(), task.localExpertIdx(), mCoord, nCoord) = producerBit;
                                 // individual tile, no batching here
                                 // Already did the network transfer,
                                 // so set signal only

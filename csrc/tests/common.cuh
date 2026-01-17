@@ -115,7 +115,7 @@ __global__ void generateRandUniform(
 
     constexpr Converter<Element, float> storeOp{};
 
-    if constexpr (!predicate) {
+    if constexpr (predicate) {
         // n % 4 == 0
         using VTD = VectorTypeDescriptor<Element, vF * sizeof(Element)>;
         using VT = VTD::VectorType;

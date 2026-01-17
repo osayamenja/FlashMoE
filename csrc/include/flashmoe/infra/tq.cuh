@@ -6,26 +6,24 @@
 #define FLASHMOE_TQ_CUH
 namespace flashmoe
 {
-    __device__
     enum SchedulerConstants : uint {
         interruptSignal = 0,
         tQHeadGroundState = 0
     };
 
     // rq
-    __device__
     enum ReadySignal : uint {
         observed,
         ready,
         COUNT = 2
     };
-    __device__
+
     struct __align__(8) TQState {
         uint tQTail;
         uint tasks;
     };
 
-    __device__
+
     struct __align__(8) TQSignal{
         uint signal; // one ahead
         uint interrupt;

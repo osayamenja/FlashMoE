@@ -579,7 +579,7 @@ namespace flashmoe::gate {
             }
             else {
                 gateMainLoop(workspace, tokens, _gateWeights, _routing, i,
-                    tokenIds, expertCounts, eCGuards, S, H, E, k, EC, rSp, rTp);
+                    tokenIds, expertCounts, eCGuards, S, H, E, k, EC, roundEC, rSp, rTp);
             }
         }
     }

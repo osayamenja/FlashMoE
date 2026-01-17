@@ -19,13 +19,12 @@ namespace flashmoe {
         sequenceStart = 1U,
      };
 
-    __device__
-        enum class PacketStage: uint {
+    enum class PacketStage: uint {
         initial,
         last,
     };
+
     template<PacketStage p = PacketStage::initial>
-    __device__
     struct __align__(8) SignalPayload {
         static_assert(p == PacketStage::initial);
         uint routedTokens;
@@ -45,7 +44,6 @@ namespace flashmoe {
     };
 
     template<>
-    __device__
     struct __align__(8) SignalPayload<PacketStage::last> {
         uint batchIdx;
         uint16_t tokensM; // <= BLOCK_M

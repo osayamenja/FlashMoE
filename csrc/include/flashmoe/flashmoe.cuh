@@ -14,7 +14,6 @@
 #define FLASHMOE_CUH
 
 #include "context.cuh"
-#include "types.cuh"
 #include "infra/atomics.cuh"
 
 #include "scheduler.cuh"
@@ -23,7 +22,6 @@
 
 #include "moe.cuh"
 #include "infra/bitset.cuh"
-#include "bootstrap.cuh"
 #include "combine.cuh"
 #include "dispatch.cuh"
 #include "infra/signal.cuh"

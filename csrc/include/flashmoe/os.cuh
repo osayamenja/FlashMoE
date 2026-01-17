@@ -86,18 +86,18 @@ namespace flashmoe::os {
         auto* __restrict__ interrupt = reinterpret_cast<uint*>(workspace + offset);
         offset += sizeof(uint) * subscriberCount;
         auto* __restrict__ rQ = reinterpret_cast<uint*>(workspace + offset);
-        offset += sizeof(uint) * rTCL<uint>(processors);
+        offset += rTCL<uint>(processors);
         auto* __restrict__ interruptScratch = reinterpret_cast<uint*>(workspace + offset);
-        offset += sizeof(uint) * rTCL<uint>(processors);
+        offset += rTCL<uint>(processors);
         auto* __restrict__ status = reinterpret_cast<uint*>(workspace + offset);
-        offset += sizeof(uint) * rTCL<uint>(world);
+        offset += rTCL<uint>(world);
         auto* __restrict__ taskBound = reinterpret_cast<uint*>(workspace + offset);
         offset += sizeof(uint);
-        auto* __restrict__ scratch = reinterpret_cast<uint*>(workspace + offset); // [world]
+        auto* __restrict__ scratch = reinterpret_cast<uint*>(workspace + offset); // [E]
 
-        const auto* __restrict__ geL = ctx.eli();
-        const auto* __restrict__ gpL = ctx.pli();
-        const auto* __restrict__ gLx = ctx.lxi();
+        const auto* __restrict__ geL = ctx.eli;
+        const auto* __restrict__ gpL = ctx.pli;
+        const auto* __restrict__ gLx = ctx.lxi;
         for (uint i = threadIdx.x; i < fSbSL; i += threads) {
             subVisitedSet[i] = BitSet{0U};
         }
@@ -140,11 +140,11 @@ namespace flashmoe::os {
                 auto bitset = vs[i];
                 for (int j = 0; j < sizeof(BitSet) * 8; ++j) {
                     const auto tileIdx = (prefix + threadIdx.x) + (j * subscriberCount);
-                    if (tileIdx > ecSignalCount * E) {
+                    if (tileIdx >= ecSignalCount * E) {
                         break;
                     }
                     const auto expertIdx = tileIdx / ecSignalCount;
-                    const auto intraTileIdx = expertIdx % ecSignalCount;
+                    const auto intraTileIdx = tileIdx % ecSignalCount;
                     const auto expertTileCount = cute::ceil_div(eCs[expertIdx], bM) * tilesN1;
                     if (intraTileIdx < expertTileCount) {
                         bitset.set(j);
@@ -153,6 +153,7 @@ namespace flashmoe::os {
                         bitset.clear(j);
                     }
                 }
+                vs[i] = bitset;
             }
         }
         __syncthreads();

@@ -2,7 +2,7 @@
 // Created by osayamen on 1/14/26.
 //
 // unit tests for combine
-#include <array>
+#include <algorithm>
 #include <vector>
 #include <tuple>
 #include <random>

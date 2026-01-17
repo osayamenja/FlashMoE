@@ -22,22 +22,29 @@ namespace flashmoe {
         sHeap(_sHeap), expertSlots(_expertSlots), EC(_EC),
         tokenDim(_tokenDim), elementBytes(_elementBytes){}
         template<
-            unsigned long int stage,
-            unsigned long int cell
+            int stage,
+            int cell
         >
         requires (stage < STAGES && cell < CELLS)
         __device__ __forceinline__
-        constexpr long int advanceOffset(const int& peer, const int& expert, const int& token = 0) const {
-            return static_cast<long int>(elementBytes) * tokenDim * (EC * (CELLS * (STAGES * (peer * expertSlots +
-                static_cast<long int>(expert)) + stage) + cell) + token);
+        constexpr long int advanceOffset(const size_t& peer, const size_t& expert, const size_t& token = 0) const {
+            return static_cast<size_t>(elementBytes)
+                    * static_cast<size_t>(tokenDim)
+                    * (static_cast<size_t>(EC)
+                        * (static_cast<size_t>(CELLS)
+                            * (static_cast<size_t>(STAGES)
+                                * (static_cast<size_t>(peer) * expertSlots + static_cast<size_t>(expert))
+                                + static_cast<size_t>(stage))
+                            + static_cast<size_t>(cell))
+                        + static_cast<size_t>(token));
         }
         template<
-            unsigned long int stage,
-            unsigned long int cell
+            int stage,
+            int cell
         >
         requires (stage < STAGES && cell < CELLS)
         __device__ __forceinline__
-        cuda::std::byte* advance(const int& peer, const int& expert, const int& token = 0) const {
+        cuda::std::byte* advance(const size_t& peer, const size_t& expert, const size_t& token = 0) const {
                 return sHeap + advanceOffset<stage, cell>(peer, expert, token);
         }
     private:
