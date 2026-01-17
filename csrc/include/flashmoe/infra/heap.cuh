@@ -27,7 +27,7 @@ namespace flashmoe {
         >
         requires (stage < STAGES && cell < CELLS)
         __device__ __forceinline__
-        constexpr long int advanceOffset(const size_t& peer, const size_t& expert, const size_t& token = 0) const {
+        constexpr auto advanceOffset(const size_t& peer, const size_t& expert, const size_t& token = 0) const {
             return static_cast<size_t>(elementBytes)
                     * static_cast<size_t>(tokenDim)
                     * (static_cast<size_t>(EC)

@@ -102,7 +102,7 @@ namespace flashmoe::processor{
         // shared memory to global memory
         static_assert(sizeof(Task) % sizeof(uint4) == 0 && alignof(Task) % alignof(uint4) == 0);
         constexpr int nRows = sizeof(Task) / sizeof(uint4);
-        const int numElems = tasks * nRows;
+        const uint numElems = tasks * nRows;
         // project TaskQ as a [tasks, nRows] matrix of 128B elements
         auto gT = cute::make_tensor(cute::make_gmem_ptr(reinterpret_cast<uint4*>(tQ)),
             cute::make_layout(cute::make_shape(tasks, nRows), cute::LayoutRight{}));
@@ -245,6 +245,7 @@ namespace flashmoe::processor{
                             task.tileIdx);
                         __syncthreads();
                         if (!threadIdx.x) {
+                            constexpr int bM = cute::get<0>(TileGEMM1::TileShape{});
                             const auto mCoord = task.tileIdx / tilesN1;
                             const auto nCoord = task.tileIdx % tilesN1;
                             // read and flip the current bit
@@ -269,10 +270,11 @@ namespace flashmoe::processor{
                                     producerBitMap(task.localPeerIdx(), task.localExpertIdx(), mCoord, 0) = producerBit;
                                     // clear the counter as it would no longer be used in this epoch
                                     tileSync.store(0, cuda::memory_order_relaxed);
+                                    const auto sourceOffset = static_cast<size_t>(bM * mCoord * H) * sizeof(Element);
                                     nvshmem_putmem_signal_nbi(task.rcData,
-                                         task.cData[1],
+                                         task.cData[1] + (sourceOffset),
                                          // Batched remote network transfer to avoid overwhelming the NIC
-                                         task.tileSize() * H * sizeof(Element),
+                                         static_cast<size_t>(task.tileSize() * H) * sizeof(Element),
                                          task.flags,
                                          sigPayload,
                                          NVSHMEM_SIGNAL_SET,
@@ -282,9 +284,8 @@ namespace flashmoe::processor{
                             else {
                                 // flip the bit
                                 producerBitMap(task.localPeerIdx(), task.localExpertIdx(), mCoord, nCoord) = producerBit;
-                                // individual tile, no batching here
-                                // Already did the network transfer,
-                                // so set signal only
+                                // individual tile, no batching here,
+                                // note, this CTA alone did the transfer over NVlink
                                 cuda::atomic_ref<uint64_t, cuda::thread_scope_system> remoteFlags{*task.flags};
                                 remoteFlags.store(sigPayload, cuda::memory_order_release);
                             }

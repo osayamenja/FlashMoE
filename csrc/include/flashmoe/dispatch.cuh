@@ -42,7 +42,7 @@ namespace flashmoe {
         // Assumptions are below:
         // workspace is in shared memory;
         // Sequence length <= UINT16_MAX * bM, typically for large sequences bM ~ 128, so S <= 8M;
-        // tokens and tokensId are 16-byte aligned.
+        // tokens and tokensId are at least 32-byte aligned.
         // we require superblocks to be equally sized
         const auto numSuperBlocks = blocks / superBlockSize;
         const int superBlockIdx = blockIdx.x / superBlockSize;
@@ -101,6 +101,7 @@ namespace flashmoe {
         for (int expertIdx = superBlockIdx; expertIdx < E; expertIdx += numSuperBlocks) {
             const auto lI = expertLookup[expertIdx];
             const auto flagOffset = epRank * lI.nLocalExperts + lI.expertLocalIdx;
+            // note that for DropTokens:no, we set EC to be the entire sequence length (S) to accommodate the worst-case
             const auto routedTokens = d == DropTokens::yes ?
                 cute::min(lI.eC, EC) : lI.eC;
             auto* __restrict__ peerHeap = reinterpret_cast<VectorElement*>(topo == Topology::MIXED && lI.isRemote ?
@@ -159,7 +160,7 @@ namespace flashmoe {
                 }
                 __syncthreads();
                 if (!threadIdx.x) {
-                    cuda::atomic_ref<int, cuda::thread_scope_device> dS{*(dispatchSync + expertIdx)};
+                    cuda::atomic_ref<int, cuda::thread_scope_system> dS{*(dispatchSync + expertIdx)};
                     if (dS.fetch_add(1, cuda::memory_order_acq_rel) + 1 == superBlockSize) {
                         // acq_rel above allows us to safely do the below.
                         // We assume this counter is used _once_ (this function)

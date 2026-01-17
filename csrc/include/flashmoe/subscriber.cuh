@@ -140,8 +140,10 @@ namespace flashmoe::subscriber{
             // expert, peer offset
             const auto sO = args.ecTilesM * (peer * args.nLx + ingredients.localExpertIdx);
             cuda::std::array<cuda::std::byte*, GEMMs> taskResults{};
-            // Staging buffer for results of preGEMM
-            taskResults[0] = args.GEMM0Staging + (peer * args.nLx * args.roundEC * args.I * sizeof(Element));
+            // Staging buffer for results of GEMM0
+            const size_t stagingOffset = static_cast<size_t>(args.roundEC) * args.I * sizeof(Element) *
+                static_cast<size_t>(peer * args.nLx + ingredients.localExpertIdx);
+            taskResults[0] = args.GEMM0Staging + stagingOffset;
             // Egress packet buffer
             auto* rcData = sHeap + heap.advanceOffset<1, 1>(args.epRank, ingredients.localExpertIdx);
             auto* intraStaging = sHeap + heap.advanceOffset<1, 0>(peer, ingredients.localExpertIdx);
