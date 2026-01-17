@@ -25,6 +25,7 @@ namespace flashmoe
                     cute::ceil_div(ecTilesM * tilesN0, subscriberWarpSize) +
                     cute::ceil_div(ecTilesM * E, subscriberCount) * tilesN1;
     }
+
     struct __align__(16) Context {
         uint64_t* const signals; // [[world, num_local_experts], [E, tiles(roundEC), tiles(H)]]
         Task* const tQ;// []
@@ -54,6 +55,7 @@ namespace flashmoe
         const uint EC; // max EC
         const uint ecTilesM;
         const uint gtqHeadLength; // world*num_local_experts*ecTilesM
+        const uint firstStageFlagCount; // nLx * world
         const uint16_t nLx;
         const uint16_t E;
         const uint16_t world;

@@ -107,10 +107,10 @@ namespace flashmoe::moe{
         }
         if (blockIdx.x < dispatchBlocks) {
             // dispatch
-            // TODO create bitmap
             dispatch<topo, Config::Threads::value, bM, bN0, Config::DTK::value>(H, E, symHeap, EC, roundEC,
                 ctx.epRank, ctx.world, superBlockSize, dispatchBlocks, tokens, ctx.signals, ctx.expertCounts,
-                ctx.tokenIndices, ctx.dispatchSync, ctx.pel, flashWorkspace, ctx.stateNumber);
+                ctx.tokenIndices, ctx.dispatchSync, ctx.pel,
+                flashWorkspace, ctx.stateNumber);
         }
         // processor;
         const auto pA = processor::ProcessorArgs{
@@ -130,10 +130,11 @@ namespace flashmoe::moe{
         using TileGEMM0 = tile::CollectiveMainloop<bM0, bN0, bK0, arch, Element, AccumType, threads, pS0>;
         using TileGEMM1 = tile::CollectiveMainloop<bM1, bN1, bK1, arch, Element, AccumType, threads, pS1>;
         static_assert(cuda::std::is_invocable_r_v<AccumType, GEMM0Act, AccumType>, "Activation should be elementwise");
-        // TODO create producer bitmap tensor
+        auto producerBM = cute::make_tensor(cute::make_gmem_ptr(ctx.producerCombineBitMap),
+            cute::make_layout(cute::make_shape(), cute::LayoutRight{}));
         processor::start<topo, threads, Config::CM::value, TileGEMM0, TileGEMM1, GEMM0Act>
         (flashWorkspace, S, H, I, E, k, roundEC, tilesN0, tielsN1, expertUpWeights, biasUp,
-            expertDownWeights, biasDown,ctx.tokenIndices, moeOut, ctx.stateNumber, symHeap, pA);
+            expertDownWeights, biasDown,ctx.tokenIndices, moeOut, producerBM, ctx.stateNumber, symHeap, pA);
     }
 }
 #endif //FLASHMOE_MOE_CUH

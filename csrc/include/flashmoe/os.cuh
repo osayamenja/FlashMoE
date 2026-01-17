@@ -157,7 +157,7 @@ namespace flashmoe::os {
             }
         }
         __syncthreads();
-        // Pre-populate rQ under the assumption that all processors are initially ready.
+        // Pre-populate rQ under the assumption that all processors are initially ready at kernel start-up
         // However, some processors are currently specialized for packet dispatch, while others are idle.
         // To maximize utilization, we time-shift idle brethren to earlier slots in the rQ.
         const auto fL  = processors - dispatchBlocks;
@@ -219,7 +219,7 @@ namespace flashmoe::os {
         else {
             subscriber::Args args{
                 ctx.signals, ctx.tQ, ctx.GEMM0Staging, senseBitset, subVisitedSet, interrupt, tQHeads,
-                pL, lX, eL, status, taskBound, ctx.world, ctx.nLx, ctx.epRank, ecTilesM * bM, E, I,
+                pL, lX, eL, status, taskBound, ctx.world, ctx.nLx, ctx.firstStageFlagCount, ctx.epRank, ecTilesM * bM, E, I,
                 threadIdx.x - scheduler::WARP_SIZE, tilesN0, tilesN1, ecTilesM, ctx.stateNumber
             };
             subscriber::start<topo, subscriberCount, bM, ElementC>(symHeap, args);

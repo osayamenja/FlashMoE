@@ -29,8 +29,7 @@ namespace flashmoe {
         static_assert(p == PacketStage::initial);
         uint routedTokens;
         uint16_t totalTilesM;
-        uint8_t senseBit;
-        uint8_t stateNumber;
+        uint16_t stateNumber;
 
         __device__ __forceinline__
         void dump() const {

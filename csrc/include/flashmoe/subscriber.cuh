@@ -54,7 +54,7 @@ namespace flashmoe::subscriber{
         uint* const taskCount; // shared
         const int world; // ep world
         const int nLx; // number of local experts
-        const int gfSfC; // global first stage flag count -> global expert slots * epWorld
+        const uint gfSfC; // global first stage flag count -> global expert slots * epWorld
         const int epRank;
         const uint roundEC;
         const int E; // number of experts
@@ -79,7 +79,7 @@ namespace flashmoe::subscriber{
             uint* const& _status,
             unsigned int* const& _taskCount,
             const int& _world,
-            const int& nLx,
+            const int& nLx, const uint& firstStageFlagCount,
             const int& _epRank, const uint& _roundEC, const int& _experts,
             const int& ffn_i_size,
             const uint threadIdx, const int& _tilesN0, const int& _tilesN1, const int& _eCTilesM,
@@ -96,7 +96,7 @@ namespace flashmoe::subscriber{
         eL(_eL),
         status(_status),
         taskCount(_taskCount),
-        gfSfC(_world * nLx),
+        gfSfC(firstStageFlagCount),
         world(_world),
         nLx(nLx),
         epRank(_epRank), roundEC(_roundEC),
@@ -246,6 +246,7 @@ namespace flashmoe::subscriber{
             BitSet* __restrict__ const& bitSet,
             const int& stageLength,
             int& pending, int& ltQHead) const {
+            const auto currentStateNumber = static_cast<uint16_t>(args.stateNumber);
             /// Flags has dimension [W, L], where W is expert parallel world and L is number of local experts
             constexpr Decoder<subscriberCount, PacketStage::initial, PeerConnectivity::p2p, bM, Element> fPd{};
             constexpr Decoder<subscriberCount, PacketStage::initial, PeerConnectivity::remote, bM, Element> fRd{};
@@ -268,7 +269,7 @@ namespace flashmoe::subscriber{
                             // RDMA peer
                             signal = nvshmem_signal_fetch(flags + flagIdx);
                             const auto sigPayload = cuda::std::bit_cast<SignalPayload<PacketStage::initial>>(signal);
-                            if (sigPayload.stateNumber == args.stateNumber) {
+                            if (sigPayload.stateNumber == currentStateNumber) {
                                 // set visited bit
                                 // self-correct the termination bound
                                 sTB(args, peerIdx, sigPayload.totalTilesM);
@@ -292,7 +293,7 @@ namespace flashmoe::subscriber{
                                     }
                                 }
                             }
-                            else if (sbs::ahead(sigPayload.stateNumber, args.stateNumber)) {
+                            else if (sbs::ahead(sigPayload.stateNumber, currentStateNumber)) {
                                 /*
                                 Their sequence number is ahead of ours,
                                 meaning that we missed processing a preceding packet
@@ -313,11 +314,11 @@ namespace flashmoe::subscriber{
                             cuda::atomic_ref<uint64_t, cuda::thread_scope_system> f{*(flags + flagIdx)};
                             signal = f.load(cuda::memory_order::acquire);
                             const auto sigPayload = cuda::std::bit_cast<SignalPayload<PacketStage::initial>>(signal);
-                            if (sigPayload.stateNumber == args.stateNumber) {
+                            if (sigPayload.stateNumber == currentStateNumber) {
                                 sTB(args, peerIdx, sigPayload.totalTilesM);
                                 visitedSet.set(vIdx);
                             }
-                            else if (sbs::ahead(sigPayload.stateNumber, args.stateNumber)) {
+                            else if (sbs::ahead(sigPayload.stateNumber, currentStateNumber)) {
                                 sTB(args, peerIdx);
                                 // set visited bit
                                 visitedSet.set(vIdx);
@@ -331,7 +332,7 @@ namespace flashmoe::subscriber{
                 // broadcast received signal from leader to others
                 signal = __shfl_sync(0xffffffff, signal, 0);
                 const auto sigPayload = cuda::std::bit_cast<SignalPayload<PacketStage::initial>>(signal);
-                if (sigPayload.stateNumber == args.stateNumber && sigPayload.routedTokens > 0) {
+                if (sigPayload.stateNumber == currentStateNumber && sigPayload.routedTokens > 0) {
                     pending -= 1;
                     const auto myLocalExIdx = flagIdx % args.nLx;
                     const auto lXI = args.lX[myLocalExIdx];
