@@ -122,7 +122,6 @@ enum class WeightDistribution {
   LogNormal       // logN(mu=0, sigma=1)
 };
 
-// Below is LLM-generated
 // Generates a routing assignment with NO token dropping:
 // - EC == S
 // - each token appears exactly k times globally

@@ -93,19 +93,21 @@ namespace flashmoe {
             return ingredients.stash;
         }
         __device__ __forceinline__
-        auto peerIdx() const {
+        auto pe() const {
             return ingredients.peerIdx;
+        }
+        __device__ __forceinline__
+        auto localPeerIdx() const {
+            return ingredients.stash;
         }
         __device__ __forceinline__
         auto tokenBatchStart() const {
             return ingredients.M;
         }
-
         __device__ __forceinline__
         auto combineTileIdx() const{
             return ingredients.stash;
         }
-
         __device__ __forceinline__
         auto expertIdx() const{
             return ingredients.expertIdx;
@@ -114,7 +116,6 @@ namespace flashmoe {
         auto epRank() const{
             return ingredients.peerIdx;
         }
-
     };
     static_assert(sizeof(Task) == 64);
 }

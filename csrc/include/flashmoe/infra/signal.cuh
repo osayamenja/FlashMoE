@@ -30,7 +30,8 @@ namespace flashmoe {
         static_assert(p == PacketStage::initial);
         uint routedTokens;
         uint16_t totalTilesM;
-        uint16_t seqNumber;
+        uint8_t senseBit;
+        uint8_t stateNumber;
 
         __device__ __forceinline__
         void dump() const {
@@ -39,7 +40,7 @@ namespace flashmoe {
                    "totalTilesM: %u,\n\t"
                    "seqNumbe: %u"
                    "\n}\n",
-                   routedTokens, totalTilesM, seqNumber);
+                   routedTokens, totalTilesM, stateNumber);
         }
     };
 
@@ -48,7 +49,8 @@ namespace flashmoe {
     struct __align__(8) SignalPayload<PacketStage::last> {
         uint batchIdx;
         uint16_t tokensM; // <= BLOCK_M
-        uint16_t seqNumber;
+        uint8_t senseBit;
+        uint8_t stateNumber;
 
         __device__ __forceinline__
         void dump() const {
@@ -57,7 +59,7 @@ namespace flashmoe {
                    "tokensM: %u,\n\t"
                    "seqBit: %u"
                    "\n}\n",
-                   batchIdx, tokensM, seqNumber);
+                   batchIdx, tokensM, stateNumber);
         }
     };
 }

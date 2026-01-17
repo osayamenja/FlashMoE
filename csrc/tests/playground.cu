@@ -26,6 +26,9 @@ struct SplitFunctor {
 };
 
 int main() {
+    volatile int* x = static_cast<int*>(std::malloc(sizeof(int)));
+    cuda::atomic_ref<volatile int, cuda::thread_scope_system> a{*x};
+    cuda::std::ignore = a.exchange(4, cuda::memory_order_acquire);
     using BLAS = decltype(
             cublasdx::Size<128, 128, 64>() +
             cublasdx::Precision<__half, __half, float>() +

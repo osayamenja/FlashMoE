@@ -128,7 +128,8 @@ namespace flashmoe::processor{
         typename TileGEMM0, // Descriptor for GEMM0
         typename TileGEMM1, // Descriptor for GEMM1
         typename Activation, // Activation function after GEMM0
-        typename Element
+        typename Element,
+        typename PBM
     >
     __device__ __forceinline__
     void start(void* __restrict__ const& workspace, // shared memory
@@ -146,13 +147,13 @@ namespace flashmoe::processor{
         const Element* __restrict__ const& biasDown, // [num_local_experts, H]
         const TPS* __restrict__ const& tokenIds, // [E, roundEC]
         Element* __restrict__ const& moeOutput,
-        const uint16_t& seqNumber,
+        const PBM& producerBitMap,
+        const uint8_t& stateNumber,
         const Heap& symHeap, const ProcessorArgs& pA){
         __shared__ Task currentTask;
         __shared__ uint globalInterrupt;
         __shared__ uint enqueue;
         // Register allocations
-        Task task{};
         TQSignal tqs{0U, 0U};
         static_assert(sizeof(TQSignal) == sizeof(uint64_t) && alignof(TQSignal) == alignof(uint64_t));
         static_assert(sizeof(SignalPayload<PacketStage::last>) == sizeof(uint64_t) &&
@@ -203,8 +204,7 @@ namespace flashmoe::processor{
             tqs.interrupt = globalInterrupt;
             if (!tqs.interrupt) {
                 // shared -> registers
-                task = currentTask;
-                switch (task.getTaskType()) {
+                switch (const auto task = currentTask; task.getTaskType()) {
                     case TaskType::GEMM0: {
                         const auto* aP = reinterpret_cast<const Element*>(task.aData);
                         const auto* bP = expertUpWeights + expertWeightSize * task.localExpertIdx();
@@ -224,7 +224,7 @@ namespace flashmoe::processor{
                         }
                         __syncthreads();
                         if (enqueue) {
-                            const auto offset = tilesN1 * task.flagBatchIdx();
+                            const auto offset = tilesN1 * (task.tileIdx / tilesN0);
                             auto* __restrict__ tQ = pA.ptQ + (task.syncIdx * tilesN1);
                             if (topo == Topology::MIXED && task.isPeerRemote()) {
                                 notifyNext<PeerConnectivity::remote,threads>(workspace, task, tQ, tilesN1, offset, pA.tQH);
@@ -245,11 +245,18 @@ namespace flashmoe::processor{
                             task.tileIdx);
                         __syncthreads();
                         if (!threadIdx.x) {
+                            const auto mCoord = task.tileIdx / tilesN1;
+                            const auto nCoord = task.tileIdx % tilesN1;
+                            // read and flip the current bit
+                            const auto prevBit = producerBitMap(task.localPeerIdx(), task.localExpertIdx(), mCoord,
+                                topo == Topology::MIXED && task.isPeerRemote()? 0 : nCoord);
+                           const auto producerBit = prevBit == 0 ? 1 : 0;
                             // Pack payload into single signal word of 8 bytes
                             const auto flagSignal = SignalPayload<PacketStage::last>{
-                                task.flagBatchIdx(),
+                                mCoord,
                                 task.tileSize(),
-                                seqNumber,
+                                producerBit,
+                                stateNumber,
                             };
                             const auto sigPayload = cuda::std::bit_cast<uint64_t>(flagSignal);
                             if (topo == Topology::MIXED && task.isPeerRemote()) {
@@ -258,6 +265,8 @@ namespace flashmoe::processor{
                                 const auto doTransfer = tileSync.fetch_add(1,
                                     cuda::memory_order_acq_rel) + 1 == (tilesN0 + tilesN1);
                                 if (doTransfer) {
+                                    // flip the bit
+                                    producerBitMap(task.localPeerIdx(), task.localExpertIdx(), mCoord, 0) = producerBit;
                                     // clear the counter as it would no longer be used in this epoch
                                     tileSync.store(0, cuda::memory_order_relaxed);
                                     nvshmem_putmem_signal_nbi(task.rcData,
@@ -267,10 +276,12 @@ namespace flashmoe::processor{
                                          task.flags,
                                          sigPayload,
                                          NVSHMEM_SIGNAL_SET,
-                                         task.peerIdx());
+                                         task.pe());
                                 }
                             }
                             else {
+                                // flip the bit
+                                producerBitMap(task.localPeerIdx(), task.localExpertIdx(), mCoord, nCoord) = producerBit == 1 ? 0 : 1;
                                 // individual tile, no batching here
                                 // Already did the network transfer,
                                 // so set signal only
@@ -297,7 +308,6 @@ namespace flashmoe::processor{
                 }
             }
         }
-        // last block clears tguardGuar
     }
 }
 #endif //FLASHMOE_COMPUTE_CUH

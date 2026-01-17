@@ -8,26 +8,21 @@ namespace flashmoe {
     struct __align__(4) BitSet {
         uint storage = 0U;
         __device__ __forceinline__
-        constexpr auto get(const uint& idx) const {
+        uint8_t get(const uint idx) const {
             return storage >> idx & 1U;
         }
         __device__ __forceinline__
-        constexpr void set(const uint& idx) {
+        void set(const uint idx) {
             storage |= 1U << idx;
         }
+        __device__ __forceinline__
+        void clear(const uint idx) {
+            storage &= ~(1U << idx);
+        }
+        __device__ __forceinline__
+        void flip(const uint idx) {
+            storage ^= (1U << idx);
+        }
     };
-
-    /// Computes precise number of integers needed to represent a consecutive set of bits
-    /// each of T threads has stride ownership of a single bit
-    /// and requires an integer to store 32 of such bits.
-    template<
-        unsigned int T,
-        unsigned int integerBitWidth = 32U
-    >
-    __host__ __device__ __forceinline__
-    constexpr uint nSI(const unsigned int& numBits) {
-        constexpr auto width = integerBitWidth * T;
-        return (numBits / width) * T + cute::min(numBits % width, T);
-    }
 }
 #endif //FLASHMOE_BITSET_CUH

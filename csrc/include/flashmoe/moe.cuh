@@ -102,14 +102,15 @@ namespace flashmoe::moe{
             constexpr auto subscriberCount = threads - scheduler::SCHEDULER_COUNT;
             static_assert(subscriberCount > 0 && subscriberCount % subscriber::WARP_SIZE == 0);
             os::start<topo, subscriberCount, threads, bM, ElementC>(flashWorkspace, symHeap, ctx, EC,
-                dispatchBlocks, E, processors);
+                I / bN0, H / bN1, dispatchBlocks, E, I, processors);
             return;
         }
         if (blockIdx.x < dispatchBlocks) {
             // dispatch
+            // TODO create bitmap
             dispatch<topo, Config::Threads::value, bM, bN0, Config::DTK::value>(H, E, symHeap, EC, roundEC,
                 ctx.epRank, ctx.world, superBlockSize, dispatchBlocks, tokens, ctx.signals, ctx.expertCounts,
-                ctx.tokenIndices, ctx.dispatchSync, ctx.pel, flashWorkspace, ctx.seqNumber);
+                ctx.tokenIndices, ctx.dispatchSync, ctx.pel, flashWorkspace, ctx.stateNumber);
         }
         // processor;
         const auto pA = processor::ProcessorArgs{
@@ -129,9 +130,10 @@ namespace flashmoe::moe{
         using TileGEMM0 = tile::CollectiveMainloop<bM0, bN0, bK0, arch, Element, AccumType, threads, pS0>;
         using TileGEMM1 = tile::CollectiveMainloop<bM1, bN1, bK1, arch, Element, AccumType, threads, pS1>;
         static_assert(cuda::std::is_invocable_r_v<AccumType, GEMM0Act, AccumType>, "Activation should be elementwise");
+        // TODO create or
         processor::start<topo, threads, Config::CM::value, TileGEMM0, TileGEMM1, GEMM0Act>
         (flashWorkspace, S, H, I, E, k, roundEC, tilesN0, tielsN1, expertUpWeights, biasUp,
-            expertDownWeights, biasDown,ctx.tokenIndices, moeOut, ctx.seqNumber, symHeap, pA);
+            expertDownWeights, biasDown,ctx.tokenIndices, moeOut, ctx.stateNumber, symHeap, pA);
     }
 }
 #endif //FLASHMOE_MOE_CUH
