@@ -290,7 +290,7 @@ namespace flashmoe
     }
 
     __host__ __forceinline__
-    void finalize(const Context& ctx, cudaStream_t stream) {
+    void finalize(const Context& ctx, const GateContext& gCtx, cudaStream_t stream) {
         CHECK_CUDA(cudaStreamSynchronize(stream));
         if (ctx.initialized) {
             nvshmem_free(ctx.symHeap);
@@ -312,22 +312,16 @@ namespace flashmoe
             cudaFreeAsync(ctx.gTqHeads, stream);
             cudaFreeAsync(ctx.tileSync, stream);
             cudaFreeAsync(ctx.tileSync, stream);
+            cudaFreeAsync(gCtx.ecGuards, stream);
+            if (gCtx.ssp != nullptr) {
+                cudaFreeAsync(gCtx.ssp, stream);
+            }
+            if (gCtx.rtp != nullptr) {
+                cudaFreeAsync(gCtx.rtp, stream);
+            }
+            cudaFreeAsync(gCtx.db, stream);
         }
         CHECK_CUDA(cudaPeekAtLastError());
-    }
-
-    __host__ __forceinline__
-    void finalize(const GateContext& ctx, cudaStream_t stream) {
-        cudaFreeAsync(ctx.ecGuards, stream);
-        if (ctx.ssp != nullptr) {
-            cudaFreeAsync(ctx.ssp, stream);
-        }
-        if (ctx.rtp != nullptr) {
-            cudaFreeAsync(ctx.rtp, stream);
-        }
-        if (ctx.db != nullptr) {
-            cudaFreeAsync(ctx.db, stream);
-        }
     }
 }
 

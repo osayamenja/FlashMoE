@@ -114,7 +114,7 @@ namespace flashmoe
 
     /// Peer lookup info: key is ep rank
     __device__
-    struct __align__(16) PLI {
+    struct __align__(8) PLI {
         cuda::std::byte* remoteSHeap;
         uint64_t* remoteSFlags;
         uint pe;
