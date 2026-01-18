@@ -559,11 +559,11 @@ namespace flashmoe::gate {
         ElementR* __restrict__ const& _routing,
         TPS* __restrict__ const& tokenIds,
         int* __restrict__ const& expertCounts,
-        int* __restrict__ eCGuards,
         const int& S, const int& H, const int& E, const int& k, const int& EC, const int& roundEC,
         const int& blocks,
-        SoftmaxStatePacked* __restrict__ const& rSp = nullptr, // only needed for grl == multiblock
-        RingTopKPayload* __restrict__ const& rTp = nullptr // only needed for grl == multiblock
+        int* __restrict__ eCGuards,
+        SoftmaxStatePacked* __restrict__ const& rSp, // only needed for grl == multiblock
+        RingTopKPayload* __restrict__ const& rTp // only needed for grl == multiblock
         ){
         // assert(blocks >= E / bN)
         using TileShape = TileGEMM::TileShape;

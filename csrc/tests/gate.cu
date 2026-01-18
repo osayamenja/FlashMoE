@@ -85,9 +85,10 @@ __global__ void gateKernel(const Element* __restrict__ tokens,
             bM, bN, bK, Arch, Element, AccumType, threads, pipeStages
         >;
     extern __shared__ __align__(TileGEMM::GeneralAlignment::value) cuda::std::byte gateWorkspace[];
+    const auto roundEC = cute::ceil_div(EC, bM) * bM;
     flashmoe::gate::forward<TileGEMM, grl, sro>(gateWorkspace, tokens, _gateWeights,
-        _routing, tokenIds, expertCounts, eCGuards,
-        S, H, E, k, EC, static_cast<int>(gridDim.x), rSp, rTp);
+        _routing, tokenIds, expertCounts,
+        S, H, E, k, EC, roundEC, static_cast<int>(gridDim.x), eCGuards, rSp, rTp);
 }
 
 template<int warmup, int runs, typename RE, typename REC>

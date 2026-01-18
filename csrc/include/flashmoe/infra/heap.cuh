@@ -5,14 +5,13 @@
 #ifndef FLASHMOE_HEAP_CUH
 #define FLASHMOE_HEAP_CUH
 
-/// Number of communication stages
-#define STAGES 2U
-/// Per stage, there is one cell for sending and another for reception
-#define CELLS 2U
-#define SEND_CELL 0U
-#define RECEIVE_CELL 1U
-
 namespace flashmoe {
+    /// Number of communication stages
+    constexpr int HEAP_STAGES = 2;
+    /// Per stage, there is one cell for sending and another for reception
+    constexpr int HEAP_CELLS = 2;
+    constexpr int HEAP_SEND_CELL = 0;
+    constexpr int HEAP_RECEIVE_CELL = 1;
     /// The symmetric tensor from the FlashMoE paper
     struct Heap {
         cuda::std::byte* const sHeap;
@@ -25,14 +24,14 @@ namespace flashmoe {
             int stage,
             int cell
         >
-        requires (stage < STAGES && cell < CELLS)
+        requires (stage < HEAP_STAGES && cell < HEAP_CELLS)
         __device__ __forceinline__
         constexpr auto advanceOffset(const size_t& peer, const size_t& expert, const size_t& token = 0) const {
             return static_cast<size_t>(elementBytes)
                     * static_cast<size_t>(tokenDim)
                     * (static_cast<size_t>(EC)
-                        * (static_cast<size_t>(CELLS)
-                            * (static_cast<size_t>(STAGES)
+                        * (static_cast<size_t>(HEAP_CELLS)
+                            * (static_cast<size_t>(HEAP_STAGES)
                                 * (static_cast<size_t>(peer) * expertSlots + static_cast<size_t>(expert))
                                 + static_cast<size_t>(stage))
                             + static_cast<size_t>(cell))
@@ -42,7 +41,7 @@ namespace flashmoe {
             int stage,
             int cell
         >
-        requires (stage < STAGES && cell < CELLS)
+        requires (stage < HEAP_STAGES && cell < HEAP_CELLS)
         __device__ __forceinline__
         cuda::std::byte* advance(const size_t& peer, const size_t& expert, const size_t& token = 0) const {
                 return sHeap + advanceOffset<stage, cell>(peer, expert, token);

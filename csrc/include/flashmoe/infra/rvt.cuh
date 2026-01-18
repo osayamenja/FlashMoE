@@ -33,8 +33,22 @@ namespace flashmoe
         static_assert(VectorWidth >= 1 && VectorWidth <= (RED_MAX_ALIGNMENT / sizeof(Element)) &&
             cutlass::is_pow2<VectorWidth>::value);
         static_assert(Arch == 700 || Arch == 800 || Arch == 900);
-        static_assert(cuda::std::is_same_v<Element, float> ||
+        static_assert(cuda::std::is_same_v<Element, double> || cuda::std::is_same_v<Element, float> ||
             cuda::std::is_same_v<Element, __half> || cuda::std::is_same_v<Element, __nv_bfloat16>);
+    };
+
+    template<int MaxVectorWidth>
+    struct RedAdd<700, double, MaxVectorWidth> {
+        using VectorWidth = cute::Int<1>;
+        template<typename T>
+        requires(cuda::std::is_same_v<typename T::value_type, double>)
+        __device__ __forceinline__
+        void operator()(double* __restrict__ const& addr, const T& v) const {
+            asm volatile("red.global.add.f64 [%0], %1;"
+                         :
+                         : "l"(addr), "d"(v[0])
+                         : "memory");
+        }
     };
 
     template<int MaxVectorWidth>
@@ -75,6 +89,19 @@ namespace flashmoe
             asm volatile("red.global.add.noftz.f16x2 [%0], %1;"
                          :
                          : "l"(addr), "r"(v0)
+                         : "memory");
+        }
+    };
+    template<int MaxVectorWidth>
+    struct RedAdd<800, double, MaxVectorWidth> {
+        using VectorWidth = cute::Int<1>;
+        template<typename T>
+        requires(cuda::std::is_same_v<typename T::value_type, double>)
+        __device__ __forceinline__
+        void operator()(double* __restrict__ const& addr, const T& v) const {
+            asm volatile("red.global.add.f64 [%0], %1;"
+                         :
+                         : "l"(addr), "d"(v[0])
                          : "memory");
         }
     };
@@ -136,6 +163,20 @@ namespace flashmoe
         __device__ __forceinline__
         void operator()(__nv_bfloat162* __restrict__ const& addr, const T& v) const {
             atomicAdd(addr, v[0]);
+        }
+    };
+
+    template<int MaxVectorWidth>
+    struct RedAdd<900, double, MaxVectorWidth> {
+        using VectorWidth = cute::Int<1>;
+        template<typename T>
+        requires(cuda::std::is_same_v<typename T::value_type, double>)
+        __device__ __forceinline__
+        void operator()(double* __restrict__ const& addr, const T& v) const {
+            asm volatile("red.global.add.f64 [%0], %1;"
+                         :
+                         : "l"(addr), "d"(v[0])
+                         : "memory");
         }
     };
 

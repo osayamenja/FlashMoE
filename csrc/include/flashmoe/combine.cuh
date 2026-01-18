@@ -151,7 +151,6 @@ namespace flashmoe
             const auto vsC = cute::make_tensor(cute::make_smem_ptr(static_cast<const RV*>(workspace)),
                 RSL{});
             // row major output
-            const auto vH = H / totalVecWidth;
             const auto vHo = H / RAD::Width::value;
             auto mC = cute::make_tensor(cute::make_gmem_ptr(reinterpret_cast<RAT*>(moeOutput)),
                 cute::make_layout(cute::make_shape(S, vHo), cute::LayoutRight{}));
@@ -190,9 +189,9 @@ namespace flashmoe
                         }
                     }
                     // account for the fact that the type of the below tile is either Element or RAT.
-                    // Since we read 'elemsPerPack' per iteration we need to advance the colIx by that much.
-                    // The row index is preserved because we only apply this vectorization across columns
-                    // which are contiguous in memory.
+                    // Since we read 'packWidth' per iteration we need to advance the colIx by that much.
+                    // The row index is preserved because we only apply this vectorization within a row
+                    // which is contiguous in memory.
                     auto* __restrict__ tCp = (&tC(tokIdx, colIdx * packWidth));
                     constexpr RedAddOp op{};
                     op(tCp, tokenValue);
@@ -242,7 +241,6 @@ namespace flashmoe
                     const auto indexAndScale = stIds[rowIdx];
                     auto tokenValue = vsC(rowIdx, colIdx);
                     const auto tokIdx = indexAndScale.tokenIdx;
-                    // smem -> gmem.
                     if (idx < actualElems) {
                         if constexpr (RAD::Width::value == 2) {
                             constexpr Converter<float2, RAT> loadOp{};

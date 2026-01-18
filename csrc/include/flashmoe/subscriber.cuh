@@ -15,6 +15,7 @@
 #include <cuda/atomic>
 #include <nvshmem.h>
 
+#include "infra/atomics.cuh"
 #include "infra/bitset.cuh"
 #include "infra/dq.cuh"
 #include "infra/heap.cuh"
@@ -22,23 +23,7 @@
 #include "infra/structures.cuh"
 #include "infra/task.cuh"
 
-namespace flashmoe
-{
-    /// Computes precise number of integers needed to represent a consecutive set of bits
-    /// each of T threads has stride ownership of a single bit
-    /// and requires an integer to store 32 of such bits.
-    template<
-        unsigned int T,
-        unsigned int integerBitWidth = 32U
-    >
-    __host__ __device__ __forceinline__
-    constexpr uint nSI(const unsigned int& numBits) {
-        constexpr auto width = integerBitWidth * T;
-        return (numBits / width) * T + cute::min(numBits % width, T);
-    }
-}
 namespace flashmoe::subscriber{
-    constexpr int WARP_SIZE = 32;
     struct __align__(16) Args {
         uint64_t* const flags; // symmetric global
         Task* const tQ; // global
@@ -632,7 +617,7 @@ namespace flashmoe::subscriber{
     >
     requires(subscriberCount % WARP_SIZE == 0)
     __device__ __forceinline__
-    void start(const Heap& symHeap, const Args& args){
+    void start(const Heap& symHeap, const Args& args, const uint& firstStageBitSetLength){
         int ltQHead = 0; // local tQ Head
 
         // first stage
@@ -646,7 +631,6 @@ namespace flashmoe::subscriber{
         const auto ssL = ssfC / subscriberCount + (args.tIdx < ssfC % subscriberCount);
         constexpr Subscriber<SubscriberStage::initial, topo, Element, subscriberCount, bM> initialSubscriber{};
         constexpr Subscriber<SubscriberStage::final, topo, Element, subscriberCount, bM> finalSubscriber{};
-        const auto pSI = nSI<subscriberCount>(ssfC);
 
         cuda::atomic_ref<uint, cuda::thread_scope_block> interrupt{*args.interrupt};
         while (!interrupt.load(cuda::memory_order_relaxed)) {
@@ -654,11 +638,10 @@ namespace flashmoe::subscriber{
             // sweep through flags by stages
             // start with the first stage
             if (fSp) {
-                auto* __restrict bitset = args.visitedSet + pSI;
-                initialSubscriber(symHeap, args, flags, bitset, fSl, fSp, ltQHead);
+                initialSubscriber(symHeap, args, flags, args.visitedSet, fSl, fSp, ltQHead);
             }
             flags += args.gfSfC;
-            finalSubscriber(args, args.visitedSet, flags, ltQHead, ssL);
+            finalSubscriber(args, args.visitedSet + firstStageBitSetLength, flags, ltQHead, ssL);
         }
     }
 }

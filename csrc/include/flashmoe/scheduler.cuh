@@ -18,6 +18,7 @@
 #include <cute/numeric/integral_constant.hpp>
 #include <cutlass/array.h>
 
+#include "infra/constants.cuh"
 #include "infra/bitset.cuh"
 #include "infra/checks.cuh"
 #include "infra/dq.cuh"
@@ -25,7 +26,6 @@
 
 namespace flashmoe::scheduler {
     using WarpScan = cub::WarpScan<uint>;
-    constexpr int WARP_SIZE = 32;
     constexpr int SCHEDULER_COUNT = WARP_SIZE; // warp_size
     // register state sizes
     constexpr int PROCESSOR_STATE_SIZE = 16; // 8 is recommended
@@ -38,7 +38,7 @@ namespace flashmoe::scheduler {
         int nQ = 0
     >
     __device__ __forceinline__
-    void schedule(const int& processors, const uint& cSetB,
+    void schedule(const uint& processors, const uint& cSetB,
     const uint& canSchedule, const uint& qIdx, uint& lRQIdx,
     const uint& gRQIdx, uint* __restrict__ const& rQ,
     TQSignal* __restrict__ const& pDB) {
@@ -87,7 +87,7 @@ namespace flashmoe::scheduler {
     requires (schedulerCount == 32 && isRegisterV<TQState>)
     __device__ __forceinline__
     void schedulerLoop(TQState& tqState,
-        const int& processors,
+        const uint& processors,
         const unsigned int& tilesN1,
         const unsigned int& tQOffset,
         const unsigned int& gTbO,

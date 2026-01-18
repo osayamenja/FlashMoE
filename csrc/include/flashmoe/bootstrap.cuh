@@ -1,0 +1,255 @@
+//
+// Created by osayamen on 1/17/26.
+//
+
+#ifndef FLASHMOE_BOOTSTRAP_CUH
+#define FLASHMOE_BOOTSTRAP_CUH
+#include <stdexcept>
+#include <tuple>
+
+#include <cuda_runtime.h>
+#include <cstdio>
+#include <nvshmem.h>
+
+#include "infra/constants.cuh"
+#include "infra/bitset.cuh"
+#include "context.cuh"
+#include "infra/atomics.cuh"
+#include "infra/signal.cuh"
+#include "infra/heap.cuh"
+#if !defined(CHECK_CUDA)
+#  define CHECK_CUDA(e)                                      \
+do {                                                         \
+    cudaError_t code = (e);                                  \
+    if (code != cudaSuccess) {                               \
+        fprintf(stderr, "<%s:%d> %s:\n    %s: %s\n",         \
+            __FILE__, __LINE__, #e,                          \
+            cudaGetErrorName(code),                          \
+            cudaGetErrorString(code));                       \
+        fflush(stderr);                                      \
+        exit(1);                                             \
+    }                                                        \
+} while (0)
+#endif
+namespace flashmoe
+{
+    struct MoEArgs {
+        const size_t elementBytes;
+        const uint sequenceLength;
+        const uint EC;
+        const uint tokenDim;
+        const uint ffnIntermediateSize;
+        const uint bM;
+        const uint bN0;
+        const uint bN1;
+        const uint threads;
+        const uint blocks; //CTAs
+        const uint16_t epRank;
+        const uint16_t epWorld;
+        const uint16_t myPE; // only needed for RDMA
+        const uint16_t numExperts;
+        const uint16_t numLocalExperts;
+        const uint16_t k;
+
+        MoEArgs(const size_t& eb, const uint& S, const uint& H, const uint& I,
+            const uint& bm, const uint& bn0, const uint& bn1,
+            const uint& _threads, const uint& ctas, const uint16_t& ep_rank, const uint16_t& ep_world,
+            const uint16_t& mype, const uint16_t& experts, const uint16_t& _k,
+            const uint16_t& nlx, const bool dropTokens = true):
+        elementBytes(eb), sequenceLength(S),
+        EC(dropTokens ? (cute::ceil_div(S, experts)) * _k : S),
+        tokenDim(H), ffnIntermediateSize(I), bM(bm), bN0(bn0), bN1(bn1),
+        threads(_threads), blocks(ctas), epRank(ep_rank), epWorld(ep_world), myPE(mype), numExperts(experts),
+        numLocalExperts(nlx),k(_k) {}
+    };
+
+    __global__ void bI(cuda::barrier<cuda::thread_scope_device>* db, const uint blocks) {
+        init(db, blocks);
+    }
+    __host__ __forceinline__
+    std::tuple<Context, GateContext> initialize(const MoEArgs& args, const uint& bNGate, cudaStream_t stream){
+        // fused gate + moe layer
+        if (args.blocks < 2) {
+            throw std::runtime_error("blocks must be at least 2");
+        }
+        const auto processors = args.blocks - 1;
+        const auto roundEC = cute::ceil_div(args.EC, args.bM) * args.bM;
+        const auto ecTilesM = cute::ceil_div(roundEC, args.bM);
+        const auto tilesN0 = cute::ceil_div(args.ffnIntermediateSize, args.bN0);
+        const auto tilesN1 = cute::ceil_div(args.tokenDim, args.bN1);
+
+        if (!nvshmemx_init_status()) {
+            throw std::runtime_error("nvshmem is not initialized");
+        }
+        const bool elementBytesConditions = cutlass::ispow2(args.elementBytes) &&
+            (args.elementBytes == 2 || args.elementBytes == 4 || args.elementBytes == 8);
+        if (!elementBytesConditions) {
+            throw std::runtime_error("elementBytes not supported");
+        }
+        // signals ~= tiles(S) * tiles(H)
+        // below ensures the following calloc initializes our signals to the expected value 0
+        static_assert(SignalConstants::ground == 0);
+        const size_t signalLength = (args.epWorld * args.numLocalExperts) + (args.numExperts * ecTilesM * tilesN1);
+        auto* signals = static_cast<uint64_t*>(nvshmem_calloc(signalLength, sizeof(uint64_t)));
+        // symmetric heap ~= 4*S*H
+        const auto heapLength = args.elementBytes * HEAP_STAGES * HEAP_CELLS * args.epWorld * args.numLocalExperts * roundEC * args.tokenDim;
+        auto* sHeap = static_cast<cuda::std::byte*>(nvshmem_malloc(heapLength));
+
+        Task* tQ = nullptr;
+        const bool threadConditions = cutlass::ispow2(args.threads) && args.threads >= 62;
+        if (!threadConditions) {
+            throw std::runtime_error("threads not supported");
+        }
+        const auto subscriberCount = args.threads - WARP_SIZE;
+        const size_t tQLength = subscriberTQLength<WARP_SIZE>(args.epWorld, args.numLocalExperts, ecTilesM, args.numExperts, tilesN0,
+            tilesN1, args.threads - WARP_SIZE);
+        const size_t secondaryTQL = secondaryTQLength(args.epWorld, args.numLocalExperts, ecTilesM, tilesN1);
+        cudaMallocAsync(&tQ, sizeof(Task) * (tQLength + secondaryTQL), stream);
+        Task* pTq = tQ + tQLength;
+
+        cuda::std::byte* GEMM0Staging = nullptr;
+        const size_t stagingLength = static_cast<size_t>(args.epWorld * args.numLocalExperts * roundEC) * args.ffnIntermediateSize;
+        cudaMallocAsync(&GEMM0Staging, stagingLength * args.elementBytes, stream);
+
+        BitSet* consumerBitMap = nullptr;
+        const auto cbmLength = nSI(args.numExperts * ecTilesM * tilesN1, subscriberCount);
+        cudaMallocAsync(&consumerBitMap, sizeof(BitSet) * cbmLength, stream);
+
+        uint8_t* producerBitMap = nullptr;
+        const auto pbmLength = args.epWorld * args.numLocalExperts * ecTilesM * tilesN1;
+        cudaMallocAsync(&producerBitMap, sizeof(uint8_t) * pbmLength, stream);
+
+        PEL* pel = nullptr;
+        cudaMallocAsync(&pel, sizeof(PEL) * args.numExperts, stream);
+
+        PLI* pli = nullptr;
+        cudaMallocAsync(&pli, sizeof(PLI) * args.epWorld, stream);
+
+        ELI* eli = nullptr;
+        cudaMallocAsync(&eli, sizeof(ELI) * args.numExperts, stream);
+
+        LXI* lxi = nullptr;
+        cudaMallocAsync(&lxi, sizeof(LXI) * args.numLocalExperts, stream);
+
+        TPS* tps = nullptr;
+        cudaMallocAsync(&tps, sizeof(TPS) * args.numExperts * roundEC, stream);
+
+        TQSignal* tqs = nullptr;
+        cudaMallocAsync(&tqs, sizeof(TQSignal) * processors, stream);
+        cudaMemsetAsync(tqs, 0, sizeof(TQSignal) * processors, stream);
+
+        uint* dispatchSync = nullptr;
+        cudaMallocAsync(&dispatchSync, sizeof(uint) * args.numExperts, stream);
+        cudaMemsetAsync(dispatchSync, 0, sizeof(uint) * args.numExperts, stream);
+
+        int* ecGuards = nullptr;
+        cudaMallocAsync(&ecGuards, sizeof(int) * args.numExperts, stream);
+        cudaMemsetAsync(ecGuards, flashmoe::STALE_AS_BYTE, sizeof(int) * args.numExperts, stream);
+
+        uint* gtqHeads = nullptr;
+        // ~= tiles(S)
+        const size_t gtqHeadsLength = args.epWorld * args.numLocalExperts * ecTilesM;
+        cudaMallocAsync(&gtqHeads, sizeof(uint) * gtqHeadsLength, stream);
+        cudaMemsetAsync(gtqHeads, 0, sizeof(uint) * gtqHeadsLength, stream);
+
+        uint* tileSync = nullptr;
+        cudaMallocAsync(&tileSync, sizeof(uint) * gtqHeadsLength, stream);
+        cudaMemsetAsync(tileSync, 0, sizeof(uint) * gtqHeadsLength, stream);
+
+        uint* statusQ = nullptr;
+        cudaMallocAsync(&statusQ, sizeof(uint) * processors, stream);
+        static_assert(ReadySignal::observed == 0);
+        cudaMemsetAsync(statusQ, 0, sizeof(uint) * processors, stream);
+
+        cuda::barrier<cuda::thread_scope_device>* db = nullptr;
+        cudaMallocAsync(&db, sizeof(cuda::barrier<cuda::thread_scope_device>), stream);
+        bI<<<1,1, 0, stream>>>(db, args.blocks);
+
+        SoftmaxStatePacked* ssp = nullptr;
+        const auto tE = cute::ceil_div(args.numExperts, bNGate);
+        cudaMallocAsync(&ssp, sizeof(SoftmaxStatePacked) * args.sequenceLength * tE, stream);
+        cudaMemsetAsync(ssp, 0, sizeof(SoftmaxStatePacked) * args.sequenceLength * tE, stream);
+
+        RingTopKPayload* rtp = nullptr;
+        cudaMallocAsync(&rtp, 2 * sizeof(SoftmaxStatePacked) * args.sequenceLength * tE, stream);
+        cudaMemsetAsync(rtp, 0, 2 * sizeof(SoftmaxStatePacked) * args.sequenceLength * tE, stream);
+
+        // TODO initialize pel, pli, lxi, eli
+
+        const auto moeContext =  Context{
+            sHeap,
+            signals,
+            tQ,
+            pTq,
+            GEMM0Staging,
+            consumerBitMap,
+            producerBitMap,
+            pel,
+            pli,
+            eli, lxi, tqs,
+            dispatchSync,
+            gtqHeads,
+            tileSync,
+            statusQ,
+            tps,
+            args.sequenceLength,
+            args.tokenDim,
+            args.ffnIntermediateSize,
+            args.EC, args.numLocalExperts,
+            args.numExperts, args.epWorld, args.epRank,
+            SignalConstants::sequenceStart, true
+        };
+
+        const auto gContext = GateContext{ecGuards, ssp, rtp, db};
+
+        return std::make_tuple(moeContext, gContext);
+    }
+
+    /*__host__ __forceinline__
+    void compatible(const uint& S, const uint& H, const uint& I, const uint& E,
+        const int& bM, const int& bNGate, const int& bN1) {
+        //TODO
+    }*/
+
+    __host__ __forceinline__
+    void finalize(const Context& ctx, cudaStream_t stream) {
+        CHECK_CUDA(cudaStreamSynchronize(stream));
+        if (ctx.initialized) {
+            nvshmem_free(ctx.symHeap);
+            nvshmem_free(ctx.signals);
+            // free workspace memory
+            cudaFreeAsync(ctx.tQ, stream);
+            cudaFreeAsync(ctx.pTq, stream);
+            cudaFreeAsync(ctx.GEMM0Staging, stream);
+            cudaFreeAsync(ctx.pel, stream);
+            cudaFreeAsync(ctx.pli, stream);
+            cudaFreeAsync(ctx.eli, stream);
+            cudaFreeAsync(ctx.lxi, stream);
+            cudaFreeAsync(ctx.consumerCombineBitMap, stream);
+            cudaFreeAsync(ctx.producerCombineBitMap, stream);
+            cudaFreeAsync(ctx.tokenIndices, stream);
+            cudaFreeAsync(ctx.tqs, stream);
+            cudaFreeAsync(ctx.GEMM0Staging, stream);
+            cudaFreeAsync(ctx.dispatchSync, stream);
+            cudaFreeAsync(ctx.gTqHeads, stream);
+            cudaFreeAsync(ctx.tileSync, stream);
+            cudaFreeAsync(ctx.tileSync, stream);
+        }
+        CHECK_CUDA(cudaPeekAtLastError());
+    }
+
+    __host__ __forceinline__
+    void finalize(const GateContext& ctx, cudaStream_t stream) {
+        cudaFreeAsync(ctx.ecGuards, stream);
+        if (ctx.ssp != nullptr) {
+            cudaFreeAsync(ctx.ssp, stream);
+        }
+        if (ctx.rtp != nullptr) {
+            cudaFreeAsync(ctx.rtp, stream);
+        }
+        if (ctx.db != nullptr) {
+            cudaFreeAsync(ctx.db, stream);
+        }
+    }
+}
+#endif //FLASHMOE_BOOTSTRAP_CUH

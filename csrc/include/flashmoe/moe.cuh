@@ -10,13 +10,12 @@
 #define FLASHMOE_MOE_CUH
 
 #include "infra/activation.cuh"
+
 #include "context.cuh"
+#include "gate.cuh"
 #include "dispatch.cuh"
 #include "processor.cuh"
 #include "os.cuh"
-#include "scheduler.cuh"
-#include "subscriber.cuh"
-#include "gate.cuh"
 
 namespace flashmoe::moe{
     using ull_t = unsigned long long int;
@@ -51,8 +50,7 @@ namespace flashmoe::moe{
         Activation a,
         Topology topo,
         bool doGate,
-        typename Element,
-        typename ElementC
+        typename Element
     >
     __global__ __launch_bounds__(Config::Threads::value, 1) void forward(
         const __grid_constant__ int S, // sequence length
@@ -67,10 +65,15 @@ namespace flashmoe::moe{
         const Element* __restrict__ biasUp, // [I]
         const Element* __restrict__ expertDownWeights, // [I, H]
         const Element* __restrict__ biasDown, // [H]
-        Element* __restrict__ gateOut, // [S, E]
-        ElementC* __restrict__ moeOut, //  [S, H]
-        const __grid_constant__ Heap& symHeap,
-        const __grid_constant__ Context ctx) {
+        Element* __restrict__ gateOut, // [S, k]
+        const int* __restrict__ expertCounts,
+        Element* __restrict__ moeOut, //  [S, H]
+        const __grid_constant__ Context ctx,
+        const __grid_constant__ GateContext gCtx) {
+        // construct const __grid_constant__ Heap& symHeap,
+        const auto symHeap = Heap{
+            ctx.symHeap, ctx.nLx, EC, H, sizeof(Element)
+        };
         extern __shared__ __align__(MAX_ALIGNMENT) cuda::std::byte flashWorkspace[];
         constexpr int bM0 = cute::get<0>(Config::G0TS{});
         constexpr int bN0 = cute::get<1>(Config::G0TS{});
@@ -89,9 +92,9 @@ namespace flashmoe::moe{
                 Config::GTS,
                 Config::Arch::value,
                 Config::GRL::value>(flashWorkspace, tokens, gateWeights, gateOut,
-                    ctx.tokenIndices, ctx.expertCounts, ctx.ecGuards,
-                    S, H, E, k, EC, roundEC, gridDim.x, ctx.ssp, ctx.rtp);
-            gridBarrier(ctx.db);
+                    ctx.tokenIndices, expertCounts,
+                    S, H, E, k, EC, roundEC, gridDim.x, gCtx.ecGuards, gCtx.ssp, gCtx.rtp);
+            gridBarrier(gCtx.db);
         }
         constexpr int threads = Config::Threads::value;
         const int processors = gridDim.x - 1;
@@ -100,15 +103,15 @@ namespace flashmoe::moe{
         if (blockIdx.x == gridDim.x - 1) {
             // call OS
             constexpr auto subscriberCount = threads - scheduler::SCHEDULER_COUNT;
-            static_assert(subscriberCount > 0 && subscriberCount % subscriber::WARP_SIZE == 0);
-            os::start<topo, subscriberCount, threads, bM, ElementC>(flashWorkspace, symHeap, ctx, EC,
+            static_assert(subscriberCount > 0 && subscriberCount % WARP_SIZE == 0);
+            os::start<topo, subscriberCount, threads, bM, Element>(flashWorkspace, expertCounts, symHeap, ctx, EC,
                 I / bN0, H / bN1, dispatchBlocks, E, I, processors);
             return;
         }
         if (blockIdx.x < dispatchBlocks) {
             // dispatch
             dispatch<topo, Config::Threads::value, bM, bN0, Config::DTK::value>(H, E, symHeap, EC, roundEC,
-                ctx.epRank, ctx.world, superBlockSize, dispatchBlocks, tokens, ctx.signals, ctx.expertCounts,
+                ctx.epRank, ctx.world, superBlockSize, dispatchBlocks, tokens, ctx.signals, expertCounts,
                 ctx.tokenIndices, ctx.dispatchSync, ctx.pel,
                 flashWorkspace, ctx.stateNumber);
         }
@@ -121,19 +124,20 @@ namespace flashmoe::moe{
             ctx.pTq,
             ctx.tileSync
         };
-        using GEMM0Act = ActivationType<a>;
+        using GEMM0Act = ActivationType<a, Element>;
         using AccumType = float;
         const auto tilesN0 = I / bN0;
-        const auto tielsN1 = H / bN1;
+        const auto tilesN1 = H / bN1;
 
         constexpr int arch = Config::Arch::value;
+        const auto ecTilesM = cute::ceil_div(EC, bM);
         using TileGEMM0 = tile::CollectiveMainloop<bM0, bN0, bK0, arch, Element, AccumType, threads, pS0>;
         using TileGEMM1 = tile::CollectiveMainloop<bM1, bN1, bK1, arch, Element, AccumType, threads, pS1>;
         static_assert(cuda::std::is_invocable_r_v<AccumType, GEMM0Act, AccumType>, "Activation should be elementwise");
         auto producerBM = cute::make_tensor(cute::make_gmem_ptr(ctx.producerCombineBitMap),
-            cute::make_layout(cute::make_shape(), cute::LayoutRight{}));
+            cute::make_layout(cute::make_shape(ctx.world, ctx.nLx, ecTilesM, tilesN1), cute::LayoutRight{}));
         processor::start<topo, threads, Config::CM::value, TileGEMM0, TileGEMM1, GEMM0Act>
-        (flashWorkspace, S, H, I, E, k, roundEC, tilesN0, tielsN1, expertUpWeights, biasUp,
+        (flashWorkspace, S, H, I, E, k, roundEC, tilesN0, tilesN1, expertUpWeights, biasUp,
             expertDownWeights, biasDown,ctx.tokenIndices, moeOut, producerBM, ctx.stateNumber, symHeap, pA);
     }
 }

@@ -37,26 +37,25 @@ namespace flashmoe::os {
         typename ElementC
     >
     __device__ __forceinline__
-    void start(cuda::std::byte* __restrict__ const& workspace,
+    void start(cuda::std::byte* __restrict__ const& workspace, const int* __restrict__ expertCounts,
         const Heap& symHeap,
         const Context& ctx, const int& EC, // not-padded EC
         const int& tilesN0, const int& tilesN1,
         const int& dispatchBlocks,
         const int& E, const int& I,
         const uint& processors) {
+        // assert(processors >= dispatchBlocks)
         // no funny business
-        static_assert(scheduler::WARP_SIZE == subscriber::WARP_SIZE);
         const auto ecTilesM = cute::ceil_div(EC, bM);
         const auto ecSignalCount = ecTilesM * tilesN1;
         const auto ssfC = E * ecSignalCount;
-        const auto* __restrict__ eC = ctx.expertCounts;
         const auto world = ctx.world;
         const auto nLx = ctx.nLx;
-        constexpr auto sNW = subscriberCount / subscriber::WARP_SIZE;
-        static_assert(subscriberCount % subscriber::WARP_SIZE == 0 && sNW >= 1);
+        constexpr auto sNW = subscriberCount / WARP_SIZE;
+        static_assert(subscriberCount % WARP_SIZE == 0 && sNW >= 1);
 
         const auto gtQCl = ctx.world * ctx.nLx * ecTilesM;
-        const auto sBz = nSI<scheduler::WARP_SIZE>(gtQCl);
+        const auto sBz = nSI<WARP_SIZE>(gtQCl);
 
         // subscriber shared memory allocation
         size_t offset = 0;
@@ -70,7 +69,7 @@ namespace flashmoe::os {
         static_assert(alignof(LXI) % alignof(BitSet) == 0);
         offset += rTCL<LXI>(nLx);
         auto* __restrict__ subVisitedSet = reinterpret_cast<BitSet*>(workspace + offset);
-        const auto fSbSL = nSI<sNW>(nLx * world);
+        const auto fSbSL = nSI<sNW>(nLx * world); //firstStageBitSetLength
         const auto bScL = nSI<subscriberCount>(ssfC);
         const auto bSSI = fSbSL + bScL;
         offset += rTCL<BitSet>(bSSI);
@@ -121,7 +120,7 @@ namespace flashmoe::os {
             *taskBound = ctx.nLx * ctx.world * ecTilesM * (tilesN0 + tilesN1);
         }
         for (uint i = threadIdx.x; i < E; i += threads) {
-            eCs[i] = eC[i];
+            eCs[i] = expertCounts[i];
         }
         __syncthreads();
         // Combine tasks
@@ -147,10 +146,10 @@ namespace flashmoe::os {
                     const auto intraTileIdx = tileIdx % ecSignalCount;
                     const auto expertTileCount = cute::ceil_div(eCs[expertIdx], bM) * tilesN1;
                     if (intraTileIdx < expertTileCount) {
-                        bitset.set(j);
+                        bitset.clear(j);
                     }
                     else {
-                        bitset.clear(j);
+                        bitset.set(j);
                     }
                 }
                 vs[i] = bitset;
@@ -205,24 +204,26 @@ namespace flashmoe::os {
         }
         __syncthreads();
         // build arguments for scheduler and subscriber
-        if (threadIdx.x / scheduler::WARP_SIZE == 0) {
+        if (threadIdx.x / WARP_SIZE == 0) {
             // scheduler
-            const auto sO = subscriberTQLength<subscriberCount, subscriber::WARP_SIZE>(ctx.world,
+            const auto sO = subscriberTQLength<subscriberCount, WARP_SIZE>(ctx.world,
                 ctx.nLx, ecTilesM, E, tilesN0, tilesN1);
-            auto* __restrict__ gtQHeads = ctx.gTqHeads();
-            auto* __restrict__ sQ = ctx.statusQueue();
-            auto* __restrict__ pDB = ctx.tqs();
+            auto* __restrict__ gtQHeads = ctx.gTqHeads;
+            auto* __restrict__ sQ = ctx.statusQueue;
+            auto* __restrict__ pDB = ctx.tqs;
             scheduler::start<subscriberCount>(interruptScratch, schedulerBitSet, processors, tilesN1,
                 sO, gtQCl, interrupt, tQHeads,
                 gtQHeads, taskBound, rQ, sQ, pDB);
         }
         else {
+            const auto tIdx = threadIdx.x - WARP_SIZE;
             subscriber::Args args{
-                ctx.signals, ctx.tQ, ctx.GEMM0Staging, senseBitset, subVisitedSet, interrupt, tQHeads,
-                pL, lX, eL, status, taskBound, ctx.world, ctx.nLx, ctx.firstStageFlagCount, ctx.epRank, ecTilesM * bM, E, I,
-                threadIdx.x - scheduler::WARP_SIZE, tilesN0, tilesN1, ecTilesM, ctx.stateNumber
+                ctx.signals, ctx.tQ, ctx.GEMM0Staging, senseBitset, subVisitedSet, interrupt, tQHeads + tIdx,
+                pL, lX, eL, status, taskBound, ctx.world, ctx.nLx, static_cast<uint>(ctx.nLx * ctx.world),
+                ctx.epRank, ecTilesM * bM, E, I,
+                tIdx, tilesN0, tilesN1, ecTilesM, ctx.stateNumber
             };
-            subscriber::start<topo, subscriberCount, bM, ElementC>(symHeap, args);
+            subscriber::start<topo, subscriberCount, bM, ElementC>(symHeap, args, fSbSL);
         }
         __syncthreads();
         for (uint i = threadIdx.x; i < bScL; i += threads) {

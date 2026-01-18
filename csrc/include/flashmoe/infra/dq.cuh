@@ -17,7 +17,7 @@ namespace flashmoe::DQ {
         int nQ = 0
     >
         __device__ __forceinline__
-    constexpr auto next(const int& prev, const int& slot) {
+    constexpr auto next(const uint& prev, const uint& slot) {
         if constexpr (dqt == DQType::stride) {
             return prev + slot * nQ;
         }
@@ -28,7 +28,7 @@ namespace flashmoe::DQ {
         int nQ
     >
     __device__ __forceinline__
-    constexpr auto sNext(const int& slot) {
+    constexpr auto sNext(const uint& slot) {
         return next<dqt, nQ>(0, slot);
     }
 }

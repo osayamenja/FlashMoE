@@ -159,8 +159,8 @@ namespace flashmoe::processor{
         static_assert(sizeof(SignalPayload<PacketStage::last>) == sizeof(uint64_t) &&
             alignof(SignalPayload<PacketStage::last>) == alignof(uint64_t));
         if (!threadIdx.x) {
-            atomicExch_block(&globalInterrupt, 0U);
-            atomicExch_block(&enqueue, 0U);
+            globalInterrupt = 0U;
+            enqueue = 0U;
         }
         __syncthreads();
         using SQT = cuda::std::underlying_type_t<flashmoe::ReadySignal>;

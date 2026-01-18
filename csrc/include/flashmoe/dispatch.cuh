@@ -81,6 +81,7 @@ namespace flashmoe {
         for (int i = threadIdx.x; i < E; i += threads) {
             auto lInfo = enL[i];
             lInfo.eC = seC[i];
+            // assert(sPTT[lInfo.peer] <= UINT16_MAX)
             lInfo.pTTt = static_cast<uint16_t>(sPTT[lInfo.peer]);
             enL[i] = lInfo;
         }
