@@ -17,24 +17,25 @@
 // note this is not an optimal implementation!
 template<int Arch, int bM, int bN, int threads, flashmoe::CombineMode c, typename Element>
 __launch_bounds__(threads, 1)
-__global__ void combineKernel(const __grid_constant__ int EC,
-    const __grid_constant__ int S,
-    const __grid_constant__ int E,
-    const __grid_constant__ int H,
-    const __grid_constant__ int k,
+__global__ void combineKernel(const __grid_constant__ size_t EC,
+    const __grid_constant__ size_t S,
+    const __grid_constant__ uint E,
+    const __grid_constant__ uint H,
     const int* __restrict__ expertCounts, // [E]
     const Element* __restrict__ tokens, // [E, EC, H]
     Element* __restrict__ output, // [S, H]
     const flashmoe::TPS* __restrict__ tokenIndices // [E, EC]
     ) {
     constexpr int Alignment = flashmoe::ElementAlignment<Element, bN>;
-    __shared__ __align__(Alignment) cuda::std::byte workspace [bM * bN * sizeof(Element)];
-    const auto tilesM = EC / bM;
-    const auto tilesN = H / bN;
+    extern __shared__ __align__(Alignment) cuda::std::byte combineWorkspace[];
+    const uint tilesM = EC / bM;
+    const uint tilesN = H / bN;
     const auto tilesPerExpert = tilesM * tilesN;
     const auto numTiles = E * tilesM * tilesN;
     const auto tokTensor = cute::make_tensor(cute::make_gmem_ptr(tokens),
         cute::make_layout(cute::make_shape(E, EC, H), cute::LayoutRight{}));
+    const auto tokenIds = cute::make_tensor(cute::make_gmem_ptr(tokenIndices),
+        cute::make_layout(cute::make_shape(E, EC), cute::LayoutRight{}));
     for (int globalIdx = blockIdx.x; globalIdx < numTiles; globalIdx += gridDim.x) {
         const auto expertIdx = globalIdx / tilesPerExpert;
         const auto tileIdx = globalIdx % tilesPerExpert;
@@ -45,11 +46,10 @@ __global__ void combineKernel(const __grid_constant__ int EC,
         const auto actualTiles = cute::ceil_div(expertCount, bM) * tilesN;
         if (tileIdx < actualTiles) {
             const auto numFullMTiles = expertCount / bM;
-            auto* __restrict__ tP = &tokTensor(expertIdx, tileM * bM, 0);
+            auto* __restrict__ tP = &tokTensor(static_cast<size_t>(expertIdx), tileM * bM, 0);
             const auto tileSize = tileM < numFullMTiles ? bM : (expertCount - numFullMTiles * bM);
-            flashmoe::combine<bM, bN, Arch, threads, c>(EC, S, E, H, k, workspace,
-                tokenIndices, output, tP, tileM * bM,
-                expertIdx, tileSize, tileCoord);
+            const auto* __restrict__ tI = &tokenIds(expertIdx, tileM * bM);
+            flashmoe::combine<bM, bN, Arch, threads, c>(S, H, combineWorkspace, tI, output, tP, tileSize, tileCoord);
         }
     }
 }
@@ -275,6 +275,14 @@ void kickStart(const int& S, const int& E, const int& k, const float& rtol, cons
     cudaSetDevice(0);
     cudaStream_t stream;
     cudaStreamCreate(&stream);
+    constexpr int sharedSize = bM * bN * sizeof(Element);
+    int maxSharedMemory = 0;
+    CHECK_CUDA(cudaDeviceGetAttribute(&maxSharedMemory,cudaDevAttrMaxSharedMemoryPerBlock, 0));
+    if (sharedSize > maxSharedMemory) {
+        printf("Insufficient shared memory for bM: %d, bN: %d -> %d should be <= %d\n",
+            bM, bN, sharedSize, maxSharedMemory);
+        return;
+    }
     Element* tokens = nullptr;
     flashmoe::TPS* tIds = nullptr;
     int* expertCounts = nullptr;
@@ -298,7 +306,7 @@ void kickStart(const int& S, const int& E, const int& k, const float& rtol, cons
     }
     CHECK_CUDA(cudaPeekAtLastError());
     // fill token array
-    randUniform<Arch>(tokens, E * EC * H, rd(), -1.0f, 1.0f, stream);
+    randUniform<Arch>(tokens, static_cast<size_t>(E * EC) * H, rd(), -1.0f, 1.0f, stream);
     // copy expert counts
     cudaMemcpyAsync(expertCounts, counts.data(), sizeof(int) * E, cudaMemcpyHostToDevice, stream);
     // copy indices data structure
@@ -314,19 +322,17 @@ void kickStart(const int& S, const int& E, const int& k, const float& rtol, cons
     int blocks = 0;
     if (k > 1) {
         auto kernel = combineKernel<Arch, bM, bN, cThreads, flashmoe::CombineMode::plural, Element>;
-        CHECK_CUDA(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&bps, kernel, cThreads, 0));
+        CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, sharedSize));
+        CHECK_CUDA(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&bps, kernel, cThreads, sharedSize));
         blocks = cute::min(((E * EC) / bM) * (H / bN), bps * NUM_SMS);
-        combineKernel<Arch, bM, bN, cThreads, flashmoe::CombineMode::plural>
-        <<<blocks, cThreads, 0, stream>>>(EC, S, E, H, k,
-            expertCounts, tokens, kut_result, tIds);
+        kernel<<<blocks, cThreads, sharedSize, stream>>>(EC, S, E, H, expertCounts, tokens, kut_result, tIds);
     }
     else {
         auto kernel = combineKernel<Arch, bM, bN, cThreads, flashmoe::CombineMode::single, Element>;
-        CHECK_CUDA(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&bps, kernel, cThreads, 0));
+        CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, sharedSize));
+        CHECK_CUDA(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&bps, kernel, cThreads, sharedSize));
         blocks = cute::min(((E * EC) / bM) * (H / bN), bps * NUM_SMS);
-        combineKernel<Arch, bM, bN, cThreads, flashmoe::CombineMode::single>
-        <<<blocks, cThreads, 0, stream>>>(EC, S, E, H, k,
-            expertCounts, tokens, kut_result, tIds);
+        kernel<<<blocks, cThreads, sharedSize, stream>>>(EC, S, E, H, expertCounts, tokens, kut_result, tIds);
     }
     // compare and report error
     using MatXType = MXE<Element>;

@@ -41,7 +41,7 @@ namespace flashmoe
         return world * numLocalExperts * ecTilesM * tilesN1;
     }
 
-    struct __align__(8) Context {
+    struct __align__(16) Context {
         cuda::std::byte* const symHeap = nullptr;
         uint64_t* const signals = nullptr; // [[world, num_local_experts], [E, tiles(roundEC), tiles(H)]]
         Task* const tQ = nullptr;// [subscriberTQLength]
@@ -64,12 +64,16 @@ namespace flashmoe
         const uint H = 0; // max hidden dimension or model dim
         const uint I = 0; //  max FFN intermediate size
         const uint EC = 0; // max EC
+        const uint16_t bM = 0;
+        const uint16_t bN0 = 0;
+        const uint16_t bN1 = 0;
         const uint16_t nLx = 0;
         const uint16_t E = 0;
         const uint16_t world = 0;
         const uint16_t epRank = 0;
-        const uint8_t stateNumber = 0;
+        const uint16_t myPE = 0;
         const bool initialized = false;
+        uint8_t stateNumber = 0;
     };
 
     struct __align__(8) GateContext{

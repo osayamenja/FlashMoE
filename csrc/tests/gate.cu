@@ -437,7 +437,7 @@ void kickStart(const int argc, char** argv) {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
     matx::cudaExecutor exec{stream};
-    constexpr auto sro = flashmoe::SoftMaxOptimizationLevel::highest;
+    constexpr auto sro = flashmoe::SoftMaxOptimizationLevel::none;
     // tiling for A100 (not tuned)
     constexpr int bM = cute::min(S, 64);
     constexpr int bK = cute::min(H, 128);

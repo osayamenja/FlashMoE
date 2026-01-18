@@ -16,8 +16,8 @@ namespace flashmoe {
     struct Heap {
         cuda::std::byte* const sHeap;
         Heap(cuda::std::byte* const& _sHeap,
-            const int& _expertSlots, const int& _EC,
-            const int& _tokenDim, const int& _elementBytes) :
+            const uint& _expertSlots, const uint& _EC,
+            const uint& _tokenDim, const uint& _elementBytes) :
         sHeap(_sHeap), expertSlots(_expertSlots), EC(_EC),
         tokenDim(_tokenDim), elementBytes(_elementBytes){}
         template<
@@ -47,10 +47,10 @@ namespace flashmoe {
                 return sHeap + advanceOffset<stage, cell>(peer, expert, token);
         }
     private:
-        const int expertSlots;
-        const int EC; // round to multiple of bM
-        const int tokenDim;
-        const int elementBytes;
+        const uint expertSlots;
+        const uint EC; // round to multiple of bM
+        const uint tokenDim;
+        const uint elementBytes;
     };
 }
 #endif //FLASHMOE_HEAP_CUH

@@ -6,6 +6,7 @@
 #define FLASHMOE_BOOTSTRAP_CUH
 #include <stdexcept>
 #include <tuple>
+#include <vector>
 
 #include <cuda_runtime.h>
 #include <cstdio>
@@ -46,33 +47,108 @@ namespace flashmoe
         const uint blocks; //CTAs
         const uint16_t epRank;
         const uint16_t epWorld;
-        const uint16_t myPE; // only needed for RDMA
+        const uint16_t myPE; // NVSHMEM PE
         const uint16_t numExperts;
         const uint16_t numLocalExperts;
-        const uint16_t k;
 
-        MoEArgs(const size_t& eb, const uint& S, const uint& H, const uint& I,
+        MoEArgs(const size_t& eb, const uint& S, const uint& H, const uint& I, const uint& _EC,
             const uint& bm, const uint& bn0, const uint& bn1,
             const uint& _threads, const uint& ctas, const uint16_t& ep_rank, const uint16_t& ep_world,
-            const uint16_t& mype, const uint16_t& experts, const uint16_t& _k,
-            const uint16_t& nlx, const bool dropTokens = true):
+            const uint16_t& mype, const uint16_t& experts,
+            const uint16_t& nlx):
         elementBytes(eb), sequenceLength(S),
-        EC(dropTokens ? (cute::ceil_div(S, experts)) * _k : S),
+        EC(_EC),
         tokenDim(H), ffnIntermediateSize(I), bM(bm), bN0(bn0), bN1(bn1),
         threads(_threads), blocks(ctas), epRank(ep_rank), epWorld(ep_world), myPE(mype), numExperts(experts),
-        numLocalExperts(nlx),k(_k) {}
+        numLocalExperts(nlx) {}
     };
 
     __global__ void bI(cuda::barrier<cuda::thread_scope_device>* db, const uint blocks) {
         init(db, blocks);
     }
+
     __host__ __forceinline__
-    std::tuple<Context, GateContext> initialize(const MoEArgs& args, const uint& bNGate, cudaStream_t stream){
+    void expertParallelBookkeeping(const uint* __restrict__ const& expertToEpRank,
+        const int* __restrict__ const& epRankToGlobalRank, const uint& epWorld,
+        const int& myPE, const uint& E, const uint& nLx,
+        cuda::std::byte* const& sHeap, uint64_t* const& signals,
+        PEL* const& pel, PLI* const& pli, ELI* const& eli, LXI* const& lxi,
+        cudaStream_t stream) {
+        if (!nvshmemx_init_status()) {
+            throw std::runtime_error("nvshmem is not initialized");
+        }
+        std::vector<uint> lxIndices(epWorld);
+        std::vector<PEL> pelHost(E);
+        std::vector<PLI> pliHost(epWorld);
+        std::vector<ELI> eliHost(E);
+        std::vector<LXI> lxiHost(nLx);
+
+        for (uint i = 0; i < E; ++i) {
+            const auto epRank = expertToEpRank[i];
+            const auto pe = epRankToGlobalRank[i];
+            auto* rSheap = static_cast<cuda::std::byte*>(nvshmem_ptr(sHeap, pe));
+            auto* rFlags = static_cast<uint64_t*>(nvshmem_ptr(signals, pe));
+            const uint lxIdx = lxIndices[epRank]++;
+            const auto isRemote = rSheap == nullptr;
+
+            // PEL
+            pelHost[i].isRemote = isRemote;
+            pelHost[i].expertLocalIdx = lxIdx;
+            pelHost[i].pe = pe;
+            pelHost[i].remoteSFlags = rFlags;
+            pelHost[i].remoteSHeap = rSheap;
+            pelHost[i].peer = epRank;
+
+            // ELI
+            eliHost[i].epRank = epRank;
+            eliHost[i].isRemote = isRemote;
+            eliHost[i].localExpertIndex = lxIdx;
+
+            // PLI
+            pliHost[i].isRemote = isRemote;
+            pliHost[i].pe = pe;
+            pliHost[i].remoteSFlags = rFlags;
+            pliHost[i].remoteSHeap = rSheap;
+
+            //LXI
+            if (pe == myPE) {
+                lxiHost[lxIdx].expertIndex = i;
+            }
+        }
+
+        auto nlxUniform = lxIndices[0];
+        for (uint i = 0; i < E; ++i) {
+            auto pt = pelHost[i];
+            pt.nLocalExperts = lxIndices[pt.peer];
+            if (pt.nLocalExperts != nlxUniform) {
+                // may relax this later
+                throw std::runtime_error("Number of local experts should be equal across the ep group");
+            }
+            pelHost[i] = pt;
+        }
+
+        cudaMemcpyAsync(pel, pelHost.data(), sizeof(PEL) * pelHost.size(),cudaMemcpyHostToDevice,stream);
+        cudaMemcpyAsync(pli, pliHost.data(), sizeof(PLI) * pliHost.size(),cudaMemcpyHostToDevice,stream);
+        cudaMemcpyAsync(eli, eliHost.data(), sizeof(ELI) * eliHost.size(), cudaMemcpyHostToDevice, stream);
+        cudaMemcpyAsync(lxi, lxiHost.data(), sizeof(LXI) * lxiHost.size(), cudaMemcpyHostToDevice, stream);
+    }
+    __host__ __forceinline__
+    std::tuple<Context, GateContext> initialize(const MoEArgs& args, const uint& bNGate,
+        const uint* __restrict__ const& expertToEpRank, const int* __restrict__ const& epRankToGlobalRank,
+        cudaStream_t stream){
         // fused gate + moe layer
         if (args.blocks < 2) {
             throw std::runtime_error("blocks must be at least 2");
         }
         const auto processors = args.blocks - 1;
+        if (processors > scheduler::MAX_PROCESSORS) {
+            throw std::runtime_error("processor count is too high");
+        }
+        // maximum tiles that a peer will send to another peer in aggregate.
+        const auto maxPeerTaskTiles = (args.EC * args.numLocalExperts) / args.bM;
+        if (maxPeerTaskTiles > cuda::std::numeric_limits<uint16_t>::max()) {
+            throw std::runtime_error("Max peer task tiles exceeds supported limit. Inform the maintainer.");
+        }
         const auto roundEC = cute::ceil_div(args.EC, args.bM) * args.bM;
         const auto ecTilesM = cute::ceil_div(roundEC, args.bM);
         const auto tilesN0 = cute::ceil_div(args.ffnIntermediateSize, args.bN0);
@@ -96,7 +172,7 @@ namespace flashmoe
         auto* sHeap = static_cast<cuda::std::byte*>(nvshmem_malloc(heapLength));
 
         Task* tQ = nullptr;
-        const bool threadConditions = cutlass::ispow2(args.threads) && args.threads >= 62;
+        const bool threadConditions = args.threads >= WARP_SIZE * 2;
         if (!threadConditions) {
             throw std::runtime_error("threads not supported");
         }
@@ -106,6 +182,9 @@ namespace flashmoe
         const size_t secondaryTQL = secondaryTQLength(args.epWorld, args.numLocalExperts, ecTilesM, tilesN1);
         cudaMallocAsync(&tQ, sizeof(Task) * (tQLength + secondaryTQL), stream);
         Task* pTq = tQ + tQLength;
+        if (tQLength + secondaryTQL > cuda::std::numeric_limits<uint>::max()) {
+            throw std::runtime_error("Not an error: inform the maintainer");
+        }
 
         cuda::std::byte* GEMM0Staging = nullptr;
         const size_t stagingLength = static_cast<size_t>(args.epWorld * args.numLocalExperts * roundEC) * args.ffnIntermediateSize;
@@ -174,7 +253,9 @@ namespace flashmoe
         cudaMallocAsync(&rtp, 2 * sizeof(SoftmaxStatePacked) * args.sequenceLength * tE, stream);
         cudaMemsetAsync(rtp, 0, 2 * sizeof(SoftmaxStatePacked) * args.sequenceLength * tE, stream);
 
-        // TODO initialize pel, pli, lxi, eli
+        CHECK_CUDA(cudaPeekAtLastError());
+        expertParallelBookkeeping(expertToEpRank, epRankToGlobalRank, args.epWorld, args.myPE,
+            args.numExperts, args.numLocalExperts, sHeap, signals, pel, pli, eli, lxi, stream);
 
         const auto moeContext =  Context{
             sHeap,
@@ -195,21 +276,18 @@ namespace flashmoe
             args.sequenceLength,
             args.tokenDim,
             args.ffnIntermediateSize,
-            args.EC, args.numLocalExperts,
-            args.numExperts, args.epWorld, args.epRank,
+            args.EC,
+            static_cast<uint16_t>(args.bM), static_cast<uint16_t>(args.bN0), static_cast<uint16_t>(args.bN1),
+            args.numLocalExperts,
+            args.numExperts, args.epWorld, args.epRank, args.myPE,
             SignalConstants::sequenceStart, true
         };
+        CHECK_CUDA(cudaStreamSynchronize(stream));
 
         const auto gContext = GateContext{ecGuards, ssp, rtp, db};
 
         return std::make_tuple(moeContext, gContext);
     }
-
-    /*__host__ __forceinline__
-    void compatible(const uint& S, const uint& H, const uint& I, const uint& E,
-        const int& bM, const int& bNGate, const int& bN1) {
-        //TODO
-    }*/
 
     __host__ __forceinline__
     void finalize(const Context& ctx, cudaStream_t stream) {
@@ -251,5 +329,30 @@ namespace flashmoe
             cudaFreeAsync(ctx.db, stream);
         }
     }
+}
+
+namespace flashmoe::experimental
+{
+    // allows for reusing a context across multiple compatible workloads
+    // if incompatible, a new context must be created.
+    // TODO
+    /*__host__ __forceinline__
+    bool compatible(const Context& ctx, const MoEArgs& args) {
+        const auto roundEC = cute::ceil_div(ctx.EC, ctx.bM) * ctx.bM;
+        const auto ecTilesM = cute::ceil_div(roundEC, ctx.bM);
+        const auto tilesN0 = cute::ceil_div(ctx.I, ctx.bN0);
+        const auto tilesN1 = cute::ceil_div(ctx.H, ctx.bN1);
+
+        bool isCompatible = true;
+        const auto roundECArgs = cute::ceil_div(args.EC, args.bM) * args.bM;
+        isCompatible &= (roundEC >= roundECArgs);
+        isCompatible &= (ecTilesM >= cute::ceil_div(roundECArgs, args.bM));
+        isCompatible &= (tilesN0 >= cute::ceil_div(args.ffnIntermediateSize, args.bN0));
+        isCompatible &= (tilesN1 >= cute::ceil_div(args.tokenDim, args.bN1));
+        isCompatible &= (ctx.myPE == args.myPE);
+        isCompatible &= (ctx.E >= args.numExperts);
+
+        return isCompatible;
+    }*/
 }
 #endif //FLASHMOE_BOOTSTRAP_CUH
