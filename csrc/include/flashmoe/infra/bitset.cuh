@@ -35,14 +35,14 @@ namespace flashmoe {
     constexpr uint nSI(const unsigned int& numBits) {
         constexpr unsigned int integerBitWidth = 32U;
         constexpr auto width = integerBitWidth * T;
-        return (numBits / width) * T + min(numBits % width, T);
+        return (numBits / width) * T + cuda::std::min(numBits % width, T);
     }
 
     __host__ __forceinline__
     constexpr uint nSI(const unsigned int& numBits, const uint& T) {
         constexpr unsigned int integerBitWidth = 32U;
         const auto width = integerBitWidth * T;
-        return (numBits / width) * T + min(numBits % width, T);
+        return (numBits / width) * T + cuda::std::min(numBits % width, T);
     }
 }
 #endif //FLASHMOE_BITSET_CUH

@@ -69,14 +69,15 @@ __global__ void gk(const Element* __restrict__ a, const Element* __restrict__ b,
 template<typename Element>
 __global__ void gatherTokens(const flashmoe::TPS* __restrict__ tokenIds,
   const Element* __restrict__ src, Element* __restrict__ dst,
-  const __grid_constant__ uint EC, const __grid_constant__ uint S,
+  const int* __restrict__ expertCounts, const __grid_constant__ uint EC, const __grid_constant__ uint S,
   const __grid_constant__ uint H) {
   // assert(n <= EC)
+  const auto count = *expertCounts;
   const auto srcTensor = cute::make_tensor(cute::make_gmem_ptr(src),
     cute::make_layout(cute::make_shape(S, H), cute::LayoutRight{}));
   auto dstTensor = cute::make_tensor(cute::make_gmem_ptr(dst),
     cute::make_layout(cute::make_shape(EC, H), cute::LayoutRight{}));
-  for (uint idx = blockIdx.x; idx < EC; idx += gridDim.x) {
+  for (uint idx = blockIdx.x; idx < count; idx += gridDim.x) {
     const auto tIdx = tokenIds[idx].tokenIdx;
     for (uint i = threadIdx.x; i < H; i += blockDim.x) {
       dstTensor(idx, i) = srcTensor(tIdx, i);
@@ -91,20 +92,62 @@ struct SplitFunctor {
   }
 };
 
+template<typename Element>
+__global__ void combineReference( const __grid_constant__ int S,
+    const __grid_constant__ int H, const __grid_constant__ int EC, const __grid_constant__ int topK,
+    const Element* __restrict__ tokens, // [EC, H]
+    const flashmoe::TPS* __restrict__ tokenIds, //[EC] metadata
+    const int* __restrict__ expertCounts, // [1]
+    Element* __restrict__ result // [S, H]
+    ) {
+  const auto tIds = cute::make_tensor(cute::make_gmem_ptr(tokenIds),
+      cute::make_layout(cute::make_shape(EC), cute::LayoutRight{}));
+  const auto tokTensor = cute::make_tensor(cute::make_gmem_ptr(tokens),
+      cute::make_layout(cute::make_shape(EC, H), cute::LayoutRight{}));
+  auto resultTensor = cute::make_tensor(cute::make_gmem_ptr(result),
+      cute::make_layout(cute::make_shape(S, H), cute::LayoutRight{}));
+  const auto expertCount = *expertCounts;
+  for (int j = blockIdx.x; j < expertCount; j += gridDim.x) {
+    const auto tokenId = tIds(j);
+    if (topK == 1) {
+      for (auto k = threadIdx.x; k < H; k += blockDim.x) {
+        resultTensor(tokenId.tokenIdx, k) = tokTensor(j, k);
+      }
+    }
+    else {
+      // a token is mapped to an expert at most once, so we can safely accumulate without atomics
+      constexpr flashmoe::Converter<float, Element> loadOp{};
+      constexpr flashmoe::Converter<Element, float> storeOp{};
+      for (auto k = threadIdx.x; k < H; k += blockDim.x) {
+        // read token value and convert to float.
+        const auto v = loadOp(tokTensor(j, k));
+        const float scaledV = v * tokenId.probability;
+        // read current result value
+        const auto rv = resultTensor(tokenId.tokenIdx, k);
+        // store summed result
+        resultTensor(tokenId.tokenIdx, k) = storeOp(scaledV) + rv;
+      }
+    }
+  }
+}
 // single GPU E2E MoE
 template<
   typename Config, int GEMM0SharedSize, int GEMM1SharedSize,
-  typename Activation, typename AccumType, typename Element, typename ElementC
+  typename Activation, typename AccumType, typename Element
 >
 __host__ __forceinline__
 void reference(const flashmoe::TPS* __restrict__ const& tokenIds,
   Element* __restrict__ const& tokens,
   Element* __restrict__ const& ref_input,
-  Element* __restrict__ const& expertUp, Element* __restrict__ const& expertDown,
-  Element* __restrict__ const& biasUp, Element* __restrict__ const& biasDown,
-  ElementC* __restrict__ const& ref_interim,
-  ElementC* __restrict__ const& ref_out,
-  const uint& S, const uint& H, const uint& EC, const uint& E, const uint I,
+  Element* __restrict__ const& expertUp, // [E, H, I]
+  Element* __restrict__ const& expertDown, // [E, I, H]
+  Element* __restrict__ const& biasUp, // [E, I]
+  Element* __restrict__ const& biasDown, // [E, H]
+  Element* __restrict__ const& ref_interim0,
+  Element* __restrict__ const& ref_interim1,
+  int* __restrict__ const& expertCounts,
+  Element* __restrict__ const& ref_out,
+  const uint& S, const uint& H, const uint& EC, const uint& E, const uint I, const int& topK,
   cudaStream_t stream) {
   constexpr int bM0 = cute::get<0>(Config::G0TS{});
   constexpr int bN0 = cute::get<1>(Config::G0TS{});
@@ -124,39 +167,69 @@ void reference(const flashmoe::TPS* __restrict__ const& tokenIds,
   using TileGEMM0 = flashmoe::tile::CollectiveMainloop<bM0, bN0, bK0, arch, Element, AccumType, threads, pS0>;
   using TileGEMM1 = flashmoe::tile::CollectiveMainloop<bM1, bN1, bK1, arch, Element, AccumType, threads, pS1>;
 
-  auto kernel0 = gk<TileGEMM0, Activation, Element, ElementC>;
+  auto kernel0 = gk<TileGEMM0, Activation, Element, Element>;
   // set shared memory
   CHECK_CUDA(cudaFuncSetAttribute(kernel0, cudaFuncAttributeMaxDynamicSharedMemorySize, GEMM0SharedSize));
   int bps = 0;
   CHECK_CUDA(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&bps, kernel0, threads, GEMM0SharedSize));
   const auto blocks0 = cute::min((EC / bM0) * (I / bN0), bps * NUM_SMS);
-  auto kernel1 = gk<TileGEMM0, cublasdx::identity, Element, ElementC>;
+  auto kernel1 = gk<TileGEMM1, cublasdx::identity, Element, Element>;
   // set shared memory
   CHECK_CUDA(cudaFuncSetAttribute(kernel1, cudaFuncAttributeMaxDynamicSharedMemorySize, GEMM1SharedSize));
   // get blocks
   CHECK_CUDA(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&bps, kernel1, threads, GEMM1SharedSize));
   const auto blocks1 = cute::min((EC / bM0) * (H / bN1), bps * NUM_SMS);
-
   for (int i = 0; i < E; ++i) {
     // get the tokens routed to expert i
-    gatherTokens<<<EC, 128, 0, stream>>>(tokenIds, tokens, ref_input, E, S, H);
+    gatherTokens<<<EC, 128, 0, stream>>>(tokenIds, tokens, ref_input, expertCounts + i, E, S, H);
     // now do GEMM0 + bias + act
-
-    // do sum+scatter
+    auto* __restrict__ expertU = expertUp + i * (static_cast<size_t>(H) * I);
+    auto* __restrict__ biasU = biasUp + i * I;
+    gk<TileGEMM0, Activation><<<blocks0, threads, GEMM0SharedSize, stream>>>(ref_input, expertU, ref_interim0, biasU, EC, I, H);
+    // do GEMM 1 + bias
+    auto* __restrict__ expertD = expertDown + i * (static_cast<size_t>(H) * I);
+    auto* __restrict__ biasD = biasDown + i * H;
+    gk<TileGEMM1, cublasdx::identity><<<blocks1, threads, GEMM1SharedSize, stream>>>(ref_interim0, expertD, ref_interim1, biasD, EC, H, I);
+    // do combine
+    auto* __restrict__ tIds = tokenIds + i * EC;
+    combineReference<>(S, H, EC, topK, ref_interim1, tIds, expertCounts + i, ref_out);
   }
 }
 
-template<
-  int Arch,
-  int bM, int bN0, int bK0, int pSK0,
-  int bN1, int bK1, int bNGate, int pSK1,
-  bool isKG1,
-  flashmoe::Activation act,
-  flashmoe::Topology topo,
-  flashmoe::GateReductionLevel grl,
-  flashmoe::DropTokens dtk = flashmoe::DropTokens::no
->
-void kickstart(const uint S, const uint H, const uint I, const uint E, const uint k) {
+// template<
+//   int Arch,
+//   int bM, int bN0, int bK0, int pSK0,
+//   int bN1, int bK1, int bNGate, int pSK1,
+//   bool isKG1,
+//   flashmoe::Activation act,
+//   flashmoe::Topology topo,
+//   flashmoe::GateReductionLevel grl,
+//   flashmoe::DropTokens dtk = flashmoe::DropTokens::no
+// >
+void kickstart(/*const uint S, const uint H, const uint I, const uint E, const uint k*/) {
+  constexpr int S = 16;
+  constexpr int H = 16;
+  constexpr int I = 16;
+  constexpr int E = 2;
+  constexpr int k = 1;
+  constexpr int bNGate = cute::min(32, E);
+  constexpr auto topo = flashmoe::Topology::NVLINK_ONLY;
+  constexpr auto grl = E > bNGate ? flashmoe::GateReductionLevel::multiBlock :
+  flashmoe::GateReductionLevel::singleBlock;
+  constexpr auto dtk = flashmoe::DropTokens::no;
+  constexpr auto Arch = FLASHMOE_ARCH;
+  constexpr auto act = flashmoe::Activation::relu;
+  using Element = __half;
+  using AccumType = float;
+  constexpr int bM = cute::min(S, 128);
+  constexpr int bN0 = cute::min(I, 128);
+  constexpr int bN1 = cute::min(H, 128);
+  constexpr int bK0 = cute::min(H, 64);
+  constexpr int bK1 = cute::min(I, 64);
+  constexpr bool isKG1 = k > 1;
+  constexpr int pSK0 = 1;
+  constexpr int pSK1 = 1;
+
   nvshmem_init();
   const uint devId = nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE);
   CHECK_CUDA(cudaSetDevice(devId));
@@ -171,8 +244,6 @@ void kickstart(const uint S, const uint H, const uint I, const uint E, const uin
   const auto numLocalExperts = E / world;
   const auto tilesN1 = H / bN1;
 
-  using Element = float;
-  using AccumType = float;
   constexpr auto threadsGEMM0 = flashmoe::tile::suggest_thread_count<bM, bN0, bK0, Arch, Element, AccumType>();
   constexpr auto threadsGEMM1 = flashmoe::tile::suggest_thread_count<bM, bN1, bK1, Arch, Element, AccumType>();
   constexpr auto threads = cute::max(threadsGEMM0, threadsGEMM1);
@@ -185,7 +256,7 @@ void kickstart(const uint S, const uint H, const uint I, const uint E, const uin
     sizeof(flashmoe::gate::SoftType) * bM * bNGate), flashmoe::MAX_ALIGNMENT);
   const auto dispatchSz = E * (sizeof(flashmoe::PEL) + sizeof(int));
   const auto OSSz = flashmoe::os::getSharedSize<threads, bM>(world, numLocalExperts, E, EC, tilesN1);
-  constexpr auto kernelSz = cute::max(GEMM0Sz, GEMM1Sz, GateSz, dispatchSz, OSSz);
+  const auto kernelSz = cute::max(GEMM0Sz, GEMM1Sz, GateSz, dispatchSz, OSSz);
   int maxSharedMemory = 0;
   CHECK_CUDA(cudaDeviceGetAttribute(&maxSharedMemory,cudaDevAttrMaxSharedMemoryPerBlock, devId));
   if (kernelSz > maxSharedMemory) {
@@ -197,7 +268,7 @@ void kickstart(const uint S, const uint H, const uint I, const uint E, const uin
   using GEMM0Tile = cute::Shape<cute::Int<bM>, cute::Int<bN0>, cute::Int<bK0>, cute::Int<pSK0>>;
   // [S, I] x [I, H] -> [S, H]
   using GEMM1Tile = cute::Shape<cute::Int<bM>, cute::Int<bN1>, cute::Int<bK1>, cute::Int<pSK1>>;
-  using Config = flashmoe::moe::MoEConfig<Arch, threads, isKG1, dtk, GateTile, GEMM0Tile, GEMM1Tile>;
+  using Config = flashmoe::moe::MoEConfig<Element, Arch, threads, isKG1, dtk, GateTile, GEMM0Tile, GEMM1Tile>;
 
   auto kernel = flashmoe::moe::forward<Config, act, topo, doGate, grl, Element>;
   CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kernelSz));
@@ -205,7 +276,7 @@ void kickstart(const uint S, const uint H, const uint I, const uint E, const uin
   CHECK_CUDA(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&bps, kernel, threads, kernelSz));
   const auto dispatchBlocks = cute::ceil_div(128, cute::max(E, 4));
   const auto processorBlocks = (S /bM) * cute::max(I / bN0, H / bN1);
-  const auto blocks = cute::max(cute::min(processorBlocks + dispatchBlocks + 1, bps * NUM_SMS), 2);
+  const uint blocks = cute::max(cute::min(processorBlocks + dispatchBlocks + 1, bps * NUM_SMS), 2);
 
   Element* tokens = nullptr;
   cudaMallocAsync(&tokens, sizeof(Element) * S * H, stream);
@@ -226,26 +297,27 @@ void kickstart(const uint S, const uint H, const uint I, const uint E, const uin
 
   Element* expertUpWeights = nullptr;
   Element* expertDownWeights = nullptr;
-  cudaMallocAsync(&expertUpWeights, sizeof(Element) * H * I, stream);
-  cudaMallocAsync(&expertDownWeights, sizeof(Element) * I * H, stream);
+  // allocate all expert weights since we need it for single-GPU correctness checks
+  cudaMallocAsync(&expertUpWeights, E * sizeof(Element) * H * I, stream);
+  cudaMallocAsync(&expertDownWeights, E * sizeof(Element) * I * H, stream);
   matx::cudaExecutor exec{stream};
   using MT = MXE<Element>;
   const auto eWz = static_cast<size_t>(H) * I;
-  for (int i = 0; i < numLocalExperts; ++i) {
-    auto euw = matx::make_tensor<MT>(expertUpWeights + i * eWz, {H, I});
+  for (int i = 0; i < E; ++i) {
+    auto euw = matx::make_tensor<MT>(reinterpret_cast<MT*>(expertUpWeights + i * eWz), {H, I});
     (euw = matx::eye<Element>({H, I})).run(exec);
-    auto edw = matx::make_tensor<MT>(expertDownWeights + i * eWz, {I, H});
+    auto edw = matx::make_tensor<MT>(reinterpret_cast<MT*>(expertDownWeights + i * eWz), {I, H});
     (edw = matx::eye<Element>({I, H})).run(exec);
   }
 
   Element* biasUp = nullptr;
-  cudaMallocAsync(&biasUp, sizeof(Element) * numLocalExperts * I, stream);
-  auto bu = matx::make_tensor<MT>(expertUpWeights, {numLocalExperts, I});
+  cudaMallocAsync(&biasUp, sizeof(Element) * E * I, stream);
+  auto bu = matx::make_tensor<MT>(reinterpret_cast<MT*>(biasUp), {numLocalExperts, I});
   (bu = matx::zeros<MT>({numLocalExperts, I})).run(exec);
 
   Element* biasDown = nullptr;
-  cudaMallocAsync(&biasDown, sizeof(Element) * numLocalExperts * H, stream);
-  auto bd = matx::make_tensor<MT>(expertUpWeights, {numLocalExperts, H});
+  cudaMallocAsync(&biasDown, sizeof(Element) * E * H, stream);
+  auto bd = matx::make_tensor<MT>(reinterpret_cast<MT*>(biasDown), {numLocalExperts, H});
   (bd = matx::zeros<MT>({numLocalExperts, H})).run(exec);
 
   Element* gateOut = nullptr;
@@ -257,10 +329,21 @@ void kickstart(const uint S, const uint H, const uint I, const uint E, const uin
   Element* moeOut = nullptr;
   cudaMallocAsync(&moeOut, sizeof(Element) * S * H, stream);
 
+  Element* referenceInput;
+  cudaMallocAsync(&referenceInput, sizeof(Element) * EC * H, stream);
+  Element* referenceInterim0;
+  cudaMallocAsync(&referenceInterim0, sizeof(Element) * EC * I, stream);
+  Element* referenceInterim1;
+  cudaMallocAsync(&referenceInterim1, sizeof(Element) * EC * H, stream);
+  Element* referenceOut;
+  cudaMallocAsync(&referenceOut, sizeof(Element) * S * H, stream);
+  cudaMemsetAsync(referenceOut, 0, sizeof(Element) * S * H, stream);
+
   // initialize
   flashmoe::MoEArgs args{
-    sizeof(Element), S, H, I, EC, bM, bN0, bN1, threads, blocks, epRank, world,
-    nvshmem_my_pe(), E, numLocalExperts
+    sizeof(Element), S, H, I, EC, bM, bN0, bN1, threads,
+    blocks, static_cast<uint16_t>(epRank), static_cast<uint16_t>(world),
+    static_cast<uint16_t>(nvshmem_my_pe()), E, static_cast<uint16_t>(numLocalExperts)
   };
   // blocked partitioning
   // for 8 experts and 4 ranks
@@ -281,20 +364,64 @@ void kickstart(const uint S, const uint H, const uint I, const uint E, const uin
   auto moeContext = std::get<0>(contexts);
   auto gateCtx = std::get<1>(contexts);
   // call kernel as many times as needed
-  flashmoe::moe::forwardHost<Config, topo, doGate, act, grl>(S, H, I, E, k, EC,
-    tokens, gateWeights, expertUpWeights, biasUp, expertDownWeights, biasDown, gateOut, expertCounts, moeOut,
-    moeContext, gateCtx, blocks, kernelSz, stream);
-  // check correctness TODO
-  Element* referenceInput;
-  cudaMallocAsync(&referenceInput, sizeof(Element) * EC * H, stream);
-  Element* referenceInterim;
-  cudaMallocAsync(&referenceInterim, sizeof(Element) * EC * cute::max(H, I), stream);
-  Element* referenceOut;
-  cudaMallocAsync(&referenceOut, sizeof(Element) * S * H, stream);
-  uint* tokenIds;
-  cudaMallocAsync(&tokenIds, sizeof(uint) * E * EC, stream);
-  // pad with zeros, so that reads are well-defined for routed tokens < EC
-  cudaMemsetAsync(tokenIds, 0, sizeof(Element) * EC * H, stream);
+  auto* __restrict__ localExpertUpWeights = expertUpWeights + (static_cast<size_t>(epRank) * (H * I));
+  auto* __restrict__ localExpertDownWeights = expertUpWeights + (static_cast<size_t>(epRank) * (I * H));
+  auto* __restrict__ localBiasUp = biasUp + (static_cast<size_t>(epRank) * (I));
+  auto* __restrict__ localBiasDown = biasUp + (static_cast<size_t>(epRank) * (H));
+
+  const flashmoe::moe::KernelArgs kArgs{
+    reinterpret_cast<const cuda::std::byte*>(tokens),
+    reinterpret_cast<const cuda::std::byte*>(gateWeights),
+    reinterpret_cast<const cuda::std::byte*>(localExpertUpWeights),
+    reinterpret_cast<const cuda::std::byte*>(localBiasUp),
+    reinterpret_cast<const cuda::std::byte*>(localExpertDownWeights),
+    reinterpret_cast<const cuda::std::byte*>(localBiasDown),
+    reinterpret_cast<cuda::std::byte*>(gateOut),
+    expertCounts, reinterpret_cast<cuda::std::byte*>(moeOut),
+    S, H, I, E, k, EC
+  };
+  flashmoe::moe::forwardHost<Config, topo, doGate, act, grl>(kArgs, moeContext, gateCtx, blocks, kernelSz, stream);
+  CHECK_CUDA(cudaPeekAtLastError());
+  // check correctness
+  using ActType = flashmoe::ActivationType<act, Element>::AT;
+  reference<Config, GEMM0Sz, GEMM1Sz, ActType, AccumType>(moeContext.tokenIndices, tokens,
+    referenceInput, expertUpWeights, expertDownWeights, biasUp, biasDown,
+    referenceInterim0, referenceInterim1, expertCounts, referenceOut,
+    S, H, EC, E, I, k, stream);
+  CHECK_CUDA(cudaPeekAtLastError());
+  // calculate error percentage
+  constexpr auto rtol = 2e-2;
+  constexpr auto atol = 2e-3;
+  auto tC = matx::make_tensor<MT>(reinterpret_cast<MT*>(moeOut), {S, H});
+  auto tRef = matx::make_tensor<MT>(reinterpret_cast<MT*>(referenceOut), {S, H});
+  auto num_matches = matx::make_tensor<long int>({});
+  (num_matches = matx::sum(matx::isclose(tC, tRef, rtol, atol))).run(exec);
+  exec.sync();
+  // calculate error percentage
+  const auto ep =  (1.0 - (static_cast<double>(num_matches()) / static_cast<double>(tC.TotalSize()))) * 100;
+  cudaEvent_t start, stop;
+  CHECK_CUDA(cudaEventCreate(&start));
+  CHECK_CUDA(cudaEventCreate(&stop));
+  // benchmark distributed moe fused kernel
+  constexpr int warmup = 128;
+  for (int i = 0; i < warmup; ++i) {
+    flashmoe::moe::forwardHost<Config, topo, doGate, act, grl>(kArgs, moeContext, gateCtx, blocks, kernelSz, stream);
+  }
+  constexpr int runs = 128;
+  CHECK_CUDA(cudaStreamSynchronize(stream));
+  cudaEventRecord(start, exec.getStream());
+  for (int i = 0; i < runs; ++i) {
+    flashmoe::moe::forwardHost<Config, topo, doGate, act, grl>(kArgs, moeContext, gateCtx, blocks, kernelSz, stream);
+  }
+  cudaEventRecord(stop, exec.getStream());
+  CHECK_CUDA(cudaEventSynchronize(stop));
+  float m_ms = 0;
+  CHECK_CUDA(cudaEventElapsedTime(&m_ms, start, stop));
+  const float m_time_ms = m_ms / static_cast<float>(runs);
+  printf("S, H, I, E, k, EC, bM, bN0, bK0, bN1, bK1, bNGate, threads, blocks/SM, SMs,blocks, rtol, atol, error(%%), "
+         "Kernel_Time(ms)\n");
+  printf("%d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %f, %f, %f, %f\n",
+    S, H, I, E, k, EC, bM, bN0, bK0, bN1, bK1, bNGate, threads, bps, NUM_SMS, blocks, rtol, atol, ep, m_time_ms);
 
   // finalize
   flashmoe::finalize(moeContext, gateCtx, stream);
@@ -307,13 +434,17 @@ void kickstart(const uint S, const uint H, const uint I, const uint E, const uin
   cudaFreeAsync(gateOut, stream);
   cudaFreeAsync(expertCounts, stream);
   cudaFreeAsync(moeOut, stream);
+  cudaFreeAsync(referenceInput, stream);
+  cudaFreeAsync(referenceInterim0, stream);
+  cudaFreeAsync(referenceInterim1, stream);
+  cudaFreeAsync(referenceOut, stream);
   CHECK_CUDA(cudaPeekAtLastError());
   nvshmem_finalize();
   CHECK_CUDA(cudaStreamSynchronize(stream));
   cudaStreamDestroy(stream);
 }
 
-__host__ __forceinline__
+/*__host__ __forceinline__
 void drive(const int argc, char** argv) {
   uint S = 16;
   uint H = 128;
@@ -369,8 +500,8 @@ void drive(const int argc, char** argv) {
   default:
     break;
   }
-}
+}*/
 //./testFlashMoE <S> <H> <I> <k>
 int main(const int argc, char** argv) {
-  drive(argc, argv);
+  kickstart();
 }

@@ -60,11 +60,11 @@ __device__ void run_producer(
     }
 }
 
-// Consumer CTA (blockIdx.x in [1..P]).
-// Warp0 polls its signal slot until:
+// Consumer CTA.
+// polls its signal slot until:
 //   - interrupt==1  OR
 //   - task_queue_index != previous.task_queue_index
-// Then it immediately sets status[pid]=Ready (release), and if not interrupt, it increments descriptor at index.
+// Then it immediately sets status[pid]=Ready (release), and if not interrupt, processes the task
 struct __align__(8) ConsumerState {
     MockTask task;
     uint16_t interrupt;
@@ -231,7 +231,7 @@ __global__ void verify(const MockTask* __restrict__ tQ, const uint n, uint* __re
         atomicAdd(failures, total);
     }
 }
-// ./testScheduler <blocks> <n_spawned>
+// ./testScheduler <consumers> <n_spawned>
 int main(const int argc, char** argv) {
     uint32_t blocks = 64;
     uint32_t n_spawned = 64;

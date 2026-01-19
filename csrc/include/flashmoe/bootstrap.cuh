@@ -116,7 +116,7 @@ namespace flashmoe
             }
         }
 
-        auto nlxUniform = lxIndices[0];
+        const auto nlxUniform = lxIndices[0];
         for (uint i = 0; i < E; ++i) {
             auto pt = pelHost[i];
             pt.nLocalExperts = lxIndices[pt.peer];
@@ -193,10 +193,12 @@ namespace flashmoe
         BitSet* consumerBitMap = nullptr;
         const auto cbmLength = nSI(args.numExperts * ecTilesM * tilesN1, subscriberCount);
         cudaMallocAsync(&consumerBitMap, sizeof(BitSet) * cbmLength, stream);
+        cudaMemsetAsync(consumerBitMap, 0, sizeof(BitSet) * cbmLength, stream);
 
         uint8_t* producerBitMap = nullptr;
         const auto pbmLength = args.epWorld * args.numLocalExperts * ecTilesM * tilesN1;
         cudaMallocAsync(&producerBitMap, sizeof(uint8_t) * pbmLength, stream);
+        cudaMemsetAsync(producerBitMap, 0, sizeof(uint8_t) * pbmLength, stream);
 
         PEL* pel = nullptr;
         cudaMallocAsync(&pel, sizeof(PEL) * args.numExperts, stream);
@@ -307,10 +309,8 @@ namespace flashmoe
             cudaFreeAsync(ctx.producerCombineBitMap, stream);
             cudaFreeAsync(ctx.tokenIndices, stream);
             cudaFreeAsync(ctx.tqs, stream);
-            cudaFreeAsync(ctx.GEMM0Staging, stream);
             cudaFreeAsync(ctx.dispatchSync, stream);
             cudaFreeAsync(ctx.gTqHeads, stream);
-            cudaFreeAsync(ctx.tileSync, stream);
             cudaFreeAsync(ctx.tileSync, stream);
             cudaFreeAsync(gCtx.ecGuards, stream);
             if (gCtx.ssp != nullptr) {
@@ -323,30 +323,5 @@ namespace flashmoe
         }
         CHECK_CUDA(cudaPeekAtLastError());
     }
-}
-
-namespace flashmoe::experimental
-{
-    // allows for reusing a context across multiple compatible workloads
-    // if incompatible, a new context must be created.
-    // TODO
-    /*__host__ __forceinline__
-    bool compatible(const Context& ctx, const MoEArgs& args) {
-        const auto roundEC = cute::ceil_div(ctx.EC, ctx.bM) * ctx.bM;
-        const auto ecTilesM = cute::ceil_div(roundEC, ctx.bM);
-        const auto tilesN0 = cute::ceil_div(ctx.I, ctx.bN0);
-        const auto tilesN1 = cute::ceil_div(ctx.H, ctx.bN1);
-
-        bool isCompatible = true;
-        const auto roundECArgs = cute::ceil_div(args.EC, args.bM) * args.bM;
-        isCompatible &= (roundEC >= roundECArgs);
-        isCompatible &= (ecTilesM >= cute::ceil_div(roundECArgs, args.bM));
-        isCompatible &= (tilesN0 >= cute::ceil_div(args.ffnIntermediateSize, args.bN0));
-        isCompatible &= (tilesN1 >= cute::ceil_div(args.tokenDim, args.bN1));
-        isCompatible &= (ctx.myPE == args.myPE);
-        isCompatible &= (ctx.E >= args.numExperts);
-
-        return isCompatible;
-    }*/
 }
 #endif //FLASHMOE_BOOTSTRAP_CUH

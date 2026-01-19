@@ -401,7 +401,7 @@ void driver(const int& S, const int& E, const int& H, const int& k, const float&
     exec.sync();
 }
 
-//./gtb <E> <E_max> <k> <checkCorrectness> <rtol> <atol>
+// ./tetstGate <E> <E_max> <k> <checkCorrectness> <rtol> <atol>
 // Sequence length and H are fixed
 __host__ __forceinline__
 void kickStart(const int argc, char** argv) {
