@@ -87,7 +87,7 @@ namespace flashmoe
 
         for (uint i = 0; i < E; ++i) {
             const auto epRank = expertToEpRank[i];
-            const auto pe = epRankToGlobalRank[i];
+            const auto pe = epRankToGlobalRank[epRank];
             auto* rSheap = static_cast<cuda::std::byte*>(nvshmem_ptr(sHeap, pe));
             auto* rFlags = static_cast<uint64_t*>(nvshmem_ptr(signals, pe));
             const uint lxIdx = lxIndices[epRank]++;

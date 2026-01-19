@@ -111,7 +111,7 @@ namespace flashmoe::moe
       // call OS
       constexpr auto subscriberCount = threads - scheduler::SCHEDULER_COUNT;
       static_assert(subscriberCount > 0 && subscriberCount % WARP_SIZE == 0);
-      os::start<topo, subscriberCount, threads, bM, DataType>(flashWorkspace, kArgs.expertCounts, symHeap, ctx, kArgs.EC,
+      os::start<topo, subscriberCount, threads, bM, Config::DTK::value, DataType>(flashWorkspace, kArgs.expertCounts, symHeap, ctx, kArgs.EC,
         kArgs.I / bN0, kArgs.H / bN1, dispatchBlocks, kArgs.E, kArgs.I, processors);
       return;
     }

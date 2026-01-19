@@ -274,7 +274,7 @@ namespace flashmoe::processor
                 producerBitMap(task.localPeerIdx(), task.localExpertIdx(), mCoord, 0) = producerBit;
                 // clear the counter as it would no longer be used in this epoch
                 tileSync.store(0, cuda::memory_order_relaxed);
-                const auto symOffset = static_cast<size_t>(bM * mCoord * H) * sizeof(Element);
+                const auto symOffset = static_cast<size_t>(bM) * mCoord * H * sizeof(Element);
                 nvshmem_putmem_signal_nbi(task.rcData + symOffset,
                                           task.cData[1] + symOffset,
                                           // Batched remote network transfer to avoid overwhelming the NIC

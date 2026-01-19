@@ -41,7 +41,7 @@ namespace flashmoe
         return world * numLocalExperts * ecTilesM * tilesN1;
     }
 
-    struct __align__(16) Context {
+    struct Context {
         cuda::std::byte* const symHeap = nullptr;
         uint64_t* const signals = nullptr; // [[world, num_local_experts], [E, tiles(roundEC), tiles(H)]]
         Task* const tQ = nullptr;// [subscriberTQLength]
