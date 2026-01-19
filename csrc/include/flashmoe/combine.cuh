@@ -39,7 +39,7 @@ namespace flashmoe
   __device__ __forceinline__
   void combine(const int& S, const int& H,
                void* __restrict__ const& workspace,
-               const TPS* __restrict__ const& tokenIndices, // [E, EC], where EC is padded to a multiple of bM
+               const TPS* __restrict__ const& tokenIndices, // [bM]
                Element* __restrict__ const& moeOutput, // [S, H] in local HBM
                const Element* __restrict__ const& tokens, // [bM, H] in local HBM
                const uint& tileSize, const TileCoord& tileCoord) {

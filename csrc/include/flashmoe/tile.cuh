@@ -7,8 +7,6 @@
 #include <cublasdx.hpp>
 #include <cutlass/numeric_conversion.h>
 
-#include "infra/vt.cuh"
-
 namespace flashmoe
 {
   template <typename T, typename S>

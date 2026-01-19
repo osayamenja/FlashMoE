@@ -1,11 +1,11 @@
 //
-// Created by osayamen on 12/13/25.
+// Created by osayamen on 1/19/26.
 //
-// Benchmark sweep and correctness test for the tiled GEMM underlying FlashMoE.
-// We compare against the numerical library MatX which calls cuBLASLt underneath.
+// correctness test for the tiled GEMM underlying FlashMoE.
 
 #include <random>
-
+#include <stdexcept>
+#include <string>
 #include <cutlass/epilogue/thread/activation.h>
 #include <cublasdx.hpp>
 
@@ -74,8 +74,8 @@ __global__ void gk(const Element* __restrict__ a, const Element* __restrict__ b,
 template<int warmup, int runs, typename AccumType, typename Activation, typename Element, typename ElementC>
 __host__ __forceinline__
 auto reference(void* const& a, void* const& b,
-    void* const& bias, void* const& bias_interim, void* const& c_ref, void* const& c_interim,
-    void* const& c_ext,
+    void* const& bias, void* const& bias_interim, void* const& c_ref,
+    void* const& c_interim, void* const& c_ext,
     const int& M, const int& N, const int& K, const float& rtol, const float& atol,
     matx::cudaExecutor& exec) {
     auto* mx_a = static_cast<Element*>(a);
@@ -121,8 +121,7 @@ auto reference(void* const& a, void* const& b,
     return std::make_tuple(ep, exec.get_time_ms() / static_cast<float>(runs));
 }
 
-template<typename TileGEMM, typename Activation, int threads, int sharedSize, typename ActM,
-typename AccumType, typename Element, typename ElementC>
+template<typename TileGEMM, typename Activation, int threads, int sharedSize, typename ActM, typename AccumType, typename Element, typename ElementC>
 __host__ __forceinline__
 auto gk_run(Element* const& a, Element* const& b,
     ElementC* const& c, ElementC* const& c_ref, ElementC* const& bias,
@@ -150,7 +149,7 @@ auto gk_run(Element* const& a, Element* const& b,
     return std::make_tuple(k_time_ms, error_pct, ref_time_ms);
 }
 
-template<int bM, int bN, int bK, int pipeStages, typename AccumType, typename Element, typename ElementC>
+template<int Arch, int bM, int bN, int bK, int pipeStages, typename AccumType, typename Element, typename ElementC>
 __host__ __forceinline__
 void driver(const int& M, const int& N, const int& K, const float& rtol, const float& atol, matx::cudaExecutor& exec) {
     Element* a = nullptr;
@@ -171,9 +170,9 @@ void driver(const int& M, const int& N, const int& K, const float& rtol, const f
 
     using Act = cutlass::epilogue::thread::ReLU<AccumType>;
     using ActM = cutlass::epilogue::thread::ReLU<MXE<AccumType>>;
-    constexpr int threads = flashmoe::tile::suggest_thread_count<bM, bN, bK, FLASHMOE_ARCH, Element, AccumType>();
+    constexpr int threads = flashmoe::tile::suggest_thread_count<bM, bN, bK, Arch, Element, AccumType>();
     using TileGEMM = flashmoe::tile::CollectiveMainloop<
-            bM, bN, bK, FLASHMOE_ARCH, Element, AccumType, threads, pipeStages
+            bM, bN, bK, Arch, Element, AccumType, threads, pipeStages
     >;
     auto kernel = gk<TileGEMM, Act, Element, ElementC>;
     int bps = 0;
@@ -184,11 +183,11 @@ void driver(const int& M, const int& N, const int& K, const float& rtol, const f
     std::random_device rd; // random seed provider
     constexpr auto min_v = -1.f;
     constexpr auto max_v = 1.f;
-    randUniform<FLASHMOE_ARCH>(a, M * K, rd(), min_v, max_v, exec.getStream());
-    randUniform<FLASHMOE_ARCH>(b, N * K, rd(), min_v, max_v, exec.getStream());
-    randUniform<FLASHMOE_ARCH>(bias, N, rd(), min_v, max_v, exec.getStream());
-    const auto [k_ms, e_p, r_ms] = gk_run<TileGEMM, Act, threads, sharedSize, ActM>(a, b, c, c_ref, bias, c_interim, bias_interim,
-        M, N, K, blocks, rtol, atol, exec);
+    randUniform<Arch>(a, M * K, rd(), min_v, max_v, exec.getStream());
+    randUniform<Arch>(b, N * K, rd(), min_v, max_v, exec.getStream());
+    randUniform<Arch>(bias, N, rd(), min_v, max_v, exec.getStream());
+    const auto [k_ms, e_p, r_ms] = gk_run<TileGEMM, Act, threads, sharedSize, ActM>(a, b, c, c_ref, bias, c_interim,
+        bias_interim, M, N, K, blocks, rtol, atol, exec);
 
     printf("%d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %.1e, %.1e, %lf, %f, %f\n",
         M, N, K, bM, bN, bK, pipeStages, threads, bps, NUM_SMS, blocks, rtol, atol, e_p, k_ms, r_ms);
@@ -197,70 +196,122 @@ void driver(const int& M, const int& N, const int& K, const float& rtol, const f
     cudaFreeAsync(a, stream);
     cudaFreeAsync(b, stream);
     cudaFreeAsync(c, stream);
-    cudaFreeAsync(c_ref, stream);
     cudaFreeAsync(bias, stream);
+    cudaFreeAsync(c_ref, stream);
     cudaFreeAsync(c_interim, stream);
     cudaFreeAsync(bias_interim, stream);
     cudaStreamSynchronize(stream);
 }
 
+// .gemmMNK <M> <N> <K> <rtol> <atol>
 __host__ __forceinline__
 void kickStart(const int argc, char** argv) {
-    int MNK = 2;
-    int MNK_max = 8192;
+    int M = 2048;
+    int N = 14 * 1024;
+    int K = 4096;
     float rtol = 2e-2f;
     float atol = 2e-3f;
     using Element = __half;
     using ElementC = Element;
-    using MMA_C = float;
+    using AccumType = float;
     printf("M, N, K, bM, bN, bK, pipeStages, threads, blocks/SM, SMs, blocks, rtol, atol, error(%%), Kernel_Time(ms), "
            "Matx_Time(ms)\n");
     if (argc > 1) {
-        MNK = std::stoi(argv[1]);
+        M = std::stoi(argv[1]);
     }
     if (argc > 2) {
-        MNK_max = std::stoi(argv[2]);
+        N = std::stoi(argv[2]);
     }
     if (argc > 3) {
-        rtol = std::stof(argv[3]);
+        K = std::stoi(argv[3]);
     }
     if (argc > 4) {
-        atol = std::stof(argv[4]);
+        rtol = std::stof(argv[4]);
+    }
+    if (argc > 5) {
+        atol = std::stof(argv[5]);
+    }
+    // below minimizes instantiated templates
+    constexpr int bK = sizeof(Element) == 8 ? 32 : 64;
+    constexpr auto arch = FLASHMOE_ARCH;
+    constexpr int pS = arch >= 800 ? 2 : 1;
+    constexpr int bN = sizeof(Element) == 8 ? 64 : 64 * (4 / sizeof(Element));
+    if (N < bN || N % bN != 0) {
+        const auto errmsg = std::string("N >= and a multiple of ").append(std::to_string(bN));
+        throw std::runtime_error(errmsg);
+    }
+    if (K < bK || K % bK != 0 ) {
+        const auto errmsg = std::string("K >= and a multiple of ").append(std::to_string(bK));
+        throw std::runtime_error(errmsg);
     }
     cudaSetDevice(0);
     cudaStream_t stream;
     cudaStreamCreate(&stream);
     matx::cudaExecutor exec{stream, true};
-    for (int i = MNK; i <= MNK_max; i *= 2) {
-        switch (i) {
-        case 2:
-            driver<2, 2, 2, 1, MMA_C, Element, ElementC>(i, i, i, rtol, atol, exec);
-            break;
-        case 4:
-            driver<4, 4, 4, 1, MMA_C, Element, ElementC>(i, i, i, rtol, atol, exec);
-            break;
-        case 8:
-            driver<8, 8, 8, 1, MMA_C, Element, ElementC>(i, i, i, rtol, atol, exec);
-            break;
-        case 16:
-            driver<16, 16, 16, 1, MMA_C, Element, ElementC>(i, i, i, rtol, atol, exec);
-            break;
-        case 32:
-            driver<32, 32, 32, 1, MMA_C, Element, ElementC>(i, i, i, rtol, atol, exec);
-            break;
-        case 64:
-            driver<64, 64, 64, 1, MMA_C, Element, ElementC>(i, i, i, rtol, atol, exec);
-            break;
-        default:
-            {
-                constexpr int pS = FLASHMOE_ARCH >= 800 ? 2 : 1;
-                constexpr int bK = cuda::std::is_same_v<Element, double> ? 32 : 64;
-                if (i >= 128 && i <= 2048) {
-                    driver<128, 64, bK, pS, MMA_C, Element, ElementC>(i, i, i, rtol, atol,exec);
-                }
-                else if (i > 2048) {
-                    driver<128, cute::max(64, 64 * (4 / sizeof(Element))), bK, pS, MMA_C, Element, ElementC>(i, i, i, rtol, atol,exec);
-                }
+    switch (M) {
+    case 1:
+        if (K > bK) {
+            driver<arch, 1, bN, bK, pS, AccumType, Element, ElementC>(M, N, K, rtol, atol, exec);
+        }
+        else {
+            driver<arch, 1, bN, bK, 1, AccumType, Element, ElementC>(M, N, K, rtol, atol, exec);
+        }
+        break;
+    case 2:
+        if (K > bK) {
+            driver<arch, 2, bN, bK, pS, AccumType, Element, ElementC>(M, N, K, rtol, atol, exec);
+        }
+        else {
+            driver<arch, 2, bN, bK, 1, AccumType, Element, ElementC>(M, N, K, rtol, atol, exec);
+        }
+        break;
+    case 4:
+        if (K > bK) {
+            driver<arch, 4, bN, bK, pS, AccumType, Element, ElementC>(M, N, K, rtol, atol, exec);
+        }
+        else {
+            driver<arch, 4, bN, bK, 1, AccumType, Element, ElementC>(M, N, K, rtol, atol, exec);
+        }
+        break;
+    case 8:
+        if (K > bK) {
+            driver<arch, 8, bN, bK, pS, AccumType, Element, ElementC>(M, N, K, rtol, atol, exec);
+        }
+        else {
+            driver<arch, 8, bN, bK, 1, AccumType, Element, ElementC>(M, N, K, rtol, atol, exec);
+        }
+        break;
+    case 16:
+        if (K > bK) {
+            driver<arch, 16, bN, bK, pS, AccumType, Element, ElementC>(M, N, K, rtol, atol, exec);
+        }
+        else {
+            driver<arch, 16, bN, bK, 1, AccumType, Element, ElementC>(M, N, K, rtol, atol, exec);
+        }
+        break;
+    case 32:
+        if (K > bK) {
+            driver<arch, 32, bN, bK, pS, AccumType, Element, ElementC>(M, N, K, rtol, atol, exec);
+        }
+        else {
+            driver<arch, 32, bN, bK, 1, AccumType, Element, ElementC>(M, N, K, rtol, atol, exec);
+        }
+        break;
+    case 64:
+        if (K > bK) {
+            driver<arch, 64, bN, bK, pS, AccumType, Element, ElementC>(M, N, K, rtol, atol, exec);
+        }
+        else {
+            driver<arch, 64, bN, bK, 1, AccumType, Element, ElementC>(M, N, K, rtol, atol, exec);
+        }
+        break;
+    default:
+        if (M >= 128 && M % 128 == 0) {
+            if (K > bK) {
+                driver<arch, 128, bN, bK, pS, AccumType, Element, ElementC>(M, N, K, rtol, atol,exec);
+            }
+            else {
+                driver<arch, 128, bN, bK, 1, AccumType, Element, ElementC>(M, N, K, rtol, atol,exec);
             }
         }
     }

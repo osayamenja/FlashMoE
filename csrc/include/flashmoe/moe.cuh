@@ -168,6 +168,7 @@ namespace flashmoe::moe
                    const GateContext& gCtx,
                    const uint& blocks, const uint& sharedSize,
                    cudaStream_t stream) {
+    // asert(blocks >= 2)
     if constexpr (Config::CM::value == CombineMode::plural) {
       cudaMemsetAsync(moeOut, 0, sizeof(Element) * S * H, stream);
     }

@@ -97,7 +97,6 @@ namespace flashmoe{
         static_assert(ScopeOf<cuda::std::remove_cvref_t<CudaBarrier>>::Scope::value == cuda::thread_scope_device,
             "Expects device-scope barrier");
         if (!threadIdx.x) {
-            __threadfence();
             db->arrive_and_wait();
         }
         __syncthreads();

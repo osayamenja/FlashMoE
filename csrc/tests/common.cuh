@@ -42,6 +42,19 @@ struct Converter<matx::matxBf16, float> {
     }
 };
 
+template<>
+struct Converter<float, matx::matxFp16> {
+    __device__ auto operator()(const matx::matxFp16& x) const {
+        return  __half2float(x.x);
+    }
+};
+template<>
+struct Converter<float, matx::matxBf16> {
+    __device__ auto operator()(const matx::matxBf16& x) const {
+        return  __bfloat162float(x.x);
+    }
+};
+
 // Deterministic 64-bit mix hash (fast, good enough for tie-breaking)
 __device__ __forceinline__ uint64_t mix64(uint64_t x) {
     // SplitMix64 finalizer (good diffusion, fast)

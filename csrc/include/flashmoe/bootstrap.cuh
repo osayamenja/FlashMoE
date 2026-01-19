@@ -280,7 +280,7 @@ namespace flashmoe
             static_cast<uint16_t>(args.bM), static_cast<uint16_t>(args.bN0), static_cast<uint16_t>(args.bN1),
             args.numLocalExperts,
             args.numExperts, args.epWorld, args.epRank, args.myPE,
-            SignalConstants::sequenceStart, true
+            true, SignalConstants::sequenceStart
         };
         CHECK_CUDA(cudaStreamSynchronize(stream));
 

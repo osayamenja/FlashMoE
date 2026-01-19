@@ -224,3 +224,8 @@ add_executable(testCombine
         tests/combine.cu
 )
 flash_target_common(testCombine)
+
+add_executable(gemmMNK
+        tests/gemmMNK.cu
+)
+flash_target_common(gemmMNK)

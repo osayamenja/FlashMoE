@@ -34,6 +34,7 @@ struct __align__(16) GateArgs {
     void* gateWeights;
     void* routing;
     void* routing_ref;
+    void* routing_interim;
     flashmoe::TPS* tokenIds_packed;
     uint* tokenIds;
     matx::index_t* tokenIds_ref;
@@ -102,6 +103,8 @@ auto reference(matx::cudaExecutor& exec, const GateArgs& gArgs, cudaEvent_t star
         {gArgs.E, gArgs.H});
     auto tC = matx::make_tensor<ElementC>(static_cast<ElementC*>(gArgs.routing_ref),
         {gArgs.S, gArgs.E});
+    auto tC_interim = matx::make_tensor<flashmoe::gate::SoftType>(
+        static_cast<flashmoe::gate::SoftType*>(gArgs.routing_interim),{gArgs.S, gArgs.E});
     auto tCx = matx::make_tensor<ElementC>(static_cast<ElementC*>(gArgs.routing),
         {gArgs.S, gArgs.E});
 
@@ -126,7 +129,9 @@ auto reference(matx::cudaExecutor& exec, const GateArgs& gArgs, cudaEvent_t star
     (tIds_matches = matx::zeros<int>(tIds_matches.Shape())).run(exec);
 
     // GEMM + Softmax
-    (tC = matx::softmax(matx::matmul(tA, tB.PermuteMatrix()), {1})).run(exec);
+    (tC_interim = matx::matmul(tA, tB.PermuteMatrix())).run(exec);
+    (tC = matx::apply(Converter<ElementC, flashmoe::gate::SoftType>{},
+        matx::softmax(tC_interim, {1}))).run(exec);
     // check error for GEMM+Softmax
     matx::cudaExecutor exec1{exec.getStream()};
     (gemm_n_matches = matx::sum(matx::isclose(tCx, tC, gArgs.rtol, gArgs.atol))).run(exec1);
@@ -289,6 +294,7 @@ void driver(const int& S, const int& E, const int& H, const int& k, const float&
     Element* gateWeights = nullptr; // weights
     ElementC* routing = nullptr; // routing
     ElementC* routing_ref = nullptr;
+    flashmoe::gate::SoftType* routing_interim = nullptr;
     flashmoe::TPS* tokenIds = nullptr; // TPS is a packed struct of float and int
     uint* tokenIds_idx = nullptr; // TPS is a packed struct of float and int
     matx::index_t* tokenIds_ref = nullptr;
@@ -310,6 +316,7 @@ void driver(const int& S, const int& E, const int& H, const int& k, const float&
     if (checkCorrectness) {
         // correctness checking consumes a lot of memory
         cudaMallocAsync(&routing_ref, M * N * sizeof(ElementC), stream);
+        cudaMallocAsync(&routing_interim, M * N * sizeof(ElementC), stream);
         cudaMallocAsync(&tokenIds_idx, E * eCap * sizeof(uint), stream);
         cudaMallocAsync(&tokenIds_ref, E * S * sizeof(matx::index_t), stream);
         cudaMallocAsync(&topK, S * E * sizeof(matx::index_t), stream);
@@ -353,6 +360,7 @@ void driver(const int& S, const int& E, const int& H, const int& k, const float&
         gateWeights,
         routing,
         routing_ref,
+        routing_interim,
         tokenIds,
         tokenIds_idx,
         tokenIds_ref, eCounts, eCGuards, eCounts_ref, topK, rSp, rTp,
