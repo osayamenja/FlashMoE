@@ -43,6 +43,8 @@ namespace flashmoe
         const uint bM;
         const uint bN0;
         const uint bN1;
+        const uint bK0;
+        const uint bK1;
         const uint threads;
         const uint blocks; //CTAs
         const uint16_t epRank;
@@ -52,13 +54,13 @@ namespace flashmoe
         const uint16_t numLocalExperts;
 
         MoEArgs(const size_t& eb, const uint& S, const uint& H, const uint& I, const uint& _EC,
-            const uint& bm, const uint& bn0, const uint& bn1,
+            const uint& bm, const uint& bn0, const uint& bn1, const uint& bk0, const uint bk1,
             const uint& _threads, const uint& ctas, const uint16_t& ep_rank, const uint16_t& ep_world,
             const uint16_t& mype, const uint16_t& experts,
             const uint16_t& nlx):
         elementBytes(eb), sequenceLength(S),
         EC(_EC),
-        tokenDim(H), ffnIntermediateSize(I), bM(bm), bN0(bn0), bN1(bn1),
+        tokenDim(H), ffnIntermediateSize(I), bM(bm), bN0(bn0), bN1(bn1), bK0(bk0), bK1(bk1),
         threads(_threads), blocks(ctas), epRank(ep_rank), epWorld(ep_world), myPE(mype), numExperts(experts),
         numLocalExperts(nlx) {}
     };
@@ -137,6 +139,12 @@ namespace flashmoe
         const uint* __restrict__ const& expertToEpRank, const int* __restrict__ const& epRankToGlobalRank,
         cudaStream_t stream){
         // fused gate + moe layer
+        if (args.tokenDim % args.bK0 != 0 || args.tokenDim % args.bN1 != 0) {
+            throw std::runtime_error("token dimension should be multiples of tile dimensions");
+        }
+        if (args.ffnIntermediateSize % args.bN0 != 0 || args.ffnIntermediateSize % args.bK1 != 0) {
+            throw std::runtime_error("Intermediate size should be multiples of tile dimensions");
+        }
         if (args.blocks < 2) {
             throw std::runtime_error("blocks must be at least 2");
         }
@@ -299,7 +307,6 @@ namespace flashmoe
             nvshmem_free(ctx.signals);
             // free workspace memory
             cudaFreeAsync(ctx.tQ, stream);
-            cudaFreeAsync(ctx.pTq, stream);
             cudaFreeAsync(ctx.GEMM0Staging, stream);
             cudaFreeAsync(ctx.pel, stream);
             cudaFreeAsync(ctx.pli, stream);

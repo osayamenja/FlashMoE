@@ -74,9 +74,6 @@ namespace flashmoe::moe
   __global__ __launch_bounds__(Config::Threads::value, 1) void forward(const __grid_constant__ KernelArgs kArgs,
     const __grid_constant__ Context ctx, const __grid_constant__ GateContext gCtx) {
     using DataType = Config::DType;
-    const auto symHeap = Heap{
-      ctx.symHeap, ctx.nLx, kArgs.EC, kArgs.H, sizeof(DataType)
-    };
     extern __shared__ __align__(MAX_ALIGNMENT) cuda::std::byte flashWorkspace[];
     // unpack pointers
     const auto* __restrict__ tokens = reinterpret_cast<const DataType*>(kArgs.tokens);
@@ -93,6 +90,9 @@ namespace flashmoe::moe
     static_assert(bM0 == bM1);
     constexpr int bM = bM0;
     const auto roundEC = cute::ceil_div(kArgs.EC, bM) * bM;
+    const auto symHeap = Heap{
+      ctx.symHeap, ctx.nLx, roundEC, kArgs.H, sizeof(DataType)
+    };
     if constexpr (doGate) {
       const auto* __restrict__ gateWeights = reinterpret_cast<const DataType*>(kArgs.gateWeights);
       auto* __restrict__ gateOut = reinterpret_cast<DataType*>(kArgs.gateOut);

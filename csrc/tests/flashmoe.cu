@@ -341,7 +341,7 @@ void kickstart(/*const uint S, const uint H, const uint I, const uint E, const u
 
   // initialize
   flashmoe::MoEArgs args{
-    sizeof(Element), S, H, I, EC, bM, bN0, bN1, threads,
+    sizeof(Element), S, H, I, EC, bM, bN0, bN1, bK0, bK1, threads,
     blocks, static_cast<uint16_t>(epRank), static_cast<uint16_t>(world),
     static_cast<uint16_t>(nvshmem_my_pe()), E, static_cast<uint16_t>(numLocalExperts)
   };
@@ -365,9 +365,9 @@ void kickstart(/*const uint S, const uint H, const uint I, const uint E, const u
   auto gateCtx = std::get<1>(contexts);
   // call kernel as many times as needed
   auto* __restrict__ localExpertUpWeights = expertUpWeights + (static_cast<size_t>(epRank) * (H * I));
-  auto* __restrict__ localExpertDownWeights = expertUpWeights + (static_cast<size_t>(epRank) * (I * H));
+  auto* __restrict__ localExpertDownWeights = expertDownWeights + (static_cast<size_t>(epRank) * (I * H));
   auto* __restrict__ localBiasUp = biasUp + (static_cast<size_t>(epRank) * (I));
-  auto* __restrict__ localBiasDown = biasUp + (static_cast<size_t>(epRank) * (H));
+  auto* __restrict__ localBiasDown = biasDown + (static_cast<size_t>(epRank) * (H));
 
   const flashmoe::moe::KernelArgs kArgs{
     reinterpret_cast<const cuda::std::byte*>(tokens),
