@@ -108,7 +108,7 @@ CPMAddPackage(
         GIT_TAG v0.9.4
 )
 ## NVSHMEM
-find_package(NVSHMEM REQUIRED HINTS "$ENV{NVSHMEM_HOME}/lib/cmake/nvshmem")
+find_package(NVSHMEM REQUIRED)
 # cuBLASDx
 find_package(mathdx REQUIRED COMPONENTS cublasdx CONFIG)
 find_package(mathdx REQUIRED COMPONENTS curanddx CONFIG)
@@ -195,9 +195,9 @@ set_target_properties(testFlashMoE PROPERTIES
         CUDA_RESOLVE_DEVICE_SYMBOLS ON
 )
 flash_target_common(testFlashMoE)
-if(FMT_ADDED)
-    target_link_libraries(testFlashMoE PRIVATE fmt::fmt)
-endif ()
+set_target_properties(nvshmem::nvshmem_host PROPERTIES
+        IMPORTED_LOCATION_RELEASE "/usr/lib/x86_64-linux-gnu/nvshmem/13/libnvshmem_host.so.3"
+)
 target_link_libraries(testFlashMoE PRIVATE nvshmem::nvshmem_host nvshmem::nvshmem_device)
 
 add_executable(testScheduler

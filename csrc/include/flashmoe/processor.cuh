@@ -77,7 +77,7 @@ namespace flashmoe::processor
     unsigned int* __restrict__ tQS = nullptr;
 
     ProcessorArgs() = default;
-    __device__
+    __device__ __forceinline__
     ProcessorArgs(unsigned int* const& _sQ,
                   TQSignal* const& _pDB,
                   unsigned int* const& _tQH,
@@ -250,7 +250,7 @@ namespace flashmoe::processor
                                               task.tileIdx);
           __syncthreads();
           if (!threadIdx.x) {
-            constexpr int bM = cute::get<0>(TileGEMM1::TileShape{});
+            constexpr int bM = cute::get<0>(typename TileGEMM1::TileShape{});
             const auto mCoord = task.tileIdx / tilesN1;
             const auto nCoord = task.tileIdx % tilesN1;
             if (topo == Topology::MIXED && task.isPeerRemote()) {
@@ -261,7 +261,7 @@ namespace flashmoe::processor
               if (doTransfer) {
                 // read and flip the current bit
                 const auto prevBit = producerBitMap(task.localPeerIdx(), task.localExpertIdx(), mCoord, 0);
-                const auto producerBit = prevBit == 0 ? 1 : 0;
+                const auto producerBit = static_cast<uint8_t>(prevBit == 0 ? 1 : 0);
                 // Pack payload into single signal word of 8 bytes
                 const auto flagSignal = SignalPayload<PacketStage::last>{
                   mCoord,
@@ -288,7 +288,7 @@ namespace flashmoe::processor
             else {
               // read and flip the current bit
               const auto prevBit = producerBitMap(task.localPeerIdx(), task.localExpertIdx(), mCoord, nCoord);
-              const auto producerBit = prevBit == 0 ? 1 : 0;
+              const auto producerBit = static_cast<uint8_t>(prevBit == 0 ? 1 : 0);
               // Pack payload into single signal word of 8 bytes
               const auto flagSignal = SignalPayload<PacketStage::last>{
                 mCoord,
@@ -315,7 +315,7 @@ namespace flashmoe::processor
           using Tiler = TileGEMM1::TileShape;
           constexpr int bM = cute::get<0>(Tiler{});
           constexpr int bN = cute::get<1>(Tiler{});
-          constexpr int Arch = TileGEMM1::TileArch;
+          constexpr int Arch = TileGEMM1::TileArch::value;
           const auto tIds = cute::make_tensor(cute::make_gmem_ptr(tokenIndices),
             cute::make_layout(cute::make_shape(E, roundEC), cute::LayoutRight{}));
           const auto* __restrict__ tokenIds = &tIds(task.expertIdx(), task.tokenBatchStart());

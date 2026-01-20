@@ -52,18 +52,18 @@ namespace flashmoe::subscriber
     const uint16_t tIdx;
     const uint8_t stateNumber;
 
-
+    __device__ __forceinline__
     Args(uint64_t* const& _signals, Task* const& tq,
          cuda::std::byte* const& gemm0Staging,
-         BitSet* const& senseBitsets,
-         BitSet* const& _vs,
-         uint* const& _interrupt,
-         unsigned int* const& _tQHead,
-         const PLI* const& _pL,
-         const LXI* const& _lX,
-         const ELI* const& _eL,
-         uint* const& _status,
-         unsigned int* const& _taskCount,
+         BitSet* __restrict__ const& senseBitsets,
+         BitSet* __restrict__ const& _vs,
+         uint* __restrict__ const& _interrupt,
+         unsigned int* __restrict__ const& _tQHead,
+         const PLI* __restrict__ const& _pL,
+         const LXI* __restrict__ const& _lX,
+         const ELI* __restrict__ const& _eL,
+         uint* __restrict__ const& _status,
+         unsigned int* __restrict__ const& _taskCount,
          const int& _world,
          const int& nLx, const uint& firstStageFlagCount,
          const int& _epRank, const uint& _roundEC, const int& _experts,
@@ -120,7 +120,7 @@ namespace flashmoe::subscriber
                     unsigned int const& routedTokens,
                     int const& peer, // relative to the EP group
                     const uint& laneId,
-                    int& lTQHead) const {
+                    uint& lTQHead) const {
       static_assert(bM > 0);
       const auto qIdx = DQ::sNext<DQType::stride, subscriberCount>(lTQHead);
       const auto fTilesM = routedTokens / bM;
@@ -156,7 +156,6 @@ namespace flashmoe::subscriber
         for (uint j = 0; j < lS; j++) {
           const auto tileIdx = fTilesM * args.tilesN0 + laneId + j * WARP_SIZE;
           const auto syncIdx = sO + fTilesM;
-          const auto rowIdx = fTilesM;
           ingredients.tileSize = static_cast<uint16_t>(residue);
           args.tQ[DQ::next<DQType::stride, subscriberCount>(qIdx, fS + j)] = Task{
             ingredients, packet, taskResults, rcData, flags, syncIdx, tileIdx
@@ -219,7 +218,7 @@ namespace flashmoe::subscriber
 
   template <
     SubscriberStage s,
-    Topology topo = Topology::NVLINK_ONLY,
+    Topology topo,
     typename Element,
     int subscriberCount,
     int bM,
@@ -233,7 +232,7 @@ namespace flashmoe::subscriber
                     uint64_t* __restrict__ const& flags,
                     BitSet* __restrict__ const& bitSet,
                     const int& stageLength,
-                    int& pending, int& ltQHead) const {
+                    uint& pending, uint& ltQHead) const {
       const auto currentStateNumber = static_cast<uint16_t>(args.stateNumber);
       /// Flags has dimension [W, L], where W is expert parallel world and L is number of local experts
       constexpr Decoder<subscriberCount, PacketStage::initial, PeerConnectivity::p2p, bM, Element> fPd{};
@@ -357,7 +356,7 @@ namespace flashmoe::subscriber
     __device__ __forceinline__
     void operator()(const Args& args,
                     BitSet* __restrict__ const& bitSet, uint64_t* __restrict__ const& flags,
-                    int& ltQHead, const int& stageLength) const {
+                    uint& ltQHead, const uint& stageLength) const {
       constexpr int wSet = 16;
       constexpr int bSw = sizeof(uint) * 8U;
       static_assert(wSet == 16 || wSet == 32);
@@ -521,7 +520,7 @@ namespace flashmoe::subscriber
     __device__ __forceinline__
     void operator()(const Args& args,
                     BitSet* __restrict__ const& bitSet, uint64_t* __restrict__ const& flags,
-                    int& ltQHead, const int& stageLength) const {
+                    uint& ltQHead, const uint& stageLength) const {
       constexpr int wSet = 16;
       constexpr int bSw = sizeof(uint) * 8U;
       static_assert(wSet == 16 || wSet == 32);
@@ -621,7 +620,7 @@ namespace flashmoe::subscriber
     requires(subscriberCount % WARP_SIZE == 0)
   __device__ __forceinline__
   void start(const Heap& symHeap, const Args& args, const uint& firstStageBitSetLength) {
-    int ltQHead = 0; // local tQ Head
+    uint ltQHead = 0; // local tQ Head
 
     // first stage
     constexpr auto sNW = subscriberCount / WARP_SIZE;

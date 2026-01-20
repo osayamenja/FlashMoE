@@ -15,6 +15,7 @@ namespace flashmoe {
     /// The symmetric tensor from the FlashMoE paper
     struct Heap {
         cuda::std::byte* const sHeap;
+        __device__ __forceinline__
         Heap(cuda::std::byte* const& _sHeap,
             const uint& _expertSlots, const uint& _EC,
             const uint& _tokenDim, const uint& _elementBytes) :

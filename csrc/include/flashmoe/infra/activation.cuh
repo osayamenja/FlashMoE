@@ -14,19 +14,19 @@ namespace flashmoe
         gelu // as many as cutlass supports
     };
 
-    template<Activation a = Activation::identity, typename Element>
+    template<typename Element, Activation a = Activation::identity>
     struct ActivationType {
         static_assert(a == Activation::identity);
         using AT = cublasdx::identity;
     };
 
     template<typename Element>
-    struct ActivationType<Activation::relu, Element> {
+    struct ActivationType<Element, Activation::relu> {
         using AT = cutlass::epilogue::thread::ReLU<Element>;
     };
 
     template<typename Element>
-    struct ActivationType<Activation::gelu, Element> {
+    struct ActivationType<Element, Activation::gelu> {
         using AT = cutlass::epilogue::thread::GELU<Element>;
     };
 }

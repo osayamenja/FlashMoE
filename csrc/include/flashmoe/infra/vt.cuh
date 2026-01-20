@@ -21,7 +21,7 @@ namespace flashmoe {
     requires(MAX_ALIGN <= MAX_ACCESS_ALIGNMENT && cutlass::is_pow2<MAX_ALIGN>::value && MAX_ALIGN >= 1)
     constexpr int ElementWidth = cute::min(dim, MAX_ALIGN / sizeof(Element));
     template<typename Element, int dim>
-    constexpr int ElementAlignment = (cutlass::is_pow2<ElementWidth<Element, dim>>::value ?
+    constexpr uint32_t ElementAlignment = (cutlass::is_pow2<ElementWidth<Element, dim>>::value ?
         ElementWidth<Element, dim> : 1) * sizeof(Element);
     template<typename Element, int dim, int width>
     constexpr int ElementAlignmentForWidth = (cutlass::is_pow2<width>::value ? width : 1) * sizeof(Element);

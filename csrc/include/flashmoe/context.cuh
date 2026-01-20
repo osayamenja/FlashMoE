@@ -60,6 +60,7 @@ namespace flashmoe
         uint* const tileSync = nullptr; // [world, num_local_experts, ecTilesM] = = tiles(S)
         uint* const statusQueue = nullptr; // [processors]
         TPS* const tokenIndices = nullptr; // [E, roundEC]
+        const uint blocks = 0;
         const uint S = 0; //  max number of tokens for this rank
         const uint H = 0; // max hidden dimension or model dim
         const uint I = 0; //  max FFN intermediate size

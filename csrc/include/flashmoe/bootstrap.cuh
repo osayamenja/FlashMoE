@@ -283,6 +283,7 @@ namespace flashmoe
             tileSync,
             statusQ,
             tps,
+            args.blocks,
             args.sequenceLength,
             args.tokenDim,
             args.ffnIntermediateSize,
