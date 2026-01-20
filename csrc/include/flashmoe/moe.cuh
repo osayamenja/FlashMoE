@@ -54,7 +54,7 @@ namespace flashmoe::moe
     const cuda::std::byte* const biasUp; // [num_local_experts, I]
     const cuda::std::byte* const expertDownWeights; // [num_local_experts, I, H]
     const cuda::std::byte* const biasDown; // [num_local_experts, H]
-    cuda::std::byte* gateOut;
+    cuda::std::byte* const gateOut;
     int* const expertCounts; // [E]
     cuda::std::byte* const moeOut; //  [S, H]
     const uint S; // sequence length
@@ -168,7 +168,6 @@ namespace flashmoe::moe
   __host__ __forceinline__
   void forwardHost(const KernelArgs& kArgs, Context& ctx, const GateContext& gCtx, const uint& sharedSize,
     cudaStream_t stream) {
-    // asert(blocks >= 2)
     if constexpr (Config::CM::value == CombineMode::plural) {
       cudaMemsetAsync(kArgs.moeOut, 0, sizeof(Config::DType) * kArgs.S * kArgs.H, stream);
     }

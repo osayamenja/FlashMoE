@@ -26,13 +26,13 @@ void gemmMainloop(void* __restrict__ const& workspace,
     using BM = cute::Int<cublasdx::size_of<BLAS>::m>;
     using BN = cute::Int<cublasdx::size_of<BLAS>::n>;
     const auto tileCoord = flashmoe::tile::idx2Coord(M / BM{}, N / BN{}, tileIdx);
-    // gmem -> rmem: prefetch bias
-    const auto gD = flashmoe::tile::getBias<BM{}, BN{}>(bias, M, N, cute::select<0, 1>(tileCoord));
-    auto d_frag = cublasdx::make_fragment_like<ElementC>(accumulator.get_results());
-    cublasdx::copy_fragment<cublasdx::alignment_of<BLAS>::c>(gD, d_frag, accumulator);
     // compute Tile
     constexpr TileGEMM tileMainloop{};
     tileMainloop(workspace, a, b, accumulator, M, N, K, tileCoord);
+    // gmem -> rmem: load bias
+    const auto gD = flashmoe::tile::getBias<BM{}, BN{}>(bias, M, N, cute::select<0, 1>(tileCoord));
+    auto d_frag = cublasdx::make_fragment_like<ElementC>(accumulator.get_results());
+    cublasdx::copy_fragment<cublasdx::alignment_of<BLAS>::c>(gD, d_frag, accumulator);
     // Epilogue
     constexpr Activation act{}; // activation function like relu, etc
     using AccumType = decltype(accumulator)::value_type;

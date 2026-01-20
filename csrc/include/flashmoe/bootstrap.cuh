@@ -85,6 +85,7 @@ namespace flashmoe
         std::vector<ELI> eliHost(E);
         std::vector<LXI> lxiHost(nLx);
 
+        std::ranges::fill(lxIndices.begin(), lxIndices.end(), 0);
         for (uint i = 0; i < E; ++i) {
             const auto epRank = expertToEpRank[i];
             const auto pe = epRankToGlobalRank[epRank];
@@ -107,10 +108,10 @@ namespace flashmoe
             eliHost[i].localExpertIndex = lxIdx;
 
             // PLI
-            pliHost[i].isRemote = isRemote;
-            pliHost[i].pe = pe;
-            pliHost[i].remoteSFlags = rFlags;
-            pliHost[i].remoteSHeap = rSheap;
+            pliHost[epRank].isRemote = isRemote;
+            pliHost[epRank].pe = pe;
+            pliHost[epRank].remoteSFlags = rFlags;
+            pliHost[epRank].remoteSHeap = rSheap;
 
             //LXI
             if (pe == myPE) {
@@ -162,7 +163,7 @@ namespace flashmoe
         const auto tilesN0 = cute::ceil_div(args.ffnIntermediateSize, args.bN0);
         const auto tilesN1 = cute::ceil_div(args.tokenDim, args.bN1);
 
-        if (!nvshmemx_init_status()) {
+        if (nvshmemx_init_status() == NVSHMEM_STATUS_NOT_INITIALIZED) {
             throw std::runtime_error("nvshmem is not initialized");
         }
         const bool elementBytesConditions = cutlass::ispow2(args.elementBytes) &&
@@ -175,9 +176,15 @@ namespace flashmoe
         static_assert(SignalConstants::ground == 0);
         const size_t signalLength = (args.epWorld * args.numLocalExperts) + (args.numExperts * ecTilesM * tilesN1);
         auto* signals = static_cast<uint64_t*>(nvshmem_calloc(signalLength, sizeof(uint64_t)));
+        if (signals == nullptr) {
+            throw std::runtime_error("failed to allocate signals via NVSHMEM");
+        }
         // symmetric heap ~= 4*S*H
         const auto heapLength = args.elementBytes * HEAP_STAGES * HEAP_CELLS * args.epWorld * args.numLocalExperts * roundEC * args.tokenDim;
         auto* sHeap = static_cast<cuda::std::byte*>(nvshmem_malloc(heapLength));
+        if (sHeap == nullptr) {
+            throw std::runtime_error("failed to allocate heap via NVSHMEM");
+        }
 
         Task* tQ = nullptr;
         const bool threadConditions = args.threads >= WARP_SIZE * 2;

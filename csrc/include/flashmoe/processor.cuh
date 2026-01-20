@@ -43,13 +43,13 @@ namespace flashmoe::processor
     using BM = cute::Int<cublasdx::size_of<BLAS>::m>;
     using BN = cute::Int<cublasdx::size_of<BLAS>::n>;
     const auto tileCoord = tile::idx2Coord(M / BM{}, N / BN{}, tileIdx);
+    // compute Tile
+    constexpr TileGEMM tileMainloop{};
+    tileMainloop(workspace, a, b, accumulator, M, N, K, tileCoord);
     // gmem -> rmem: prefetch bias
     const auto gD = tile::getBias<BM{}, BN{}>(bias, M, N, cute::select<0, 1>(tileCoord));
     auto d_frag = cublasdx::make_fragment_like<ElementC>(accumulator.get_results());
     cublasdx::copy_fragment<cublasdx::alignment_of<BLAS>::c>(gD, d_frag, accumulator);
-    // compute Tile
-    constexpr TileGEMM tileMainloop{};
-    tileMainloop(workspace, a, b, accumulator, M, N, K, tileCoord);
     // Epilogue
     constexpr Activation act{}; // activation function like relu, etc
     // ElementC -> accum type
@@ -61,8 +61,7 @@ namespace flashmoe::processor
     cute::for_each(cute::make_int_sequence<accum_size>{}, [&c_frag, &d_frag](auto i) {
       d_frag(i) = storeConv(act(c_frag(i) + loadConv(d_frag(i))));
     });
-    auto gC = tile::getC<BM{}, BN{}, cublasdx::arrangement_of_v_c<BLAS>>(c, M, N,
-                                                                         cute::select<0, 1>(tileCoord));
+    auto gC = tile::getC<BM{}, BN{}, cublasdx::arrangement_of_v_c<BLAS>>(c, M, N, cute::select<0, 1>(tileCoord));
     // rmem -> gmem
     cublasdx::copy_fragment<cublasdx::alignment_of<BLAS>::c>(d_frag, gC, accumulator);
   }
