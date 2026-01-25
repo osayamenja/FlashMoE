@@ -7,11 +7,9 @@
 
 #include <cuda/barrier>
 #include <cute/int_tuple.hpp>
-#include <nvshmem.h>
 
 #include "infra/bitset.cuh"
 #include "infra/packed.cuh"
-#include "infra/signal.cuh"
 #include "infra/structures.cuh"
 #include "infra/task.cuh"
 #include "infra/tq.cuh"
@@ -20,21 +18,20 @@ namespace flashmoe
 {
     template<int subscriberWarpSize>
     __host__ __forceinline__
-    auto subscriberTQLength(const int& world, const uint& numLocalExperts, const uint& ecTilesM,
+    constexpr auto subscriberTQLength(const int& world, const uint& numLocalExperts, const uint& ecTilesM,
         const uint& E, const uint& tilesN0, const uint& tilesN1, const uint& subscriberCount) {
-        return cute::ceil_div(world * numLocalExperts, subscriberCount / subscriberWarpSize) *
-                    cute::ceil_div(ecTilesM * tilesN0, subscriberWarpSize) +
-                    cute::ceil_div(ecTilesM * E, subscriberCount) * tilesN1;
+        const auto dispatchTaskQL = cute::ceil_div(world * numLocalExperts,
+            subscriberCount / subscriberWarpSize) * cute::ceil_div(ecTilesM * tilesN0, subscriberWarpSize);
+        const auto combineTaskQL = cute::ceil_div(ecTilesM * E * tilesN1, subscriberCount);
+        return (dispatchTaskQL + combineTaskQL) * subscriberCount;
     }
 
     template<int subscriberCount, int subscriberWarpSize>
     __device__ __forceinline__
-    auto subscriberTQLength(const int& world, const int& numLocalExperts, const uint& ecTilesM,
+    constexpr auto subscriberTQLength(const int& world, const int& numLocalExperts, const uint& ecTilesM,
         const uint& E, const uint& tilesN0, const uint& tilesN1) {
-        static_assert(subscriberCount % subscriberWarpSize == 0 && subscriberWarpSize == 32);
-        return cute::ceil_div(world * numLocalExperts, subscriberCount / subscriberWarpSize) *
-                    cute::ceil_div(ecTilesM * tilesN0, subscriberWarpSize) +
-                    cute::ceil_div(ecTilesM * E, subscriberCount) * tilesN1;
+        static_assert(subscriberCount % subscriberWarpSize == 0);
+        return subscriberTQLength<subscriberWarpSize>(world, numLocalExperts, ecTilesM, E, tilesN0, tilesN1, subscriberCount);
     }
     __host__ __device__ __forceinline__
     auto secondaryTQLength(const int& world, const int& numLocalExperts, const uint& ecTilesM, const uint& tilesN1) {

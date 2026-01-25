@@ -36,7 +36,7 @@ namespace flashmoe {
             printf("{\n\t"
                    "routedTokens: %u,\n\t"
                    "totalTilesM: %u,\n\t"
-                   "seqNumbe: %u"
+                   "state: %u"
                    "\n}\n",
                    routedTokens, totalTilesM, stateNumber);
         }
@@ -54,7 +54,7 @@ namespace flashmoe {
             printf("{\n\t"
                    "batchIdx: %u,\n\t"
                    "tokensM: %u,\n\t"
-                   "seqBit: %u"
+                   "stateNumber: %u"
                    "\n}\n",
                    batchIdx, tokensM, stateNumber);
         }

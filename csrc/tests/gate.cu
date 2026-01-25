@@ -53,45 +53,6 @@ struct __align__(16) GateArgs {
     float atol;
 };
 
-template<
-        typename TileShape,
-        int Arch,
-        int threads,
-        flashmoe::GateReductionLevel grl = flashmoe::GateReductionLevel::singleBlock,
-        flashmoe::SoftMaxOptimizationLevel sro = flashmoe::SoftMaxOptimizationLevel::none,
-        typename AccumType = float,
-        typename Element,
-        typename ElementR
-    >
-__launch_bounds__(threads, 1)
-__global__ void gateKernel(const Element* __restrict__ tokens,
-        const Element* __restrict__ _gateWeights,
-        ElementR* __restrict__ _routing,
-        flashmoe::TPS* __restrict__ tokenIds,
-        int* __restrict__ expertCounts,
-        int* __restrict__ eCGuards,
-        const __grid_constant__ int S,
-        const __grid_constant__ int H,
-        const __grid_constant__ int E,
-        const __grid_constant__ int k,
-        const __grid_constant__ int EC,
-        flashmoe::SoftmaxStatePacked* __restrict__ rSp,
-        flashmoe::RingTopKPayload* __restrict__ rTp
-        ) {
-    constexpr int bM = cute::get<0>(TileShape{});
-    constexpr int bN = cute::get<1>(TileShape{});
-    constexpr int bK = cute::get<2>(TileShape{});
-    constexpr int pipeStages = cute::get<3>(TileShape{});
-    using TileGEMM = flashmoe::tile::CollectiveMainloop<
-            bM, bN, bK, Arch, Element, AccumType, threads, pipeStages
-        >;
-    extern __shared__ __align__(TileGEMM::GeneralAlignment::value) cuda::std::byte gateWorkspace[];
-    const auto roundEC = cute::ceil_div(EC, bM) * bM;
-    flashmoe::gate::forward<TileGEMM, grl, sro>(gateWorkspace, tokens, _gateWeights,
-        _routing, tokenIds, expertCounts,
-        S, H, E, k, EC, roundEC, static_cast<int>(gridDim.x), eCGuards, rSp, rTp);
-}
-
 template<int warmup, int runs, typename RE, typename REC>
 __host__ __forceinline__
 auto reference(matx::cudaExecutor& exec, const GateArgs& gArgs, cudaEvent_t start, cudaEvent_t stop) {
@@ -238,14 +199,13 @@ auto gk_run(matx::cudaExecutor& exec, const GateArgs& gArgs, const int& blocks, 
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
     auto kernel = [&]() {
-        gateKernel<TileShape, Arch, threads, grl, sro, AccumType>
+        flashmoe::gate::forwardKernel<TileShape, Arch, threads, grl, sro, AccumType>
         <<<blocks, threads, sharedSize, exec.getStream()>>>(
             static_cast<Element*>(gArgs.tokens),
             static_cast<Element*>(gArgs.gateWeights),
             static_cast<ElementC*>(gArgs.routing),
-            gArgs.tokenIds_packed,
-            gArgs.eCounts, gArgs.eCGuards,
-            gArgs.S, gArgs.H, gArgs.E, gArgs.k, gArgs.EC, gArgs.rSp, gArgs.rTp);
+            gArgs.eCounts, gArgs.S, gArgs.H, gArgs.E, gArgs.k, gArgs.EC,
+            gArgs.tokenIds_packed, gArgs.eCGuards, gArgs.rSp, gArgs.rTp);
     };
     kernel();
     auto ref_result = std::make_tuple(0.f, -0.0, -0.0, -0.0);
@@ -336,7 +296,7 @@ void driver(const int& S, const int& E, const int& H, const int& k, const float&
     using AccumType = float;
     using TileShape = cute::Shape<cute::Int<bM>, cute::Int<bN>, cute::Int<bK>, cute::Int<pipeStages>>;
     constexpr int threads = flashmoe::tile::suggest_thread_count<bM, bN, bK, Arch, Element, AccumType>();
-    auto kernel = gateKernel<TileShape, Arch, threads, grl, sro, AccumType, Element, ElementC>;
+    auto kernel = flashmoe::gate::forwardKernel<TileShape, Arch, threads, grl, sro, AccumType, Element, ElementC>;
     int bps = 0;
     constexpr auto sharedSize = cute::max(bK * pipeStages * (bM + bN) * sizeof(Element),
         bM * bN * sizeof(AccumType));

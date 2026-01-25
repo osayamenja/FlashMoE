@@ -593,5 +593,39 @@ namespace flashmoe::gate
       }
     }
   }
+
+  template<
+        typename TileShape,
+        int Arch,
+        int threads,
+        GateReductionLevel grl = GateReductionLevel::singleBlock,
+        SoftMaxOptimizationLevel sro = SoftMaxOptimizationLevel::none,
+        typename AccumType = float,
+        typename Element,
+        typename ElementR
+    >
+  __launch_bounds__(threads, 1)
+  __global__ void forwardKernel(const Element* __restrict__ tokens,
+        const Element* __restrict__ _gateWeights,
+        ElementR* __restrict__ _routing,
+        int* __restrict__ expertCounts,
+        const __grid_constant__ int S,
+        const __grid_constant__ int H,
+        const __grid_constant__ int E,
+        const __grid_constant__ int k,
+        const __grid_constant__ int EC,
+        TPS* __restrict__ tokenIds,
+        int* __restrict__ eCGuards,
+        SoftmaxStatePacked* __restrict__ rSp, RingTopKPayload* __restrict__ rTp) {
+    constexpr int bM = cute::get<0>(TileShape{});
+    constexpr int bN = cute::get<1>(TileShape{});
+    constexpr int bK = cute::get<2>(TileShape{});
+    constexpr int pipeStages = cute::get<3>(TileShape{});
+    using TileGEMM = tile::CollectiveMainloop<bM, bN, bK, Arch, Element, AccumType, threads, pipeStages>;
+    extern __shared__ __align__(TileGEMM::GeneralAlignment::value) cuda::std::byte gateWorkspace[];
+    const auto roundEC = cute::ceil_div(EC, bM) * bM;
+    gate::forward<TileGEMM, grl, sro>(gateWorkspace, tokens, _gateWeights, _routing, tokenIds, expertCounts,
+        S, H, E, k, EC, roundEC, static_cast<int>(gridDim.x), eCGuards, rSp, rTp);
+  }
 }
 #endif //GATE_CUH

@@ -66,24 +66,23 @@ namespace flashmoe::processor
     cublasdx::copy_fragment<cublasdx::alignment_of<BLAS>::c>(d_frag, gC, accumulator);
   }
 
-  struct __align__(16) ProcessorArgs {
-    // sensible sentinel values
-    unsigned int* __restrict__ sQ = nullptr;
-    uint64_t* __restrict__ pDB = nullptr;
-    unsigned int* __restrict__ tQH = nullptr;
-    Task* __restrict__ tQ = nullptr;
-    Task* __restrict__ ptQ = nullptr;
-    unsigned int* __restrict__ tQS = nullptr;
+  struct ProcessorArgs {
+    unsigned int* sQ = nullptr;
+    uint64_t* pDB = nullptr;
+    unsigned int* tQH = nullptr;
+    Task* tQ = nullptr;
+    Task* ptQ = nullptr;
+    unsigned int* tQS = nullptr;
 
     ProcessorArgs() = default;
     __device__ __forceinline__
-    ProcessorArgs(unsigned int* const& _sQ,
-                  TQSignal* const& _pDB,
-                  unsigned int* const& _tQH,
-                  Task* const& _tQ,
-                  Task* const& _ptQ,
-                  unsigned int* const& _tQS) :
-      sQ(_sQ), pDB(reinterpret_cast<uint64_t*>(_pDB)), tQH(_tQH), tQ(_tQ), ptQ(_ptQ), tQS(_tQS) {
+    ProcessorArgs(unsigned int* const& sq,
+                  TQSignal* const& pdb,
+                  unsigned int* const& tqh,
+                  Task* const& tq,
+                  Task* const& ptq,
+                  unsigned int* const& tqs) :
+      sQ(sq), pDB(reinterpret_cast<uint64_t*>(pdb)), tQH(tqh), tQ(tq), ptQ(ptq), tQS(tqs) {
     }
   };
 
@@ -93,13 +92,17 @@ namespace flashmoe::processor
   >
   __device__ __forceinline__
   void notifyNext(void* __restrict__ const& workspace, const Task& task, Task* __restrict__ const& tQ,
-                  const uint& tasks, const uint& offset, uint* __restrict__ const& tQH) {
+                  const uint& tasks, const uint& flagColStride,
+                  const uint& offset, uint* __restrict__ const& tQH) {
     auto* __restrict__ sTQ = static_cast<Task*>(workspace);
+    auto ingredients = task.ingredients;
+    ingredients.taskType = TaskType::GEMM1;
     // registers -> shared memory
     for (int i = threadIdx.x; i < tasks; i += threads) {
       sTQ[i] = Task{
-        task.ingredients, task.cData[0], task.cData, task.rcData,
-        task.flags + offset + (p == PeerConnectivity::p2p ? i : 0), task.syncIdx, offset + i
+        ingredients, task.cData[0], task.cData, task.rcData,
+        task.flags + (p == PeerConnectivity::remote ? 0 : i * flagColStride), // col-major indexing
+        task.syncIdx, offset + i
       };
     }
     __syncthreads();
@@ -141,8 +144,8 @@ namespace flashmoe::processor
              const int& H, // token hidden dimension
              const int& I, // FFN intermediate size
              const int& E, // total number of experts
-             const int& k, // top k
              const int& roundEC,
+             const uint& flagColStride, // ecTilesM * E
              const uint& tilesN0, // I / bN0
              const uint& tilesN1, // H / bN1
              const Element* __restrict__ const& expertUpWeights, // [num_local_experts, H, I]
@@ -231,10 +234,12 @@ namespace flashmoe::processor
             const auto offset = tilesN1 * (task.tileIdx / tilesN0);
             auto* __restrict__ tQ = pA.ptQ + (task.syncIdx * tilesN1);
             if (topo == Topology::MIXED && task.isPeerRemote()) {
-              notifyNext<PeerConnectivity::remote, threads>(workspace, task, tQ, tilesN1, offset, pA.tQH);
+              notifyNext<PeerConnectivity::remote, threads>(workspace, task, tQ, tilesN1, flagColStride,
+                offset, pA.tQH);
             }
             else {
-              notifyNext<PeerConnectivity::p2p, threads>(workspace, task, tQ, tilesN1, offset, pA.tQH);
+              notifyNext<PeerConnectivity::p2p, threads>(workspace, task, tQ, tilesN1, flagColStride,
+                offset, pA.tQH);
             }
           }
           __syncthreads();

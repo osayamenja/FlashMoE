@@ -1,11 +1,13 @@
 /******************************************************************************
  * Copyright (c) 2026, Osayamen Jonathan Aimuyo.
  ******************************************************************************/
+// E2E correctness test and benchmark of fused distributed MoE kernel
 #include <random>
 #include <stdexcept>
 #include <tuple>
 
 #include "../include/flashmoe/bootstrap.cuh"
+#include "../include/flashmoe/gate.cuh"
 #include "../include/flashmoe/moe.cuh"
 
 #include "common.cuh"
@@ -193,10 +195,42 @@ void reference(const flashmoe::TPS* __restrict__ const& tokenIds,
     gk<TileGEMM1, cublasdx::identity><<<blocks1, threads, GEMM1SharedSize, stream>>>
     (ref_interim0, expertD, ref_interim1, biasD, EC, H, I);
     // do combine
-    combineReference<<<EC, threads, 0, stream>>>(S, H, EC, topK, ref_interim1, tIds, expertCounts + i, ref_out);
+    combineReference<<<1, threads, 0, stream>>>(S, H, EC, topK, ref_interim1, tIds, expertCounts + i, ref_out);
   }
+  /*{
+    std::vector<Element> hr(S * H);
+    cudaMemcpyAsync(hr.data(), ref_out, sizeof(Element) * S * H, cudaMemcpyDeviceToHost, stream);
+    cudaStreamSynchronize(stream);
+    const auto tr = cute::make_tensor(hr.data(), cute::make_layout(
+      cute::make_shape(S, H), cute::LayoutRight{}));
+    printf("Reference result\n");
+    print_tensor(tr);
+  }*/
 }
 
+__host__ __forceinline__
+void printMetadata(const std::vector<int>& counts, const std::vector<flashmoe::TPS>& ids,
+    const int& EC, const int& E) {
+  const auto t0 = cute::make_tensor(counts.data(), cute::make_layout(
+      cute::make_shape(E, 1), cute::LayoutRight{}));
+  print_tensor(t0);
+  void* p = std::malloc(ids.size() * sizeof(uint));
+  auto* indices = static_cast<uint*>(p);
+  std::ranges::transform(ids.begin(), ids.end(), indices, [](const flashmoe::TPS t) {
+      return t.tokenIdx;
+  });
+  const auto t1 = cute::make_tensor(indices, cute::make_layout(
+      cute::make_shape(E, EC), cute::LayoutRight{}));
+  print_tensor(t1);
+  auto* scales = static_cast<float*>(p);
+  std::ranges::transform(ids.begin(), ids.end(), scales, [](const flashmoe::TPS t) {
+      return t.probability;
+  });
+  const auto t2 = cute::make_tensor(scales, cute::make_layout(
+      cute::make_shape(E, EC), cute::LayoutRight{}));
+  print_tensor(t2);
+  std::free(p);
+}
 // template<
 //   int Arch,
 //   int bM, int bN0, int bK0, int pSK0,
@@ -218,6 +252,7 @@ void kickstart(/*const uint S, const uint H, const uint I, const uint E, const u
   constexpr auto topo = flashmoe::Topology::NVLINK_ONLY;
   constexpr auto grl = E > bNGate ? flashmoe::GateReductionLevel::multiBlock :
   flashmoe::GateReductionLevel::singleBlock;
+  constexpr auto sro = flashmoe::SoftMaxOptimizationLevel::highest;
   constexpr auto dtk = flashmoe::DropTokens::no;
   constexpr auto Arch = FLASHMOE_ARCH;
   constexpr auto act = flashmoe::Activation::relu;
@@ -250,7 +285,6 @@ void kickstart(/*const uint S, const uint H, const uint I, const uint E, const u
   constexpr auto threadsGEMM1 = flashmoe::tile::suggest_thread_count<bM, bN1, bK1, Arch, Element, AccumType>();
   constexpr auto threads = cute::max(threadsGEMM0, threadsGEMM1);
   static_assert(dtk == flashmoe::DropTokens::no);
-  constexpr bool doGate = true;
   const auto EC = dtk == flashmoe::DropTokens::no ? S : cute::ceil_div(S, E) * k;
   constexpr auto GEMM0Sz = cutlass::round_up(sizeof(Element) * bK0 * pSK0 * (bM + bN0), flashmoe::MAX_ALIGNMENT);
   constexpr auto GEMM1Sz = cutlass::round_up(sizeof(Element) * bK1 * pSK1 * (bM + bN1), flashmoe::MAX_ALIGNMENT);
@@ -258,11 +292,13 @@ void kickstart(/*const uint S, const uint H, const uint I, const uint E, const u
     sizeof(flashmoe::gate::SoftType) * bM * bNGate), flashmoe::MAX_ALIGNMENT);
   const auto dispatchSz = E * (sizeof(flashmoe::PEL) + sizeof(int));
   const auto OSSz = flashmoe::os::getSharedSize<threads, bM>(world, numLocalExperts, E, EC, tilesN1);
-  const auto kernelSz = cute::max(GEMM0Sz, GEMM1Sz, GateSz, dispatchSz, OSSz);
+  const auto taskSz = sizeof(flashmoe::Task) * tilesN1;
+  const auto combineSz = cutlass::round_up(sizeof(Element) * bM * bN1, flashmoe::MAX_ALIGNMENT);
+  const auto kernelSz = cute::max(GEMM0Sz, GEMM1Sz, dispatchSz, OSSz, taskSz, combineSz);
   int maxSharedMemory = 0;
   CHECK_CUDA(cudaDeviceGetAttribute(&maxSharedMemory,cudaDevAttrMaxSharedMemoryPerBlock, devId));
   if (kernelSz > maxSharedMemory) {
-    throw std::runtime_error("Required shared memory exceeds hardware limits. Reduce tile shapes.");
+    throw std::runtime_error("Required shared memory exceeds hardware limits. Reduce tile shapes or input sizes.");
   }
   // [S, H] x [H, E] -> [S, E]
   using GateTile = cute::Shape<cute::Int<bM>, cute::Int<bNGate>, cute::Int<bK0>, cute::Int<pSK0>>;
@@ -270,15 +306,22 @@ void kickstart(/*const uint S, const uint H, const uint I, const uint E, const u
   using GEMM0Tile = cute::Shape<cute::Int<bM>, cute::Int<bN0>, cute::Int<bK0>, cute::Int<pSK0>>;
   // [S, I] x [I, H] -> [S, H]
   using GEMM1Tile = cute::Shape<cute::Int<bM>, cute::Int<bN1>, cute::Int<bK1>, cute::Int<pSK1>>;
-  using Config = flashmoe::moe::MoEConfig<Element, Arch, threads, isKG1, dtk, GateTile, GEMM0Tile, GEMM1Tile>;
+  using Config = flashmoe::moe::MoEConfig<Element, Arch, threads, isKG1, dtk, GEMM0Tile, GEMM1Tile>;
 
-  auto kernel = flashmoe::moe::forward<Config, act, topo, doGate, grl>;
+  auto kernel = flashmoe::moe::forward<Config, act, topo>;
   CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kernelSz));
   int bps = 0;
   CHECK_CUDA(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&bps, kernel, threads, kernelSz));
   const auto dispatchBlocks = cute::ceil_div(128, cute::max(E, 4));
   const auto processorBlocks = (S /bM) * cute::max(I / bN0, H / bN1);
   const uint blocks = cute::max(cute::min(cute::max(processorBlocks, dispatchBlocks) + 1, bps * NUM_SMS), 2);
+
+  int bps1 = 0;
+  constexpr auto gateThreads = flashmoe::tile::suggest_thread_count<bM, bNGate, bK0, Arch, Element, AccumType>();
+  auto gateKernel = flashmoe::gate::forwardKernel<GateTile, Arch, gateThreads, grl, sro,AccumType, Element, Element>;
+  CHECK_CUDA(cudaFuncSetAttribute(gateKernel, cudaFuncAttributeMaxDynamicSharedMemorySize, GateSz));
+  CHECK_CUDA(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&bps1, gateKernel, gateThreads, GateSz));
+  const auto gateBlocks = cute::min((S / bM) * (E / bNGate), bps1 * NUM_SMS);
 
   Element* tokens = nullptr;
   cudaMallocAsync(&tokens, sizeof(Element) * S * H, stream);
@@ -385,7 +428,19 @@ void kickstart(/*const uint S, const uint H, const uint I, const uint E, const u
     S, H, I, E, k, EC
   };
 
-  flashmoe::moe::forwardHost<Config, topo, doGate, act, grl>(kArgs, moeContext, gateCtx, kernelSz, stream);
+  // run gate to populate data structures
+  flashmoe::gate::forwardKernel<GateTile, Arch, gateThreads, grl, sro, AccumType>
+  <<<gateBlocks, gateThreads, GateSz, stream>>>(tokens, gateWeights, gateOut,
+    expertCounts, S, H, E, k, EC, moeContext.tokenIndices, gateCtx.ecGuards, gateCtx.ssp, gateCtx.rtp);
+  /*{
+    std::vector<int> counts(E);
+    std::vector<flashmoe::TPS> ids(EC * E);
+    cudaMemcpyAsync(counts.data(), expertCounts, sizeof(int) * E, cudaMemcpyDeviceToHost, stream);
+    cudaMemcpyAsync(ids.data(), moeContext.tokenIndices, sizeof(flashmoe::TPS) * E * EC, cudaMemcpyDeviceToHost, stream);
+    CHECK_CUDA(cudaStreamSynchronize(stream));
+    printMetadata(counts, ids, EC, E);
+  }*/
+  flashmoe::moe::forwardHost<Config, topo, act>(kArgs, moeContext, kernelSz, stream);
   CHECK_CUDA(cudaPeekAtLastError());
   // check correctness
   using ActType = flashmoe::ActivationType<Element, act>::AT;
@@ -398,36 +453,45 @@ void kickstart(/*const uint S, const uint H, const uint I, const uint E, const u
   constexpr auto rtol = 2e-2;
   constexpr auto atol = 2e-3;
   auto tC = matx::make_tensor<MT>(reinterpret_cast<MT*>(moeOut), {S, H});
+  /*{
+    std::vector<Element> hr(S * H);
+    cudaMemcpyAsync(hr.data(), moeOut, sizeof(Element) * S * H, cudaMemcpyDeviceToHost, stream);
+    cudaStreamSynchronize(stream);
+    const auto tr = cute::make_tensor(hr.data(), cute::make_layout(
+      cute::make_shape(S, H), cute::LayoutRight{}));
+    printf("FlashMoE result\n");
+    print_tensor(tr);
+  }*/
   auto tRef = matx::make_tensor<MT>(reinterpret_cast<MT*>(referenceOut), {S, H});
   auto num_matches = matx::make_tensor<long int>({});
   (num_matches = matx::sum(matx::isclose(tC, tRef, rtol, atol))).run(exec);
-
+  exec.sync();
   // calculate error percentage
   const auto ep =  (1.0 - (static_cast<double>(num_matches()) / static_cast<double>(tC.TotalSize()))) * 100;
   cudaEvent_t start, stop;
   CHECK_CUDA(cudaEventCreate(&start));
   CHECK_CUDA(cudaEventCreate(&stop));
   // benchmark distributed moe fused kernel
-  constexpr int warmup = 0;
+  constexpr int warmup = 128;
   for (int i = 0; i < warmup; ++i) {
-    flashmoe::moe::forwardHost<Config, topo, doGate, act, grl>(kArgs, moeContext, gateCtx, kernelSz, stream);
+    flashmoe::moe::forwardHost<Config, topo, act>(kArgs, moeContext, kernelSz, stream);
   }
-  constexpr int runs = 0;
+  constexpr int runs = 128;
   CHECK_CUDA(cudaStreamSynchronize(stream));
   cudaEventRecord(start, exec.getStream());
   for (int i = 0; i < runs; ++i) {
-    flashmoe::moe::forwardHost<Config, topo, doGate, act, grl>(kArgs, moeContext, gateCtx, kernelSz, stream);
+    flashmoe::moe::forwardHost<Config, topo, act>(kArgs, moeContext, kernelSz, stream);
   }
   cudaEventRecord(stop, exec.getStream());
   CHECK_CUDA(cudaEventSynchronize(stop));
   float m_ms = 0;
   CHECK_CUDA(cudaEventElapsedTime(&m_ms, start, stop));
-  //const float m_time_ms = m_ms / static_cast<float>(runs);
+  const float m_time_ms = m_ms / static_cast<float>(runs);
   if (nvshmem_my_pe() == 0) {
     printf("S, H, I, E, k, EC, bM, bN0, bK0, bN1, bK1, bNGate, threads, blocks/SM, SMs,blocks, rtol, atol, error(%%), "
          "Kernel_Time(ms)\n");
     printf("%d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %.1e, %.1e, %f, %f\n",
-      S, H, I, E, k, EC, bM, bN0, bK0, bN1, bK1, bNGate, threads, bps, NUM_SMS, blocks, rtol, atol, -0.0f, -0.f);
+      S, H, I, E, k, EC, bM, bN0, bK0, bN1, bK1, bNGate, threads, bps, NUM_SMS, blocks, rtol, atol, ep, m_time_ms);
   }
 
   // finalize

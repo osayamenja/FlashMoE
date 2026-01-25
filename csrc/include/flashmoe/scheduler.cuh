@@ -92,13 +92,13 @@ namespace flashmoe::scheduler
                      uint* __restrict__ const& rQ,
                      TQSignal* __restrict__ const& pDB,
                      const bool& isMedley = false) {
-    __shared__ WarpScan::TempStorage wSt[2];
+    __shared__ WarpScan::TempStorage wSt;
     uint queueSlot;
     uint taskTally;
     // things are about to get warped :)
     // Aggregate tally across the warp
     __syncwarp();
-    WarpScan(wSt[0]).InclusiveSum(lTt, queueSlot, taskTally);
+    WarpScan(wSt).InclusiveSum(lTt, queueSlot, taskTally);
     queueSlot -= lTt;
     auto prefixTaskSum = 0U;
     while (taskTally) {
@@ -119,7 +119,8 @@ namespace flashmoe::scheduler
         }
         uint startIdx;
         // Aggregate tally across the warp
-        WarpScan(wSt[1]).InclusiveSum(lPt, startIdx, processorTally);
+        __syncwarp();
+        WarpScan(wSt).InclusiveSum(lPt, startIdx, processorTally);
         startIdx -= lPt;
         // write to rQ
         const auto qSIdx = gRQIdx + prefixTaskSum;
@@ -205,7 +206,6 @@ namespace flashmoe::scheduler
     cutlass::Array<uint, PROCESSOR_STATE_SIZE> sQState{};
     /// read through the ready queue first
     constexpr auto sig = TQSignal{0U, 1U}; // set interrupt to 1
-    // Below must be <= ceil(processors / wS) == sQsL, so we can repurpose sQState registers as temporary storage
     const auto tS = processorTally / schedulerCount + (threadIdx.x < processorTally % schedulerCount);
     const auto gRO = gRQIdx + (threadIdx.x * (processorTally / schedulerCount) +
       cute::min(threadIdx.x, processorTally % schedulerCount));
@@ -436,7 +436,7 @@ namespace flashmoe::scheduler
     #pragma unroll
     for (uint sid = threadIdx.x; sid < subscribers; sid += SCHEDULER_COUNT) {
       cuda::atomic_ref<uint, cuda::thread_scope_block> inr{*(sInterrupts + sid)};
-      inr.store(1U, cuda::memory_order_release);
+      inr.store(1, cuda::memory_order_relaxed);
     }
     // interrupt processors
     sPI<schedulerCount>(rQ, sQ, pDB, gRQIdx, interruptScratch, processors, processorTally);

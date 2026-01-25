@@ -12,7 +12,6 @@
 #include "infra/activation.cuh"
 
 #include "context.cuh"
-#include "gate.cuh"
 #include "dispatch.cuh"
 #include "processor.cuh"
 #include "os.cuh"
@@ -27,19 +26,15 @@ namespace flashmoe::moe
     int _threads, // see tile::suggest_thread_count
     bool isKG1, // is k greater than 1
     DropTokens _dTk, // yes or no,
-    typename GateTile, // cute::Shape<M,N,K,pipeStages>, will be ignored if not doing gate
     typename GEMM0Tile, // cute::Shape<M,N,K,pipeStages>
     typename GEMM1Tile // cute::Shape<M,N,K,pipeStages>
   >
   struct MoEConfig {
-    static_assert(cute::is_tuple_v<GateTile> && cute::rank_v<GateTile> == 4);
-    using GTS = GateTile;
     static_assert(cute::is_tuple_v<GEMM0Tile> && cute::rank_v<GEMM0Tile> == 4);
     using G0TS = GEMM0Tile;
     static_assert(cute::is_tuple_v<GEMM1Tile> && cute::rank_v<GEMM1Tile> == 4);
     using G1TS = GEMM1Tile;
-    static_assert(cute::get<0>(GateTile{}) == cute::get<0>(GEMM0Tile{}) &&
-      cute::get<0>(GEMM0Tile{}) == cute::get<0>(GEMM1Tile{}));
+    static_assert(cute::get<0>(GEMM0Tile{}) == cute::get<0>(GEMM1Tile{}));
     using Arch = cute::Int<arch>;
     using Threads = cute::Int<_threads>;
     using DTK = cute::C<_dTk>;
@@ -48,15 +43,15 @@ namespace flashmoe::moe
   };
 
   struct KernelArgs {
-    const cuda::std::byte* const tokens; // [S, H]
-    const cuda::std::byte* const gateWeights = nullptr; // [H, E]
-    const cuda::std::byte* const expertUpWeights; // [num_local_experts, H, I]
-    const cuda::std::byte* const biasUp; // [num_local_experts, I]
-    const cuda::std::byte* const expertDownWeights; // [num_local_experts, I, H]
-    const cuda::std::byte* const biasDown; // [num_local_experts, H]
-    cuda::std::byte* const gateOut;
-    int* const expertCounts; // [E]
-    cuda::std::byte* const moeOut; //  [S, H]
+    const cuda::std::byte* tokens; // [S, H]
+    const cuda::std::byte* gateWeights = nullptr; // [H, E]
+    const cuda::std::byte* expertUpWeights; // [num_local_experts, H, I]
+    const cuda::std::byte* biasUp; // [num_local_experts, I]
+    const cuda::std::byte* expertDownWeights; // [num_local_experts, I, H]
+    const cuda::std::byte* biasDown; // [num_local_experts, H]
+    cuda::std::byte* gateOut;
+    int* expertCounts; // [E]
+    cuda::std::byte* moeOut; //  [S, H]
     const uint S; // sequence length
     const uint H; // token hidden dimension
     const uint I; // FFN intermediate size
@@ -67,18 +62,14 @@ namespace flashmoe::moe
   template <
     typename Config,
     Activation a,
-    Topology topo,
-    bool doGate,
-    GateReductionLevel gRl = GateReductionLevel::singleBlock, // ignored if doGate == false
-    SoftMaxOptimizationLevel sro = SoftMaxOptimizationLevel::highest // ignored if doGate == false
+    Topology topo
   >
   __global__ __launch_bounds__(Config::Threads::value, 1) void forward(const __grid_constant__ KernelArgs kArgs,
-    const __grid_constant__ Context ctx, const __grid_constant__ GateContext gCtx) {
+    const __grid_constant__ Context ctx) {
     using DataType = Config::DType;
     extern __shared__ __align__(MAX_ALIGNMENT) cuda::std::byte flashWorkspace[];
     // unpack pointers
     const auto* __restrict__ tokens = reinterpret_cast<const DataType*>(kArgs.tokens);
-
     constexpr int bM0 = cute::get<0>(typename Config::G0TS{});
     constexpr int bN0 = cute::get<1>(typename Config::G0TS{});
     constexpr int bK0 = cute::get<2>(typename Config::G0TS{});
@@ -97,20 +88,6 @@ namespace flashmoe::moe
     const auto symHeap = Heap{
       ctx.symHeap, ctx.nLx, roundEC, kArgs.H, sizeof(DataType)
     };
-    if constexpr (doGate) {
-      const auto* __restrict__ gateWeights = reinterpret_cast<const DataType*>(kArgs.gateWeights);
-      auto* __restrict__ gateOut = reinterpret_cast<DataType*>(kArgs.gateOut);
-      constexpr int bMGate = cute::get<0>(typename Config::GTS{});
-      static_assert(bMGate == bM);
-      constexpr int bNGate = cute::get<1>(typename Config::GTS{});
-      constexpr int bKGate = cute::get<2>(typename Config::GTS{});
-      constexpr int pSGate = cute::get<3>(typename Config::GTS{});
-      using TileGEMMGate = tile::CollectiveMainloop<bMGate, bNGate, bKGate, arch, DataType, AccumType, threads, pSGate>;
-      gate::forward<TileGEMMGate, gRl, sro>(flashWorkspace, tokens, gateWeights, gateOut,ctx.tokenIndices,
-        kArgs.expertCounts, kArgs.S, kArgs.H, kArgs.E, kArgs.k, kArgs.EC, roundEC, gridDim.x,
-        gCtx.ecGuards, gCtx.ssp, gCtx.rtp);
-      gridBarrier(gCtx.db);
-    }
     const auto processors = gridDim.x - 1;
     const auto superBlockSize = cute::min(cute::ceil_div(128, cute::max(kArgs.E, 4)), processors);
     const auto dispatchBlocks = (processors / superBlockSize) * superBlockSize;
@@ -146,33 +123,29 @@ namespace flashmoe::moe
     using TileGEMM1 = tile::CollectiveMainloop<bM1, bN1, bK1, arch, DataType, AccumType, threads, pS1>;
     static_assert(cuda::std::is_invocable_r_v<AccumType, GEMM0Act, AccumType>, "Activation should be elementwise");
     auto producerBM = cute::make_tensor(cute::make_gmem_ptr(ctx.producerCombineBitMap),
-                                        cute::make_layout(cute::make_shape(ctx.world, ctx.nLx, ecTilesM, tilesN1),
-                                                          cute::LayoutRight{}));
+                                        cute::make_layout(cute::make_shape(static_cast<uint>(ctx.world),
+                                          static_cast<uint>(ctx.nLx), ecTilesM, tilesN1), cute::LayoutRight{}));
     const auto* __restrict__ expertUp = reinterpret_cast<const DataType*>(kArgs.expertUpWeights);
     const auto* __restrict__ biasUp = reinterpret_cast<const DataType*>(kArgs.biasUp);
     const auto* __restrict__ expertDown = reinterpret_cast<const DataType*>(kArgs.expertDownWeights);
     const auto* __restrict__ biasDown = reinterpret_cast<const DataType*>(kArgs.biasDown);
     auto* __restrict__ moeOut = reinterpret_cast<DataType*>(kArgs.moeOut);
     processor::start<topo, threads, Config::CM::value, TileGEMM0, TileGEMM1, GEMM0Act>
-    (flashWorkspace, kArgs.S, kArgs.H, kArgs.I, kArgs.E, kArgs.k, roundEC, tilesN0, tilesN1, expertUp,
+    (flashWorkspace, kArgs.S, kArgs.H, kArgs.I, kArgs.E, roundEC, ecTilesM * kArgs.E, tilesN0, tilesN1, expertUp,
       biasUp,expertDown, biasDown, ctx.tokenIndices, moeOut, producerBM, ctx.stateNumber, symHeap, pA);
   }
 
   template <
     typename Config,
     Topology topo,
-    bool doGate,
-    Activation a,
-    GateReductionLevel gRl = GateReductionLevel::singleBlock
+    Activation a
   >
   __host__ __forceinline__
-  void forwardHost(const KernelArgs& kArgs, Context& ctx, const GateContext& gCtx, const uint& sharedSize,
-    cudaStream_t stream) {
+  void forwardHost(const KernelArgs& kArgs, Context& ctx, const uint& sharedSize, cudaStream_t stream) {
     if constexpr (Config::CM::value == CombineMode::plural) {
       cudaMemsetAsync(kArgs.moeOut, 0, sizeof(Config::DType) * kArgs.S * kArgs.H, stream);
     }
-    forward<Config, a, topo, doGate, gRl><<<ctx.blocks, Config::Threads::value, sharedSize, stream>>>
-    (kArgs, ctx, gCtx);
+    forward<Config, a, topo><<<ctx.blocks, Config::Threads::value, sharedSize, stream>>>(kArgs, ctx);
     ctx.stateNumber = sbs::next(ctx.stateNumber);
   }
 }

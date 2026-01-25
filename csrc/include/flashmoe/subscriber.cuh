@@ -31,7 +31,7 @@ namespace flashmoe::subscriber
     cuda::std::byte* const GEMM0Staging;
     BitSet* const senseBitSets; // shared, read from
     BitSet* const visitedSet; // shared
-    uint* const interrupt; // shared
+    uint* interrupt; // shared
     unsigned int* const tQHead; // shared
     const PLI* const pL; // shared
     const LXI* const lX; // shared
@@ -56,39 +56,39 @@ namespace flashmoe::subscriber
     Args(uint64_t* const& _signals, Task* const& tq,
          cuda::std::byte* const& gemm0Staging,
          BitSet* __restrict__ const& senseBitsets,
-         BitSet* __restrict__ const& _vs,
-         uint* __restrict__ const& _interrupt,
-         unsigned int* __restrict__ const& _tQHead,
-         const PLI* __restrict__ const& _pL,
-         const LXI* __restrict__ const& _lX,
-         const ELI* __restrict__ const& _eL,
-         uint* __restrict__ const& _status,
-         unsigned int* __restrict__ const& _taskCount,
-         const int& _world,
+         BitSet* __restrict__ const& vs_,
+         uint* __restrict__ const& interrupt_,
+         unsigned int* __restrict__ const& tQHead_,
+         const PLI* __restrict__ const& pL_,
+         const LXI* __restrict__ const& lX_,
+         const ELI* __restrict__ const& eL_,
+         uint* __restrict__ const& status_,
+         unsigned int* __restrict__ const& taskCount_,
+         const int& world_,
          const int& nLx, const uint& firstStageFlagCount,
-         const int& _epRank, const uint& _roundEC, const int& _experts,
+         const int& epRank_, const uint& roundEC_, const int& experts_,
          const int& ffn_i_size,
-         const uint threadIdx, const int& _tilesN0, const int& _tilesN1, const int& _eCTilesM,
+         const uint tid_, const int& tilesN0_, const int& tilesN1_, const int& eCTilesM_,
          const uint16_t sNo) :
       flags(_signals),
-      tQ(tq + threadIdx),
+      tQ(tq + tid_),
       GEMM0Staging(gemm0Staging),
       senseBitSets(senseBitsets),
-      visitedSet(_vs),
-      interrupt(_interrupt),
-      tQHead(_tQHead),
-      pL(_pL),
-      lX(_lX),
-      eL(_eL),
-      status(_status),
-      taskCount(_taskCount),
+      visitedSet(vs_),
+      interrupt(interrupt_ + tid_),
+      tQHead(tQHead_ + tid_),
+      pL(pL_),
+      lX(lX_),
+      eL(eL_),
+      status(status_),
+      taskCount(taskCount_),
       gfSfC(firstStageFlagCount),
-      world(_world),
+      world(world_),
       nLx(nLx),
-      epRank(_epRank), roundEC(_roundEC),
-      E(_experts), I(ffn_i_size),
-      tilesN0(_tilesN0), tilesN1(_tilesN1), ecTilesM(_eCTilesM), ecSignalCount(ecTilesM * tilesN1),
-      tIdx(threadIdx),
+      epRank(epRank_), roundEC(roundEC_),
+      E(experts_), I(ffn_i_size),
+      tilesN0(tilesN0_), tilesN1(tilesN1_), ecTilesM(eCTilesM_), ecSignalCount(ecTilesM * tilesN1),
+      tIdx(tid_),
       stateNumber(sNo) {
     }
   };
@@ -147,7 +147,7 @@ namespace flashmoe::subscriber
         const auto syncIdx = sO + rowIdx;
         ingredients.tileSize = bM;
         args.tQ[DQ::next<DQType::stride, subscriberCount>(qIdx, i)] = Task{
-          ingredients, packet, taskResults, rcData, flags, syncIdx, tileIdx
+          ingredients, packet, taskResults, rcData, flags + rowIdx, syncIdx, tileIdx
         };
       }
 
@@ -158,7 +158,7 @@ namespace flashmoe::subscriber
           const auto syncIdx = sO + fTilesM;
           ingredients.tileSize = static_cast<uint16_t>(residue);
           args.tQ[DQ::next<DQType::stride, subscriberCount>(qIdx, fS + j)] = Task{
-            ingredients, packet, taskResults, rcData, flags, syncIdx, tileIdx
+            ingredients, packet, taskResults, rcData, flags + fTilesM, syncIdx, tileIdx
           };
         }
       }
@@ -263,8 +263,7 @@ namespace flashmoe::subscriber
                 visitedSet.set(vIdx);
 
                 // enforce memory consistency of expected packet
-                const bool isPacketHere = nvshmem_uint64_test(flags + flagIdx,
-                                                              NVSHMEM_CMP_EQ, signal);
+                const bool isPacketHere = nvshmem_uint64_test(flags + flagIdx,NVSHMEM_CMP_EQ, signal);
                 if (!isPacketHere) {
                   /*this scenario means that this peer sent another packet in between us
                   observing the signal and testing the signal's presence.
@@ -333,14 +332,16 @@ namespace flashmoe::subscriber
           ingredients.M = cute::ceil_div(sigPayload.routedTokens, bM) * bM;
           ingredients.stash = peerIdx;
           if (topo == Topology::MIXED && pLI.isRemote) {
-            auto* nFlags = args.flags + args.gfSfC + lXI.expertIndex * (args.ecTilesM * args.tilesN1);
+            // col-major indexing
+            auto* nFlags = args.flags + args.gfSfC + lXI.expertIndex * args.ecTilesM;
             // frd
             ingredients.isPeerRemote = 1;
             fRd(args, symHeap, symHeap.sHeap, ingredients, nFlags, packet,
                 sigPayload.routedTokens, peerIdx, laneId, ltQHead);
           }
           else {
-            auto* nFlags = pLI.remoteSFlags + args.gfSfC + lXI.expertIndex * (args.ecTilesM * args.tilesN1);
+            // col-major indexing
+            auto* nFlags = pLI.remoteSFlags + args.gfSfC + lXI.expertIndex * args.ecTilesM;
             // fpd
             ingredients.isPeerRemote = 0;
             fPd(args, symHeap, pLI.remoteSHeap, ingredients, nFlags, packet,
@@ -363,17 +364,17 @@ namespace flashmoe::subscriber
       const int stageTrips = stageLength / wSet;
       constexpr Decoder<subscriberCount, PacketStage::last, PeerConnectivity::p2p> lPd{};
       constexpr Decoder<subscriberCount, PacketStage::last, PeerConnectivity::remote> lRd{};
+      const auto nRows = args.ecSignalCount * args.E;
       // prefetch
       for (int i = 0; i < stageTrips; ++i) {
         const uint sBIdx = args.tIdx + (i * wSet / bSw) * subscriberCount;
         auto sBS = bitSet[sBIdx];
         auto senseBitSet = args.senseBitSets[sBIdx];
-        #pragma unroll
         for (uint j = 0; j < wSet; ++j) {
           const auto slotIdx = i * wSet + j;
           const uint bIdx = (i * wSet + j) % bSw;
           const auto flagIdx = args.tIdx + slotIdx * subscriberCount;
-          const auto expertIdx = flagIdx / args.ecSignalCount;
+          const auto expertIdx = (flagIdx % nRows) / args.ecTilesM; // col-major
           const auto lookup = args.eL[expertIdx];
           if (!sBS.get(bIdx)) {
             if (lookup.isRemote) {
@@ -429,7 +430,7 @@ namespace flashmoe::subscriber
                 ingredients.localExpertIdx = lookup.localExpertIndex;
                 ingredients.peerIdx = args.epRank;
                 ingredients.tileSize = sigPayload.tokensM;
-                ingredients.stash = flagIdx % args.tilesN1;
+                ingredients.stash = flagIdx / nRows; // combine tileIdx
                 ingredients.taskType = TaskType::combine;
                 ingredients.isPeerRemote = 0;
                 lPd(args, ingredients, ltQHead);
@@ -445,64 +446,61 @@ namespace flashmoe::subscriber
         const uint sBIdx = args.tIdx + (stageTrips * wSet / bSw) * subscriberCount;
         auto sBS = bitSet[sBIdx];
         auto senseBitSet = args.senseBitSets[sBIdx];
-        #pragma unroll
-        for (uint j = 0; j < wSet; ++j) {
-          if (j < residue) {
-            const auto slotIdx = stageTrips * wSet + j;
-            const uint bIdx = (stageTrips * wSet + j) % bSw;
-            const auto flagIdx = args.tIdx + slotIdx * subscriberCount;
-            const auto expertIdx = flagIdx / args.ecSignalCount;
-            const auto lookup = args.eL[expertIdx];
-            if (!sBS.get(bIdx)) {
-              if (lookup.isRemote) {
-                const auto signal = nvshmem_signal_fetch(flags + flagIdx);
-                const auto sigPayload = cuda::std::bit_cast<SignalPayload<PacketStage::last>>(signal);
-                const auto expected = expectedState(senseBitSet.get(bIdx),
-                                                    sigPayload.senseBit, args.stateNumber,
-                                                    sigPayload.stateNumber);
-                if (expected) {
-                  sBS.set(bIdx);
-                  // flip sense bit
-                  senseBitSet.flip(bIdx);
-                  const bool isPacketHere = nvshmem_uint64_test(flags + flagIdx, NVSHMEM_CMP_EQ,
-                                                                signal);
-                  if (__builtin_expect(!isPacketHere, 0)) {
-                    __trap();
-                  }
-                  Ingredients ingredients{};
-                  const auto tokenIdx = sigPayload.batchIdx * bM;
-                  ingredients.M = tokenIdx;
-                  ingredients.localExpertIdx = lookup.localExpertIndex;
-                  ingredients.peerIdx = args.epRank;
-                  ingredients.tileSize = sigPayload.tokensM;
-                  ingredients.taskType = TaskType::combine;
-                  ingredients.isPeerRemote = 1;
-                  lRd(args, ingredients, ltQHead);
+        for (uint j = 0; j < residue; ++j) {
+          const auto slotIdx = stageTrips * wSet + j;
+          const uint bIdx = (stageTrips * wSet + j) % bSw;
+          const auto flagIdx = args.tIdx + slotIdx * subscriberCount;
+          const auto expertIdx = (flagIdx % nRows) / args.ecTilesM; // col-major
+          const auto lookup = args.eL[expertIdx];
+          if (!sBS.get(bIdx)) {
+            if (lookup.isRemote) {
+              const auto signal = nvshmem_signal_fetch(flags + flagIdx);
+              const auto sigPayload = cuda::std::bit_cast<SignalPayload<PacketStage::last>>(signal);
+              const auto expected = expectedState(senseBitSet.get(bIdx),
+                                                  sigPayload.senseBit, args.stateNumber,
+                                                  sigPayload.stateNumber);
+              if (expected) {
+                sBS.set(bIdx);
+                // flip sense bit
+                senseBitSet.flip(bIdx);
+                const bool isPacketHere = nvshmem_uint64_test(flags + flagIdx, NVSHMEM_CMP_EQ,
+                                                              signal);
+                if (__builtin_expect(!isPacketHere, 0)) {
+                  __trap();
                 }
+                Ingredients ingredients{};
+                const auto tokenIdx = sigPayload.batchIdx * bM;
+                ingredients.M = tokenIdx;
+                ingredients.localExpertIdx = lookup.localExpertIndex;
+                ingredients.peerIdx = args.epRank;
+                ingredients.tileSize = sigPayload.tokensM;
+                ingredients.taskType = TaskType::combine;
+                ingredients.isPeerRemote = 1;
+                lRd(args, ingredients, ltQHead);
               }
-              else {
-                cuda::atomic_ref<uint64_t, cuda::thread_scope_system> f{*(flags + flagIdx)};
-                const auto sigPayload = cuda::std::bit_cast<SignalPayload<PacketStage::last>>(
-                  f.load(cuda::memory_order_acquire));
-                const auto expected = expectedState(senseBitSet.get(bIdx),
-                                                    sigPayload.senseBit, args.stateNumber,
-                                                    sigPayload.stateNumber);
-                if (expected) {
-                  sBS.set(bIdx);
-                  // flip sense bit
-                  senseBitSet.flip(bIdx);
-                  const auto tokenIdx = sigPayload.batchIdx * bM;
-                  // construct combine ingredients
-                  Ingredients ingredients{};
-                  ingredients.M = tokenIdx;
-                  ingredients.localExpertIdx = lookup.localExpertIndex;
-                  ingredients.peerIdx = args.epRank;
-                  ingredients.tileSize = sigPayload.tokensM;
-                  ingredients.stash = flagIdx % args.tilesN1;
-                  ingredients.taskType = TaskType::combine;
-                  ingredients.isPeerRemote = 0;
-                  lPd(args, ingredients, ltQHead);
-                }
+            }
+            else {
+              cuda::atomic_ref<uint64_t, cuda::thread_scope_system> f{*(flags + flagIdx)};
+              const auto sigPayload = cuda::std::bit_cast<SignalPayload<PacketStage::last>>(
+                f.load(cuda::memory_order_acquire));
+              const auto expected = expectedState(senseBitSet.get(bIdx),
+                                                  sigPayload.senseBit, args.stateNumber,
+                                                  sigPayload.stateNumber);
+              if (expected) {
+                sBS.set(bIdx);
+                // flip sense bit
+                senseBitSet.flip(bIdx);
+                const auto tokenIdx = sigPayload.batchIdx * bM;
+                // construct combine ingredients
+                Ingredients ingredients{};
+                ingredients.M = tokenIdx;
+                ingredients.localExpertIdx = lookup.localExpertIndex;
+                ingredients.peerIdx = args.epRank;
+                ingredients.tileSize = sigPayload.tokensM;
+                ingredients.stash = flagIdx / nRows;
+                ingredients.taskType = TaskType::combine;
+                ingredients.isPeerRemote = 0;
+                lPd(args, ingredients, ltQHead);
               }
             }
           }
@@ -527,16 +525,16 @@ namespace flashmoe::subscriber
       const int stageTrips = stageLength / wSet;
       constexpr Decoder<subscriberCount, PacketStage::last, PeerConnectivity::p2p> lPd{};
       constexpr Decoder<subscriberCount, PacketStage::last, PeerConnectivity::remote> lRd{};
+      const auto nRows = args.ecSignalCount * args.E;
       for (int i = 0; i < stageTrips; ++i) {
         const uint sBIdx = args.tIdx + (i * wSet / bSw) * subscriberCount;
         auto sBS = bitSet[sBIdx];
         auto senseBitSet = args.senseBitSets[sBIdx];
-        #pragma unroll
         for (uint j = 0; j < wSet; ++j) {
           const auto slotIdx = i * wSet + j;
           const uint bIdx = (i * wSet + j) % bSw;
           const auto flagIdx = args.tIdx + slotIdx * subscriberCount;
-          const auto expertIdx = flagIdx / args.ecSignalCount;
+          const auto expertIdx = (flagIdx % nRows) / args.ecTilesM; // col-major
           const auto lookup = args.eL[expertIdx];
           if (!sBS.get(bIdx)) {
             // NVLink peer
@@ -557,7 +555,7 @@ namespace flashmoe::subscriber
               ingredients.localExpertIdx = lookup.localExpertIndex;
               ingredients.peerIdx = args.epRank;
               ingredients.tileSize = sigPayload.tokensM;
-              ingredients.stash = flagIdx % args.tilesN1;
+              ingredients.stash = flagIdx / nRows;
               ingredients.taskType = TaskType::combine;
               ingredients.isPeerRemote = 0;
               lPd(args, ingredients, ltQHead);
@@ -571,36 +569,34 @@ namespace flashmoe::subscriber
         const uint sBIdx = args.tIdx + (stageTrips * wSet / bSw) * subscriberCount;
         auto sBS = bitSet[sBIdx];
         auto senseBitSet = args.senseBitSets[sBIdx];
-        #pragma unroll
-        for (uint j = 0; j < wSet; ++j) {
-          if (j < residue) {
-            const uint bIdx = (stageTrips * wSet + j) % bSw;
-            const auto slotIdx = stageTrips * wSet + j;
-            const auto flagIdx = args.tIdx + slotIdx * subscriberCount;
-            const auto expertIdx = flagIdx / args.ecSignalCount;
-            const auto lookup = args.eL[expertIdx];
-            if (!sBS.get(bIdx)) {
-              cuda::atomic_ref<uint64_t, cuda::thread_scope_system> f{*(flags + flagIdx)};
-              const auto sigPayload = cuda::std::bit_cast<SignalPayload<PacketStage::last>>(
-                f.load(cuda::memory_order_acquire));
-              const auto expected = expectedState(senseBitSet.get(bIdx),
-                                                  sigPayload.senseBit, args.stateNumber,
-                                                  sigPayload.stateNumber);
-              if (expected) {
-                sBS.set(bIdx);
-                senseBitSet.flip(bIdx);
-                const auto tokenIdx = sigPayload.batchIdx * bM;
-                // construct combine ingredients
-                Ingredients ingredients{};
-                ingredients.M = tokenIdx;
-                ingredients.localExpertIdx = lookup.localExpertIndex;
-                ingredients.peerIdx = args.epRank;
-                ingredients.tileSize = sigPayload.tokensM;
-                ingredients.stash = flagIdx % args.tilesN1;
-                ingredients.taskType = TaskType::combine;
-                ingredients.isPeerRemote = 0;
-                lPd(args, ingredients, ltQHead);
-              }
+        for (uint j = 0; j < residue; ++j) {
+          const uint bIdx = (stageTrips * wSet + j) % bSw;
+          const auto slotIdx = stageTrips * wSet + j;
+          const auto flagIdx = args.tIdx + slotIdx * subscriberCount;
+          const auto expertIdx = (flagIdx % nRows) / args.ecTilesM; // col-major
+          const auto lookup = args.eL[expertIdx];
+          if (!sBS.get(bIdx)) {
+            cuda::atomic_ref<uint64_t, cuda::thread_scope_system> f{*(flags + flagIdx)};
+            const auto sigPayload = cuda::std::bit_cast<SignalPayload<PacketStage::last>>(
+              f.load(cuda::memory_order_acquire));
+            const auto expected = expectedState(senseBitSet.get(bIdx),
+                                                sigPayload.senseBit, args.stateNumber,
+                                                sigPayload.stateNumber);
+            if (expected) {
+              sBS.set(bIdx);
+              senseBitSet.flip(bIdx);
+              const auto tokenIdx = sigPayload.batchIdx * bM;
+              // construct combine ingredients
+              Ingredients ingredients{};
+              ingredients.expertIdx = expertIdx;
+              ingredients.M = tokenIdx;
+              ingredients.localExpertIdx = lookup.localExpertIndex;
+              ingredients.peerIdx = args.epRank;
+              ingredients.tileSize = sigPayload.tokensM;
+              ingredients.stash = flagIdx / nRows; // combine tile idx
+              ingredients.taskType = TaskType::combine;
+              ingredients.isPeerRemote = 0;
+              lPd(args, ingredients, ltQHead);
             }
           }
         }
@@ -634,8 +630,8 @@ namespace flashmoe::subscriber
     constexpr Subscriber<SubscriberStage::initial, topo, Element, subscriberCount, bM> initialSubscriber{};
     constexpr Subscriber<SubscriberStage::final, topo, Element, subscriberCount, bM> finalSubscriber{};
 
-    cuda::atomic_ref<uint, cuda::thread_scope_block> interrupt{*args.interrupt};
-    while (!interrupt.load(cuda::memory_order_relaxed)) {
+    cuda::atomic_ref<uint, cuda::thread_scope_block> inr{*args.interrupt};
+    while (!inr.load(cuda::memory_order_relaxed)) {
       auto* __restrict__ flags = args.flags;
       // sweep through flags by stages
       // start with the first stage
@@ -644,6 +640,7 @@ namespace flashmoe::subscriber
       }
       flags += args.gfSfC;
       finalSubscriber(args, args.visitedSet + firstStageBitSetLength, flags, ltQHead, ssL);
+      __syncwarp();
     }
   }
 }

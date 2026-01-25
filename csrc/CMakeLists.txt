@@ -112,7 +112,7 @@ find_package(NVSHMEM REQUIRED)
 # cuBLASDx
 find_package(mathdx REQUIRED COMPONENTS cublasdx CONFIG)
 find_package(mathdx REQUIRED COMPONENTS curanddx CONFIG)
-
+include(CheckCompilerFlag)
 function(flash_target_test tgt)
     target_link_libraries(${tgt} PRIVATE CUDA::cudart CUDA::cuda_driver CUDA::nvtx3)
     target_link_libraries(${tgt} PRIVATE atomic)
@@ -160,7 +160,7 @@ function(flash_target_common tgt)
     target_compile_options(${tgt} PRIVATE
             $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-Xfatbin -compress-all>
             $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
-            $<$<COMPILE_LANGUAGE:CUDA>:-t0;--generate-line-info> #use sm_xxa for xx >= 90
+            $<$<COMPILE_LANGUAGE:CUDA>:-t0;--generate-line-info>
             $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-gencode=arch=compute_${ARCH_TAG},code=sm_${ARCH_TAG}>
     )
     # Debug vs Release flags
@@ -168,6 +168,10 @@ function(flash_target_common tgt)
             $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CXX>>:-O0;-g>
             $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CXX>>:-O3>
             $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:-Xptxas -v;--expt-relaxed-constexpr>
+    )
+
+    target_compile_options(${tgt} PRIVATE
+            $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Debug>>:-lineinfo -Xcompiler=-rdynamic>
     )
     
     if("${tgt}" STREQUAL "testFlashMoE")

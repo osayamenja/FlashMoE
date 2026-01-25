@@ -1,7 +1,13 @@
 //
 // Created by osayamen on 1/19/26.
 //
-// correctness test for the tiled GEMM underlying FlashMoE.
+// correctness test and benchmark for the tiled GEMM underlying FlashMoE.
+// computes Activation((a @ b) + bias) as a single kernel,
+// where a is [M, K],
+// b is [N, K] like PyTorch's row-major format
+// c is [M, N]
+// bias is [1, N]
+// Act is an elementwise activation function
 
 #include <random>
 #include <stdexcept>
@@ -237,11 +243,11 @@ void kickStart(const int argc, char** argv) {
     constexpr int pS = arch >= 800 ? 2 : 1;
     constexpr int bN = sizeof(Element) == 8 ? 64 : 64 * (4 / sizeof(Element));
     if (N < bN || N % bN != 0) {
-        const auto errmsg = std::string("N >= and a multiple of ").append(std::to_string(bN));
+        const auto errmsg = std::string("N must be a multiple of ").append(std::to_string(bN));
         throw std::runtime_error(errmsg);
     }
     if (K < bK || K % bK != 0 ) {
-        const auto errmsg = std::string("K >= and a multiple of ").append(std::to_string(bK));
+        const auto errmsg = std::string("K must be a multiple of ").append(std::to_string(bK));
         throw std::runtime_error(errmsg);
     }
     cudaSetDevice(0);

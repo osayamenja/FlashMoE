@@ -25,7 +25,7 @@ namespace flashmoe
     int bM, // for GEMM0
     int bN, // for GEMM0
     DropTokens d = DropTokens::yes,
-    int batch = cute::min(bM, 8), // number of tokens dispatched in one go by a CTA
+    int batch = cute::min(bM, 4), // number of tokens dispatched in one go by a CTA
     typename Element
   >
   __forceinline__ __device__
@@ -57,14 +57,8 @@ namespace flashmoe
     /// Populate Data Structures
     size_t offset = 0;
     auto* __restrict__ enL = reinterpret_cast<PEL*>(workspace);
-    using V16 = uint4;
-    static_assert(sizeof(PEL) % sizeof(V16) == 0);
-    auto* __restrict__ venL = reinterpret_cast<V16*>(enL);
-    const auto* __restrict__ eL = reinterpret_cast<const V16*>(expertLookupInfo);
-    static_assert(sizeof(PEL) % sizeof(uint4) == 0 && alignof(PEL) == alignof(uint4));
-    const int elElems = static_cast<int>(sizeof(PEL) / sizeof(uint4)) * E;
-    for (int i = threadIdx.x; i < elElems; i += threads) {
-      venL[i] = eL[i];
+    for (int i = threadIdx.x; i < E; i += threads) {
+      enL[i] = expertLookupInfo[i];
     }
     offset += rTCL<PEL>(E);
     auto* __restrict__ seC = reinterpret_cast<int*>(workspace + offset);

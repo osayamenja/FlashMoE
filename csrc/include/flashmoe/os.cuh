@@ -235,14 +235,14 @@ namespace flashmoe::os
         ctx.nLx, ecTilesM, E, tilesN0, tilesN1);
       auto* __restrict__ gtQHeads = ctx.gTqHeads;
       auto* __restrict__ sQ = ctx.statusQueue;
-      auto* __restrict__ pDB = ctx.tqs;
+      auto* pDB = ctx.tqs;
       scheduler::start<subscriberCount>(interruptScratch, schedulerBitSet, processors, tilesN1,
-      sO, gtQCl, interrupt, tQHeads,gtQHeads, taskBound, rQ, sQ, pDB);
+      sO, gtQCl, interrupt, tQHeads, gtQHeads, taskBound, rQ, sQ, pDB);
     }
     else {
       const auto tIdx = threadIdx.x - WARP_SIZE;
       subscriber::Args args{
-        ctx.signals, ctx.tQ, ctx.GEMM0Staging, senseBitset, subVisitedSet, interrupt, tQHeads + tIdx,
+        ctx.signals, ctx.tQ, ctx.GEMM0Staging, senseBitset, subVisitedSet, interrupt, tQHeads,
         pL, lX, eL, status, taskBound, ctx.world, ctx.nLx, static_cast<uint>(ctx.nLx * ctx.world),
         ctx.epRank, ecTilesM * bM, E, I, tIdx, tilesN0, tilesN1, ecTilesM, ctx.stateNumber
       };
