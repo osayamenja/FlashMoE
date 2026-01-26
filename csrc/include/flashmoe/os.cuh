@@ -180,10 +180,6 @@ namespace flashmoe::os
           const auto tileRowIdx = (flagIdx % nRows) % ecTilesM;
           const auto tileColIdx = flagIdx / nRows;
           const auto actualTiles = cute::ceil_div(eCs[expertIdx], bM);
-          // printf("Subscriber %d, expert %d, rowIdx: %d, coldIdx: %d, masked? %s\n",
-          //   i % subscriberCount, expertIdx, tileRowIdx, tileColIdx,
-          //   ((isRemote && tileColIdx > 0) || tileRowIdx >= actualTiles) ? "Yes" : "No");
-          __syncwarp();
           if ((isRemote && tileColIdx > 0) || tileRowIdx >= actualTiles) {
             bitset.set(j);
           }
@@ -195,12 +191,6 @@ namespace flashmoe::os
       }
     }
     __syncthreads();
-    // if (!threadIdx.x) {
-    //   printf("TaskBound is %d\n", *taskBound);
-    //   const auto counts = cute::make_tensor(eCs, cute::make_layout(cute::make_shape(1, E),
-    //     cute::LayoutRight{}));
-    //   print_tensor(counts);
-    // }
     // Pre-populate rQ under the assumption that all processors are initially ready at kernel start-up
     // However, some processors are currently specialized for packet dispatch, while others are idle.
     // To maximize utilization, we time-shift idle brethren to earlier slots in the rQ.
@@ -248,7 +238,7 @@ namespace flashmoe::os
       auto* __restrict__ gtQHeads = ctx.gTqHeads;
       auto* __restrict__ sQ = ctx.statusQueue;
       auto* pDB = ctx.tqs;
-      scheduler::start<subscriberCount>(interruptScratch, schedulerBitSet, processors, tilesN1,
+      scheduler::start<subscriberCount>(interruptScratch, schedulerBitSet, processors, ctx.processors_v, tilesN1,
       sO, gtQCl, interrupt, tQHeads, gtQHeads, taskBound, rQ, sQ, pDB);
     }
     else {

@@ -65,6 +65,7 @@ namespace flashmoe
         uint* const tileSync = nullptr; // [world, num_local_experts, ecTilesM] = = tiles(S)
         uint* const statusQueue = nullptr; // [processors]
         TPS* const tokenIndices = nullptr; // [E, roundEC]
+        const cuda::fast_mod_div<uint> processors_v;
         const uint blocks = 0;
         const uint S = 0; //  max number of tokens for this rank
         const uint H = 0; // max hidden dimension or model dim
@@ -80,6 +81,7 @@ namespace flashmoe
         const uint16_t myPE = 0;
         const bool initialized = false;
         uint8_t stateNumber = 0;
+        static_assert(alignof(cuda::fast_mod_div<uint>) <= 8);
     };
 
     struct __align__(8) GateContext{

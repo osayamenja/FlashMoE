@@ -91,6 +91,11 @@ namespace flashmoe::moe
     const uint k; // top k
     const uint EC; // expert capacity
   };
+
+  __host__ __device__ __forceinline__
+  constexpr auto dispatchSuperBlockSize(const uint& E) {
+    return cute::ceil_div(128, cute::max(E, 4));
+  }
   template <
     typename Config,
     Activation a,
@@ -121,8 +126,7 @@ namespace flashmoe::moe
       ctx.symHeap, ctx.nLx, roundEC, kArgs.H, sizeof(DataType)
     };
     const auto processors = gridDim.x - 1;
-    const auto superBlockSize = cute::min(cute::ceil_div(128, cute::max(kArgs.E, 4)), processors);
-    // TODO tune thi
+    const auto superBlockSize = cute::min(dispatchSuperBlockSize(kArgs.E), processors);
     const auto dispatchBlocks = (processors / superBlockSize) * superBlockSize;
     if (blockIdx.x == gridDim.x - 1) {
       // call OS

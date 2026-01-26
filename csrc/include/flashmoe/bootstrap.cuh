@@ -12,6 +12,8 @@
 #include <cstdio>
 #include <nvshmem.h>
 
+#include <cuda/cmath>
+
 #include "infra/constants.cuh"
 #include "infra/bitset.cuh"
 #include "context.cuh"
@@ -199,7 +201,13 @@ namespace flashmoe
         cudaMallocAsync(&tQ, sizeof(Task) * (tQLength + secondaryTQL), stream);
         Task* pTq = tQ + tQLength;
         if (tQLength + secondaryTQL > cuda::std::numeric_limits<uint>::max()) {
-            throw std::runtime_error("Not an error: inform the maintainer");
+            throw std::runtime_error("Task Queue length > UINT32_MAX. Not an error: inform the maintainer");
+        }
+        const size_t gRQIdxMax = (args.numLocalExperts * args.epWorld * ecTilesM * (tilesN0 + tilesN1)) +
+            (cute::ceil_div(roundEC, args.bM) * tilesN1) + (cute::ceil_div(processors, scheduler::SCHEDULER_COUNT));
+        if (gRQIdxMax >= cuda::std::numeric_limits<uint>::max()) {
+            // catches overflow in scheduler. See circularIdx function
+            throw std::runtime_error("gRQIdxMax >= UINT32_MAX. Not an error: inform the maintainer");
         }
         require_align16(tQ);
         require_align16(pTq);
@@ -297,6 +305,7 @@ namespace flashmoe
             tileSync,
             statusQ,
             tps,
+            cuda::fast_mod_div(processors),
             args.blocks,
             args.sequenceLength,
             args.tokenDim,

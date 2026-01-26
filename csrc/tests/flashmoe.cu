@@ -70,14 +70,14 @@ __global__ void gk(const Element* __restrict__ a, const Element* __restrict__ b,
 template<typename Element>
 __global__ void gatherTokens(const flashmoe::TPS* __restrict__ tokenIds,
   const Element* __restrict__ src, Element* __restrict__ dst,
-  const int* __restrict__ expertCounts, const __grid_constant__ uint EC, const __grid_constant__ uint S,
+  const __grid_constant__ uint roundEC,
+  const __grid_constant__ int count,
+  const __grid_constant__ uint S,
   const __grid_constant__ uint H) {
-  // assert(n <= EC)
-  const auto count = *expertCounts;
   const auto srcTensor = cute::make_tensor(cute::make_gmem_ptr(src),
     cute::make_layout(cute::make_shape(S, H), cute::LayoutRight{}));
   auto dstTensor = cute::make_tensor(cute::make_gmem_ptr(dst),
-    cute::make_layout(cute::make_shape(EC, H), cute::LayoutRight{}));
+    cute::make_layout(cute::make_shape(roundEC, H), cute::LayoutRight{}));
   for (uint idx = blockIdx.x; idx < count; idx += gridDim.x) {
     const auto tIdx = tokenIds[idx].tokenIdx;
     for (uint i = threadIdx.x; i < H; i += blockDim.x) {
@@ -95,19 +95,19 @@ struct SplitFunctor {
 
 template<typename Element>
 __global__ void combineReference( const __grid_constant__ int S,
-    const __grid_constant__ int H, const __grid_constant__ int EC, const __grid_constant__ int topK,
-    const Element* __restrict__ tokens, // [EC, H]
-    const flashmoe::TPS* __restrict__ tokenIds, //[EC] metadata
-    const int* __restrict__ expertCounts, // [1]
+    const __grid_constant__ int H, const __grid_constant__ int roundEC,
+    const __grid_constant__ int expertCount,
+    const __grid_constant__ int topK,
+    const Element* __restrict__ tokens, // [roundEC, H]
+    const flashmoe::TPS* __restrict__ tokenIds, //[roundEC] metadata
     Element* __restrict__ result // [S, H]
     ) {
   const auto tIds = cute::make_tensor(cute::make_gmem_ptr(tokenIds),
-      cute::make_layout(cute::make_shape(EC), cute::LayoutRight{}));
+      cute::make_layout(cute::make_shape(roundEC), cute::LayoutRight{}));
   const auto tokTensor = cute::make_tensor(cute::make_gmem_ptr(tokens),
-      cute::make_layout(cute::make_shape(EC, H), cute::LayoutRight{}));
+      cute::make_layout(cute::make_shape(roundEC, H), cute::LayoutRight{}));
   auto resultTensor = cute::make_tensor(cute::make_gmem_ptr(result),
       cute::make_layout(cute::make_shape(S, H), cute::LayoutRight{}));
-  const auto expertCount = *expertCounts;
   for (int j = blockIdx.x; j < expertCount; j += gridDim.x) {
     const auto tokenId = tIds(j);
     if (topK == 1) {
@@ -150,6 +150,7 @@ void reference(const flashmoe::TPS* __restrict__ const& tokenIds,
   Element* __restrict__ const& ref_out,
   const uint& S, const uint& H, const uint& EC, const uint& E, const uint I, const int& topK,
   cudaStream_t stream) {
+  constexpr auto dtk = Config::DTK::value;
   constexpr int bM0 = cute::get<0>(typename Config::G0TS{});
   constexpr int bN0 = cute::get<1>(typename Config::G0TS{});
   constexpr int bK0 = cute::get<2>(typename Config::G0TS{});
@@ -160,9 +161,7 @@ void reference(const flashmoe::TPS* __restrict__ const& tokenIds,
   constexpr int bK1 = cute::get<2>(typename Config::G1TS{});
   constexpr int pS1 = cute::get<3>(typename Config::G1TS{});
   static_assert(bM0 == bM1);
-  if (EC % bM0 != 0) {
-    throw std::runtime_error("EC should be a multiple of bM");
-  }
+  const auto roundEC = cute::ceil_div(EC, bM0) * bM0;
   constexpr auto threads = Config::Threads::value;
   constexpr int arch = Config::Arch::value;
   using TileGEMM0 = flashmoe::tile::CollectiveMainloop<bM0, bN0, bK0, arch, Element, AccumType, threads, pS0>;
@@ -173,29 +172,35 @@ void reference(const flashmoe::TPS* __restrict__ const& tokenIds,
   CHECK_CUDA(cudaFuncSetAttribute(kernel0, cudaFuncAttributeMaxDynamicSharedMemorySize, GEMM0SharedSize));
   int bps = 0;
   CHECK_CUDA(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&bps, kernel0, threads, GEMM0SharedSize));
-  const auto blocks0 = cute::min((EC / bM0) * (I / bN0), bps * NUM_SMS);
+  const auto blocks0 = cute::min((roundEC / bM0) * (I / bN0), bps * NUM_SMS);
   auto kernel1 = gk<TileGEMM1, cublasdx::identity, Element, Element>;
   // set shared memory
   CHECK_CUDA(cudaFuncSetAttribute(kernel1, cudaFuncAttributeMaxDynamicSharedMemorySize, GEMM1SharedSize));
   // get blocks
   CHECK_CUDA(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&bps, kernel1, threads, GEMM1SharedSize));
-  const auto blocks1 = cute::min((EC / bM0) * (H / bN1), bps * NUM_SMS);
+  const auto blocks1 = cute::min((roundEC / bM0) * (H / bN1), bps * NUM_SMS);
+  std::vector<int> hCounts (E);
+  cudaMemcpyAsync(hCounts.data(), expertCounts, sizeof(int) * E, cudaMemcpyDeviceToHost, stream);
+  cudaStreamSynchronize(stream);
   for (int i = 0; i < E; ++i) {
-    // get the tokens routed to expert i
-    auto* __restrict__ tIds = tokenIds + i * EC;
-    gatherTokens<<<EC, threads, 0, stream>>>(tIds, tokens, ref_input, expertCounts + i, E, S, H);
-    // now do GEMM0 + bias + act
-    auto* __restrict__ expertU = expertUp + i * (static_cast<size_t>(H) * I);
-    auto* __restrict__ biasU = biasUp + i * I;
-    gk<TileGEMM0, Activation><<<blocks0, threads, GEMM0SharedSize, stream>>>
-    (ref_input, expertU, ref_interim0, biasU, EC, I, H);
-    // do GEMM 1 + bias
-    auto* __restrict__ expertD = expertDown + i * (static_cast<size_t>(H) * I);
-    auto* __restrict__ biasD = biasDown + i * H;
-    gk<TileGEMM1, cublasdx::identity><<<blocks1, threads, GEMM1SharedSize, stream>>>
-    (ref_interim0, expertD, ref_interim1, biasD, EC, H, I);
-    // do combine
-    combineReference<<<1, threads, 0, stream>>>(S, H, EC, topK, ref_interim1, tIds, expertCounts + i, ref_out);
+    const auto count = dtk == flashmoe::DropTokens::no ? hCounts[i] : cute::min(hCounts[i], EC);
+    if (count > 0) {
+      // get the tokens routed to expert i
+      auto* __restrict__ tIds = tokenIds + i * roundEC;
+      gatherTokens<<<count, threads, 0, stream>>>(tIds, tokens, ref_input, roundEC, count, S, H);
+      // now do GEMM0 + bias + act
+      auto* __restrict__ expertU = expertUp + i * (static_cast<size_t>(H) * I);
+      auto* __restrict__ biasU = biasUp + i * I;
+      gk<TileGEMM0, Activation><<<blocks0, threads, GEMM0SharedSize, stream>>>
+      (ref_input, expertU, ref_interim0, biasU, roundEC, I, H);
+      // do GEMM 1 + bias
+      auto* __restrict__ expertD = expertDown + i * (static_cast<size_t>(H) * I);
+      auto* __restrict__ biasD = biasDown + i * H;
+      gk<TileGEMM1, cublasdx::identity><<<blocks1, threads, GEMM1SharedSize, stream>>>
+      (ref_interim0, expertD, ref_interim1, biasD, roundEC, H, I);
+      // do combine
+      combineReference<<<count, threads, 0, stream>>>(S, H, roundEC, count, topK, ref_interim1, tIds, ref_out);
+    }
   }
   /*{
     std::vector<Element> hr(S * H);
@@ -243,7 +248,7 @@ void printMetadata(const std::vector<int>& counts, const std::vector<flashmoe::T
 // >
 void kickstart(/*const uint S, const uint H, const uint I, const uint E, const uint k*/) {
   // debug mode for now
-  constexpr int S = 4096;
+  constexpr int S = 2048;
   constexpr int H = 2048;
   constexpr int I = 2048;
   constexpr int E = 32;
@@ -284,8 +289,8 @@ void kickstart(/*const uint S, const uint H, const uint I, const uint E, const u
   constexpr auto threadsGEMM0 = flashmoe::tile::suggest_thread_count<bM, bN0, bK0, Arch, Element, AccumType>();
   constexpr auto threadsGEMM1 = flashmoe::tile::suggest_thread_count<bM, bN1, bK1, Arch, Element, AccumType>();
   constexpr auto threads = cute::max(threadsGEMM0, threadsGEMM1);
-  static_assert(dtk == flashmoe::DropTokens::no);
   constexpr auto EC = dtk == flashmoe::DropTokens::no ? S : cute::ceil_div(S, E) * k;
+  constexpr auto roundEC = cute::ceil_div(EC, bM) * bM;
   constexpr auto GEMM0Sz = cutlass::round_up(sizeof(Element) * bK0 * pSK0 * (bM + bN0), flashmoe::MAX_ALIGNMENT);
   constexpr auto GEMM1Sz = cutlass::round_up(sizeof(Element) * bK1 * pSK1 * (bM + bN1), flashmoe::MAX_ALIGNMENT);
   constexpr auto GateSz = cutlass::round_up(cute::max(sizeof(Element) * bK0 * pSK0 * (bM + bNGate),
@@ -314,8 +319,8 @@ void kickstart(/*const uint S, const uint H, const uint I, const uint E, const u
   CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kernelSz));
   int bps = 0;
   CHECK_CUDA(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&bps, kernel, threads, kernelSz));
-  constexpr auto dispatchBlocks = cute::ceil_div(512, cute::max(E, 4));
   constexpr auto processorBlocks = (S /bM) * cute::max(I / bN0, H / bN1);
+  constexpr auto dispatchBlocks = flashmoe::moe::dispatchSuperBlockSize(E) * E;
   const uint blocks = cute::max(cute::min(cute::max(processorBlocks, dispatchBlocks) + 1, bps * NUM_SMS), 2);
 
   int bps1 = 0;
@@ -377,11 +382,11 @@ void kickstart(/*const uint S, const uint H, const uint I, const uint E, const u
   cudaMallocAsync(&moeOut, sizeof(Element) * S * H, stream);
 
   Element* referenceInput;
-  cudaMallocAsync(&referenceInput, sizeof(Element) * EC * H, stream);
+  cudaMallocAsync(&referenceInput, sizeof(Element) * roundEC * H, stream);
   Element* referenceInterim0;
-  cudaMallocAsync(&referenceInterim0, sizeof(Element) * EC * I, stream);
+  cudaMallocAsync(&referenceInterim0, sizeof(Element) * roundEC * I, stream);
   Element* referenceInterim1;
-  cudaMallocAsync(&referenceInterim1, sizeof(Element) * EC * H, stream);
+  cudaMallocAsync(&referenceInterim1, sizeof(Element) * roundEC * H, stream);
   Element* referenceOut;
   cudaMallocAsync(&referenceOut, sizeof(Element) * S * H, stream);
   if constexpr (k > 1) {
@@ -474,11 +479,11 @@ void kickstart(/*const uint S, const uint H, const uint I, const uint E, const u
   CHECK_CUDA(cudaEventCreate(&start));
   CHECK_CUDA(cudaEventCreate(&stop));
   // benchmark distributed moe fused kernel
-  constexpr int warmup = 0;
+  constexpr int warmup = 128;
   for (int i = 0; i < warmup; ++i) {
     flashmoe::moe::forwardHost<Config, topo, act>(kArgs, moeContext, kernelSz, stream);
   }
-  constexpr int runs = 0;
+  constexpr int runs = 128;
   CHECK_CUDA(cudaStreamSynchronize(stream));
   cudaEventRecord(start, exec.getStream());
   for (int i = 0; i < runs; ++i) {
@@ -488,7 +493,7 @@ void kickstart(/*const uint S, const uint H, const uint I, const uint E, const u
   CHECK_CUDA(cudaEventSynchronize(stop));
   float m_ms = 0;
   CHECK_CUDA(cudaEventElapsedTime(&m_ms, start, stop));
-  const float m_time_ms = m_ms / static_cast<float>(1);
+  const float m_time_ms = m_ms / static_cast<float>(runs);
   if (nvshmem_my_pe() == 0) {
     printf("S, H, I, E, k, EC, bM, bN0, bK0, bN1, bK1, bNGate, threads, blocks/SM, SMs,blocks, rtol, atol, error(%%), "
          "Kernel_Time(ms)\n");

@@ -15,6 +15,7 @@
 
 #include <cub/cub.cuh>
 #include <cuda/atomic>
+#include <cuda/cmath>
 #include <cute/numeric/integral_constant.hpp>
 #include <cutlass/array.h>
 
@@ -26,6 +27,14 @@
 
 namespace flashmoe::scheduler
 {
+  __device__ __forceinline__
+  auto circularIdx(const uint& cursor, const cuda::fast_mod_div<uint>& len) {
+    //https://nvidia.github.io/cccl/libcudacxx/extended_api/math/fast_mod_div.html#libcudacxx-extended-api-math-fast-mod-div
+#if defined(__CUDA_ARCH__)
+    __builtin_assume(cursor != cuda::std::numeric_limits<uint>::max());
+#endif
+    return cursor % len;
+  }
   using WarpScan = cub::WarpScan<uint>;
 
   template <
@@ -33,7 +42,7 @@ namespace flashmoe::scheduler
     int nQ = 0
   >
   __device__ __forceinline__
-  void schedule(const uint& processors, const uint& cSetB,
+  void schedule(const cuda::fast_mod_div<uint>& processors_v, const uint& cSetB,
                 const uint& canSchedule, const uint& qIdx, uint& lRQIdx,
                 const uint& gRQIdx, uint* __restrict__ const& rQ,
                 TQSignal* __restrict__ const& pDB) {
@@ -43,7 +52,7 @@ namespace flashmoe::scheduler
     for (uint k = 0; k < cSetB; ++k) {
       #pragma unroll
       for (uint l = 0; l < wSet.size(); ++l) {
-        wSet[l] = rQ[(gRQIdx + lRQIdx++) % processors];
+        wSet[l] = rQ[circularIdx(gRQIdx + lRQIdx++, processors_v)];
       }
       #pragma unroll
       for (uint l = 0; l < wSet.size(); ++l) {
@@ -59,7 +68,7 @@ namespace flashmoe::scheduler
     #pragma unroll
     for (uint l = 0; l < wSet.size(); ++l) {
       if (l < residue) {
-        wSet[l] = rQ[(gRQIdx + lRQIdx++) % processors];
+        wSet[l] = rQ[circularIdx(gRQIdx + lRQIdx++, processors_v)];
       }
     }
     #pragma unroll
@@ -83,6 +92,7 @@ namespace flashmoe::scheduler
   __device__ __forceinline__
   void schedulerLoop(TQState& tqState,
                      const uint& processors,
+                     const cuda::fast_mod_div<uint>& processors_v,
                      const unsigned int& tilesN1,
                      const unsigned int& tQOffset,
                      const unsigned int& gTbO,
@@ -129,7 +139,7 @@ namespace flashmoe::scheduler
           const auto idx = j * schedulerCount + threadIdx.x;
           if (idx < processors && sQState[j]) {
             // write ready process pid to rQ
-            rQ[(qSIdx + startIdx++) % processors] = idx;
+            rQ[circularIdx((qSIdx + startIdx++), processors_v)] = idx;
           }
         }
         if (processorTally) {
@@ -160,7 +170,7 @@ namespace flashmoe::scheduler
                 // have to increment tails as we will revisit this queue later on
                 tqState[j].tQTail += canSchedule;
                 const auto cSetB = canSchedule / WORK_SET_SIZE;
-                schedule<DQType::stride, subscriberCount>(processors, cSetB, canSchedule, qIdx,
+                schedule<DQType::stride, subscriberCount>(processors_v, cSetB, canSchedule, qIdx,
                                                           queueSlot, gRQIdx, rQ, pDB);
               }
             }
@@ -177,7 +187,7 @@ namespace flashmoe::scheduler
             // checkpoint state in case of partial scheduling
             tqState[j].tQTail += canSchedule;
             const auto cSetB = canSchedule / WORK_SET_SIZE;
-            schedule<DQType::block>(processors, cSetB, canSchedule,
+            schedule<DQType::block>(processors_v, cSetB, canSchedule,
                                     qIdx, queueSlot, gRQIdx, rQ, pDB);
           }
         }
@@ -189,7 +199,7 @@ namespace flashmoe::scheduler
       tqState[j].tQTail = 0;
     }
     // Advance global rQ index
-    gRQIdx = (gRQIdx + prefixTaskSum) % processors;
+    gRQIdx = circularIdx((gRQIdx + prefixTaskSum), processors_v);
   }
 
   template <unsigned int schedulerCount>
@@ -201,6 +211,7 @@ namespace flashmoe::scheduler
            uint& gRQIdx,
            uint* __restrict__ const& scratch, // pre-filled with 1
            const uint& processors,
+           const cuda::fast_mod_div<uint>& processors_v,
            const uint& processorTally) {
     __shared__ WarpScan::TempStorage wSt;
     cutlass::Array<uint, PROCESSOR_STATE_SIZE> sQState{};
@@ -210,12 +221,12 @@ namespace flashmoe::scheduler
     const auto gRO = gRQIdx + (threadIdx.x * (processorTally / schedulerCount) +
       cute::min(threadIdx.x, processorTally % schedulerCount));
     // index can only wrap around once
-    gRQIdx = gRO % processors;
+    gRQIdx = circularIdx(gRO, processors_v);
     #pragma unroll
     for (uint i = 0; i < sQState.size(); ++i) {
       if (i < tS) {
         // shared -> registers
-        sQState[i] = rQ[(gRQIdx + i) % processors];
+        sQState[i] = rQ[circularIdx(gRQIdx + i, processors_v)];
       }
     }
     #pragma unroll
@@ -302,6 +313,7 @@ namespace flashmoe::scheduler
   void start(uint* __restrict__ const& interruptScratch,
              BitSet* __restrict__ const& bitSet,
              const uint& processors,
+             const cuda::fast_mod_div<uint>& processors_v,
              const unsigned int& tilesN1,
              const unsigned int& sO,
              const unsigned int& gtQCL,
@@ -370,7 +382,7 @@ namespace flashmoe::scheduler
         }
         bitSet[threadIdx.x] = sBS;
         // schedule observed tasks
-        schedulerLoop<subscribers, sL, schedulerCount>(tqState, processors, tilesN1, sO, 0, lTt,
+        schedulerLoop<subscribers, sL, schedulerCount>(tqState, processors, processors_v, tilesN1, sO, 0, lTt,
         processorTally, gRQIdx, scheduled, sQ, rQ, pDB, true);
 
         for (uint i = 1; i < dT; ++i) {
@@ -395,7 +407,7 @@ namespace flashmoe::scheduler
           }
           bitSet[sBIdx] = sBS;
           // schedule observed tasks
-          schedulerLoop<subscribers, sL, schedulerCount>(tqState, processors, tilesN1, sO, i * dQL,
+          schedulerLoop<subscribers, sL, schedulerCount>(tqState, processors, processors_v, tilesN1, sO, i * dQL,
           lTt, processorTally, gRQIdx, scheduled, sQ, rQ, pDB);
         }
       }
@@ -423,7 +435,7 @@ namespace flashmoe::scheduler
         bitSet[sBIdx] = sBS;
       }
       // schedule observed tasks
-      schedulerLoop<subscribers, sL, schedulerCount>(tqState, processors, tilesN1, sO, dQL * dT,
+      schedulerLoop<subscribers, sL, schedulerCount>(tqState, processors, processors_v, tilesN1, sO, dQL * dT,
       lTt, processorTally, gRQIdx, scheduled, sQ, rQ, pDB, dT == 0);
 
       if (!threadIdx.x) {
@@ -444,7 +456,7 @@ namespace flashmoe::scheduler
       inr.store(1, cuda::memory_order_relaxed);
     }
     // interrupt processors
-    sPI<schedulerCount>(rQ, sQ, pDB, gRQIdx, interruptScratch, processors, processorTally);
+    sPI<schedulerCount>(rQ, sQ, pDB, gRQIdx, interruptScratch, processors, processors_v, processorTally);
   }
 }
 #endif //SCHEDULER_CUH

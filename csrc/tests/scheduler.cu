@@ -143,6 +143,7 @@ __device__ void run_consumer(MockTask* __restrict__ const& taskQueue,
 // -------------------- The kernel --------------------
 template<int threads = 128>
 __global__ void testSchedulerE2E(
+    const __grid_constant__ cuda::fast_mod_div<uint> divisor,
     MockTask* __restrict__ taskQueue, // length = N + M*tN   (or whatever your scheduler uses)
     uint32_t* __restrict__ statusQueue, // length = P, init Observed(0)
     flashmoe::TQSignal* __restrict__ tqSignalQ, // length = P, init {0,0}
@@ -201,7 +202,7 @@ __global__ void testSchedulerE2E(
 
         if (warp_id() == 0) {
             // call scheduler
-            scheduler::start<producers>(scratch, bitset, num_consumers, tN,
+            scheduler::start<producers>(scratch, bitset, num_consumers, divisor, tN,
                 num_primary_tasks, producers, interrupts, tQHeads_sh, gTQHeads, taskBound,
                 readyQ, statusQueue, tqSignalQ);
         }
@@ -232,9 +233,9 @@ __global__ void verify(const MockTask* __restrict__ tQ, const uint n, uint* __re
         atomicAdd(failures, total);
     }
 }
-// ./testScheduler <consumers> <n_spawned>
-int main(const int argc, char** argv) {
-    uint32_t blocks = 64;
+
+void kickstart(const int argc, char** argv) {
+    int blocks = 64;
     uint32_t n_spawned = 64;
     uint32_t post_runs = 0;
     if (argc > 1) {
@@ -260,7 +261,8 @@ int main(const int argc, char** argv) {
     constexpr auto num_primary_tasks = producers;
     const auto num_spawned_tasks = producers * n_spawned;
     const auto totalTasks = num_primary_tasks + num_spawned_tasks;
-    const auto consumers = blocks - 1;
+    const int consumers = blocks - 1;
+    const cuda::fast_mod_div<uint> divisor(consumers);
     if (consumers > flashmoe::scheduler::SCHEDULER_COUNT * flashmoe::scheduler::MAX_PROCESSORS) {
         throw std::invalid_argument(std::string("blocks - 1 must be <= ")
             .append(std::to_string(flashmoe::scheduler::MAX_PROCESSORS)));
@@ -282,7 +284,7 @@ int main(const int argc, char** argv) {
 
     constexpr auto bitSetSize = flashmoe::nSI<flashmoe::scheduler::SCHEDULER_COUNT>(producers);
     const size_t sharedSize = sizeof(uint32_t) * (2 * (producers + consumers) + bitSetSize + 1);
-    testSchedulerE2E<threads><<<blocks, threads, sharedSize, stream>>>(taskQ, statusQueue, tqs, tQHeads, n_spawned);
+    testSchedulerE2E<threads><<<blocks, threads, sharedSize, stream>>>(divisor, taskQ, statusQueue, tqs, tQHeads, n_spawned);
     CHECK_CUDA(cudaPeekAtLastError());
     cudaMallocAsync(&failures, sizeof(uint), stream);
     cudaMemsetAsync(failures, 0, sizeof(uint), stream);
@@ -292,7 +294,7 @@ int main(const int argc, char** argv) {
     cudaMemcpyAsync(&h_failures, failures, sizeof(uint), cudaMemcpyDeviceToHost, stream);
     CHECK_CUDA(cudaStreamSynchronize(stream));
     for (int i = 0; i < post_runs; ++i) {
-        testSchedulerE2E<threads><<<blocks, threads, sharedSize, stream>>>(taskQ, statusQueue, tqs, tQHeads, n_spawned);
+        testSchedulerE2E<threads><<<blocks, threads, sharedSize, stream>>>(divisor, taskQ, statusQueue, tqs, tQHeads, n_spawned);
     }
     cudaFreeAsync(taskQ, stream);
     cudaFreeAsync(tqs, stream);
@@ -304,4 +306,8 @@ int main(const int argc, char** argv) {
     printf("%d,%d,%d,%d,%d,%f\n", blocks, threads, producers, consumers, totalTasks,failure_percent);
     CHECK_CUDA(cudaStreamSynchronize(stream));
     cudaStreamDestroy(stream);
+}
+// ./testScheduler <consumers> <n_spawned>
+int main(const int argc, char** argv) {
+    kickstart(argc, argv);
 }
