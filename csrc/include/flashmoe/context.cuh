@@ -8,6 +8,7 @@
 #include <cuda/barrier>
 #include <cute/int_tuple.hpp>
 
+#include "cuda/memory"
 #include "infra/bitset.cuh"
 #include "infra/packed.cuh"
 #include "infra/structures.cuh"
@@ -16,6 +17,13 @@
 
 namespace flashmoe
 {
+    __host__ __forceinline__ __device__
+    auto require_align16(const void* const& p) {
+        if (!cuda::is_aligned(p, 16)) {
+            printf("Pointer is not 16-byte aligned:\n");
+            cuda::std::terminate();
+        }
+    };
     template<int subscriberWarpSize>
     __host__ __forceinline__
     constexpr auto subscriberTQLength(const int& world, const uint& numLocalExperts, const uint& ecTilesM,

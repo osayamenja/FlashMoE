@@ -163,32 +163,44 @@ namespace flashmoe::os
       const auto eCt = cute::ceil_div(eCount, bM);
       atomicAdd_block(taskBound, eCt * tilesN1);
     }
-    // initialize combine visited set
     if (threadIdx.x < subscriberCount) {
+      const auto nRows = ecTilesM * E;
       auto* __restrict__ vs = subVisitedSet + fSbSL;
       for (uint i = threadIdx.x; i < bScL; i += subscriberCount) {
         const auto slot = i / subscriberCount;
-        const auto prefix = slot * subscriberCount * sizeof(BitSet) * 8;
+        const uint prefix = slot * subscriberCount * sizeof(BitSet) * 8;
         auto bitset = vs[i];
         for (int j = 0; j < sizeof(BitSet) * 8; ++j) {
-          const auto tileIdx = (prefix + threadIdx.x) + (j * subscriberCount);
-          if (tileIdx >= ecSignalCount * E) {
+          const auto flagIdx = (prefix + threadIdx.x) + (j * subscriberCount);
+          if (flagIdx >= ecSignalCount * E) {
             break;
           }
-          const auto expertIdx = tileIdx / ecSignalCount;
-          const auto intraTileIdx = tileIdx % ecSignalCount;
-          const auto expertTileCount = cute::ceil_div(eCs[expertIdx], bM) * tilesN1;
-          if (intraTileIdx < expertTileCount) {
-            bitset.clear(j);
+          const auto expertIdx = (flagIdx % nRows) / ecTilesM;
+          const bool isRemote = eL[expertIdx].isRemote;
+          const auto tileRowIdx = (flagIdx % nRows) % ecTilesM;
+          const auto tileColIdx = flagIdx / nRows;
+          const auto actualTiles = cute::ceil_div(eCs[expertIdx], bM);
+          // printf("Subscriber %d, expert %d, rowIdx: %d, coldIdx: %d, masked? %s\n",
+          //   i % subscriberCount, expertIdx, tileRowIdx, tileColIdx,
+          //   ((isRemote && tileColIdx > 0) || tileRowIdx >= actualTiles) ? "Yes" : "No");
+          __syncwarp();
+          if ((isRemote && tileColIdx > 0) || tileRowIdx >= actualTiles) {
+            bitset.set(j);
           }
           else {
-            bitset.set(j);
+            bitset.clear(j);
           }
         }
         vs[i] = bitset;
       }
     }
     __syncthreads();
+    // if (!threadIdx.x) {
+    //   printf("TaskBound is %d\n", *taskBound);
+    //   const auto counts = cute::make_tensor(eCs, cute::make_layout(cute::make_shape(1, E),
+    //     cute::LayoutRight{}));
+    //   print_tensor(counts);
+    // }
     // Pre-populate rQ under the assumption that all processors are initially ready at kernel start-up
     // However, some processors are currently specialized for packet dispatch, while others are idle.
     // To maximize utilization, we time-shift idle brethren to earlier slots in the rQ.

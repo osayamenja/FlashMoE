@@ -43,6 +43,38 @@ namespace flashmoe::moe
   };
 
   struct KernelArgs {
+    __host__
+    KernelArgs(const cuda::std::byte* tokens, const cuda::std::byte* gate_weights,
+      const cuda::std::byte* expert_up_weights, const cuda::std::byte* bias_up,
+      const cuda::std::byte* expert_down_weights, const cuda::std::byte* bias_down, cuda::std::byte* gate_out,
+      int* expert_counts, cuda::std::byte* moe_out,
+      const uint s, const uint h, const uint i, const uint e, const uint k, const uint ec)
+      : tokens(tokens),
+        gateWeights(gate_weights),
+        expertUpWeights(expert_up_weights),
+        biasUp(bias_up),
+        expertDownWeights(expert_down_weights),
+        biasDown(bias_down),
+        gateOut(gate_out),
+        expertCounts(expert_counts),
+        moeOut(moe_out),
+        S(s),
+        H(h),
+        I(i),
+        E(e),
+        k(k),
+        EC(ec) {
+      require_align16(tokens);
+      require_align16(gate_weights);
+      require_align16(expert_up_weights);
+      require_align16(expert_down_weights);
+      require_align16(bias_up);
+      require_align16(bias_down);
+      require_align16(gate_out);
+      require_align16(expert_counts);
+      require_align16(moe_out);
+    }
+
     const cuda::std::byte* tokens; // [S, H]
     const cuda::std::byte* gateWeights = nullptr; // [H, E]
     const cuda::std::byte* expertUpWeights; // [num_local_experts, H, I]
@@ -90,6 +122,7 @@ namespace flashmoe::moe
     };
     const auto processors = gridDim.x - 1;
     const auto superBlockSize = cute::min(cute::ceil_div(128, cute::max(kArgs.E, 4)), processors);
+    // TODO tune thi
     const auto dispatchBlocks = (processors / superBlockSize) * superBlockSize;
     if (blockIdx.x == gridDim.x - 1) {
       // call OS
@@ -143,7 +176,7 @@ namespace flashmoe::moe
   __host__ __forceinline__
   void forwardHost(const KernelArgs& kArgs, Context& ctx, const uint& sharedSize, cudaStream_t stream) {
     if constexpr (Config::CM::value == CombineMode::plural) {
-      cudaMemsetAsync(kArgs.moeOut, 0, sizeof(Config::DType) * kArgs.S * kArgs.H, stream);
+      cudaMemsetAsync(kArgs.moeOut, 0, sizeof(typename Config::DType) * kArgs.S * kArgs.H, stream);
     }
     forward<Config, a, topo><<<ctx.blocks, Config::Threads::value, sharedSize, stream>>>(kArgs, ctx);
     ctx.stateNumber = sbs::next(ctx.stateNumber);

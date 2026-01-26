@@ -243,11 +243,11 @@ void printMetadata(const std::vector<int>& counts, const std::vector<flashmoe::T
 // >
 void kickstart(/*const uint S, const uint H, const uint I, const uint E, const uint k*/) {
   // debug mode for now
-  constexpr int S = 16;
-  constexpr int H = 16;
-  constexpr int I = 16;
-  constexpr int E = 2;
-  constexpr int k = 1;
+  constexpr int S = 4096;
+  constexpr int H = 2048;
+  constexpr int I = 2048;
+  constexpr int E = 32;
+  constexpr int k = 2;
   constexpr int bNGate = cute::min(32, E);
   constexpr auto topo = flashmoe::Topology::NVLINK_ONLY;
   constexpr auto grl = E > bNGate ? flashmoe::GateReductionLevel::multiBlock :
@@ -256,7 +256,7 @@ void kickstart(/*const uint S, const uint H, const uint I, const uint E, const u
   constexpr auto dtk = flashmoe::DropTokens::no;
   constexpr auto Arch = FLASHMOE_ARCH;
   constexpr auto act = flashmoe::Activation::relu;
-  using Element = float;
+  using Element = __half;
   using AccumType = float;
   constexpr int bM = cute::min(S, 128);
   constexpr int bN0 = cute::min(I, 128);
@@ -264,8 +264,8 @@ void kickstart(/*const uint S, const uint H, const uint I, const uint E, const u
   constexpr int bK0 = cute::min(H, 64);
   constexpr int bK1 = cute::min(I, 64);
   constexpr bool isKG1 = k > 1;
-  constexpr int pSK0 = 1;
-  constexpr int pSK1 = 1;
+  constexpr int pSK0 = 2;
+  constexpr int pSK1 = 2;
 
   nvshmem_init();
   const uint devId = nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE);
@@ -279,26 +279,28 @@ void kickstart(/*const uint S, const uint H, const uint I, const uint E, const u
     throw std::runtime_error("E should be a multiple of world");
   }
   const auto numLocalExperts = E / world;
-  const auto tilesN1 = H / bN1;
+  constexpr auto tilesN1 = H / bN1;
 
   constexpr auto threadsGEMM0 = flashmoe::tile::suggest_thread_count<bM, bN0, bK0, Arch, Element, AccumType>();
   constexpr auto threadsGEMM1 = flashmoe::tile::suggest_thread_count<bM, bN1, bK1, Arch, Element, AccumType>();
   constexpr auto threads = cute::max(threadsGEMM0, threadsGEMM1);
   static_assert(dtk == flashmoe::DropTokens::no);
-  const auto EC = dtk == flashmoe::DropTokens::no ? S : cute::ceil_div(S, E) * k;
+  constexpr auto EC = dtk == flashmoe::DropTokens::no ? S : cute::ceil_div(S, E) * k;
   constexpr auto GEMM0Sz = cutlass::round_up(sizeof(Element) * bK0 * pSK0 * (bM + bN0), flashmoe::MAX_ALIGNMENT);
   constexpr auto GEMM1Sz = cutlass::round_up(sizeof(Element) * bK1 * pSK1 * (bM + bN1), flashmoe::MAX_ALIGNMENT);
   constexpr auto GateSz = cutlass::round_up(cute::max(sizeof(Element) * bK0 * pSK0 * (bM + bNGate),
     sizeof(flashmoe::gate::SoftType) * bM * bNGate), flashmoe::MAX_ALIGNMENT);
-  const auto dispatchSz = E * (sizeof(flashmoe::PEL) + sizeof(int));
+  constexpr auto dispatchSz = E * (sizeof(flashmoe::PEL) + sizeof(int));
   const auto OSSz = flashmoe::os::getSharedSize<threads, bM>(world, numLocalExperts, E, EC, tilesN1);
-  const auto taskSz = sizeof(flashmoe::Task) * tilesN1;
-  const auto combineSz = cutlass::round_up(sizeof(Element) * bM * bN1, flashmoe::MAX_ALIGNMENT);
+  constexpr auto taskSz = sizeof(flashmoe::Task) * tilesN1;
+  constexpr auto combineSz = cutlass::round_up(sizeof(Element) * bM * bN1, flashmoe::MAX_ALIGNMENT);
   const auto kernelSz = cute::max(GEMM0Sz, GEMM1Sz, dispatchSz, OSSz, taskSz, combineSz);
   int maxSharedMemory = 0;
-  CHECK_CUDA(cudaDeviceGetAttribute(&maxSharedMemory,cudaDevAttrMaxSharedMemoryPerBlock, devId));
+  CHECK_CUDA(cudaDeviceGetAttribute(&maxSharedMemory,cudaDevAttrMaxSharedMemoryPerBlockOptin, devId));
   if (kernelSz > maxSharedMemory) {
-    throw std::runtime_error("Required shared memory exceeds hardware limits. Reduce tile shapes or input sizes.");
+    const auto errmsg = std::string("Required shared memory ").append(std::to_string(kernelSz))
+    .append(" exceeds hardware limits: ").append(std::to_string(maxSharedMemory)).append(" Reduce tile shapes or input sizes.");
+    throw std::runtime_error(errmsg);
   }
   // [S, H] x [H, E] -> [S, E]
   using GateTile = cute::Shape<cute::Int<bM>, cute::Int<bNGate>, cute::Int<bK0>, cute::Int<pSK0>>;
@@ -312,12 +314,12 @@ void kickstart(/*const uint S, const uint H, const uint I, const uint E, const u
   CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kernelSz));
   int bps = 0;
   CHECK_CUDA(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&bps, kernel, threads, kernelSz));
-  const auto dispatchBlocks = cute::ceil_div(128, cute::max(E, 4));
-  const auto processorBlocks = (S /bM) * cute::max(I / bN0, H / bN1);
+  constexpr auto dispatchBlocks = cute::ceil_div(512, cute::max(E, 4));
+  constexpr auto processorBlocks = (S /bM) * cute::max(I / bN0, H / bN1);
   const uint blocks = cute::max(cute::min(cute::max(processorBlocks, dispatchBlocks) + 1, bps * NUM_SMS), 2);
 
   int bps1 = 0;
-  constexpr auto gateThreads = flashmoe::tile::suggest_thread_count<bM, bNGate, bK0, Arch, Element, AccumType>();
+  constexpr auto gateThreads = cute::max(flashmoe::tile::suggest_thread_count<bM, bNGate, bK0, Arch, Element, AccumType>(), bM);
   auto gateKernel = flashmoe::gate::forwardKernel<GateTile, Arch, gateThreads, grl, sro,AccumType, Element, Element>;
   CHECK_CUDA(cudaFuncSetAttribute(gateKernel, cudaFuncAttributeMaxDynamicSharedMemorySize, GateSz));
   CHECK_CUDA(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&bps1, gateKernel, gateThreads, GateSz));
@@ -382,7 +384,7 @@ void kickstart(/*const uint S, const uint H, const uint I, const uint E, const u
   cudaMallocAsync(&referenceInterim1, sizeof(Element) * EC * H, stream);
   Element* referenceOut;
   cudaMallocAsync(&referenceOut, sizeof(Element) * S * H, stream);
-  if (k > 1) {
+  if constexpr (k > 1) {
     cudaMemsetAsync(referenceOut, 0, sizeof(Element) * S * H, stream);
   }
 
@@ -472,11 +474,11 @@ void kickstart(/*const uint S, const uint H, const uint I, const uint E, const u
   CHECK_CUDA(cudaEventCreate(&start));
   CHECK_CUDA(cudaEventCreate(&stop));
   // benchmark distributed moe fused kernel
-  constexpr int warmup = 128;
+  constexpr int warmup = 0;
   for (int i = 0; i < warmup; ++i) {
     flashmoe::moe::forwardHost<Config, topo, act>(kArgs, moeContext, kernelSz, stream);
   }
-  constexpr int runs = 128;
+  constexpr int runs = 0;
   CHECK_CUDA(cudaStreamSynchronize(stream));
   cudaEventRecord(start, exec.getStream());
   for (int i = 0; i < runs; ++i) {
@@ -486,7 +488,7 @@ void kickstart(/*const uint S, const uint H, const uint I, const uint E, const u
   CHECK_CUDA(cudaEventSynchronize(stop));
   float m_ms = 0;
   CHECK_CUDA(cudaEventElapsedTime(&m_ms, start, stop));
-  const float m_time_ms = m_ms / static_cast<float>(runs);
+  const float m_time_ms = m_ms / static_cast<float>(1);
   if (nvshmem_my_pe() == 0) {
     printf("S, H, I, E, k, EC, bM, bN0, bK0, bN1, bK1, bNGate, threads, blocks/SM, SMs,blocks, rtol, atol, error(%%), "
          "Kernel_Time(ms)\n");

@@ -185,6 +185,7 @@ namespace flashmoe
         if (sHeap == nullptr) {
             throw std::runtime_error("failed to allocate heap via NVSHMEM");
         }
+        require_align16(sHeap);
 
         Task* tQ = nullptr;
         const bool threadConditions = args.threads >= WARP_SIZE * 2;
@@ -200,6 +201,8 @@ namespace flashmoe
         if (tQLength + secondaryTQL > cuda::std::numeric_limits<uint>::max()) {
             throw std::runtime_error("Not an error: inform the maintainer");
         }
+        require_align16(tQ);
+        require_align16(pTq);
 
         cuda::std::byte* GEMM0Staging = nullptr;
         const size_t stagingLength = static_cast<size_t>(args.epWorld * args.numLocalExperts * roundEC) * args.ffnIntermediateSize;

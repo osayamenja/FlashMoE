@@ -176,10 +176,12 @@ namespace flashmoe::subscriber
   struct Decoder<subscriberCount, PacketStage::last, PeerConnectivity::p2p> {
     __device__ __forceinline__
     void operator()(const Args& args, const Ingredients& ingredients, unsigned int& lTQHead) const {
+      static_assert(alignof(Task) % alignof(Ingredients) == 0);
       // now let's decode this single tile
       // Note: we intentionally modeled the Task struct so that the below compiles to a single 128B
-      // instruction rather than 4 of them, which would have been the case if we updated the entire object.
-      args.tQ[DQ::sNext<DQType::stride, subscriberCount>(lTQHead++)].ingredients = ingredients;
+      // instruction rather than 4 of them, which would have been the case if we updated the entire Task object.
+      auto* tQp = &((args.tQ + DQ::sNext<DQType::stride, subscriberCount>(lTQHead++))->ingredients);
+      cuda::ptx::st(cuda::ptx::space_global, tQp, ingredients);
       cuda::atomic_ref<unsigned int, cuda::thread_scope_block> tqh{*args.tQHead};
       // notifies scheduler of work
       cuda::std::ignore = tqh.fetch_add(1, cuda::memory_order_release);
@@ -193,7 +195,8 @@ namespace flashmoe::subscriber
       const auto qIdx = DQ::sNext<DQType::stride, subscriberCount>(lTQHead);
       for (uint i = 0; i < args.tilesN1; ++i) {
         ingredients.stash = i;
-        args.tQ[DQ::next<DQType::stride, subscriberCount>(qIdx, i)].ingredients = ingredients;
+        auto* tQp = &((args.tQ + DQ::next<DQType::stride, subscriberCount>(qIdx, i))->ingredients);
+        cuda::ptx::st(cuda::ptx::space_global, tQp, ingredients);
       }
       lTQHead += args.tilesN1;
       cuda::atomic_ref<unsigned int, cuda::thread_scope_block> tqh{*args.tQHead};
@@ -318,8 +321,9 @@ namespace flashmoe::subscriber
         // broadcast received signal from leader to others
         signal = __shfl_sync(0xffffffff, signal, 0);
         const auto sigPayload = cuda::std::bit_cast<SignalPayload<PacketStage::initial>>(signal);
-        if (sigPayload.stateNumber == currentStateNumber && sigPayload.routedTokens > 0) {
-          pending -= 1;
+        const bool expected = sigPayload.stateNumber == currentStateNumber;
+        pending -= expected ? 1 : 0;
+        if (expected && sigPayload.routedTokens > 0) {
           const auto myLocalExIdx = flagIdx % args.nLx;
           const auto lXI = args.lX[myLocalExIdx];
           const auto* packet = symHeap.advance<0, 1>(peerIdx, myLocalExIdx);
@@ -364,7 +368,7 @@ namespace flashmoe::subscriber
       const int stageTrips = stageLength / wSet;
       constexpr Decoder<subscriberCount, PacketStage::last, PeerConnectivity::p2p> lPd{};
       constexpr Decoder<subscriberCount, PacketStage::last, PeerConnectivity::remote> lRd{};
-      const auto nRows = args.ecSignalCount * args.E;
+      const auto nRows = args.ecTilesM * args.E;
       // prefetch
       for (int i = 0; i < stageTrips; ++i) {
         const uint sBIdx = args.tIdx + (i * wSet / bSw) * subscriberCount;
@@ -525,7 +529,7 @@ namespace flashmoe::subscriber
       const int stageTrips = stageLength / wSet;
       constexpr Decoder<subscriberCount, PacketStage::last, PeerConnectivity::p2p> lPd{};
       constexpr Decoder<subscriberCount, PacketStage::last, PeerConnectivity::remote> lRd{};
-      const auto nRows = args.ecSignalCount * args.E;
+      const auto nRows = args.ecTilesM * args.E;
       for (int i = 0; i < stageTrips; ++i) {
         const uint sBIdx = args.tIdx + (i * wSet / bSw) * subscriberCount;
         auto sBS = bitSet[sBIdx];
@@ -545,6 +549,10 @@ namespace flashmoe::subscriber
                                                 sigPayload.senseBit, args.stateNumber,
                                                 sigPayload.stateNumber);
             if (expected) {
+              /*const auto limit = (args.roundEC / bM) - 1;
+              if (expertIdx >= 32 || sigPayload.batchIdx > limit) {
+                printf("Bad! Subscriber thread %d received %u, %u\n", args.tIdx, expertIdx, sigPayload.batchIdx);
+              }*/
               sBS.set(bIdx);
               senseBitSet.flip(bIdx);
               const auto tokenIdx = sigPayload.batchIdx * bM;
@@ -583,6 +591,10 @@ namespace flashmoe::subscriber
                                                 sigPayload.senseBit, args.stateNumber,
                                                 sigPayload.stateNumber);
             if (expected) {
+              /*const auto limit = (args.roundEC / bM) - 1;
+              if (expertIdx >= 32 || sigPayload.batchIdx > limit) {
+                printf("Bad! Subscriber thread %d received %u, %u\n", args.tIdx, expertIdx, sigPayload.batchIdx);
+              }*/
               sBS.set(bIdx);
               senseBitSet.flip(bIdx);
               const auto tokenIdx = sigPayload.batchIdx * bM;

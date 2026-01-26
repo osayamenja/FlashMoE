@@ -428,10 +428,15 @@ namespace flashmoe::scheduler
 
       if (!threadIdx.x) {
         tTB = tb.load(cuda::memory_order_relaxed);
+        //printf("%d/%d scheduled\n", scheduled, tTB);
       }
       __syncwarp();
       tTB = __shfl_sync(0xffffffff, tTB, 0);
     }
+    // if (!threadIdx.x) {
+    //   printf("Scheduler is done!\n");
+    // }
+    __syncwarp();
     // interrupt subscribers
     #pragma unroll
     for (uint sid = threadIdx.x; sid < subscribers; sid += SCHEDULER_COUNT) {

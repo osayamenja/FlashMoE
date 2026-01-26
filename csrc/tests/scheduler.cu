@@ -4,6 +4,7 @@
 // unit tests for the scheduler
 
 #include <cuda/atomic>
+#include <cuda/cmath>
 #include <cub/cub.cuh>
 #include "debug.cuh"
 #include "../include/flashmoe/scheduler.cuh"

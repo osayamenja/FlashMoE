@@ -277,7 +277,7 @@ void kickStart(const int& S, const int& E, const int& k, const float& rtol, cons
     cudaStreamCreate(&stream);
     constexpr int sharedSize = bM * bN * sizeof(Element);
     int maxSharedMemory = 0;
-    CHECK_CUDA(cudaDeviceGetAttribute(&maxSharedMemory,cudaDevAttrMaxSharedMemoryPerBlock, 0));
+    CHECK_CUDA(cudaDeviceGetAttribute(&maxSharedMemory,cudaDevAttrMaxSharedMemoryPerBlockOptin, 0));
     if (sharedSize > maxSharedMemory) {
         printf("Insufficient shared memory for bM: %d, bN: %d -> %d should be <= %d\n",
             bM, bN, sharedSize, maxSharedMemory);

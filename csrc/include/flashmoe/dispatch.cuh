@@ -25,7 +25,7 @@ namespace flashmoe
     int bM, // for GEMM0
     int bN, // for GEMM0
     DropTokens d = DropTokens::yes,
-    int batch = cute::min(bM, 4), // number of tokens dispatched in one go by a CTA
+    int batch = cute::min(bM, 8), // number of tokens dispatched in one go by a CTA
     typename Element
   >
   __forceinline__ __device__
