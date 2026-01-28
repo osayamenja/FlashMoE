@@ -32,13 +32,14 @@ namespace flashmoe {
         uint16_t stateNumber;
 
         __device__ __forceinline__
-        void dump() const {
+        void dump(const uint& lex) const {
             printf("{\n\t"
                    "routedTokens: %u,\n\t"
+                   "localExpertIdx: %u,\n\t"
                    "totalTilesM: %u,\n\t"
                    "state: %u"
                    "\n}\n",
-                   routedTokens, totalTilesM, stateNumber);
+                   routedTokens, lex, totalTilesM, stateNumber);
         }
     };
 
@@ -50,13 +51,15 @@ namespace flashmoe {
         uint8_t stateNumber;
 
         __device__ __forceinline__
-        void dump() const {
+        void dump(const uint& ex, const uint& col) const {
             printf("{\n\t"
                    "batchIdx: %u,\n\t"
+                   "expertIdx: %u,\n\t"
+                   "colIdx: %u,\n\t"
                    "tokensM: %u,\n\t"
                    "stateNumber: %u"
                    "\n}\n",
-                   batchIdx, tokensM, stateNumber);
+                   batchIdx, ex, col, tokensM, stateNumber);
         }
     };
 }

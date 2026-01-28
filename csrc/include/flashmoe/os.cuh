@@ -43,13 +43,12 @@ namespace flashmoe::os
     bytes += rTCL<PLI>(world);
     bytes += rTCL<ELI>(E);
     bytes += rTCL<LXI>(nLx);
-    const auto fSbSL = nSI<sNW>(nLx * world); //firstStageBitSetLength
+    const auto fSbSL = rTCL<BitSet>(nSI<sNW>(nLx * world)); //firstStageBitSetLength
     const auto bScL = nSI<subscriberCount>(ssfC);
     const auto bSSI = fSbSL + bScL;
     bytes += rTCL<BitSet>(bSSI);
     bytes += rTCL<BitSet>(bScL);
     bytes += rTCL<BitSet>(sBz);
-    bytes += sizeof(uint) * subscriberCount;
     bytes += sizeof(uint) * subscriberCount;
     // The chicken and egg problem: we can't get precise number of blocks without knowing dynamic smem
     // but that depends on knowing the number of blocks...
@@ -57,6 +56,7 @@ namespace flashmoe::os
     bytes += rTCL<uint>(scheduler::MAX_PROCESSORS);
     bytes += rTCL<uint>(scheduler::MAX_PROCESSORS);
     bytes += rTCL<uint>(world);
+    bytes += sizeof(uint) * (subscriberCount / WARP_SIZE);
     bytes += sizeof(uint);
     bytes += sizeof(int) * E;
     return bytes;
@@ -102,7 +102,8 @@ namespace flashmoe::os
     static_assert(alignof(LXI) % alignof(BitSet) == 0);
     offset += rTCL<LXI>(nLx);
     auto* __restrict__ subVisitedSet = reinterpret_cast<BitSet*>(workspace + offset);
-    const auto fSbSL = nSI<sNW>(nLx * world); //firstStageBitSetLength
+    const auto xfSbSL = nSI<sNW>(nLx * world); //firstStageBitSetLength
+    const auto fSbSL = rTCL<BitSet>(xfSbSL);
     const auto bScL = nSI<subscriberCount>(ssfC);
     const auto bSSI = fSbSL + bScL;
     offset += rTCL<BitSet>(bSSI);
@@ -115,14 +116,14 @@ namespace flashmoe::os
     static_assert(alignof(BitSet) % alignof(uint) == 0);
     auto* __restrict__ tQHeads = reinterpret_cast<uint*>(workspace + offset);
     offset += sizeof(uint) * subscriberCount;
-    auto* __restrict__ interrupt = reinterpret_cast<uint*>(workspace + offset);
-    offset += sizeof(uint) * subscriberCount;
     auto* __restrict__ rQ = reinterpret_cast<uint*>(workspace + offset);
     offset += rTCL<uint>(processors);
     auto* __restrict__ interruptScratch = reinterpret_cast<uint*>(workspace + offset);
     offset += rTCL<uint>(processors);
     auto* __restrict__ status = reinterpret_cast<uint*>(workspace + offset);
     offset += rTCL<uint>(world);
+    auto* __restrict__ interrupt = reinterpret_cast<uint*>(workspace + offset);
+    offset += sizeof(uint) * (subscriberCount / WARP_SIZE);
     auto* __restrict__ taskBound = reinterpret_cast<uint*>(workspace + offset);
     offset += sizeof(uint);
     auto* __restrict__ scratch = reinterpret_cast<uint*>(workspace + offset); // [E]
@@ -130,7 +131,7 @@ namespace flashmoe::os
     const auto* __restrict__ geL = ctx.eli;
     const auto* __restrict__ gpL = ctx.pli;
     const auto* __restrict__ gLx = ctx.lxi;
-    for (uint i = threadIdx.x; i < fSbSL; i += threads) {
+    for (uint i = threadIdx.x; i < xfSbSL; i += threads) {
       subVisitedSet[i] = BitSet{0U};
     }
     for (uint i = threadIdx.x; i < world; i += threads) {
@@ -179,7 +180,8 @@ namespace flashmoe::os
           const bool isRemote = eL[expertIdx].isRemote;
           const auto tileRowIdx = (flagIdx % nRows) % ecTilesM;
           const auto tileColIdx = flagIdx / nRows;
-          const auto actualTiles = cute::ceil_div(eCs[expertIdx], bM);
+          const auto expertCount = d == DropTokens::yes ? cute::min(eCs[expertIdx], EC) : eCs[expertIdx];
+          const auto actualTiles = cute::ceil_div(expertCount, bM);
           if ((isRemote && tileColIdx > 0) || tileRowIdx >= actualTiles) {
             bitset.set(j);
           }
@@ -215,12 +217,13 @@ namespace flashmoe::os
       const auto idx = psL * threads + threadIdx.x;
       rQ[fL + idx] = idx;
     }
-
     for (uint i = threadIdx.x; i < processors; i += threads) {
       interruptScratch[i] = 1U; // pre-fill the scheduler's bitmask
     }
     for (uint i = threadIdx.x; i < subscriberCount; i += threads) {
       tQHeads[i] = 0U;
+    }
+    for (uint i = threadIdx.x; i < (subscriberCount / WARP_SIZE); i += threads) {
       interrupt[i] = 0U;
     }
     for (uint i = threadIdx.x; i < world; i += threads) {

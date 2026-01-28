@@ -187,7 +187,7 @@ namespace flashmoe
         if (sHeap == nullptr) {
             throw std::runtime_error("failed to allocate heap via NVSHMEM");
         }
-        require_align16(sHeap);
+        checkAlignment(sHeap);
 
         Task* tQ = nullptr;
         const bool threadConditions = args.threads >= WARP_SIZE * 2;
@@ -201,16 +201,16 @@ namespace flashmoe
         cudaMallocAsync(&tQ, sizeof(Task) * (tQLength + secondaryTQL), stream);
         Task* pTq = tQ + tQLength;
         if (tQLength + secondaryTQL > cuda::std::numeric_limits<uint>::max()) {
-            throw std::runtime_error("Task Queue length > UINT32_MAX. Not an error: inform the maintainer");
+            throw std::runtime_error("Task Queue length > UINT32_MAX. Not an error: need to migrate to uint64");
         }
         const size_t gRQIdxMax = (args.numLocalExperts * args.epWorld * ecTilesM * (tilesN0 + tilesN1)) +
             (cute::ceil_div(roundEC, args.bM) * tilesN1) + (cute::ceil_div(processors, scheduler::SCHEDULER_COUNT));
         if (gRQIdxMax >= cuda::std::numeric_limits<uint>::max()) {
             // catches overflow in scheduler. See circularIdx function
-            throw std::runtime_error("gRQIdxMax >= UINT32_MAX. Not an error: inform the maintainer");
+            throw std::runtime_error("gRQIdxMax >= UINT32_MAX. Not an error: need to migrate to uint64");
         }
-        require_align16(tQ);
-        require_align16(pTq);
+        checkAlignment(tQ);
+        checkAlignment(pTq);
 
         cuda::std::byte* GEMM0Staging = nullptr;
         const size_t stagingLength = static_cast<size_t>(args.epWorld * args.numLocalExperts * roundEC) * args.ffnIntermediateSize;

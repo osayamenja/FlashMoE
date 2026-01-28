@@ -6,6 +6,11 @@
 #define FLASHMOE_CONSTANTS_CUH
 namespace flashmoe
 {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+    constexpr int MAX_ACCESS_ALIGNMENT = 32;
+#else
+    constexpr int MAX_ACCESS_ALIGNMENT = 16;
+#endif
     constexpr int WARP_SIZE = 32;
 }
 

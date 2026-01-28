@@ -5,12 +5,8 @@
 #ifndef FLASHMOE_VT_CUH
 #define FLASHMOE_VT_CUH
 
+#include "constants.cuh"
 namespace flashmoe {
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-    constexpr int MAX_ACCESS_ALIGNMENT = 32;
-#else
-    constexpr int MAX_ACCESS_ALIGNMENT = 16;
-#endif
     constexpr int MAX_ALIGNMENT = 16;
     template<typename T, int Alignment = MAX_ALIGNMENT>
     struct VectorTypeDescriptor {

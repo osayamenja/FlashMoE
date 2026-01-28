@@ -75,7 +75,7 @@ namespace flashmoe::subscriber
       GEMM0Staging(gemm0Staging),
       senseBitSets(senseBitsets),
       visitedSet(vs_),
-      interrupt(interrupt_ + tid_),
+      interrupt(interrupt_ + (tid_ / WARP_SIZE)),
       tQHead(tQHead_ + tid_),
       pL(pL_),
       lX(lX_),
@@ -520,15 +520,13 @@ namespace flashmoe::subscriber
   struct Subscriber<SubscriberStage::final, Topology::NVLINK_ONLY, Element, subscriberCount, bM> {
     // every peer is P2P-connected
     __device__ __forceinline__
-    void operator()(const Args& args,
-                    BitSet* __restrict__ const& bitSet, uint64_t* __restrict__ const& flags,
-                    uint& ltQHead, const uint& stageLength) const {
+    void operator()(const Args& args, BitSet* __restrict__ const& bitSet, uint64_t* __restrict__ const& flags,
+    uint& ltQHead, const uint& stageLength) const {
       constexpr int wSet = 16;
       constexpr int bSw = sizeof(uint) * 8U;
       static_assert(wSet == 16 || wSet == 32);
       const int stageTrips = stageLength / wSet;
       constexpr Decoder<subscriberCount, PacketStage::last, PeerConnectivity::p2p> lPd{};
-      constexpr Decoder<subscriberCount, PacketStage::last, PeerConnectivity::remote> lRd{};
       const auto nRows = args.ecTilesM * args.E;
       for (int i = 0; i < stageTrips; ++i) {
         const uint sBIdx = args.tIdx + (i * wSet / bSw) * subscriberCount;
@@ -591,10 +589,7 @@ namespace flashmoe::subscriber
                                                 sigPayload.senseBit, args.stateNumber,
                                                 sigPayload.stateNumber);
             if (expected) {
-              /*const auto limit = (args.roundEC / bM) - 1;
-              if (expertIdx >= 32 || sigPayload.batchIdx > limit) {
-                printf("Bad! Subscriber thread %d received %u, %u\n", args.tIdx, expertIdx, sigPayload.batchIdx);
-              }*/
+              //sigPayload.dump(expertIdx, flagIdx / nRows);
               sBS.set(bIdx);
               senseBitSet.flip(bIdx);
               const auto tokenIdx = sigPayload.batchIdx * bM;
@@ -642,8 +637,14 @@ namespace flashmoe::subscriber
     constexpr Subscriber<SubscriberStage::initial, topo, Element, subscriberCount, bM> initialSubscriber{};
     constexpr Subscriber<SubscriberStage::final, topo, Element, subscriberCount, bM> finalSubscriber{};
 
-    cuda::atomic_ref<uint, cuda::thread_scope_block> inr{*args.interrupt};
-    while (!inr.load(cuda::memory_order_relaxed)) {
+    const auto laneId = args.tIdx % WARP_SIZE;
+    uint interrupt = 0;
+    if (laneId == 0) {
+      cuda::atomic_ref<uint, cuda::thread_scope_block> inr{*args.interrupt};
+      interrupt = inr.load(cuda::memory_order_relaxed);
+    }
+    interrupt = __shfl_sync(0xffffffff, interrupt, 0);
+    while (!interrupt) {
       auto* __restrict__ flags = args.flags;
       // sweep through flags by stages
       // start with the first stage
@@ -652,7 +653,11 @@ namespace flashmoe::subscriber
       }
       flags += args.gfSfC;
       finalSubscriber(args, args.visitedSet + firstStageBitSetLength, flags, ltQHead, ssL);
-      __syncwarp();
+      if (laneId == 0) {
+        cuda::atomic_ref<uint, cuda::thread_scope_block> inr{*args.interrupt};
+        interrupt = inr.load(cuda::memory_order_relaxed);
+      }
+      interrupt = __shfl_sync(0xffffffff, interrupt, 0);
     }
   }
 }

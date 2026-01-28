@@ -248,7 +248,7 @@ void printMetadata(const std::vector<int>& counts, const std::vector<flashmoe::T
 // >
 void kickstart(/*const uint S, const uint H, const uint I, const uint E, const uint k*/) {
   // debug mode for now
-  constexpr int S = 2048;
+  constexpr int S = 8192;
   constexpr int H = 2048;
   constexpr int I = 2048;
   constexpr int E = 32;
@@ -258,7 +258,7 @@ void kickstart(/*const uint S, const uint H, const uint I, const uint E, const u
   constexpr auto grl = E > bNGate ? flashmoe::GateReductionLevel::multiBlock :
   flashmoe::GateReductionLevel::singleBlock;
   constexpr auto sro = flashmoe::SoftMaxOptimizationLevel::highest;
-  constexpr auto dtk = flashmoe::DropTokens::no;
+  constexpr auto dtk = flashmoe::DropTokens::yes;
   constexpr auto Arch = FLASHMOE_ARCH;
   constexpr auto act = flashmoe::Activation::relu;
   using Element = __half;
@@ -439,14 +439,14 @@ void kickstart(/*const uint S, const uint H, const uint I, const uint E, const u
   flashmoe::gate::forwardKernel<GateTile, Arch, gateThreads, grl, sro, AccumType>
   <<<gateBlocks, gateThreads, GateSz, stream>>>(tokens, gateWeights, gateOut,
     expertCounts, S, H, E, k, EC, moeContext.tokenIndices, gateCtx.ecGuards, gateCtx.ssp, gateCtx.rtp);
-  /*{
+  {
     std::vector<int> counts(E);
-    std::vector<flashmoe::TPS> ids(EC * E);
     cudaMemcpyAsync(counts.data(), expertCounts, sizeof(int) * E, cudaMemcpyDeviceToHost, stream);
-    cudaMemcpyAsync(ids.data(), moeContext.tokenIndices, sizeof(flashmoe::TPS) * E * EC, cudaMemcpyDeviceToHost, stream);
+    const auto t0 = cute::make_tensor(counts.data(), cute::make_layout(cute::make_shape(1, E),
+      cute::LayoutRight{}));
     CHECK_CUDA(cudaStreamSynchronize(stream));
-    printMetadata(counts, ids, EC, E);
-  }*/
+    print_tensor(t0);
+  }
   flashmoe::moe::forwardHost<Config, topo, act>(kArgs, moeContext, kernelSz, stream);
   CHECK_CUDA(cudaPeekAtLastError());
   // check correctness

@@ -64,15 +64,15 @@ namespace flashmoe::moe
         E(e),
         k(k),
         EC(ec) {
-      require_align16(tokens);
-      require_align16(gate_weights);
-      require_align16(expert_up_weights);
-      require_align16(expert_down_weights);
-      require_align16(bias_up);
-      require_align16(bias_down);
-      require_align16(gate_out);
-      require_align16(expert_counts);
-      require_align16(moe_out);
+      checkAlignment(tokens);
+      checkAlignment(gate_weights);
+      checkAlignment(expert_up_weights);
+      checkAlignment(expert_down_weights);
+      checkAlignment(bias_up);
+      checkAlignment(bias_down);
+      checkAlignment(gate_out);
+      checkAlignment(expert_counts);
+      checkAlignment(moe_out);
     }
 
     const cuda::std::byte* tokens; // [S, H]
@@ -169,7 +169,8 @@ namespace flashmoe::moe
     auto* __restrict__ moeOut = reinterpret_cast<DataType*>(kArgs.moeOut);
     processor::start<topo, threads, Config::CM::value, TileGEMM0, TileGEMM1, GEMM0Act>
     (flashWorkspace, kArgs.S, kArgs.H, kArgs.I, kArgs.E, roundEC, ecTilesM * kArgs.E, tilesN0, tilesN1, expertUp,
-      biasUp,expertDown, biasDown, ctx.tokenIndices, moeOut, producerBM, ctx.stateNumber, symHeap, pA);
+      biasUp,expertDown, biasDown, ctx.tokenIndices, moeOut, producerBM, ctx.stateNumber, symHeap, pA,
+      ctx.signals + ctx.nLx * ctx.world);
   }
 
   template <

@@ -10,6 +10,7 @@
 
 #include "cuda/memory"
 #include "infra/bitset.cuh"
+#include "infra/constants.cuh"
 #include "infra/packed.cuh"
 #include "infra/structures.cuh"
 #include "infra/task.cuh"
@@ -18,18 +19,19 @@
 namespace flashmoe
 {
     __host__ __forceinline__ __device__
-    auto require_align16(const void* const& p) {
-        if (!cuda::is_aligned(p, 16)) {
-            printf("Pointer is not 16-byte aligned:\n");
+    auto checkAlignment(const void* const& p) {
+        if (!cuda::is_aligned(p, MAX_ACCESS_ALIGNMENT)) {
+            printf("Pointer is not %d-byte aligned:\n", MAX_ACCESS_ALIGNMENT);
             cuda::std::terminate();
         }
-    };
+    }
     template<int subscriberWarpSize>
     __host__ __forceinline__
     constexpr auto subscriberTQLength(const int& world, const uint& numLocalExperts, const uint& ecTilesM,
         const uint& E, const uint& tilesN0, const uint& tilesN1, const uint& subscriberCount) {
-        const auto dispatchTaskQL = cute::ceil_div(world * numLocalExperts,
-            subscriberCount / subscriberWarpSize) * cute::ceil_div(ecTilesM * tilesN0, subscriberWarpSize);
+        const auto dispatchTaskQL = cute::ceil_div(world * numLocalExperts,subscriberCount / subscriberWarpSize) *
+                (cute::ceil_div(ecTilesM * tilesN0, subscriberWarpSize) +
+                    cute::ceil_div(tilesN0, subscriberWarpSize));
         const auto combineTaskQL = cute::ceil_div(ecTilesM * E * tilesN1, subscriberCount);
         return (dispatchTaskQL + combineTaskQL) * subscriberCount;
     }

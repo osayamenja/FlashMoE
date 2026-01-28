@@ -64,7 +64,7 @@ namespace flashmoe::scheduler
       }
     }
     // Residual scheduling
-    const auto residue = canSchedule - cSetB * wSet.size();
+    const uint residue = canSchedule - cSetB * wSet.size();
     #pragma unroll
     for (uint l = 0; l < wSet.size(); ++l) {
       if (l < residue) {
@@ -88,7 +88,7 @@ namespace flashmoe::scheduler
     int schedulerCount,
     typename TQState
   >
-    requires (schedulerCount == 32 && isRegisterV<TQState>)
+    requires (schedulerCount == SCHEDULER_COUNT && isRegisterV<TQState>)
   __device__ __forceinline__
   void schedulerLoop(TQState& tqState,
                      const uint& processors,
@@ -342,8 +342,12 @@ namespace flashmoe::scheduler
 
     uint gRQIdx = 0U;
     uint processorTally = processors; // initially, all processors are available, ensure that rQ has all pids
-    cuda::atomic_ref<unsigned int, cuda::thread_scope_block> tb{*taskBound};
-    auto tTB = tb.load(cuda::memory_order_relaxed);
+    uint tTB = 0;
+    if (!threadIdx.x) {
+      cuda::atomic_ref<unsigned int, cuda::thread_scope_block> tb{*taskBound};
+      tTB = tb.load(cuda::memory_order_relaxed);
+    }
+    tTB = __shfl_sync(0xffffffff, tTB, 0);
     while (scheduled < tTB) {
       // statically sweep tQ for tasks
       uint lTt = 0U; // local task tally
@@ -439,19 +443,17 @@ namespace flashmoe::scheduler
       lTt, processorTally, gRQIdx, scheduled, sQ, rQ, pDB, dT == 0);
 
       if (!threadIdx.x) {
+        cuda::atomic_ref<unsigned int, cuda::thread_scope_block> tb{*taskBound};
         tTB = tb.load(cuda::memory_order_relaxed);
         //printf("%d/%d scheduled\n", scheduled, tTB);
       }
       __syncwarp();
       tTB = __shfl_sync(0xffffffff, tTB, 0);
     }
-    // if (!threadIdx.x) {
-    //   printf("Scheduler is done!\n");
-    // }
     __syncwarp();
     // interrupt subscribers
     #pragma unroll
-    for (uint sid = threadIdx.x; sid < subscribers; sid += SCHEDULER_COUNT) {
+    for (uint sid = threadIdx.x; sid < (subscribers /  WARP_SIZE); sid += SCHEDULER_COUNT) {
       cuda::atomic_ref<uint, cuda::thread_scope_block> inr{*(sInterrupts + sid)};
       inr.store(1, cuda::memory_order_relaxed);
     }
