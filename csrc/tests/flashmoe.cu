@@ -2,9 +2,11 @@
  * Copyright (c) 2026, Osayamen Jonathan Aimuyo.
  ******************************************************************************/
 // E2E correctness test and benchmark of fused distributed MoE kernel
-#include <random>
+#include <random> // for seeds
 #include <stdexcept>
 #include <tuple>
+
+#include <mpi.h>
 
 #include "../include/flashmoe/bootstrap.cuh"
 #include "../include/flashmoe/gate.cuh"
@@ -213,6 +215,25 @@ void reference(const flashmoe::TPS* __restrict__ const& tokenIds,
   }*/
 }
 
+struct Seeds {
+  using SeedType = uint64_t;
+  SeedType expertUp;
+  SeedType expertDown;
+  SeedType biasUp;
+  SeedType biasDown;
+  __host__ __forceinline__
+  void dump(const int& rank) const {
+    printf("{\n\t"
+                   "expertUp: %lu,\n\t"
+                   "rank: %u, \n\t"
+                   "expertDown: %lu,\n\t"
+                   "biasUp: %lu,\n\t"
+                   "biasDown: %lu"
+                   "\n}\n",
+                   expertUp, rank, expertDown, biasUp, biasDown);
+  }
+};
+
 __host__ __forceinline__
 void printMetadata(const std::vector<int>& counts, const std::vector<flashmoe::TPS>& ids,
     const int& EC, const int& E) {
@@ -249,10 +270,15 @@ void printMetadata(const std::vector<int>& counts, const std::vector<flashmoe::T
 void kickstart(/*const uint S, const uint H, const uint I, const uint E, const uint k*/) {
   // debug mode for now
   constexpr int S = 8192;
-  constexpr int H = 2048;
-  constexpr int I = 2048;
-  constexpr int E = 32;
+  constexpr int H = 1536;
+  constexpr int I = 256;
+  constexpr int E = 64;
   constexpr int k = 2;
+  nvtx3::scoped_range driverRange{std::string("flashMoE, S: ")
+        .append(std::to_string(S)).append(", E: ")
+        .append(std::to_string(E)).append(", H: ")
+        .append(std::to_string(H).append(", topK: ")
+        .append(std::to_string(k)))};
   constexpr int bNGate = cute::min(32, E);
   constexpr auto topo = flashmoe::Topology::NVLINK_ONLY;
   constexpr auto grl = E > bNGate ? flashmoe::GateReductionLevel::multiBlock :
@@ -282,6 +308,9 @@ void kickstart(/*const uint S, const uint H, const uint I, const uint E, const u
   const auto epRank = nvshmem_my_pe();
   if (E % world != 0) {
     throw std::runtime_error("E should be a multiple of world");
+  }
+  if (k > E) {
+    throw std::invalid_argument("k must be at most number of experts");
   }
   const auto numLocalExperts = E / world;
   constexpr auto tilesN1 = H / bN1;
@@ -329,48 +358,58 @@ void kickstart(/*const uint S, const uint H, const uint I, const uint E, const u
   CHECK_CUDA(cudaFuncSetAttribute(gateKernel, cudaFuncAttributeMaxDynamicSharedMemorySize, GateSz));
   CHECK_CUDA(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&bps1, gateKernel, gateThreads, GateSz));
   const auto gateBlocks = cute::min((S / bM) * (E / bNGate), bps1 * NUM_SMS);
+  if (E > gateBlocks * bNGate) {
+    throw std::invalid_argument("E is too big!");
+  }
 
+  constexpr float minv = -1.0f;
+  constexpr float maxv = 1.0f;
+  std::random_device rd;
   Element* tokens = nullptr;
   cudaMallocAsync(&tokens, sizeof(Element) * S * H, stream);
-  std::vector<float> th(S*H);
-  auto tokTensor = cute::make_tensor(th.data(),
-    cute::make_layout(cute::make_shape(S, H), cute::LayoutRight{}));
-  for (int i = 0; i < S; ++i) {
-    for (int j = 0; j < H; ++j) {
-      tokTensor(i, j) = static_cast<float>(i + j);
-    }
-  }
-  cudaMemcpyAsync(tokens, th.data(), sizeof(Element) * th.size(), cudaMemcpyHostToDevice, stream);
+  randUniform<Arch>(tokens, static_cast<size_t>(S) * H, rd(), minv, maxv, stream);
 
   Element* gateWeights = nullptr;
-  std::random_device rd;
   cudaMallocAsync(&gateWeights, sizeof(Element) * H * E, stream);
-  randUniform<Arch>(gateWeights, H * E, rd(), -1.0f, 1.0f, stream);
+  randUniform<Arch>(gateWeights, static_cast<size_t>(H) * E, rd(), minv, maxv, stream);
+
+  Seeds seeds{};
+  if (epRank == 0) {
+    seeds.expertUp = rd();
+    seeds.expertDown = rd();
+    seeds.biasUp = rd();
+    seeds.biasDown = rd();
+  }
+  if (world > 1) {
+    // Rank 0 will generate a random seed and propagate to every rank
+    // the weights need to be uniform across all ranks as each rank will do an independent check
+    // NVSHMEM init would have initialized MPI already
+    int isMPIInitialized = 0;
+    MPI_Initialized(&isMPIInitialized);
+    if (!isMPIInitialized) {
+      throw std::runtime_error("MPI is not initialized!");
+    }
+    constexpr int count = sizeof(Seeds) / sizeof(Seeds::SeedType);
+    static_assert(cuda::std::is_same_v<Seeds::SeedType, uint64_t>);
+    MPI_Bcast(&seeds, count, MPI_UINT64_T, 0, MPI_COMM_WORLD);
+  }
 
   Element* expertUpWeights = nullptr;
   Element* expertDownWeights = nullptr;
   // allocate all expert weights since we need it for single-GPU correctness checks
-  cudaMallocAsync(&expertUpWeights, E * sizeof(Element) * H * I, stream);
-  cudaMallocAsync(&expertDownWeights, E * sizeof(Element) * I * H, stream);
-  matx::cudaExecutor exec{stream};
+  cudaMallocAsync(&expertUpWeights, sizeof(Element) * E * H * I, stream);
+  randUniform<Arch>(expertUpWeights, static_cast<size_t>(E) * H * I, seeds.expertUp, minv, maxv, stream);
+  cudaMallocAsync(&expertDownWeights, sizeof(Element) * E * I * H, stream);
+  randUniform<Arch>(expertDownWeights, static_cast<size_t>(E) * H * I, seeds.expertDown, minv, maxv, stream);
   using MT = MXE<Element>;
-  const auto eWz = static_cast<size_t>(H) * I;
-  for (int i = 0; i < E; ++i) {
-    auto euw = matx::make_tensor<MT>(reinterpret_cast<MT*>(expertUpWeights + i * eWz), {H, I});
-    (euw = matx::eye<Element>({H, I})).run(exec);
-    auto edw = matx::make_tensor<MT>(reinterpret_cast<MT*>(expertDownWeights + i * eWz), {I, H});
-    (edw = matx::eye<Element>({I, H})).run(exec);
-  }
 
   Element* biasUp = nullptr;
   cudaMallocAsync(&biasUp, sizeof(Element) * E * I, stream);
-  auto bu = matx::make_tensor<MT>(reinterpret_cast<MT*>(biasUp), {numLocalExperts, I});
-  (bu = matx::zeros<MT>({numLocalExperts, I})).run(exec);
+  randUniform<Arch>(biasUp, static_cast<size_t>(E) * I, seeds.biasUp, minv, maxv, stream);
 
   Element* biasDown = nullptr;
   cudaMallocAsync(&biasDown, sizeof(Element) * E * H, stream);
-  auto bd = matx::make_tensor<MT>(reinterpret_cast<MT*>(biasDown), {numLocalExperts, H});
-  (bd = matx::zeros<MT>({numLocalExperts, H})).run(exec);
+  randUniform<Arch>(biasDown, static_cast<size_t>(E) * H, seeds.biasDown, minv, maxv, stream);
 
   Element* gateOut = nullptr;
   cudaMallocAsync(&gateOut, sizeof(Element) * S * E, stream);
@@ -408,7 +447,6 @@ void kickstart(/*const uint S, const uint H, const uint I, const uint E, const u
       expertToEpRank[i * numLocalExperts + j] = i;
     }
   }
-  // world == ePworld for this instance
   std::vector<int> epRankToGlobalRank(world);
   for (int i = 0; i < world; ++i) {
     epRankToGlobalRank[i] = i;
@@ -417,11 +455,11 @@ void kickstart(/*const uint S, const uint H, const uint I, const uint E, const u
     expertToEpRank.data(), epRankToGlobalRank.data(), stream);
   auto moeContext = std::get<0>(contexts);
   auto gateCtx = std::get<1>(contexts);
-  // call kernel as many times as needed
-  auto* __restrict__ localExpertUpWeights = expertUpWeights + (static_cast<size_t>(epRank) * (H * I));
-  auto* __restrict__ localExpertDownWeights = expertDownWeights + (static_cast<size_t>(epRank) * (I * H));
-  auto* __restrict__ localBiasUp = biasUp + (static_cast<size_t>(epRank) * (I));
-  auto* __restrict__ localBiasDown = biasDown + (static_cast<size_t>(epRank) * (H));
+  size_t expertBase = static_cast<size_t>(epRank) * numLocalExperts;
+  auto* __restrict__ localExpertUpWeights = expertUpWeights + (expertBase * static_cast<size_t>(H) * I);
+  auto* __restrict__ localExpertDownWeights = expertDownWeights + (expertBase * static_cast<size_t>(I) * H);
+  auto* __restrict__ localBiasUp = biasUp + (expertBase * I);
+  auto* __restrict__ localBiasDown = biasDown + (expertBase * H);
 
   const flashmoe::moe::KernelArgs kArgs{
     reinterpret_cast<const cuda::std::byte*>(tokens),
@@ -439,38 +477,30 @@ void kickstart(/*const uint S, const uint H, const uint I, const uint E, const u
   flashmoe::gate::forwardKernel<GateTile, Arch, gateThreads, grl, sro, AccumType>
   <<<gateBlocks, gateThreads, GateSz, stream>>>(tokens, gateWeights, gateOut,
     expertCounts, S, H, E, k, EC, moeContext.tokenIndices, gateCtx.ecGuards, gateCtx.ssp, gateCtx.rtp);
-  {
+  /*{
     std::vector<int> counts(E);
     cudaMemcpyAsync(counts.data(), expertCounts, sizeof(int) * E, cudaMemcpyDeviceToHost, stream);
     const auto t0 = cute::make_tensor(counts.data(), cute::make_layout(cute::make_shape(1, E),
       cute::LayoutRight{}));
     CHECK_CUDA(cudaStreamSynchronize(stream));
     print_tensor(t0);
-  }
+  }*/
   flashmoe::moe::forwardHost<Config, topo, act>(kArgs, moeContext, kernelSz, stream);
   CHECK_CUDA(cudaPeekAtLastError());
   // check correctness
-  using ActType = flashmoe::ActivationType<Element, act>::AT;
+  using ActType = flashmoe::ActivationType<AccumType, act>::AT;
   reference<Config, GEMM0Sz, GEMM1Sz, ActType, AccumType>(moeContext.tokenIndices, tokens,
     referenceInput, expertUpWeights, expertDownWeights, biasUp, biasDown,
     referenceInterim0, referenceInterim1, expertCounts, referenceOut,
     S, H, EC, E, I, k, stream);
   CHECK_CUDA(cudaPeekAtLastError());
-  // calculate error percentage
+
   constexpr auto rtol = 2e-2;
   constexpr auto atol = 2e-3;
   auto tC = matx::make_tensor<MT>(reinterpret_cast<MT*>(moeOut), {S, H});
-  /*{
-    std::vector<Element> hr(S * H);
-    cudaMemcpyAsync(hr.data(), moeOut, sizeof(Element) * S * H, cudaMemcpyDeviceToHost, stream);
-    cudaStreamSynchronize(stream);
-    const auto tr = cute::make_tensor(hr.data(), cute::make_layout(
-      cute::make_shape(S, H), cute::LayoutRight{}));
-    printf("FlashMoE result\n");
-    print_tensor(tr);
-  }*/
   auto tRef = matx::make_tensor<MT>(reinterpret_cast<MT*>(referenceOut), {S, H});
   auto num_matches = matx::make_tensor<long int>({});
+  matx::cudaExecutor exec{stream};
   (num_matches = matx::sum(matx::isclose(tC, tRef, rtol, atol))).run(exec);
   exec.sync();
   // calculate error percentage
@@ -485,21 +515,19 @@ void kickstart(/*const uint S, const uint H, const uint I, const uint E, const u
   }
   constexpr int runs = 128;
   CHECK_CUDA(cudaStreamSynchronize(stream));
-  cudaEventRecord(start, exec.getStream());
+  cudaEventRecord(start, stream);
   for (int i = 0; i < runs; ++i) {
     flashmoe::moe::forwardHost<Config, topo, act>(kArgs, moeContext, kernelSz, stream);
   }
-  cudaEventRecord(stop, exec.getStream());
+  cudaEventRecord(stop, stream);
   CHECK_CUDA(cudaEventSynchronize(stop));
   float m_ms = 0;
   CHECK_CUDA(cudaEventElapsedTime(&m_ms, start, stop));
   const float m_time_ms = m_ms / static_cast<float>(runs);
-  if (nvshmem_my_pe() == 0) {
-    printf("S, H, I, E, k, EC, bM, bN0, bK0, bN1, bK1, bNGate, threads, blocks/SM, SMs,blocks, rtol, atol, error(%%), "
-         "Kernel_Time(ms)\n");
-    printf("%d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %.1e, %.1e, %f, %f\n",
-      S, H, I, E, k, EC, bM, bN0, bK0, bN1, bK1, bNGate, threads, bps, NUM_SMS, blocks, rtol, atol, ep, m_time_ms);
-  }
+  printf("EP Rank, S, H, I, E, k, EC, bM, bN0, bK0, bN1, bK1, bNGate, threads, blocks/SM, SMs,blocks, rtol, atol, error(%%), "
+         "Kernel_Time(ms)\n"
+         "%d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %.1e, %.1e, %f, %f\n",
+         epRank, S, H, I, E, k, EC, bM, bN0, bK0, bN1, bK1, bNGate, threads, bps, NUM_SMS, blocks, rtol, atol, ep, m_time_ms);
 
   // finalize
   flashmoe::finalize(moeContext, gateCtx, stream);
@@ -517,16 +545,18 @@ void kickstart(/*const uint S, const uint H, const uint I, const uint E, const u
   cudaFreeAsync(referenceInterim1, stream);
   cudaFreeAsync(referenceOut, stream);
   CHECK_CUDA(cudaPeekAtLastError());
-  nvshmem_finalize();
   CHECK_CUDA(cudaStreamSynchronize(stream));
+  nvshmem_finalize();
   cudaStreamDestroy(stream);
 }
 
+//./testFlashMoE <S> <H> <I> <E> <k>
 /*__host__ __forceinline__
 void drive(const int argc, char** argv) {
   uint S = 16;
   uint H = 128;
   uint I = 128;
+  uint E = 8;
   uint k = 2;
   if (argc > 1) {
     S = std::stoi(argv[1]);
@@ -541,23 +571,24 @@ void drive(const int argc, char** argv) {
     k = std::stoi(argv[4]);
   }
   // below values are static to minimize instantiated templates.
-  constexpr int E = 16;
-  constexpr int bNGate = cute::min(32, E);
-  constexpr auto topo = flashmoe::Topology::NVLINK_ONLY;
-  constexpr auto grl = E > bNGate ? flashmoe::GateReductionLevel::multiBlock :
-  flashmoe::GateReductionLevel::singleBlock;
-  constexpr auto dtk = flashmoe::DropTokens::no;
   constexpr auto arch = FLASHMOE_ARCH;
+  constexpr auto dtk = flashmoe::DropTokens::yes; // or no, both work here
   constexpr auto act = flashmoe::Activation::relu;
+  using Element = __half;
+  using AccumType = cuda::std::conditional_t<cuda::std::is_same_v<Element, double>, double, float>;
   if (k > E) {
-    throw std::runtime_error("k must be <= E");
+    throw std::invalid_argument("k must be <= E");
   }
   // to minimize instantiated templates
-  if (I < 128) {
-    throw std::runtime_error("I must be >= 128 for this bench");
+  constexpr int bN0 = sizeof(Element) == 2 ? 128 : 64;
+  constexpr int bN1 = bN0;
+  constexpr int bK0 = cuda::std::is_same_v<Element, double> ? 32 : 64;
+  constexpr int bK1 = bK0;
+  if (H < bK0 || H % bK0 != 0 || H < bN1 || H % bN1 != 0) {
+    throw std::invalid_argument("H is invalid");
   }
-  if (H < 128) {
-    throw std::runtime_error("H must be >= 128 for this bench");
+  if (I < bK1 || I % bK1 != 0 || I < bN0 || I % bN0 != 0) {
+    throw std::invalid_argument("I is invalid");
   }
 
   switch (S) {
@@ -579,7 +610,6 @@ void drive(const int argc, char** argv) {
     break;
   }
 }*/
-//./testFlashMoE <S> <H> <I> <k>
 int main(/*const int argc, char** argv*/) {
   kickstart();
 }

@@ -152,7 +152,7 @@ __global__ void generateRandUniform(
 template<int Arch, bool addJitter = false, typename Element>
 __host__ __forceinline__
 void randUniform(Element* __restrict__ const& out,
-    const  size_t& n, const long int& seed, const float& minv,
+    const  size_t& n, const size_t& seed, const float& minv,
     const float& maxv, cudaStream_t stream) {
     constexpr int threads = 128;
     const int blocks = static_cast<int>(cute::ceil_div(n, threads * 4));

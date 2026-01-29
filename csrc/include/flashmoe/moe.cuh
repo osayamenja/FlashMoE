@@ -40,6 +40,7 @@ namespace flashmoe::moe
     using DTK = cute::C<_dTk>;
     using CM = cute::C<isKG1 ? CombineMode::plural : CombineMode::single>;
     using DType = Element;
+    using AccumType = cuda::std::conditional_t<cuda::std::is_same_v<Element, double>, double, float>;
   };
 
   struct KernelArgs {
@@ -117,7 +118,6 @@ namespace flashmoe::moe
     constexpr int bK1 = cute::get<2>(typename Config::G1TS{});
     constexpr int pS1 = cute::get<3>(typename Config::G1TS{});
     static_assert(bM0 == bM1);
-    using AccumType = float;
     constexpr int bM = bM0;
     constexpr int arch = Config::Arch::value;
     constexpr int threads = Config::Threads::value;
@@ -151,7 +151,8 @@ namespace flashmoe::moe
       ctx.pTq,
       ctx.tileSync
     };
-    using GEMM0Act = ActivationType<DataType, a>::AT;
+    using AccumType = Config::AccumType;
+    using GEMM0Act = ActivationType<AccumType, a>::AT;
     const auto tilesN0 = kArgs.I / bN0;
     const auto tilesN1 = kArgs.H / bN1;
 
@@ -169,8 +170,7 @@ namespace flashmoe::moe
     auto* __restrict__ moeOut = reinterpret_cast<DataType*>(kArgs.moeOut);
     processor::start<topo, threads, Config::CM::value, TileGEMM0, TileGEMM1, GEMM0Act>
     (flashWorkspace, kArgs.S, kArgs.H, kArgs.I, kArgs.E, roundEC, ecTilesM * kArgs.E, tilesN0, tilesN1, expertUp,
-      biasUp,expertDown, biasDown, ctx.tokenIndices, moeOut, producerBM, ctx.stateNumber, symHeap, pA,
-      ctx.signals + ctx.nLx * ctx.world);
+      biasUp,expertDown, biasDown, ctx.tokenIndices, moeOut, producerBM, ctx.stateNumber, symHeap, pA);
   }
 
   template <

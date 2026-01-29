@@ -407,7 +407,7 @@ namespace flashmoe::subscriber
                 ingredients.expertIdx = expertIdx;
                 ingredients.M = tokenIdx;
                 ingredients.localExpertIdx = lookup.localExpertIndex;
-                ingredients.peerIdx = args.epRank;
+                ingredients.peerIdx = lookup.epRank;
                 ingredients.tileSize = sigPayload.tokensM;
                 ingredients.taskType = TaskType::combine;
                 ingredients.isPeerRemote = 1;
@@ -432,7 +432,7 @@ namespace flashmoe::subscriber
                 ingredients.expertIdx = expertIdx;
                 ingredients.M = tokenIdx;
                 ingredients.localExpertIdx = lookup.localExpertIndex;
-                ingredients.peerIdx = args.epRank;
+                ingredients.peerIdx = lookup.epRank;
                 ingredients.tileSize = sigPayload.tokensM;
                 ingredients.stash = flagIdx / nRows; // combine tileIdx
                 ingredients.taskType = TaskType::combine;
@@ -476,7 +476,7 @@ namespace flashmoe::subscriber
                 const auto tokenIdx = sigPayload.batchIdx * bM;
                 ingredients.M = tokenIdx;
                 ingredients.localExpertIdx = lookup.localExpertIndex;
-                ingredients.peerIdx = args.epRank;
+                ingredients.peerIdx = lookup.epRank;
                 ingredients.tileSize = sigPayload.tokensM;
                 ingredients.taskType = TaskType::combine;
                 ingredients.isPeerRemote = 1;
@@ -499,7 +499,7 @@ namespace flashmoe::subscriber
                 Ingredients ingredients{};
                 ingredients.M = tokenIdx;
                 ingredients.localExpertIdx = lookup.localExpertIndex;
-                ingredients.peerIdx = args.epRank;
+                ingredients.peerIdx = lookup.epRank;
                 ingredients.tileSize = sigPayload.tokensM;
                 ingredients.stash = flagIdx / nRows;
                 ingredients.taskType = TaskType::combine;
@@ -547,10 +547,6 @@ namespace flashmoe::subscriber
                                                 sigPayload.senseBit, args.stateNumber,
                                                 sigPayload.stateNumber);
             if (expected) {
-              /*const auto limit = (args.roundEC / bM) - 1;
-              if (expertIdx >= 32 || sigPayload.batchIdx > limit) {
-                printf("Bad! Subscriber thread %d received %u, %u\n", args.tIdx, expertIdx, sigPayload.batchIdx);
-              }*/
               sBS.set(bIdx);
               senseBitSet.flip(bIdx);
               const auto tokenIdx = sigPayload.batchIdx * bM;
@@ -559,7 +555,7 @@ namespace flashmoe::subscriber
               ingredients.expertIdx = expertIdx;
               ingredients.M = tokenIdx;
               ingredients.localExpertIdx = lookup.localExpertIndex;
-              ingredients.peerIdx = args.epRank;
+              ingredients.peerIdx = lookup.epRank;
               ingredients.tileSize = sigPayload.tokensM;
               ingredients.stash = flagIdx / nRows;
               ingredients.taskType = TaskType::combine;
@@ -598,7 +594,7 @@ namespace flashmoe::subscriber
               ingredients.expertIdx = expertIdx;
               ingredients.M = tokenIdx;
               ingredients.localExpertIdx = lookup.localExpertIndex;
-              ingredients.peerIdx = args.epRank;
+              ingredients.peerIdx = lookup.epRank;
               ingredients.tileSize = sigPayload.tokensM;
               ingredients.stash = flagIdx / nRows; // combine tile idx
               ingredients.taskType = TaskType::combine;

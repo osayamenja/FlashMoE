@@ -153,7 +153,9 @@ namespace flashmoe
         }
         const auto processors = args.blocks - 1;
         if (processors > scheduler::MAX_PROCESSORS) {
-            throw std::runtime_error("processor count is too high");
+            const auto errmsg = std::string("processor count: ").append(std::to_string(processors))
+            .append(" is too high");
+            throw std::runtime_error(errmsg);
         }
         // maximum tiles that a peer will send to another peer in aggregate.
         const auto maxPeerTaskTiles = (args.EC * args.numLocalExperts) / args.bM;

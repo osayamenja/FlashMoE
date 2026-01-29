@@ -203,6 +203,8 @@ set_target_properties(nvshmem::nvshmem_host PROPERTIES
         IMPORTED_LOCATION_RELEASE "/usr/lib/x86_64-linux-gnu/nvshmem/13/libnvshmem_host.so.3"
 )
 target_link_libraries(testFlashMoE PRIVATE nvshmem::nvshmem_host nvshmem::nvshmem_device)
+find_package(MPI REQUIRED COMPONENTS CXX)
+target_link_libraries(testFlashMoE PRIVATE MPI::MPI_CXX)
 
 add_executable(testScheduler
         tests/scheduler.cu

@@ -445,7 +445,6 @@ namespace flashmoe::scheduler
       if (!threadIdx.x) {
         cuda::atomic_ref<unsigned int, cuda::thread_scope_block> tb{*taskBound};
         tTB = tb.load(cuda::memory_order_relaxed);
-        //printf("%d/%d scheduled\n", scheduled, tTB);
       }
       __syncwarp();
       tTB = __shfl_sync(0xffffffff, tTB, 0);

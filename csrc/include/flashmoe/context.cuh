@@ -30,8 +30,7 @@ namespace flashmoe
     constexpr auto subscriberTQLength(const int& world, const uint& numLocalExperts, const uint& ecTilesM,
         const uint& E, const uint& tilesN0, const uint& tilesN1, const uint& subscriberCount) {
         const auto dispatchTaskQL = cute::ceil_div(world * numLocalExperts,subscriberCount / subscriberWarpSize) *
-                (cute::ceil_div(ecTilesM * tilesN0, subscriberWarpSize) +
-                    cute::ceil_div(tilesN0, subscriberWarpSize));
+            (cute::ceil_div(ecTilesM * tilesN0, subscriberWarpSize) + cute::ceil_div(tilesN0, subscriberWarpSize));
         const auto combineTaskQL = cute::ceil_div(ecTilesM * E * tilesN1, subscriberCount);
         return (dispatchTaskQL + combineTaskQL) * subscriberCount;
     }

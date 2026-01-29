@@ -163,7 +163,7 @@ namespace flashmoe::processor
              Element* __restrict__ const& moeOutput,
              const PBM& producerBitMap,
              const uint8_t& stateNumber,
-             const Heap& symHeap, const ProcessorArgs& pA, uint64_t* flags) {
+             const Heap& symHeap, const ProcessorArgs& pA) {
     __shared__ Task currentTask;
     __shared__ uint globalInterrupt;
     __shared__ uint enqueue;
@@ -320,11 +320,6 @@ namespace flashmoe::processor
         }
         break;
         case TaskType::combine: {
-          // if (!threadIdx.x) {
-          //   printf("TaskQ Id: %d, ExpertIdx: %d, rowIdx: %d, colIdx: %d\n", tqs.decodeSig(),
-          //     task.expertIdx(), task.tokenBatchStart(),
-          //     task.combineTileIdx());
-          // }
           const auto tileCoord = cute::make_coord(cute::_0{}, task.combineTileIdx());
           const auto* __restrict__ tokens = reinterpret_cast<Element*>(symHeap.advance<1, 1>(task.epRank(),
             task.localExpertIdx(), static_cast<int>(task.tokenBatchStart())));
