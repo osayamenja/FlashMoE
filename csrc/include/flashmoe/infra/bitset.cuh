@@ -1,5 +1,5 @@
 //
-// Created by azureuser on 1/5/26.
+// Created by Osayamen on 1/5/26.
 //
 
 #ifndef FLASHMOE_BITSET_CUH

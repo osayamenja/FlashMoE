@@ -54,17 +54,18 @@ namespace flashmoe
         const uint16_t myPE; // NVSHMEM PE
         const uint16_t numExperts;
         const uint16_t numLocalExperts;
+        const Topology topo;
 
         MoEArgs(const size_t& eb, const uint& S, const uint& H, const uint& I, const uint& _EC,
             const uint& bm, const uint& bn0, const uint& bn1, const uint& bk0, const uint bk1,
             const uint& _threads, const uint& ctas, const uint16_t& ep_rank, const uint16_t& ep_world,
             const uint16_t& mype, const uint16_t& experts,
-            const uint16_t& nlx):
+            const uint16_t& nlx, const Topology& topo_):
         elementBytes(eb), sequenceLength(S),
         EC(_EC),
         tokenDim(H), ffnIntermediateSize(I), bM(bm), bN0(bn0), bN1(bn1), bK0(bk0), bK1(bk1),
         threads(_threads), blocks(ctas), epRank(ep_rank), epWorld(ep_world), myPE(mype), numExperts(experts),
-        numLocalExperts(nlx) {}
+        numLocalExperts(nlx), topo(topo_) {}
     };
 
     __global__ void bI(cuda::barrier<cuda::thread_scope_device>* db, const uint blocks) {
@@ -78,7 +79,7 @@ namespace flashmoe
         cuda::std::byte* const& sHeap, uint64_t* const& signals,
         PEL* const& pel, PLI* const& pli, ELI* const& eli, LXI* const& lxi,
         cudaStream_t stream) {
-        if (!nvshmemx_init_status()) {
+        if (nvshmemx_init_status() == NVSHMEM_STATUS_NOT_INITIALIZED) {
             throw std::runtime_error("nvshmem is not initialized");
         }
         std::vector<uint> lxIndices(epWorld);
@@ -136,6 +137,14 @@ namespace flashmoe
         cudaMemcpyAsync(pli, pliHost.data(), sizeof(PLI) * pliHost.size(),cudaMemcpyHostToDevice,stream);
         cudaMemcpyAsync(eli, eliHost.data(), sizeof(ELI) * eliHost.size(), cudaMemcpyHostToDevice, stream);
         cudaMemcpyAsync(lxi, lxiHost.data(), sizeof(LXI) * lxiHost.size(), cudaMemcpyHostToDevice, stream);
+    }
+
+    __host__ __forceinline__
+    Topology detectTopo() {
+        if (nvshmemx_init_status() == NVSHMEM_STATUS_NOT_INITIALIZED) {
+            throw std::runtime_error("nvshmem is not initialized");
+        }
+        return nvshmem_team_n_pes(NVSHMEM_TEAM_SHARED_INDEX) == nvshmem_n_pes() ? Topology::NVLINK_ONLY : Topology::MIXED;
     }
     __host__ __forceinline__
     std::tuple<Context, GateContext> initialize(const MoEArgs& args, const uint& bNGate,
@@ -316,7 +325,7 @@ namespace flashmoe
             static_cast<uint16_t>(args.bM), static_cast<uint16_t>(args.bN0), static_cast<uint16_t>(args.bN1),
             args.numLocalExperts,
             args.numExperts, args.epWorld, args.epRank, args.myPE,
-            true, SignalConstants::sequenceStart
+            true, args.topo, SignalConstants::sequenceStart
         };
         CHECK_CUDA(cudaStreamSynchronize(stream));
 

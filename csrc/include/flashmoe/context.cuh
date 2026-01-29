@@ -12,6 +12,7 @@
 #include "infra/bitset.cuh"
 #include "infra/constants.cuh"
 #include "infra/packed.cuh"
+#include "infra/signal.cuh"
 #include "infra/structures.cuh"
 #include "infra/task.cuh"
 #include "infra/tq.cuh"
@@ -81,6 +82,7 @@ namespace flashmoe
         const uint16_t epRank = 0;
         const uint16_t myPE = 0;
         const bool initialized = false;
+        const Topology topo = Topology::MIXED;
         uint8_t stateNumber = 0;
         static_assert(alignof(cuda::fast_mod_div<uint>) <= 8);
     };

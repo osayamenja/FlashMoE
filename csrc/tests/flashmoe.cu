@@ -263,16 +263,15 @@ void printMetadata(const std::vector<int>& counts, const std::vector<flashmoe::T
 //   int bN1, int bK1, int bNGate, int pSK1,
 //   bool isKG1,
 //   flashmoe::Activation act,
-//   flashmoe::Topology topo,
 //   flashmoe::GateReductionLevel grl,
 //   flashmoe::DropTokens dtk = flashmoe::DropTokens::no
 // >
 void kickstart(/*const uint S, const uint H, const uint I, const uint E, const uint k*/) {
   // debug mode for now
   constexpr int S = 8192;
-  constexpr int H = 1536;
-  constexpr int I = 256;
-  constexpr int E = 64;
+  constexpr int H = 2048;
+  constexpr int I = 2048;
+  constexpr int E = 32;
   constexpr int k = 2;
   nvtx3::scoped_range driverRange{std::string("flashMoE, S: ")
         .append(std::to_string(S)).append(", E: ")
@@ -280,14 +279,13 @@ void kickstart(/*const uint S, const uint H, const uint I, const uint E, const u
         .append(std::to_string(H).append(", topK: ")
         .append(std::to_string(k)))};
   constexpr int bNGate = cute::min(32, E);
-  constexpr auto topo = flashmoe::Topology::NVLINK_ONLY;
   constexpr auto grl = E > bNGate ? flashmoe::GateReductionLevel::multiBlock :
   flashmoe::GateReductionLevel::singleBlock;
   constexpr auto sro = flashmoe::SoftMaxOptimizationLevel::highest;
   constexpr auto dtk = flashmoe::DropTokens::yes;
   constexpr auto Arch = FLASHMOE_ARCH;
   constexpr auto act = flashmoe::Activation::relu;
-  using Element = __half;
+  using Element = __nv_bfloat16;
   using AccumType = float;
   constexpr int bM = cute::min(S, 128);
   constexpr int bN0 = cute::min(I, 128);
@@ -306,6 +304,8 @@ void kickstart(/*const uint S, const uint H, const uint I, const uint E, const u
 
   const auto world = nvshmem_n_pes();
   const auto epRank = nvshmem_my_pe();
+  nvshmem_sync_all(); // this is needed to force initialization of NVSHMEM state.
+
   if (E % world != 0) {
     throw std::runtime_error("E should be a multiple of world");
   }
@@ -344,10 +344,18 @@ void kickstart(/*const uint S, const uint H, const uint I, const uint E, const u
   using GEMM1Tile = cute::Shape<cute::Int<bM>, cute::Int<bN1>, cute::Int<bK1>, cute::Int<pSK1>>;
   using Config = flashmoe::moe::MoEConfig<Element, Arch, threads, isKG1, dtk, GEMM0Tile, GEMM1Tile>;
 
-  auto kernel = flashmoe::moe::forward<Config, act, topo>;
-  CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kernelSz));
   int bps = 0;
-  CHECK_CUDA(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&bps, kernel, threads, kernelSz));
+  const auto kernelTopo = flashmoe::detectTopo();
+  if (kernelTopo == flashmoe::Topology::NVLINK_ONLY) {
+    auto kernel = flashmoe::moe::forward<Config, act, flashmoe::Topology::NVLINK_ONLY>;
+    CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kernelSz));
+    CHECK_CUDA(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&bps, kernel, threads, kernelSz));
+  }
+  else {
+    auto kernel = flashmoe::moe::forward<Config, act, flashmoe::Topology::MIXED>;
+    CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kernelSz));
+    CHECK_CUDA(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&bps, kernel, threads, kernelSz));
+  }
   constexpr auto processorBlocks = (S /bM) * cute::max(I / bN0, H / bN1);
   constexpr auto dispatchBlocks = flashmoe::moe::dispatchSuperBlockSize(E) * E;
   const uint blocks = cute::max(cute::min(cute::max(processorBlocks, dispatchBlocks) + 1, bps * NUM_SMS), 2);
@@ -436,7 +444,7 @@ void kickstart(/*const uint S, const uint H, const uint I, const uint E, const u
   flashmoe::MoEArgs args{
     sizeof(Element), S, H, I, EC, bM, bN0, bN1, bK0, bK1, threads,
     blocks, static_cast<uint16_t>(epRank), static_cast<uint16_t>(world),
-    static_cast<uint16_t>(nvshmem_my_pe()), E, static_cast<uint16_t>(numLocalExperts)
+    static_cast<uint16_t>(nvshmem_my_pe()), E, static_cast<uint16_t>(numLocalExperts), kernelTopo
   };
   // blocked partitioning
   // for 8 experts and 4 ranks
@@ -485,7 +493,22 @@ void kickstart(/*const uint S, const uint H, const uint I, const uint E, const u
     CHECK_CUDA(cudaStreamSynchronize(stream));
     print_tensor(t0);
   }*/
-  flashmoe::moe::forwardHost<Config, topo, act>(kArgs, moeContext, kernelSz, stream);
+  if (moeContext.topo != flashmoe::Topology::NVLINK_ONLY) {
+    fprintf(stderr, "RDMA has not been tested, GPU poor :(\n");
+  }
+  auto flashMK = [&](const flashmoe::Topology topology, const int& runs) {
+    if (topology == flashmoe::Topology::NVLINK_ONLY) {
+      for (int i = 0; i < runs; ++i) {
+        flashmoe::moe::forwardHost<Config, flashmoe::Topology::NVLINK_ONLY, act>(kArgs, moeContext, kernelSz, stream);
+      }
+    }
+    else {
+      for (int i = 0; i < runs; ++i) {
+        flashmoe::moe::forwardHost<Config, flashmoe::Topology::MIXED, act>(kArgs, moeContext, kernelSz, stream);
+      }
+    }
+  };
+  flashMK(moeContext.topo, 1);
   CHECK_CUDA(cudaPeekAtLastError());
   // check correctness
   using ActType = flashmoe::ActivationType<AccumType, act>::AT;
@@ -509,16 +532,12 @@ void kickstart(/*const uint S, const uint H, const uint I, const uint E, const u
   CHECK_CUDA(cudaEventCreate(&start));
   CHECK_CUDA(cudaEventCreate(&stop));
   // benchmark distributed moe fused kernel
-  constexpr int warmup = 128;
-  for (int i = 0; i < warmup; ++i) {
-    flashmoe::moe::forwardHost<Config, topo, act>(kArgs, moeContext, kernelSz, stream);
-  }
-  constexpr int runs = 128;
+  constexpr int warmup = 0;
+  flashMK(moeContext.topo, warmup);
+  constexpr int runs = 1;
   CHECK_CUDA(cudaStreamSynchronize(stream));
   cudaEventRecord(start, stream);
-  for (int i = 0; i < runs; ++i) {
-    flashmoe::moe::forwardHost<Config, topo, act>(kArgs, moeContext, kernelSz, stream);
-  }
+  flashMK(moeContext.topo, runs);
   cudaEventRecord(stop, stream);
   CHECK_CUDA(cudaEventSynchronize(stop));
   float m_ms = 0;
