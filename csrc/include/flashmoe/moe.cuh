@@ -24,7 +24,7 @@ namespace flashmoe::moe
     typename Element, // data type = {fp32, fp16, bf16}
     int arch, //  GPU Architecture, Volta - Blackwell (700 - 1200), See cuBLASDx docs
     int _threads, // see tile::suggest_thread_count
-    bool isKG1, // is k greater than 1
+    CombineMode cm, // plural, if k > 1; single otherwise
     DropTokens _dTk, // yes or no,
     typename GEMM0Tile, // cute::Shape<M,N,K,pipeStages>
     typename GEMM1Tile // cute::Shape<M,N,K,pipeStages>
@@ -38,7 +38,7 @@ namespace flashmoe::moe
     using Arch = cute::Int<arch>;
     using Threads = cute::Int<_threads>;
     using DTK = cute::C<_dTk>;
-    using CM = cute::C<isKG1 ? CombineMode::plural : CombineMode::single>;
+    using CM = cute::C<cm>;
     using DType = Element;
     using AccumType = cuda::std::conditional_t<cuda::std::is_same_v<Element, double>, double, float>;
   };

@@ -91,7 +91,7 @@ namespace flashmoe
         int* const ecGuards = nullptr; // [E]
         SoftmaxStatePacked* const ssp = nullptr; // [S, tiles(E)]
         RingTopKPayload* const rtp = nullptr; // [2, S, tiles(E)]
-        cuda::barrier<cuda::thread_scope_device>* const db = nullptr; // [1]
+        //cuda::barrier<cuda::thread_scope_device>* const db = nullptr; // [1]
     };
 }
 #endif //FLASHMOE_CONTEXT_CUH

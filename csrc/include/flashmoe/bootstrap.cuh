@@ -147,9 +147,8 @@ namespace flashmoe
         return nvshmem_team_n_pes(NVSHMEM_TEAM_SHARED_INDEX) == nvshmem_n_pes() ? Topology::NVLINK_ONLY : Topology::MIXED;
     }
     __host__ __forceinline__
-    std::tuple<Context, GateContext> initialize(const MoEArgs& args, const uint& bNGate,
-        const uint* __restrict__ const& expertToEpRank, const int* __restrict__ const& epRankToGlobalRank,
-        cudaStream_t stream, const bool isCoupled = false){
+    Context initialize(const MoEArgs& args, const uint* __restrict__ const& expertToEpRank,
+        const int* __restrict__ const& epRankToGlobalRank, cudaStream_t stream){
         // fused gate + moe layer
         if (args.tokenDim % args.bK0 != 0 || args.tokenDim % args.bN1 != 0) {
             throw std::runtime_error("token dimension should be multiples of tile dimensions");
@@ -260,10 +259,6 @@ namespace flashmoe
         cudaMallocAsync(&dispatchSync, sizeof(uint) * args.numExperts, stream);
         cudaMemsetAsync(dispatchSync, 0, sizeof(uint) * args.numExperts, stream);
 
-        int* ecGuards = nullptr;
-        cudaMallocAsync(&ecGuards, sizeof(int) * args.numExperts, stream);
-        cudaMemsetAsync(ecGuards, flashmoe::STALE_AS_BYTE, sizeof(int) * args.numExperts, stream);
-
         uint* gtqHeads = nullptr;
         // ~= tiles(S)
         const size_t gtqHeadsLength = args.epWorld * args.numLocalExperts * ecTilesM;
@@ -279,28 +274,12 @@ namespace flashmoe
         static_assert(ReadySignal::observed == 0);
         cudaMemsetAsync(statusQ, 0, sizeof(uint) * processors, stream);
 
-        cuda::barrier<cuda::thread_scope_device>* db = nullptr;
-        if (isCoupled) {
-            cudaMallocAsync(&db, sizeof(cuda::barrier<cuda::thread_scope_device>), stream);
-            bI<<<1,1, 0, stream>>>(db, args.blocks);
-        }
-
-        SoftmaxStatePacked* ssp = nullptr;
-        RingTopKPayload* rtp = nullptr;
-        if (args.numExperts > bNGate) {
-            const auto tE = cute::ceil_div(args.numExperts, bNGate);
-            cudaMallocAsync(&ssp, sizeof(SoftmaxStatePacked) * args.sequenceLength * tE, stream);
-            cudaMemsetAsync(ssp, 0, sizeof(SoftmaxStatePacked) * args.sequenceLength * tE, stream);
-
-            cudaMallocAsync(&rtp, 2 * sizeof(SoftmaxStatePacked) * args.sequenceLength * tE, stream);
-            cudaMemsetAsync(rtp, 0, 2 * sizeof(SoftmaxStatePacked) * args.sequenceLength * tE, stream);
-        }
-
         CHECK_CUDA(cudaPeekAtLastError());
         expertParallelBookkeeping(expertToEpRank, epRankToGlobalRank, args.epWorld, args.myPE,
             args.numExperts, args.numLocalExperts, sHeap, signals, pel, pli, eli, lxi, stream);
+        CHECK_CUDA(cudaStreamSynchronize(stream));
 
-        const auto moeContext =  Context{
+        return Context{
             sHeap,
             signals,
             tQ,
@@ -327,15 +306,40 @@ namespace flashmoe
             args.numExperts, args.epWorld, args.epRank, args.myPE,
             true, args.topo, SignalConstants::sequenceStart
         };
-        CHECK_CUDA(cudaStreamSynchronize(stream));
-
-        const auto gContext = GateContext{ecGuards, ssp, rtp, db};
-
-        return std::make_tuple(moeContext, gContext);
     }
 
     __host__ __forceinline__
-    void finalize(const Context& ctx, const GateContext& gCtx, cudaStream_t stream) {
+    GateContext initializeGate(const uint& bNGate, const uint& numExperts, const uint& S, cudaStream_t stream) {
+        int* ecGuards = nullptr;
+        cudaMallocAsync(&ecGuards, sizeof(int) * numExperts, stream);
+        cudaMemsetAsync(ecGuards, flashmoe::STALE_AS_BYTE, sizeof(int) * numExperts, stream);
+        SoftmaxStatePacked* ssp = nullptr;
+        RingTopKPayload* rtp = nullptr;
+        if (numExperts > bNGate) {
+            const auto tE = cute::ceil_div(numExperts, bNGate);
+            cudaMallocAsync(&ssp, sizeof(SoftmaxStatePacked) * S * tE, stream);
+            cudaMemsetAsync(ssp, 0, sizeof(SoftmaxStatePacked) * S * tE, stream);
+
+            cudaMallocAsync(&rtp, 2 * sizeof(SoftmaxStatePacked) * S * tE, stream);
+            cudaMemsetAsync(rtp, 0, 2 * sizeof(SoftmaxStatePacked) * S * tE, stream);
+        }
+        return GateContext{ecGuards, ssp, rtp};
+    }
+
+    __host__ __forceinline__
+    void finalizeGate(const GateContext& gCtx, cudaStream_t stream) {
+        cudaFreeAsync(gCtx.ecGuards, stream);
+        if (gCtx.ssp != nullptr) {
+            cudaFreeAsync(gCtx.ssp, stream);
+        }
+        if (gCtx.rtp != nullptr) {
+            cudaFreeAsync(gCtx.rtp, stream);
+        }
+        CHECK_CUDA(cudaPeekAtLastError());
+        CHECK_CUDA(cudaStreamSynchronize(stream));
+    }
+    __host__ __forceinline__
+    void finalize(const Context& ctx, cudaStream_t stream) {
         if (ctx.initialized) {
             // free workspace memory
             cudaFreeAsync(ctx.tQ, stream);
@@ -352,16 +356,6 @@ namespace flashmoe
             cudaFreeAsync(ctx.gTqHeads, stream);
             cudaFreeAsync(ctx.tileSync, stream);
             cudaFreeAsync(ctx.statusQueue, stream);
-            cudaFreeAsync(gCtx.ecGuards, stream);
-            if (gCtx.ssp != nullptr) {
-                cudaFreeAsync(gCtx.ssp, stream);
-            }
-            if (gCtx.rtp != nullptr) {
-                cudaFreeAsync(gCtx.rtp, stream);
-            }
-            if (gCtx.db != nullptr) {
-                cudaFreeAsync(gCtx.db, stream);
-            }
             CHECK_CUDA(cudaStreamSynchronize(stream));
             nvshmem_free(ctx.symHeap);
             nvshmem_free(ctx.signals);

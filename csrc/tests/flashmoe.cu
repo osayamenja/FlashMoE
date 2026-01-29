@@ -48,8 +48,13 @@ void gemmMainloop(void* __restrict__ const& workspace,
   });
   auto gC = flashmoe::tile::getC<BM{}, BN{}, cublasdx::arrangement_of_v_c<BLAS>>(c, M, N,
       cute::select<0, 1>(tileCoord));
-  // rmem -> gmem
-  cublasdx::copy_fragment<cublasdx::alignment_of<BLAS>::c>(d_frag, gC, accumulator);
+  // rmem -> smem
+  auto sC = cublasdx::make_tensor(static_cast<ElementC*>(workspace), BLAS::suggest_layout_smem_c());
+  __syncthreads();
+  cublasdx::copy_fragment<cublasdx::alignment_of<BLAS>::c>(d_frag, sC, accumulator);
+  __syncthreads();
+  // smem -> gmem
+  cublasdx::copy<BLAS, cublasdx::alignment_of<BLAS>::c>(sC, gC);
 }
 
 template<typename TileGEMM, typename Activation, typename Element, typename ElementC>
@@ -151,6 +156,7 @@ void reference(const flashmoe::TPS* __restrict__ const& tokenIds,
   int* __restrict__ const& expertCounts,
   Element* __restrict__ const& ref_out,
   const uint& S, const uint& H, const uint& EC, const uint& E, const uint I, const int& topK,
+  const int& num_sms,
   cudaStream_t stream) {
   constexpr auto dtk = Config::DTK::value;
   constexpr int bM0 = cute::get<0>(typename Config::G0TS{});
@@ -174,13 +180,13 @@ void reference(const flashmoe::TPS* __restrict__ const& tokenIds,
   CHECK_CUDA(cudaFuncSetAttribute(kernel0, cudaFuncAttributeMaxDynamicSharedMemorySize, GEMM0SharedSize));
   int bps = 0;
   CHECK_CUDA(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&bps, kernel0, threads, GEMM0SharedSize));
-  const auto blocks0 = cute::min((roundEC / bM0) * (I / bN0), bps * NUM_SMS);
+  const auto blocks0 = cute::min((roundEC / bM0) * (I / bN0), bps * num_sms);
   auto kernel1 = gk<TileGEMM1, cublasdx::identity, Element, Element>;
   // set shared memory
   CHECK_CUDA(cudaFuncSetAttribute(kernel1, cudaFuncAttributeMaxDynamicSharedMemorySize, GEMM1SharedSize));
   // get blocks
   CHECK_CUDA(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&bps, kernel1, threads, GEMM1SharedSize));
-  const auto blocks1 = cute::min((roundEC / bM0) * (H / bN1), bps * NUM_SMS);
+  const auto blocks1 = cute::min((roundEC / bM0) * (H / bN1), bps * num_sms);
   std::vector<int> hCounts (E);
   cudaMemcpyAsync(hCounts.data(), expertCounts, sizeof(int) * E, cudaMemcpyDeviceToHost, stream);
   cudaStreamSynchronize(stream);
@@ -204,15 +210,6 @@ void reference(const flashmoe::TPS* __restrict__ const& tokenIds,
       combineReference<<<count, threads, 0, stream>>>(S, H, roundEC, count, topK, ref_interim1, tIds, ref_out);
     }
   }
-  /*{
-    std::vector<Element> hr(S * H);
-    cudaMemcpyAsync(hr.data(), ref_out, sizeof(Element) * S * H, cudaMemcpyDeviceToHost, stream);
-    cudaStreamSynchronize(stream);
-    const auto tr = cute::make_tensor(hr.data(), cute::make_layout(
-      cute::make_shape(S, H), cute::LayoutRight{}));
-    printf("Reference result\n");
-    print_tensor(tr);
-  }*/
 }
 
 struct Seeds {
@@ -257,50 +254,41 @@ void printMetadata(const std::vector<int>& counts, const std::vector<flashmoe::T
   print_tensor(t2);
   std::free(p);
 }
-// template<
-//   int Arch,
-//   int bM, int bN0, int bK0, int pSK0,
-//   int bN1, int bK1, int bNGate, int pSK1,
-//   bool isKG1,
-//   flashmoe::Activation act,
-//   flashmoe::GateReductionLevel grl,
-//   flashmoe::DropTokens dtk = flashmoe::DropTokens::no
-// >
-void kickstart(/*const uint S, const uint H, const uint I, const uint E, const uint k*/) {
-  // debug mode for now
-  constexpr int S = 8192;
-  constexpr int H = 2048;
-  constexpr int I = 2048;
-  constexpr int E = 32;
-  constexpr int k = 2;
+template<
+  typename Element, typename AccumType,
+  int Arch,
+  int bM, int bN0, int bK0, int pSK0,
+  int bN1, int bK1, int bNGate, int pSK1,
+  flashmoe::CombineMode cm,
+  flashmoe::Activation act,
+  flashmoe::GateReductionLevel grl,
+  flashmoe::SoftMaxOptimizationLevel sro,
+  flashmoe::DropTokens dtk = flashmoe::DropTokens::no
+>
+void kickstart(const uint& S, const uint& H, const uint& I, const uint& E, const uint& k,
+  const float& rtol, const float& atol) {
   nvtx3::scoped_range driverRange{std::string("flashMoE, S: ")
         .append(std::to_string(S)).append(", E: ")
         .append(std::to_string(E)).append(", H: ")
         .append(std::to_string(H).append(", topK: ")
         .append(std::to_string(k)))};
-  constexpr int bNGate = cute::min(32, E);
-  constexpr auto grl = E > bNGate ? flashmoe::GateReductionLevel::multiBlock :
-  flashmoe::GateReductionLevel::singleBlock;
-  constexpr auto sro = flashmoe::SoftMaxOptimizationLevel::highest;
-  constexpr auto dtk = flashmoe::DropTokens::yes;
-  constexpr auto Arch = FLASHMOE_ARCH;
-  constexpr auto act = flashmoe::Activation::relu;
-  using Element = __nv_bfloat16;
-  using AccumType = float;
-  constexpr int bM = cute::min(S, 128);
-  constexpr int bN0 = cute::min(I, 128);
-  constexpr int bN1 = cute::min(H, 128);
-  constexpr int bK0 = cute::min(H, 64);
-  constexpr int bK1 = cute::min(I, 64);
-  constexpr bool isKG1 = k > 1;
-  constexpr int pSK0 = 2;
-  constexpr int pSK1 = 2;
 
   nvshmem_init();
   const uint devId = nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE);
   CHECK_CUDA(cudaSetDevice(devId));
   cudaStream_t stream;
   CHECK_CUDA(cudaStreamCreate(&stream));
+
+  int archMajor = 0;
+  CHECK_CUDA(cudaDeviceGetAttribute(&archMajor,cudaDevAttrComputeCapabilityMajor, devId));
+  int archMinor = 0;
+  CHECK_CUDA(cudaDeviceGetAttribute(&archMinor,cudaDevAttrComputeCapabilityMinor, devId));
+  const auto actualArch = archMajor * 100 + archMinor * 10;
+  if (Arch > actualArch) {
+    throw std::invalid_argument("Invalid Arch");
+  }
+  int num_sms = 0;
+  CHECK_CUDA(cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, devId));
 
   const auto world = nvshmem_n_pes();
   const auto epRank = nvshmem_my_pe();
@@ -313,20 +301,20 @@ void kickstart(/*const uint S, const uint H, const uint I, const uint E, const u
     throw std::invalid_argument("k must be at most number of experts");
   }
   const auto numLocalExperts = E / world;
-  constexpr auto tilesN1 = H / bN1;
+  const auto tilesN1 = H / bN1;
 
   constexpr auto threadsGEMM0 = flashmoe::tile::suggest_thread_count<bM, bN0, bK0, Arch, Element, AccumType>();
   constexpr auto threadsGEMM1 = flashmoe::tile::suggest_thread_count<bM, bN1, bK1, Arch, Element, AccumType>();
-  constexpr auto threads = cute::max(threadsGEMM0, threadsGEMM1);
-  constexpr auto EC = dtk == flashmoe::DropTokens::no ? S : cute::ceil_div(S, E) * k;
-  constexpr auto roundEC = cute::ceil_div(EC, bM) * bM;
+  constexpr auto threads = cute::max(threadsGEMM0, threadsGEMM1, 64);
+  const auto EC = dtk == flashmoe::DropTokens::no ? S : cute::ceil_div(S, E) * k;
+  const auto roundEC = cute::ceil_div(EC, bM) * bM;
   constexpr auto GEMM0Sz = cutlass::round_up(sizeof(Element) * bK0 * pSK0 * (bM + bN0), flashmoe::MAX_ALIGNMENT);
   constexpr auto GEMM1Sz = cutlass::round_up(sizeof(Element) * bK1 * pSK1 * (bM + bN1), flashmoe::MAX_ALIGNMENT);
   constexpr auto GateSz = cutlass::round_up(cute::max(sizeof(Element) * bK0 * pSK0 * (bM + bNGate),
     sizeof(flashmoe::gate::SoftType) * bM * bNGate), flashmoe::MAX_ALIGNMENT);
-  constexpr auto dispatchSz = E * (sizeof(flashmoe::PEL) + sizeof(int));
+  const auto dispatchSz = E * (sizeof(flashmoe::PEL) + sizeof(int));
   const auto OSSz = flashmoe::os::getSharedSize<threads, bM>(world, numLocalExperts, E, EC, tilesN1);
-  constexpr auto taskSz = sizeof(flashmoe::Task) * tilesN1;
+  const auto taskSz = sizeof(flashmoe::Task) * tilesN1;
   constexpr auto combineSz = cutlass::round_up(sizeof(Element) * bM * bN1, flashmoe::MAX_ALIGNMENT);
   const auto kernelSz = cute::max(GEMM0Sz, GEMM1Sz, dispatchSz, OSSz, taskSz, combineSz);
   int maxSharedMemory = 0;
@@ -342,7 +330,7 @@ void kickstart(/*const uint S, const uint H, const uint I, const uint E, const u
   using GEMM0Tile = cute::Shape<cute::Int<bM>, cute::Int<bN0>, cute::Int<bK0>, cute::Int<pSK0>>;
   // [S, I] x [I, H] -> [S, H]
   using GEMM1Tile = cute::Shape<cute::Int<bM>, cute::Int<bN1>, cute::Int<bK1>, cute::Int<pSK1>>;
-  using Config = flashmoe::moe::MoEConfig<Element, Arch, threads, isKG1, dtk, GEMM0Tile, GEMM1Tile>;
+  using Config = flashmoe::moe::MoEConfig<Element, Arch, threads, cm, dtk, GEMM0Tile, GEMM1Tile>;
 
   int bps = 0;
   const auto kernelTopo = flashmoe::detectTopo();
@@ -356,16 +344,16 @@ void kickstart(/*const uint S, const uint H, const uint I, const uint E, const u
     CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kernelSz));
     CHECK_CUDA(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&bps, kernel, threads, kernelSz));
   }
-  constexpr auto processorBlocks = (S /bM) * cute::max(I / bN0, H / bN1);
-  constexpr auto dispatchBlocks = flashmoe::moe::dispatchSuperBlockSize(E) * E;
-  const uint blocks = cute::max(cute::min(cute::max(processorBlocks, dispatchBlocks) + 1, bps * NUM_SMS), 2);
+  const auto processorBlocks = (S /bM) * cute::max(I / bN0, H / bN1);
+  const auto dispatchBlocks = flashmoe::moe::dispatchSuperBlockSize(E) * E;
+  const uint blocks = cute::max(cute::min(cute::max(processorBlocks, dispatchBlocks) + 1, bps * num_sms), 2);
 
   int bps1 = 0;
   constexpr auto gateThreads = cute::max(flashmoe::tile::suggest_thread_count<bM, bNGate, bK0, Arch, Element, AccumType>(), bM);
-  auto gateKernel = flashmoe::gate::forwardKernel<GateTile, Arch, gateThreads, grl, sro,AccumType, Element, Element>;
+  auto gateKernel = flashmoe::gate::forwardKernel<GateTile, Arch, gateThreads, grl, sro, AccumType, Element, Element>;
   CHECK_CUDA(cudaFuncSetAttribute(gateKernel, cudaFuncAttributeMaxDynamicSharedMemorySize, GateSz));
   CHECK_CUDA(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&bps1, gateKernel, gateThreads, GateSz));
-  const auto gateBlocks = cute::min((S / bM) * (E / bNGate), bps1 * NUM_SMS);
+  const auto gateBlocks = cute::min((S / bM) * (E / bNGate), bps1 * num_sms);
   if (E > gateBlocks * bNGate) {
     throw std::invalid_argument("E is too big!");
   }
@@ -436,7 +424,7 @@ void kickstart(/*const uint S, const uint H, const uint I, const uint E, const u
   cudaMallocAsync(&referenceInterim1, sizeof(Element) * roundEC * H, stream);
   Element* referenceOut;
   cudaMallocAsync(&referenceOut, sizeof(Element) * S * H, stream);
-  if constexpr (k > 1) {
+  if (k > 1) {
     cudaMemsetAsync(referenceOut, 0, sizeof(Element) * S * H, stream);
   }
 
@@ -444,7 +432,8 @@ void kickstart(/*const uint S, const uint H, const uint I, const uint E, const u
   flashmoe::MoEArgs args{
     sizeof(Element), S, H, I, EC, bM, bN0, bN1, bK0, bK1, threads,
     blocks, static_cast<uint16_t>(epRank), static_cast<uint16_t>(world),
-    static_cast<uint16_t>(nvshmem_my_pe()), E, static_cast<uint16_t>(numLocalExperts), kernelTopo
+    static_cast<uint16_t>(nvshmem_my_pe()), static_cast<uint16_t>(E),
+    static_cast<uint16_t>(numLocalExperts), kernelTopo
   };
   // blocked partitioning
   // for 8 experts and 4 ranks
@@ -459,10 +448,8 @@ void kickstart(/*const uint S, const uint H, const uint I, const uint E, const u
   for (int i = 0; i < world; ++i) {
     epRankToGlobalRank[i] = i;
   }
-  const auto contexts = flashmoe::initialize(args, bNGate,
-    expertToEpRank.data(), epRankToGlobalRank.data(), stream);
-  auto moeContext = std::get<0>(contexts);
-  auto gateCtx = std::get<1>(contexts);
+  auto gateCtx = flashmoe::initializeGate(bNGate, E, S, stream);
+  auto moeContext = flashmoe::initialize(args,expertToEpRank.data(), epRankToGlobalRank.data(), stream);
   size_t expertBase = static_cast<size_t>(epRank) * numLocalExperts;
   auto* __restrict__ localExpertUpWeights = expertUpWeights + (expertBase * static_cast<size_t>(H) * I);
   auto* __restrict__ localExpertDownWeights = expertDownWeights + (expertBase * static_cast<size_t>(I) * H);
@@ -481,18 +468,10 @@ void kickstart(/*const uint S, const uint H, const uint I, const uint E, const u
     S, H, I, E, k, EC
   };
 
-  // run gate to populate data structures
+  // run gate to populate tokenIndices and expertCounts
   flashmoe::gate::forwardKernel<GateTile, Arch, gateThreads, grl, sro, AccumType>
   <<<gateBlocks, gateThreads, GateSz, stream>>>(tokens, gateWeights, gateOut,
     expertCounts, S, H, E, k, EC, moeContext.tokenIndices, gateCtx.ecGuards, gateCtx.ssp, gateCtx.rtp);
-  /*{
-    std::vector<int> counts(E);
-    cudaMemcpyAsync(counts.data(), expertCounts, sizeof(int) * E, cudaMemcpyDeviceToHost, stream);
-    const auto t0 = cute::make_tensor(counts.data(), cute::make_layout(cute::make_shape(1, E),
-      cute::LayoutRight{}));
-    CHECK_CUDA(cudaStreamSynchronize(stream));
-    print_tensor(t0);
-  }*/
   if (moeContext.topo != flashmoe::Topology::NVLINK_ONLY) {
     fprintf(stderr, "RDMA has not been tested, GPU poor :(\n");
   }
@@ -515,11 +494,9 @@ void kickstart(/*const uint S, const uint H, const uint I, const uint E, const u
   reference<Config, GEMM0Sz, GEMM1Sz, ActType, AccumType>(moeContext.tokenIndices, tokens,
     referenceInput, expertUpWeights, expertDownWeights, biasUp, biasDown,
     referenceInterim0, referenceInterim1, expertCounts, referenceOut,
-    S, H, EC, E, I, k, stream);
+    S, H, EC, E, I, k, num_sms, stream);
   CHECK_CUDA(cudaPeekAtLastError());
 
-  constexpr auto rtol = 2e-2;
-  constexpr auto atol = 2e-3;
   auto tC = matx::make_tensor<MT>(reinterpret_cast<MT*>(moeOut), {S, H});
   auto tRef = matx::make_tensor<MT>(reinterpret_cast<MT*>(referenceOut), {S, H});
   auto num_matches = matx::make_tensor<long int>({});
@@ -544,12 +521,13 @@ void kickstart(/*const uint S, const uint H, const uint I, const uint E, const u
   CHECK_CUDA(cudaEventElapsedTime(&m_ms, start, stop));
   const float m_time_ms = m_ms / static_cast<float>(runs);
   printf("EP Rank, S, H, I, E, k, EC, bM, bN0, bK0, bN1, bK1, bNGate, threads, blocks/SM, SMs,blocks, rtol, atol, error(%%), "
-         "Kernel_Time(ms)\n"
+         "Fused_DMoE_Kernel_Time(ms)\n"
          "%d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %.1e, %.1e, %f, %f\n",
-         epRank, S, H, I, E, k, EC, bM, bN0, bK0, bN1, bK1, bNGate, threads, bps, NUM_SMS, blocks, rtol, atol, ep, m_time_ms);
+         epRank, S, H, I, E, k, EC, bM, bN0, bK0, bN1, bK1, bNGate, threads, bps, num_sms, blocks, rtol, atol, ep, m_time_ms);
 
   // finalize
-  flashmoe::finalize(moeContext, gateCtx, stream);
+  flashmoe::finalizeGate(gateCtx, stream);
+  flashmoe::finalize(moeContext, stream);
   cudaFreeAsync(tokens, stream);
   cudaFreeAsync(gateWeights, stream);
   cudaFreeAsync(expertUpWeights, stream);
@@ -569,32 +547,67 @@ void kickstart(/*const uint S, const uint H, const uint I, const uint E, const u
   cudaStreamDestroy(stream);
 }
 
-//./testFlashMoE <S> <H> <I> <E> <k>
-/*__host__ __forceinline__
+__host__ __forceinline__
+uint parse_u32(const char* s, const char* name, const uint lo = 1, const uint hi = std::numeric_limits<uint>::max()) {
+  // Fast, non-allocating, rejects negatives automatically
+  std::string_view sv{s};
+  uint64_t v = 0;
+  auto [ptr, ec] = std::from_chars(sv.data(), sv.data() + sv.size(), v);
+  if (ec != std::errc{} || ptr != sv.data() + sv.size()) {
+    throw std::invalid_argument(std::string(name) + " must be an integer");
+  }
+  if (v < lo || v > hi) {
+    throw std::invalid_argument(std::string(name) + " out of range");
+  }
+  return static_cast<uint>(v);
+}
+
+__host__ __forceinline__
+float parse_f32(const char* s, const char* name) {
+  try {
+    size_t idx = 0;
+    float v = std::stof(s, &idx);
+    if (idx != std::string(s).size()) {
+      throw std::invalid_argument("trailing chars");
+    }
+    return v;
+  } catch (...) {
+    throw std::invalid_argument(std::string(name) + " must be a float");
+  }
+}
+
+//./testFlashMoE <S> <H> <I> <E> <k> <rtol> <atol>
+__host__
 void drive(const int argc, char** argv) {
-  uint S = 16;
-  uint H = 128;
-  uint I = 128;
-  uint E = 8;
+  uint S = 8192;
+  uint H = 2048;
+  uint I = 2048;
+  uint E = 32;
   uint k = 2;
-  if (argc > 1) {
-    S = std::stoi(argv[1]);
-  }
-  if (argc > 2) {
-    H = std::stoi(argv[2]);
-  }
-  if (argc > 3) {
-    I = std::stoi(argv[3]);
-  }
-  if (argc > 4) {
-    k = std::stoi(argv[4]);
-  }
+  float rtol = 2e-2;
+  float atol = 2e-3;
+  if (argc > 1) S = parse_u32(argv[1], "S", 1);
+  if (argc > 2) H = parse_u32(argv[2], "H", 1);
+  if (argc > 3) I = parse_u32(argv[3], "I", 1);
+  if (argc > 4) E = parse_u32(argv[4], "E", 1);
+  if (argc > 5) k = parse_u32(argv[5], "k", 1);
+  if (argc > 6) rtol = parse_f32(argv[6], "rtol");
+  if (argc > 7) atol = parse_f32(argv[7], "atol");
+
+  using Element = __half;
+  static_assert(cuda::std::is_same_v<Element, __half> ||
+    cuda::std::is_same_v<Element, __nv_bfloat16> ||
+    cuda::std::is_same_v<Element, float> ||
+    cuda::std::is_same_v<Element, double>);
+
+  using AccumType = cuda::std::conditional_t<cuda::std::is_same_v<Element, double>, double, float>;
   // below values are static to minimize instantiated templates.
+  // some values are 700 (Volta), 750 (Turing), 800 (Ampere), 900 (Hopper), 1000 (Blackwell), 1100 (?), 1200 (?)
+  static_assert(FLASHMOE_ARCH >= 700);
   constexpr auto arch = FLASHMOE_ARCH;
   constexpr auto dtk = flashmoe::DropTokens::yes; // or no, both work here
   constexpr auto act = flashmoe::Activation::relu;
-  using Element = __half;
-  using AccumType = cuda::std::conditional_t<cuda::std::is_same_v<Element, double>, double, float>;
+  constexpr auto sro = flashmoe::SoftMaxOptimizationLevel::highest;
   if (k > E) {
     throw std::invalid_argument("k must be <= E");
   }
@@ -603,32 +616,699 @@ void drive(const int argc, char** argv) {
   constexpr int bN1 = bN0;
   constexpr int bK0 = cuda::std::is_same_v<Element, double> ? 32 : 64;
   constexpr int bK1 = bK0;
-  if (H < bK0 || H % bK0 != 0 || H < bN1 || H % bN1 != 0) {
+  if (H <= bK0 || H % bK0 != 0 || H < bN1 || H % bN1 != 0) {
     throw std::invalid_argument("H is invalid");
   }
-  if (I < bK1 || I % bK1 != 0 || I < bN0 || I % bN0 != 0) {
+  if (I <= bK1 || I % bK1 != 0 || I < bN0 || I % bN0 != 0) {
     throw std::invalid_argument("I is invalid");
   }
-
+  constexpr auto pS = arch >= 800 ? 2 : 1;
   switch (S) {
-  case 1:
+  case 1: {
+    constexpr auto bM = 1;
+    switch (E) {
+      case 1: {
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 1, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 1, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+      break;
+      case 2: {
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 2, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 2, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+      break;
+      case 4: {
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 4, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 4, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+      break;
+      case 8: {
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 8, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 8, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+      break;
+      case 16: {
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 16, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 16, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+      break;
+      case 32: {
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+      break;
+      default: {
+        if (E % 32 != 0) {
+          throw std::invalid_argument("E must be a multiple of 32");
+        }
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::multiBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::multiBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+    }
+  }
     break;
-  case 2:
+  case 2: {
+    constexpr auto bM = 2;
+    switch (E) {
+      case 1: {
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 1, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 1, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+      break;
+      case 2: {
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 2, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 2, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+      break;
+      case 4: {
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 4, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 4, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+      break;
+      case 8: {
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 8, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 8, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+      break;
+      case 16: {
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 16, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 16, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+      break;
+      case 32: {
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+      break;
+      default: {
+        if (E % 32 != 0) {
+          throw std::invalid_argument("E must be a multiple of 32");
+        }
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::multiBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::multiBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+    }
+  }
     break;
-  case 4:
+  case 4: {
+    constexpr auto bM = 4;
+    switch (E) {
+      case 1: {
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 1, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 1, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+      break;
+      case 2: {
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 2, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 2, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+      break;
+      case 4: {
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 4, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 4, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+      break;
+      case 8: {
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 8, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 8, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+      break;
+      case 16: {
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 16, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 16, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+      break;
+      case 32: {
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+      break;
+      default: {
+        if (E % 32 != 0) {
+          throw std::invalid_argument("E must be a multiple of 32");
+        }
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::multiBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::multiBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+    }
+  }
     break;
-  case 8:
+  case 8: {
+    constexpr auto bM = 8;
+    switch (E) {
+      case 1: {
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 1, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 1, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+      break;
+      case 2: {
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 2, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 2, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+      break;
+      case 4: {
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 4, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 4, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+      break;
+      case 8: {
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 8, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 8, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+      break;
+      case 16: {
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 16, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 16, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+      break;
+      case 32: {
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+      break;
+      default: {
+        if (E % 32 != 0) {
+          throw std::invalid_argument("E must be a multiple of 32");
+        }
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::multiBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::multiBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+    }
+  }
     break;
-  case 16:
+  case 16: {
+    constexpr auto bM = 16;
+    switch (E) {
+      case 1: {
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 1, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 1, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+      break;
+      case 2: {
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 2, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 2, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+      break;
+      case 4: {
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 4, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 4, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+      break;
+      case 8: {
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 8, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 8, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+      break;
+      case 16: {
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 16, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 16, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+      break;
+      case 32: {
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+      break;
+      default: {
+        if (E % 32 != 0) {
+          throw std::invalid_argument("E must be a multiple of 32");
+        }
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::multiBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::multiBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+    }
+  }
     break;
-  case 32:
+  case 32: {
+    constexpr auto bM = 32;
+    switch (E) {
+      case 1: {
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 1, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 1, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+      break;
+      case 2: {
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 2, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 2, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+      break;
+      case 4: {
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 4, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 4, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+      break;
+      case 8: {
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 8, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 8, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+      break;
+      case 16: {
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 16, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 16, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+      break;
+      case 32: {
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+      break;
+      default: {
+        if (E % 32 != 0) {
+          throw std::invalid_argument("E must be a multiple of 32");
+        }
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::multiBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::multiBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+    }
+  }
     break;
-  case 64:
+  case 64: {
+    constexpr auto bM = 64;
+    switch (E) {
+      case 1: {
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 1, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 1, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+      break;
+      case 2: {
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 2, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 2, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+      break;
+      case 4: {
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 4, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 4, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+      break;
+      case 8: {
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 8, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 8, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+      break;
+      case 16: {
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 16, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 16, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+      break;
+      case 32: {
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+      break;
+      default: {
+        if (E % 32 != 0) {
+          throw std::invalid_argument("E must be a multiple of 32");
+        }
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::multiBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::multiBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+    }
+  }
     break;
-  default:
+  default: {
+    if (S % 128 != 0) {
+      throw std::invalid_argument("S must be a multiple of 128");
+    }
+    constexpr auto bM = 128;
+    switch (E) {
+      case 1: {
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 1, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 1, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+      break;
+      case 2: {
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 2, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 2, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+      break;
+      case 4: {
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 4, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 4, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+      break;
+      case 8: {
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 8, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 8, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+      break;
+      case 16: {
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 16, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 16, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+      break;
+      case 32: {
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+      break;
+      default: {
+        if (E % 32 != 0) {
+          throw std::invalid_argument("E must be a multiple of 32");
+        }
+        if (k > 1) {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::plural, act,
+          flashmoe::GateReductionLevel::multiBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+        else {
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::single, act,
+          flashmoe::GateReductionLevel::multiBlock, sro, dtk>(S, H, I, E, k, rtol, atol);
+        }
+      }
+    }
+  }
     break;
   }
-}*/
-int main(/*const int argc, char** argv*/) {
-  kickstart();
+}
+int main(const int argc, char** argv) {
+  drive(argc, argv);
 }
