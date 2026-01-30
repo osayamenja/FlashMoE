@@ -74,12 +74,12 @@ namespace flashmoe::processor
   }
 
   struct ProcessorArgs {
-    unsigned int* sQ = nullptr;
-    uint64_t* pDB = nullptr;
-    unsigned int* tQH = nullptr;
-    Task* tQ = nullptr;
-    Task* ptQ = nullptr;
-    unsigned int* tQS = nullptr;
+    unsigned int* const sQ = nullptr;
+    uint64_t* const pDB = nullptr;
+    unsigned int* const tQH = nullptr;
+    Task* const tQ = nullptr;
+    Task* const ptQ = nullptr;
+    unsigned int* const tQS = nullptr;
 
     ProcessorArgs() = default;
     __device__ __forceinline__

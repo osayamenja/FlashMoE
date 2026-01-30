@@ -77,15 +77,15 @@ namespace flashmoe::moe
       checkAlignment(moe_out);
     }
 
-    const cuda::std::byte* tokens; // [S, H]
-    const cuda::std::byte* gateWeights = nullptr; // [H, E]
-    const cuda::std::byte* expertUpWeights; // [num_local_experts, H, I]
-    const cuda::std::byte* biasUp; // [num_local_experts, I]
-    const cuda::std::byte* expertDownWeights; // [num_local_experts, I, H]
-    const cuda::std::byte* biasDown; // [num_local_experts, H]
-    cuda::std::byte* gateOut;
-    int* expertCounts; // [E]
-    cuda::std::byte* moeOut; //  [S, H]
+    const cuda::std::byte* const tokens; // [S, H]
+    const cuda::std::byte* const gateWeights = nullptr; // [H, E]
+    const cuda::std::byte* const expertUpWeights; // [num_local_experts, H, I]
+    const cuda::std::byte* const biasUp; // [num_local_experts, I]
+    const cuda::std::byte* const expertDownWeights; // [num_local_experts, I, H]
+    const cuda::std::byte* const biasDown; // [num_local_experts, H]
+    cuda::std::byte* const gateOut;
+    int* const expertCounts; // [E]
+    cuda::std::byte* const moeOut; //  [S, H]
     const uint S; // sequence length
     const uint H; // token hidden dimension
     const uint I; // FFN intermediate size

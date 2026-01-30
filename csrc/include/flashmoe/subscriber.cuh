@@ -68,8 +68,8 @@ namespace flashmoe::subscriber
          const int& nLx, const uint& firstStageFlagCount,
          const int& epRank_, const uint& roundEC_, const int& experts_,
          const int& ffn_i_size,
-         const uint tid_, const int& tilesN0_, const int& tilesN1_, const int& eCTilesM_,
-         const uint16_t sNo) :
+         const uint& tid_, const int& tilesN0_, const int& tilesN1_, const int& eCTilesM_,
+         const uint16_t& sNo) :
       flags(_signals),
       tQ(tq + tid_),
       GEMM0Staging(gemm0Staging),
