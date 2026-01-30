@@ -151,7 +151,7 @@ namespace flashmoe
       const auto vHo = H / RAD::Width::value;
       auto mC = cute::make_tensor(cute::make_gmem_ptr(reinterpret_cast<RAT*>(moeOutput)),
                                   cute::make_layout(cute::make_shape(S, vHo), cute::LayoutRight{}));
-      auto tC = cute::local_tile(mC, cute::make_shape(S, cute::Int<rbN>{}), tileCoord);
+      auto tC = cute::local_tile(mC, cute::make_shape(S, cute::Int<bNp>{}), tileCoord);
 
       constexpr auto totalElems = bM * rbN; // cublasdx::cosize(RSL{})
       const auto actualElems = tileSize * rbN;

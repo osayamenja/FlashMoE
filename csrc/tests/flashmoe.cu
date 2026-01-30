@@ -620,7 +620,7 @@ void drive(const int argc, char** argv) {
   static_assert(FLASHMOE_ARCH >= 700);
   constexpr auto arch = FLASHMOE_ARCH;
   constexpr auto dtk = flashmoe::DropTokens::yes; // or no, both work here
-  constexpr auto act = flashmoe::Activation::relu;
+  constexpr auto act = flashmoe::Activation::silu;
   constexpr auto sro = flashmoe::SoftMaxOptimizationLevel::highest;
   if (k > E) {
     throw std::invalid_argument("k must be <= E");
