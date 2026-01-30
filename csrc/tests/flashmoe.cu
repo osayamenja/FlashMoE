@@ -586,7 +586,7 @@ float parse_f32(const char* s, const char* name) {
   }
 }
 
-//./testFlashMoE <S> <H> <I> <E> <k> <rtol> <atol>
+//./testFlashMoE <S> <H> <I> <E> <k> <warmup> <runs> <rtol> <atol>
 __host__
 void drive(const int argc, char** argv) {
   uint S = 8192;

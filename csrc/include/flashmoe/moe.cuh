@@ -19,7 +19,7 @@
 namespace flashmoe::moe
 {
   template <
-    typename Element, // data type = {fp32, fp16, bf16}
+    typename Element, // data type = {fp32, fp16, bf16, fp64}
     int arch, //  GPU Architecture, Volta - Blackwell (700 - 1200), See cuBLASDx docs
     int _threads, // see tile::suggest_thread_count
     CombineMode cm, // plural, if k > 1; single otherwise
@@ -42,7 +42,7 @@ namespace flashmoe::moe
   };
 
   struct KernelArgs {
-    __host__
+    __host__ __forceinline__
     KernelArgs(const cuda::std::byte* tokens, const cuda::std::byte* gate_weights,
       const cuda::std::byte* expert_up_weights, const cuda::std::byte* bias_up,
       const cuda::std::byte* expert_down_weights, const cuda::std::byte* bias_down, cuda::std::byte* gate_out,

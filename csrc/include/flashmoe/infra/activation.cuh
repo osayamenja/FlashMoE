@@ -11,7 +11,8 @@ namespace flashmoe
     enum class Activation {
         identity,
         relu,
-        gelu // as many as cutlass supports
+        gelu,
+        silu // as many as cutlass supports
     };
 
     template<typename Element, Activation a = Activation::identity>
@@ -28,6 +29,11 @@ namespace flashmoe
     template<typename Element>
     struct ActivationType<Element, Activation::gelu> {
         using AT = cutlass::epilogue::thread::GELU<Element>;
+    };
+
+    template<typename Element>
+    struct ActivationType<Element, Activation::silu> {
+        using AT = cutlass::epilogue::thread::SiLu<Element>;
     };
 }
 #endif //FLASHMOE_ACTIVATION_CUH

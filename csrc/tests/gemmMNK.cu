@@ -174,8 +174,8 @@ void driver(const int& M, const int& N, const int& K, const float& rtol, const f
     cudaMallocAsync(&bias_interim, N * sizeof(AccumType), stream);
     cudaMallocAsync(&bias, N * sizeof(ElementC), stream);
 
-    using Act = cutlass::epilogue::thread::ReLU<AccumType>;
-    using ActM = cutlass::epilogue::thread::ReLU<MXE<AccumType>>;
+    using Act = cutlass::epilogue::thread::SiLu<AccumType>;
+    using ActM = cutlass::epilogue::thread::SiLu<MXE<AccumType>>;
     constexpr int threads = flashmoe::tile::suggest_thread_count<bM, bN, bK, Arch, Element, AccumType>();
     using TileGEMM = flashmoe::tile::CollectiveMainloop<
             bM, bN, bK, Arch, Element, AccumType, threads, pipeStages
