@@ -318,7 +318,7 @@ void kickstart(const uint& S, const uint& H, const uint& I, const uint& E, const
   constexpr auto threadsGEMM0 = flashmoe::tile::suggest_thread_count<bM, bN0, bK0, Arch, Element, AccumType>();
   constexpr auto threadsGEMM1 = flashmoe::tile::suggest_thread_count<bM, bN1, bK1, Arch, Element, AccumType>();
   constexpr auto threads = cute::max(threadsGEMM0, threadsGEMM1, 64);
-  const auto EC = dtk == flashmoe::DropTokens::no ? S : cute::ceil_div(S, E) * k;
+  const auto EC = dtk == flashmoe::DropTokens::no ? S : cute::min((cute::ceil_div(S, E) * k), S);
   const auto roundEC = cute::ceil_div(EC, bM) * bM;
   constexpr auto GEMM0Sz = cutlass::round_up(sizeof(Element) * bK0 * pSK0 * (bM + bN0), flashmoe::MAX_ALIGNMENT);
   constexpr auto GEMM1Sz = cutlass::round_up(sizeof(Element) * bK1 * pSK1 * (bM + bN1), flashmoe::MAX_ALIGNMENT);
