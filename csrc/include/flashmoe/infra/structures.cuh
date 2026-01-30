@@ -11,46 +11,8 @@ namespace flashmoe
         no
     };
 
-    // Expert Parallel Group details
-    struct __align__(8) EPG {
-        uint16_t epRank;
-        uint16_t expertSlots;
-        uint16_t nLx;
-        uint16_t epWorld;
-        uint epWorldM;
-
-        EPG() = default;
-        EPG(const uint16_t& _epR,
-            const uint16_t& _eS,
-            const uint16_t& _nLx,
-            const uint16_t& _epW):
-        epRank(_epR), expertSlots(_eS), nLx(_nLx), epWorld(_epW), epWorldM(_epW) {}
-
-        void dump() const {
-            printf("{\n\t"
-                   "epRank: %u,\n\t"
-                   "expertSlots: %u,\n\t"
-                   "nLx: %u,\n\t"
-                   "epWorld: %u"
-                   "\n}\n",
-                   epRank, expertSlots, nLx, epWorld);
-        }
-
-        void dump(const int& gRank) const {
-            printf("{\n\t"
-                   "gRank: %d,\n\t"
-                   "epRank: %u,\n\t"
-                   "expertSlots: %u,\n\t"
-                   "nLx: %u,\n\t"
-                   "epWorld: %u"
-                   "\n}\n",
-                   gRank,
-                   epRank, expertSlots, nLx, epWorld);
-        }
-    };
     /// Packet Encoding Lookup info, retrievable in a single memory lookup
     /// Key is global expert index
-    __device__
     struct __align__(16) PEL {
         cuda::std::byte* remoteSHeap;
         uint64_t* remoteSFlags;
@@ -82,7 +44,6 @@ namespace flashmoe
     };
 
     /// Expert lookup info: key is global expert index
-    __device__
     struct __align__(8) ELI {
         uint epRank; // host peer
         uint16_t localExpertIndex;
@@ -102,7 +63,6 @@ namespace flashmoe
     };
 
     /// Local expert lookup: key is local expert index
-    __device__
     struct __align__(4) LXI {
         uint expertIndex;
         __host__ __device__ __forceinline__
@@ -113,7 +73,6 @@ namespace flashmoe
     };
 
     /// Peer lookup info: key is ep rank
-    __device__
     struct __align__(8) PLI {
         cuda::std::byte* remoteSHeap;
         uint64_t* remoteSFlags;

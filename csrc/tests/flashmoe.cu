@@ -2,6 +2,11 @@
  * Copyright (c) 2026, Osayamen Jonathan Aimuyo.
  ******************************************************************************/
 // E2E correctness test and benchmark of fused distributed MoE kernel
+#include <charconv>
+#include <limits>
+#include <string>
+#include <string_view>
+#include <system_error>
 #include <random> // for seeds
 #include <stdexcept>
 
@@ -265,7 +270,7 @@ template<
   flashmoe::DropTokens dtk = flashmoe::DropTokens::no
 >
 void kickstart(const uint& S, const uint& H, const uint& I, const uint& E, const uint& k,
-  const int warmup, const int runs, const float& rtol, const float& atol) {
+  const uint warmup, const uint runs, const float& rtol, const float& atol) {
   nvtx3::scoped_range driverRange{std::string("flashMoE, S: ")
         .append(std::to_string(S)).append(", E: ")
         .append(std::to_string(E)).append(", H: ")
@@ -301,6 +306,14 @@ void kickstart(const uint& S, const uint& H, const uint& I, const uint& E, const
   }
   const auto numLocalExperts = E / world;
   const auto tilesN1 = H / bN1;
+  const auto tilesK0 = H / bK0;
+  const auto tilesK1 = I / bK1;
+  if (pSK0 > tilesK0) {
+    throw std::invalid_argument("pSK0 must be <= tilesK0");
+  }
+  if (pSK1 > tilesK1) {
+    throw std::invalid_argument("pSK1 must be <= tilesK1");
+  }
 
   constexpr auto threadsGEMM0 = flashmoe::tile::suggest_thread_count<bM, bN0, bK0, Arch, Element, AccumType>();
   constexpr auto threadsGEMM1 = flashmoe::tile::suggest_thread_count<bM, bN1, bK1, Arch, Element, AccumType>();
@@ -448,7 +461,7 @@ void kickstart(const uint& S, const uint& H, const uint& I, const uint& E, const
     epRankToGlobalRank[i] = i;
   }
   auto gateCtx = flashmoe::initializeGate(bNGate, E, S, stream);
-  auto moeContext = flashmoe::initialize(args,expertToEpRank.data(), epRankToGlobalRank.data(), stream);
+  auto moeContext = flashmoe::initialize(args, Arch,expertToEpRank.data(), epRankToGlobalRank.data(), stream);
   size_t expertBase = static_cast<size_t>(epRank) * numLocalExperts;
   auto* __restrict__ localExpertUpWeights = expertUpWeights + (expertBase * static_cast<size_t>(H) * I);
   auto* __restrict__ localExpertDownWeights = expertDownWeights + (expertBase * static_cast<size_t>(I) * H);
@@ -464,17 +477,14 @@ void kickstart(const uint& S, const uint& H, const uint& I, const uint& E, const
     reinterpret_cast<const cuda::std::byte*>(localBiasDown),
     reinterpret_cast<cuda::std::byte*>(gateOut),
     expertCounts, reinterpret_cast<cuda::std::byte*>(moeOut),
-    S, H, I, E, k, EC
+    S, H, I, E, k, EC, Arch
   };
 
   // run gate to populate tokenIndices and expertCounts
   flashmoe::gate::forwardKernel<GateTile, Arch, gateThreads, grl, sro, AccumType>
   <<<gateBlocks, gateThreads, GateSz, stream>>>(tokens, gateWeights, gateOut,
     expertCounts, S, H, E, k, EC, moeContext.tokenIndices, gateCtx.ecGuards, gateCtx.ssp, gateCtx.rtp);
-  if (moeContext.topo != flashmoe::Topology::NVLINK_ONLY) {
-    fprintf(stderr, "RDMA has not been tested, GPU poor :(\n");
-  }
-  auto flashMK = [&](const flashmoe::Topology topology, const int& k_runs) {
+  auto flashMK = [&](const flashmoe::Topology topology, const uint& k_runs) {
     if (topology == flashmoe::Topology::NVLINK_ONLY) {
       for (int i = 0; i < k_runs; ++i) {
         flashmoe::moe::forwardHost<Config, flashmoe::Topology::NVLINK_ONLY, act>(kArgs, moeContext, kernelSz, stream);
@@ -592,8 +602,8 @@ void drive(const int argc, char** argv) {
   if (argc > 3) I = parse_u32(argv[3], "I", 1);
   if (argc > 4) E = parse_u32(argv[4], "E", 1);
   if (argc > 5) k = parse_u32(argv[5], "k", 1);
-  if (argc > 6) k = parse_u32(argv[6], "warmup", 0);
-  if (argc > 7) k = parse_u32(argv[7], "runs", 1);
+  if (argc > 6) warmup = parse_u32(argv[6], "warmup", 0);
+  if (argc > 7) runs = parse_u32(argv[7], "runs", 1);
   if (argc > 8) rtol = parse_f32(argv[8], "rtol");
   if (argc > 9) atol = parse_f32(argv[9], "atol");
 

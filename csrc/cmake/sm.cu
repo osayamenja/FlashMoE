@@ -17,6 +17,7 @@ do {                                                         \
 #endif
 
 int main() {
+    CHECK_CUDA(cudaSetDevice(0));
     int numSMs = 0;
     CHECK_CUDA(cudaDeviceGetAttribute(&numSMs, cudaDevAttrMultiProcessorCount, 0));
     printf("%d", numSMs);

@@ -39,9 +39,4 @@ do {                                                         \
         std::quick_exit(EXIT_FAILURE);                       \
     }                                                        \
 } while (0)
-
-
-#if !defined(CHECK_LAST)
-# define CHECK_LAST() FLASHMOE_CHECK_CUDA(cudaPeekAtLastError()); FLASHMOE_CHECK_CUDA(cudaDeviceSynchronize())
-#endif
 #endif //CSRC_DEBUG_CUH

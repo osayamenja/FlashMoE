@@ -167,7 +167,6 @@ namespace flashmoe::processor
     __shared__ Task currentTask;
     __shared__ uint globalInterrupt;
     __shared__ uint enqueue;
-    // Register allocations
     TQSignal tqs{0U, 0U};
     static_assert(sizeof(TQSignal) == sizeof(uint64_t) && alignof(TQSignal) == alignof(uint64_t));
     static_assert(sizeof(SignalPayload<PacketStage::last>) == sizeof(uint64_t) &&
@@ -257,8 +256,7 @@ namespace flashmoe::processor
           const auto* bP = expertDownWeights + expertWeightSize * task.localExpertIdx();
           auto* __restrict__ cP = reinterpret_cast<Element*>(task.cData[1]);
           const auto* __restrict__ biasP = biasDown + H * task.localExpertIdx();
-          fGET<TileGEMM1, cublasdx::identity>(workspace, aP, bP, cP, biasP, task.M(), H, I,
-                                              task.tileIdx);
+          fGET<TileGEMM1, cublasdx::identity>(workspace, aP, bP, cP, biasP, task.M(), H, I, task.tileIdx);
           __syncthreads();
           if (!threadIdx.x) {
             constexpr int bM = cute::get<0>(typename TileGEMM1::TileShape{});
@@ -267,8 +265,7 @@ namespace flashmoe::processor
             if (topo == Topology::MIXED && task.isPeerRemote()) {
               // Remote; check if we need to do the transfer
               cuda::atomic_ref<uint, cuda::thread_scope_device> tileSync{*(pA.tQS + task.syncIdx)};
-              const auto doTransfer = tileSync.fetch_add(1,
-                                                         cuda::memory_order_acq_rel) + 1 == (tilesN0 + tilesN1);
+              const auto doTransfer = tileSync.fetch_add(1,cuda::memory_order_acq_rel) + 1 == (tilesN0 + tilesN1);
               if (doTransfer) {
                 // read and flip the current bit
                 const auto prevBit = producerBitMap(task.localPeerIdx(), task.localExpertIdx(), mCoord, 0);

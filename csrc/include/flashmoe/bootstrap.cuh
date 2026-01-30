@@ -4,8 +4,8 @@
 
 #ifndef FLASHMOE_BOOTSTRAP_CUH
 #define FLASHMOE_BOOTSTRAP_CUH
+#include <algorithm>
 #include <stdexcept>
-#include <tuple>
 #include <vector>
 
 #include <cuda_runtime.h>
@@ -147,7 +147,7 @@ namespace flashmoe
         return nvshmem_team_n_pes(NVSHMEM_TEAM_SHARED_INDEX) == nvshmem_n_pes() ? Topology::NVLINK_ONLY : Topology::MIXED;
     }
     __host__ __forceinline__
-    Context initialize(const MoEArgs& args, const uint* __restrict__ const& expertToEpRank,
+    Context initialize(const MoEArgs& args, const int& arch, const uint* __restrict__ const& expertToEpRank,
         const int* __restrict__ const& epRankToGlobalRank, cudaStream_t stream){
         // fused gate + moe layer
         if (args.tokenDim % args.bK0 != 0 || args.tokenDim % args.bN1 != 0) {
@@ -166,7 +166,7 @@ namespace flashmoe
             throw std::runtime_error(errmsg);
         }
         // maximum tiles that a peer will send to another peer in aggregate.
-        const auto maxPeerTaskTiles = (args.EC * args.numLocalExperts) / args.bM;
+        const auto maxPeerTaskTiles = cute::ceil_div(args.EC, args.bM) * args.numExperts;
         if (maxPeerTaskTiles > cuda::std::numeric_limits<uint16_t>::max()) {
             throw std::runtime_error("Max peer task tiles exceeds supported limit. Inform the maintainer.");
         }
@@ -197,7 +197,8 @@ namespace flashmoe
         if (sHeap == nullptr) {
             throw std::runtime_error("failed to allocate heap via NVSHMEM");
         }
-        checkAlignment(sHeap);
+        const auto supports32 = arch >= 1000;
+        checkAlignment(sHeap, supports32);
 
         Task* tQ = nullptr;
         const bool threadConditions = args.threads >= WARP_SIZE * 2;

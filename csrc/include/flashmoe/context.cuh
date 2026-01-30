@@ -10,7 +10,6 @@
 
 #include "cuda/memory"
 #include "infra/bitset.cuh"
-#include "infra/constants.cuh"
 #include "infra/packed.cuh"
 #include "infra/signal.cuh"
 #include "infra/structures.cuh"
@@ -20,9 +19,10 @@
 namespace flashmoe
 {
     __host__ __forceinline__ __device__
-    auto checkAlignment(const void* const& p) {
-        if (!cuda::is_aligned(p, MAX_ACCESS_ALIGNMENT)) {
-            printf("Pointer is not %d-byte aligned:\n", MAX_ACCESS_ALIGNMENT);
+    auto checkAlignment(const void* const& p, const bool supports32 = false) {
+        const auto alignment = supports32 ? 32 : 16;
+        if (!cuda::is_aligned(p, alignment)) {
+            printf("Pointer is not %d-byte aligned:\n", alignment);
             cuda::std::terminate();
         }
     }

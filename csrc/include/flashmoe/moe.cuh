@@ -49,7 +49,7 @@ namespace flashmoe::moe
       const cuda::std::byte* expert_up_weights, const cuda::std::byte* bias_up,
       const cuda::std::byte* expert_down_weights, const cuda::std::byte* bias_down, cuda::std::byte* gate_out,
       int* expert_counts, cuda::std::byte* moe_out,
-      const uint s, const uint h, const uint i, const uint e, const uint k, const uint ec)
+      const uint s, const uint h, const uint i, const uint e, const uint k, const uint ec, const int& arch)
       : tokens(tokens),
         gateWeights(gate_weights),
         expertUpWeights(expert_up_weights),
@@ -65,7 +65,8 @@ namespace flashmoe::moe
         E(e),
         k(k),
         EC(ec) {
-      checkAlignment(tokens);
+      const auto supports32 = arch >= 1000;
+      checkAlignment(tokens, supports32);
       checkAlignment(gate_weights);
       checkAlignment(expert_up_weights);
       checkAlignment(expert_down_weights);

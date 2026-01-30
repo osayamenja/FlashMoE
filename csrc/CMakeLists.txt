@@ -84,15 +84,6 @@ CPMAddPackage(
         "CUTLASS_NVCC_ARCHS=${ARCH_TAG}"
 )
 
-set(FMT_SYSTEM_HEADERS ON)
-CPMAddPackage(
-        NAME FMT
-        GITHUB_REPOSITORY fmtlib/fmt
-        GIT_TAG 11.1.4
-        OPTIONS
-        "FMT_SYSTEM_HEADERS=ON"
-)
-
 CPMAddPackage(
         NAME NVTX3
         GITHUB_REPOSITORY NVIDIA/NVTX
@@ -125,7 +116,7 @@ function(flash_target_test tgt)
     target_compile_options(${tgt} PRIVATE
             $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-Xfatbin -compress-all>
             $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
-            $<$<COMPILE_LANGUAGE:CUDA>:-t0;--generate-line-info> #use sm_xxa for xx >= 90
+            $<$<COMPILE_LANGUAGE:CUDA>:-t0> #use sm_xxa for xx >= 90
             $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-gencode=arch=compute_${ARCH_TAG},code=sm_${ARCH_TAG}>
     )
     set_property(TARGET ${tgt} PROPERTY CUDA_ARCHITECTURES "native")
@@ -199,8 +190,9 @@ set_target_properties(testFlashMoE PROPERTIES
         CUDA_RESOLVE_DEVICE_SYMBOLS ON
 )
 flash_target_common(testFlashMoE)
+# WAR for build failure
 set_target_properties(nvshmem::nvshmem_host PROPERTIES
-        IMPORTED_LOCATION_RELEASE "/usr/lib/x86_64-linux-gnu/nvshmem/13/libnvshmem_host.so.3"
+        IMPORTED_LOCATION_RELEASE "$ENV{NVSHMEM_LIB_HOME}/libnvshmem_host.so.3"
 )
 target_link_libraries(testFlashMoE PRIVATE nvshmem::nvshmem_host nvshmem::nvshmem_device)
 find_package(MPI REQUIRED COMPONENTS CXX)

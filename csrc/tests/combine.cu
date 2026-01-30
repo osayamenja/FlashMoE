@@ -281,6 +281,7 @@ void kickStart(const int& S, const int& E, const int& k, const float& rtol, cons
     if (sharedSize > maxSharedMemory) {
         printf("Insufficient shared memory for bM: %d, bN: %d -> %d should be <= %d\n",
             bM, bN, sharedSize, maxSharedMemory);
+        cudaStreamDestroy(stream);
         return;
     }
     Element* tokens = nullptr;
