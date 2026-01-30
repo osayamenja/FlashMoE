@@ -106,8 +106,6 @@ __global__ void generateRandUniform(
     constexpr int vF = 4;
     const size_t out_base = static_cast<size_t>(tid) * vF;
 
-    if (out_base >= n) return;
-
     RNG rng(seed, tid, global_offset);
 
     curanddx::uniform<float> dist(minv, maxv);
@@ -129,6 +127,7 @@ __global__ void generateRandUniform(
     constexpr Converter<Element, float> storeOp{};
 
     if constexpr (predicate) {
+        if (out_base + (vF - 1) >= n) return;
         // n % 4 == 0
         using VTD = VectorTypeDescriptor<Element, vF * sizeof(Element)>;
         using VT = VTD::VectorType;
@@ -142,6 +141,7 @@ __global__ void generateRandUniform(
         vo[tid] = vt;
     }
     else {
+        if (out_base >= n) return;
         out[out_base + 0] = storeOp(v.x);
         if (out_base + 1 < n) out[out_base + 1] = storeOp(v.y);
         if (out_base + 2 < n) out[out_base + 2] = storeOp(v.z);
@@ -154,8 +154,8 @@ __host__ __forceinline__
 void randUniform(Element* __restrict__ const& out,
     const  size_t& n, const size_t& seed, const float& minv,
     const float& maxv, cudaStream_t stream) {
-    constexpr int threads = 128;
-    const int blocks = static_cast<int>(cute::ceil_div(n, threads * 4));
+    constexpr uint threads = 128;
+    const auto blocks = static_cast<uint>(cute::ceil_div(n, threads * 4));
     if (n % 4 == 0) {
         generateRandUniform<Arch, true, addJitter><<<blocks, threads, 0, stream>>>(out, n, seed, minv, maxv);
     }

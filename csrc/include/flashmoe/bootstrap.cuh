@@ -209,7 +209,7 @@ namespace flashmoe
         const size_t tQLength = subscriberTQLength<WARP_SIZE>(args.epWorld, args.numLocalExperts, ecTilesM, args.numExperts, tilesN0,
             tilesN1, args.threads - WARP_SIZE);
         const size_t secondaryTQL = secondaryTQLength(args.epWorld, args.numLocalExperts, ecTilesM, tilesN1);
-        cudaMallocAsync(&tQ, sizeof(Task) * (tQLength + secondaryTQL), stream);
+        CHECK_CUDA(cudaMallocAsync(&tQ, sizeof(Task) * (tQLength + secondaryTQL), stream));
         Task* pTq = tQ + tQLength;
         if (tQLength + secondaryTQL > cuda::std::numeric_limits<uint>::max()) {
             throw std::runtime_error("Task Queue length > UINT32_MAX. Not an error: need to migrate to uint64");
@@ -225,55 +225,55 @@ namespace flashmoe
 
         cuda::std::byte* GEMM0Staging = nullptr;
         const size_t stagingLength = static_cast<size_t>(args.epWorld * args.numLocalExperts * roundEC) * args.ffnIntermediateSize;
-        cudaMallocAsync(&GEMM0Staging, stagingLength * args.elementBytes, stream);
+        CHECK_CUDA(cudaMallocAsync(&GEMM0Staging, stagingLength * args.elementBytes, stream));
 
         BitSet* consumerBitMap = nullptr;
         const auto cbmLength = nSI(args.numExperts * ecTilesM * tilesN1, subscriberCount);
-        cudaMallocAsync(&consumerBitMap, sizeof(BitSet) * cbmLength, stream);
-        cudaMemsetAsync(consumerBitMap, 0, sizeof(BitSet) * cbmLength, stream);
+        CHECK_CUDA(cudaMallocAsync(&consumerBitMap, sizeof(BitSet) * cbmLength, stream));
+        CHECK_CUDA(cudaMemsetAsync(consumerBitMap, 0, sizeof(BitSet) * cbmLength, stream));
 
         uint8_t* producerBitMap = nullptr;
         const auto pbmLength = args.epWorld * args.numLocalExperts * ecTilesM * tilesN1;
-        cudaMallocAsync(&producerBitMap, sizeof(uint8_t) * pbmLength, stream);
-        cudaMemsetAsync(producerBitMap, 0, sizeof(uint8_t) * pbmLength, stream);
+        CHECK_CUDA(cudaMallocAsync(&producerBitMap, sizeof(uint8_t) * pbmLength, stream));
+        CHECK_CUDA(cudaMemsetAsync(producerBitMap, 0, sizeof(uint8_t) * pbmLength, stream));
 
         PEL* pel = nullptr;
-        cudaMallocAsync(&pel, sizeof(PEL) * args.numExperts, stream);
+        CHECK_CUDA(cudaMallocAsync(&pel, sizeof(PEL) * args.numExperts, stream));
 
         PLI* pli = nullptr;
-        cudaMallocAsync(&pli, sizeof(PLI) * args.epWorld, stream);
+        CHECK_CUDA(cudaMallocAsync(&pli, sizeof(PLI) * args.epWorld, stream));
 
         ELI* eli = nullptr;
-        cudaMallocAsync(&eli, sizeof(ELI) * args.numExperts, stream);
+        CHECK_CUDA(cudaMallocAsync(&eli, sizeof(ELI) * args.numExperts, stream));
 
         LXI* lxi = nullptr;
-        cudaMallocAsync(&lxi, sizeof(LXI) * args.numLocalExperts, stream);
+        CHECK_CUDA(cudaMallocAsync(&lxi, sizeof(LXI) * args.numLocalExperts, stream));
 
         TPS* tps = nullptr;
-        cudaMallocAsync(&tps, sizeof(TPS) * args.numExperts * roundEC, stream);
+        CHECK_CUDA(cudaMallocAsync(&tps, sizeof(TPS) * args.numExperts * roundEC, stream));
 
         TQSignal* tqs = nullptr;
-        cudaMallocAsync(&tqs, sizeof(TQSignal) * processors, stream);
-        cudaMemsetAsync(tqs, 0, sizeof(TQSignal) * processors, stream);
+        CHECK_CUDA(cudaMallocAsync(&tqs, sizeof(TQSignal) * processors, stream));
+        CHECK_CUDA(cudaMemsetAsync(tqs, 0, sizeof(TQSignal) * processors, stream));
 
         uint* dispatchSync = nullptr;
-        cudaMallocAsync(&dispatchSync, sizeof(uint) * args.numExperts, stream);
-        cudaMemsetAsync(dispatchSync, 0, sizeof(uint) * args.numExperts, stream);
+        CHECK_CUDA(cudaMallocAsync(&dispatchSync, sizeof(uint) * args.numExperts, stream));
+        CHECK_CUDA(cudaMemsetAsync(dispatchSync, 0, sizeof(uint) * args.numExperts, stream));
 
         uint* gtqHeads = nullptr;
         // ~= tiles(S)
         const size_t gtqHeadsLength = args.epWorld * args.numLocalExperts * ecTilesM;
-        cudaMallocAsync(&gtqHeads, sizeof(uint) * gtqHeadsLength, stream);
-        cudaMemsetAsync(gtqHeads, 0, sizeof(uint) * gtqHeadsLength, stream);
+        CHECK_CUDA(cudaMallocAsync(&gtqHeads, sizeof(uint) * gtqHeadsLength, stream));
+        CHECK_CUDA(cudaMemsetAsync(gtqHeads, 0, sizeof(uint) * gtqHeadsLength, stream));
 
         uint* tileSync = nullptr;
-        cudaMallocAsync(&tileSync, sizeof(uint) * gtqHeadsLength, stream);
-        cudaMemsetAsync(tileSync, 0, sizeof(uint) * gtqHeadsLength, stream);
+        CHECK_CUDA(cudaMallocAsync(&tileSync, sizeof(uint) * gtqHeadsLength, stream));
+        CHECK_CUDA(cudaMemsetAsync(tileSync, 0, sizeof(uint) * gtqHeadsLength, stream));
 
         uint* statusQ = nullptr;
-        cudaMallocAsync(&statusQ, sizeof(uint) * processors, stream);
+        CHECK_CUDA(cudaMallocAsync(&statusQ, sizeof(uint) * processors, stream));
         static_assert(ReadySignal::observed == 0);
-        cudaMemsetAsync(statusQ, 0, sizeof(uint) * processors, stream);
+        CHECK_CUDA(cudaMemsetAsync(statusQ, 0, sizeof(uint) * processors, stream));
 
         CHECK_CUDA(cudaPeekAtLastError());
         expertParallelBookkeeping(expertToEpRank, epRankToGlobalRank, args.epWorld, args.myPE,
@@ -309,20 +309,52 @@ namespace flashmoe
         };
     }
 
+    // profiling purposes
+    __host__ __forceinline__ size_t getWorkspaceBytes(const MoEArgs& args) {
+        const auto roundEC = cute::ceil_div(args.EC, args.bM) * args.bM;
+        const auto ecTilesM = cute::ceil_div(roundEC, args.bM);
+        const auto tilesN0 = cute::ceil_div(args.ffnIntermediateSize, args.bN0);
+        const auto tilesN1 = cute::ceil_div(args.tokenDim, args.bN1);
+        const auto subscriberCount = args.threads - WARP_SIZE;
+        const auto processors = args.blocks - 1;
+
+        size_t bytes = 0;
+        bytes += sizeof(uint64_t) * (args.epWorld * args.numLocalExperts) + (args.numExperts * ecTilesM * tilesN1);
+        bytes += args.elementBytes * HEAP_STAGES * HEAP_CELLS * args.epWorld * args.numLocalExperts * roundEC * args.tokenDim;
+        const size_t tQLength = subscriberTQLength<WARP_SIZE>(args.epWorld, args.numLocalExperts, ecTilesM, args.numExperts, tilesN0,
+            tilesN1, args.threads - WARP_SIZE);
+        const size_t secondaryTQL = secondaryTQLength(args.epWorld, args.numLocalExperts, ecTilesM, tilesN1);
+        bytes += sizeof(Task) * (tQLength + secondaryTQL);
+        bytes += args.elementBytes * static_cast<size_t>(args.epWorld * args.numLocalExperts * roundEC) * args.ffnIntermediateSize;
+        bytes += sizeof(BitSet) * nSI(args.numExperts * ecTilesM * tilesN1, subscriberCount);
+        bytes += sizeof(uint8_t) * args.epWorld * args.numLocalExperts * ecTilesM * tilesN1;
+        bytes += sizeof(PEL) * args.numExperts;
+        bytes += sizeof(PLI) * args.epWorld;
+        bytes += sizeof(ELI) * args.numExperts;
+        bytes += sizeof(LXI) * args.numLocalExperts;
+        bytes += sizeof(TPS) * args.numExperts * roundEC;
+        bytes += sizeof(TQSignal) * processors;
+        bytes += sizeof(uint) * args.numExperts;
+        bytes += sizeof(uint) * args.epWorld * args.numLocalExperts * ecTilesM;
+        bytes += sizeof(uint) * args.epWorld * args.numLocalExperts * ecTilesM;
+        bytes += sizeof(uint) * processors;
+        return bytes;
+    }
+
     __host__ __forceinline__
     GateContext initializeGate(const uint& bNGate, const uint& numExperts, const uint& S, cudaStream_t stream) {
         int* ecGuards = nullptr;
-        cudaMallocAsync(&ecGuards, sizeof(int) * numExperts, stream);
-        cudaMemsetAsync(ecGuards, flashmoe::STALE_AS_BYTE, sizeof(int) * numExperts, stream);
+        CHECK_CUDA(cudaMallocAsync(&ecGuards, sizeof(int) * numExperts, stream));
+        CHECK_CUDA(cudaMemsetAsync(ecGuards, flashmoe::STALE_AS_BYTE, sizeof(int) * numExperts, stream));
         SoftmaxStatePacked* ssp = nullptr;
         RingTopKPayload* rtp = nullptr;
         if (numExperts > bNGate) {
             const auto tE = cute::ceil_div(numExperts, bNGate);
-            cudaMallocAsync(&ssp, sizeof(SoftmaxStatePacked) * S * tE, stream);
-            cudaMemsetAsync(ssp, 0, sizeof(SoftmaxStatePacked) * S * tE, stream);
+            CHECK_CUDA(cudaMallocAsync(&ssp, sizeof(SoftmaxStatePacked) * S * tE, stream));
+            CHECK_CUDA(cudaMemsetAsync(ssp, 0, sizeof(SoftmaxStatePacked) * S * tE, stream));
 
-            cudaMallocAsync(&rtp, 2 * sizeof(RingTopKPayload) * S * tE, stream);
-            cudaMemsetAsync(rtp, 0, 2 * sizeof(RingTopKPayload) * S * tE, stream);
+            CHECK_CUDA(cudaMallocAsync(&rtp, 2 * sizeof(RingTopKPayload) * S * tE, stream));
+            CHECK_CUDA(cudaMemsetAsync(rtp, 0, 2 * sizeof(RingTopKPayload) * S * tE, stream));
         }
         return GateContext{ecGuards, ssp, rtp};
     }

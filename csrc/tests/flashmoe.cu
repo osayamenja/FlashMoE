@@ -374,11 +374,11 @@ void kickstart(const uint& S, const uint& H, const uint& I, const uint& E, const
   constexpr float maxv = 1.0f;
   std::random_device rd;
   Element* tokens = nullptr;
-  cudaMallocAsync(&tokens, sizeof(Element) * S * H, stream);
+  CHECK_CUDA(cudaMallocAsync(&tokens, sizeof(Element) * S * H, stream));
   randUniform<Arch>(tokens, static_cast<size_t>(S) * H, rd(), minv, maxv, stream);
 
   Element* gateWeights = nullptr;
-  cudaMallocAsync(&gateWeights, sizeof(Element) * H * E, stream);
+  CHECK_CUDA(cudaMallocAsync(&gateWeights, sizeof(Element) * H * E, stream));
   randUniform<Arch>(gateWeights, static_cast<size_t>(H) * E, rd(), minv, maxv, stream);
 
   Seeds seeds{};
@@ -405,39 +405,39 @@ void kickstart(const uint& S, const uint& H, const uint& I, const uint& E, const
   Element* expertUpWeights = nullptr;
   Element* expertDownWeights = nullptr;
   // allocate all expert weights since we need it for single-GPU correctness checks
-  cudaMallocAsync(&expertUpWeights, sizeof(Element) * E * H * I, stream);
+  CHECK_CUDA(cudaMallocAsync(&expertUpWeights, sizeof(Element) * E * H * I, stream));
   randUniform<Arch>(expertUpWeights, static_cast<size_t>(E) * H * I, seeds.expertUp, minv, maxv, stream);
-  cudaMallocAsync(&expertDownWeights, sizeof(Element) * E * I * H, stream);
+  CHECK_CUDA(cudaMallocAsync(&expertDownWeights, sizeof(Element) * E * I * H, stream));
   randUniform<Arch>(expertDownWeights, static_cast<size_t>(E) * H * I, seeds.expertDown, minv, maxv, stream);
   using MT = MXE<Element>;
 
   Element* biasUp = nullptr;
-  cudaMallocAsync(&biasUp, sizeof(Element) * E * I, stream);
+  CHECK_CUDA(cudaMallocAsync(&biasUp, sizeof(Element) * E * I, stream));
   randUniform<Arch>(biasUp, static_cast<size_t>(E) * I, seeds.biasUp, minv, maxv, stream);
 
   Element* biasDown = nullptr;
-  cudaMallocAsync(&biasDown, sizeof(Element) * E * H, stream);
+  CHECK_CUDA(cudaMallocAsync(&biasDown, sizeof(Element) * E * H, stream));
   randUniform<Arch>(biasDown, static_cast<size_t>(E) * H, seeds.biasDown, minv, maxv, stream);
 
   Element* gateOut = nullptr;
-  cudaMallocAsync(&gateOut, sizeof(Element) * S * E, stream);
+  CHECK_CUDA(cudaMallocAsync(&gateOut, sizeof(Element) * S * E, stream));
 
   int* expertCounts = nullptr;
-  cudaMallocAsync(&expertCounts, sizeof(int) * E, stream);
+  CHECK_CUDA(cudaMallocAsync(&expertCounts, sizeof(int) * E, stream));
 
   Element* moeOut = nullptr;
-  cudaMallocAsync(&moeOut, sizeof(Element) * S * H, stream);
+  CHECK_CUDA(cudaMallocAsync(&moeOut, sizeof(Element) * S * H, stream));
 
   Element* referenceInput;
-  cudaMallocAsync(&referenceInput, sizeof(Element) * roundEC * H, stream);
+  CHECK_CUDA(cudaMallocAsync(&referenceInput, sizeof(Element) * roundEC * H, stream));
   Element* referenceInterim0;
-  cudaMallocAsync(&referenceInterim0, sizeof(Element) * roundEC * I, stream);
+  CHECK_CUDA(cudaMallocAsync(&referenceInterim0, sizeof(Element) * roundEC * I, stream));
   Element* referenceInterim1;
-  cudaMallocAsync(&referenceInterim1, sizeof(Element) * roundEC * H, stream);
+  CHECK_CUDA(cudaMallocAsync(&referenceInterim1, sizeof(Element) * roundEC * H, stream));
   Element* referenceOut;
-  cudaMallocAsync(&referenceOut, sizeof(Element) * S * H, stream);
+  CHECK_CUDA(cudaMallocAsync(&referenceOut, sizeof(Element) * S * H, stream));
   if (k > 1) {
-    cudaMemsetAsync(referenceOut, 0, sizeof(Element) * S * H, stream);
+    CHECK_CUDA(cudaMemsetAsync(referenceOut, 0, sizeof(Element) * S * H, stream));
   }
 
   // initialize
@@ -447,6 +447,7 @@ void kickstart(const uint& S, const uint& H, const uint& I, const uint& E, const
     static_cast<uint16_t>(nvshmem_my_pe()), static_cast<uint16_t>(E),
     static_cast<uint16_t>(numLocalExperts), kernelTopo
   };
+  const auto workspaceBytesMiB = flashmoe::getWorkspaceBytes(args) / static_cast<double>(1024 * 1024);
   // blocked partitioning
   // for 8 experts and 4 ranks
   // rank 0 gets [E0, E1], rank 1 gets [E2, E3] and so on
@@ -528,11 +529,11 @@ void kickstart(const uint& S, const uint& H, const uint& I, const uint& E, const
   CHECK_CUDA(cudaEventElapsedTime(&m_ms, start, stop));
   const float m_time_ms = m_ms / static_cast<float>(runs);
   printf("EP Rank, S, H, I, E, k, EC, bM, bN0, bK0, bN1, bK1, bNGate, threads, blocks/SM, SMs,blocks, rtol, atol, "
-         "error(%%), warmup, runs, "
+         "error(%%), warmup, runs, workspace_bytes(MiB), "
          "FlashMoE_Time(ms)\n"
-         "%d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %.1e, %.1e, %f, %d, %d, %f\n",
+         "%d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %.1e, %.1e, %f, %d, %d, %.4lf, %f\n",
          epRank, S, H, I, E, k, EC, bM, bN0, bK0, bN1, bK1, bNGate, threads, bps, num_sms, blocks, rtol, atol, ep,
-         warmup, runs, m_time_ms);
+         warmup, runs, workspaceBytesMiB, m_time_ms);
 
   // finalize
   flashmoe::finalizeGate(gateCtx, stream);
