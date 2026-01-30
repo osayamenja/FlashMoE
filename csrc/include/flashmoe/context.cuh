@@ -5,7 +5,6 @@
 #ifndef FLASHMOE_CONTEXT_CUH
 #define FLASHMOE_CONTEXT_CUH
 
-#include <cuda/barrier>
 #include <cute/int_tuple.hpp>
 
 #include "cuda/memory"
@@ -21,7 +20,7 @@ namespace flashmoe
     __host__ __forceinline__ __device__
     auto checkAlignment(const void* const& p, const bool supports32 = false) {
         const auto alignment = supports32 ? 32 : 16;
-        if (!cuda::is_aligned(p, alignment)) {
+        if (p == nullptr || !cuda::is_aligned(p, alignment)) {
             printf("Pointer is not %d-byte aligned:\n", alignment);
             cuda::std::terminate();
         }

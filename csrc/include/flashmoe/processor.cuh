@@ -114,7 +114,6 @@ namespace flashmoe::processor
     }
     __syncthreads();
     // shared memory to global memory
-    static_assert(sizeof(Task) % sizeof(uint4) == 0 && alignof(Task) % alignof(uint4) == 0);
     constexpr int nRows = sizeof(Task) / sizeof(uint4);
     const uint numElems = tasks * nRows;
     // project TaskQ as a [tasks, nRows] matrix of 128B elements
@@ -164,6 +163,8 @@ namespace flashmoe::processor
              const PBM& producerBitMap,
              const uint8_t& stateNumber,
              const Heap& symHeap, const ProcessorArgs& pA) {
+    static_assert(sizeof(Task) % sizeof(uint4) == 0 && alignof(Task) % alignof(uint4) == 0);
+    static_assert(cuda::std::is_trivially_copyable_v<Task>);
     __shared__ Task currentTask;
     __shared__ uint globalInterrupt;
     __shared__ uint enqueue;
@@ -178,7 +179,7 @@ namespace flashmoe::processor
     __syncthreads();
     using SQT = cuda::std::underlying_type_t<flashmoe::ReadySignal>;
     constexpr auto taskWidth = sizeof(Task) / sizeof(uint4);
-    const size_t expertWeightSize = I * H;
+    const size_t expertWeightSize = static_cast<size_t>(I) * H;
     static_assert(taskWidth > 0 && taskWidth < WARP_SIZE);
     while (!tqs.interrupt) {
       if (threadIdx.x / WARP_SIZE == 0) {

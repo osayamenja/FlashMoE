@@ -18,8 +18,6 @@
 
 namespace flashmoe::moe
 {
-  using ull_t = unsigned long long int;
-
   template <
     typename Element, // data type = {fp32, fp16, bf16}
     int arch, //  GPU Architecture, Volta - Blackwell (700 - 1200), See cuBLASDx docs
@@ -182,7 +180,7 @@ namespace flashmoe::moe
   __host__ __forceinline__
   void forwardHost(const KernelArgs& kArgs, Context& ctx, const uint& sharedSize, cudaStream_t stream) {
     if constexpr (Config::CM::value == CombineMode::plural) {
-      cudaMemsetAsync(kArgs.moeOut, 0, sizeof(typename Config::DType) * kArgs.S * kArgs.H, stream);
+      cudaMemsetAsync(kArgs.moeOut, 0, sizeof(typename Config::DType) * kArgs.S * static_cast<size_t>(kArgs.H), stream);
     }
     forward<Config, a, topo><<<ctx.blocks, Config::Threads::value, sharedSize, stream>>>(kArgs, ctx);
     ctx.stateNumber = sbs::next(ctx.stateNumber);

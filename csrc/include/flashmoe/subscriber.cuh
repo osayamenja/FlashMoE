@@ -322,7 +322,8 @@ namespace flashmoe::subscriber
         signal = __shfl_sync(0xffffffff, signal, 0);
         const auto sigPayload = cuda::std::bit_cast<SignalPayload<PacketStage::initial>>(signal);
         const bool expected = sigPayload.stateNumber == currentStateNumber;
-        pending -= expected ? 1 : 0;
+        const bool ahead = sbs::ahead(sigPayload.stateNumber, currentStateNumber);
+        pending -= (expected || ahead)? 1 : 0;
         if (expected && sigPayload.routedTokens > 0) {
           const auto myLocalExIdx = flagIdx % args.nLx;
           const auto lXI = args.lX[myLocalExIdx];
@@ -525,7 +526,7 @@ namespace flashmoe::subscriber
       constexpr int wSet = 16;
       constexpr int bSw = sizeof(uint) * 8U;
       static_assert(wSet == 16 || wSet == 32);
-      const int stageTrips = stageLength / wSet;
+      const uint stageTrips = stageLength / wSet;
       constexpr Decoder<subscriberCount, PacketStage::last, PeerConnectivity::p2p> lPd{};
       const auto nRows = args.ecTilesM * args.E;
       for (int i = 0; i < stageTrips; ++i) {

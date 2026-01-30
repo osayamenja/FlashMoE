@@ -552,6 +552,7 @@ void kickstart(const uint& S, const uint& H, const uint& I, const uint& E, const
   cudaFreeAsync(referenceOut, stream);
   CHECK_CUDA(cudaPeekAtLastError());
   CHECK_CUDA(cudaStreamSynchronize(stream));
+  cudaEventDestroy(start);cudaEventDestroy(stop);
   nvshmem_finalize();
   cudaStreamDestroy(stream);
 }

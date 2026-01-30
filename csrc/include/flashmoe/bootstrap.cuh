@@ -201,7 +201,7 @@ namespace flashmoe
         checkAlignment(sHeap, supports32);
 
         Task* tQ = nullptr;
-        const bool threadConditions = args.threads >= WARP_SIZE * 2;
+        const bool threadConditions = args.threads >= WARP_SIZE * 2 && args.threads % WARP_SIZE == 0;
         if (!threadConditions) {
             throw std::runtime_error("threads not supported");
         }
@@ -321,8 +321,8 @@ namespace flashmoe
             cudaMallocAsync(&ssp, sizeof(SoftmaxStatePacked) * S * tE, stream);
             cudaMemsetAsync(ssp, 0, sizeof(SoftmaxStatePacked) * S * tE, stream);
 
-            cudaMallocAsync(&rtp, 2 * sizeof(SoftmaxStatePacked) * S * tE, stream);
-            cudaMemsetAsync(rtp, 0, 2 * sizeof(SoftmaxStatePacked) * S * tE, stream);
+            cudaMallocAsync(&rtp, 2 * sizeof(RingTopKPayload) * S * tE, stream);
+            cudaMemsetAsync(rtp, 0, 2 * sizeof(RingTopKPayload) * S * tE, stream);
         }
         return GateContext{ecGuards, ssp, rtp};
     }

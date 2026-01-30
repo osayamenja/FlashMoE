@@ -4,6 +4,7 @@
 
 #ifndef FLASHMOE_STRUCTURES_CUH
 #define FLASHMOE_STRUCTURES_CUH
+#include <cuda/std/cstddef>
 namespace flashmoe
 {
     enum class DropTokens {
