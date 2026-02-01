@@ -24,8 +24,8 @@ namespace flashmoe::moe
     int _threads, // see tile::suggest_thread_count
     CombineMode cm, // plural, if k > 1; single otherwise
     DropTokens _dTk, // yes or no,
-    typename GEMM0Tile, // cute::Shape<M,N,K,pipeStages>
-    typename GEMM1Tile // cute::Shape<M,N,K,pipeStages>
+    typename GEMM0Tile, // cute::Shape<bM,bN,bK,pipeStages>
+    typename GEMM1Tile // cute::Shape<bM,bN,bK,pipeStages>
   >
   struct MoEConfig {
     static_assert(cute::is_tuple_v<GEMM0Tile> && cute::rank_v<GEMM0Tile> == 4);
@@ -43,18 +43,16 @@ namespace flashmoe::moe
 
   struct KernelArgs {
     __host__ __forceinline__
-    KernelArgs(const cuda::std::byte* tokens, const cuda::std::byte* gate_weights,
+    KernelArgs(const cuda::std::byte* tokens,
       const cuda::std::byte* expert_up_weights, const cuda::std::byte* bias_up,
-      const cuda::std::byte* expert_down_weights, const cuda::std::byte* bias_down, cuda::std::byte* gate_out,
+      const cuda::std::byte* expert_down_weights, const cuda::std::byte* bias_down,
       int* expert_counts, cuda::std::byte* moe_out,
       const uint s, const uint h, const uint i, const uint e, const uint k, const uint ec, const int& arch)
       : tokens(tokens),
-        gateWeights(gate_weights),
         expertUpWeights(expert_up_weights),
         biasUp(bias_up),
         expertDownWeights(expert_down_weights),
         biasDown(bias_down),
-        gateOut(gate_out),
         expertCounts(expert_counts),
         moeOut(moe_out),
         S(s),
@@ -65,23 +63,19 @@ namespace flashmoe::moe
         EC(ec) {
       const auto supports32 = arch >= 1000;
       checkAlignment(tokens, supports32);
-      checkAlignment(gate_weights);
       checkAlignment(expert_up_weights);
       checkAlignment(expert_down_weights);
       checkAlignment(bias_up);
       checkAlignment(bias_down);
-      checkAlignment(gate_out);
       checkAlignment(expert_counts);
       checkAlignment(moe_out);
     }
 
     const cuda::std::byte* const tokens; // [S, H]
-    const cuda::std::byte* const gateWeights = nullptr; // [H, E]
     const cuda::std::byte* const expertUpWeights; // [num_local_experts, H, I]
     const cuda::std::byte* const biasUp; // [num_local_experts, I]
     const cuda::std::byte* const expertDownWeights; // [num_local_experts, I, H]
     const cuda::std::byte* const biasDown; // [num_local_experts, H]
-    cuda::std::byte* const gateOut;
     int* const expertCounts; // [E]
     cuda::std::byte* const moeOut; //  [S, H]
     const uint S; // sequence length
@@ -101,8 +95,8 @@ namespace flashmoe::moe
     Activation a,
     Topology topo
   >
-  __global__ __launch_bounds__(Config::Threads::value, 1) void forward(const __grid_constant__ KernelArgs kArgs,
-    const __grid_constant__ Context ctx) {
+  __launch_bounds__(Config::Threads::value, 1)
+  __global__  void forward(const __grid_constant__ KernelArgs kArgs, const __grid_constant__ Context ctx) {
     using DataType = Config::DType;
     extern __shared__ __align__(MAX_ALIGNMENT) cuda::std::byte flashWorkspace[];
     // unpack pointers

@@ -84,14 +84,12 @@ namespace flashmoe
       const auto vsC = cute::make_tensor(cute::make_smem_ptr(static_cast<const VT*>(workspace)),
                                          VSL{});
       // vector copy results to gmem and call it a day
-      #pragma unroll
       for (int i = 0; i < elemsPerThread; ++i) {
         const auto idx = threadIdx.x + i * threads;
         const auto rowIdx = idx / vbN;
         cache[i] = stIds[rowIdx].tokenIdx;
       }
       if (tileSize == bM) {
-        #pragma unroll
         for (int i = 0; i < elemsPerThread; ++i) {
           const auto idx = threadIdx.x + i * threads;
           const auto rowIdx = idx / vbN;
@@ -102,7 +100,6 @@ namespace flashmoe
         }
       }
       else {
-        #pragma unroll
         for (int i = 0; i < elemsPerThread; ++i) {
           const auto idx = threadIdx.x + i * threads;
           const auto rowIdx = idx / vbN;
@@ -170,7 +167,6 @@ namespace flashmoe
             constexpr Converter<RAT, float2> storeOp{};
             // fp16x2 or bf16x2
             const auto scale2 = float2{indexAndScale.probability, indexAndScale.probability};
-            #pragma unroll
             for (int j = 0; j < packWidth; ++j) {
               // convert to float2 -> multiply -> convert back
               tokenValue[j] = storeOp(float2Mul(loadOp(tokenValue[j]), scale2));
@@ -179,7 +175,6 @@ namespace flashmoe
           else {
             constexpr Converter<float, RAT> loadOp{};
             constexpr Converter<RAT, float> storeOp{};
-            #pragma unroll
             for (int j = 0; j < packWidth; ++j) {
               // convert to float -> multiply -> convert back
               tokenValue[j] = storeOp(loadOp(tokenValue[j]) * indexAndScale.probability);
@@ -208,7 +203,6 @@ namespace flashmoe
               constexpr Converter<RAT, float2> storeOp{};
               // fp16x2 or bf16x2
               const auto scale2 = float2{indexAndScale.probability, indexAndScale.probability};
-              #pragma unroll
               for (int j = 0; j < packWidth; ++j) {
                 // convert to float2 -> multiply -> convert back
                 tokenValue[j] = storeOp(float2Mul(loadOp(tokenValue[j]), scale2));
@@ -217,7 +211,6 @@ namespace flashmoe
             else {
               constexpr Converter<float, RAT> loadOp{};
               constexpr Converter<RAT, float> storeOp{};
-              #pragma unroll
               for (int j = 0; j < packWidth; ++j) {
                 // convert to float -> multiply -> convert back
                 tokenValue[j] = storeOp(loadOp(tokenValue[j]) * indexAndScale.probability);
@@ -244,7 +237,6 @@ namespace flashmoe
               constexpr Converter<RAT, float2> storeOp{};
               // fp16x2 or bf16x2
               const auto scale2 = float2{indexAndScale.probability, indexAndScale.probability};
-              #pragma unroll
               for (int j = 0; j < packWidth; ++j) {
                 // convert to float2 -> multiply -> convert back
                 tokenValue[j] = storeOp(float2Mul(loadOp(tokenValue[j]), scale2));
@@ -253,7 +245,6 @@ namespace flashmoe
             else {
               constexpr Converter<float, RAT> loadOp{};
               constexpr Converter<RAT, float> storeOp{};
-              #pragma unroll
               for (int j = 0; j < packWidth; ++j) {
                 // convert to float -> multiply -> convert back
                 tokenValue[j] = storeOp(loadOp(tokenValue[j]) * indexAndScale.probability);

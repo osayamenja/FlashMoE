@@ -471,12 +471,10 @@ void kickstart(const uint& S, const uint& H, const uint& I, const uint& E, const
 
   const flashmoe::moe::KernelArgs kArgs{
     reinterpret_cast<const cuda::std::byte*>(tokens),
-    reinterpret_cast<const cuda::std::byte*>(gateWeights),
     reinterpret_cast<const cuda::std::byte*>(localExpertUpWeights),
     reinterpret_cast<const cuda::std::byte*>(localBiasUp),
     reinterpret_cast<const cuda::std::byte*>(localExpertDownWeights),
     reinterpret_cast<const cuda::std::byte*>(localBiasDown),
-    reinterpret_cast<cuda::std::byte*>(gateOut),
     expertCounts, reinterpret_cast<cuda::std::byte*>(moeOut),
     S, H, I, E, k, EC, Arch
   };
