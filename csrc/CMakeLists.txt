@@ -133,6 +133,7 @@ function(flash_target_test tgt)
     )
 endfunction()
 function(flash_target_common tgt)
+    set_property(TARGET ${tgt} PROPERTY CUDA_ARCHITECTURES "native")
     target_link_libraries(${tgt} PRIVATE CUDA::cudart CUDA::cuda_driver CUDA::nvtx3 atomic)
     if(CCCL_ADDED)
         target_link_libraries(${tgt} PRIVATE CCCL::CCCL)
@@ -144,13 +145,43 @@ function(flash_target_common tgt)
         target_link_libraries(${tgt} PRIVATE matx::matx)
     endif()
     target_link_libraries(${tgt} PRIVATE mathdx::cublasdx mathdx::curanddx)
-
     target_compile_options(${tgt} PRIVATE
             $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-Xfatbin -compress-all>
             $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
             $<$<COMPILE_LANGUAGE:CUDA>:-t0>
     )
-
+    # Debug/Release opts
+    target_compile_options(${tgt} PRIVATE
+            $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CXX>>:-O0;-g>
+            $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CXX>>:-O3>
+            $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:-O3>
+            $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:-Xptxas -v>
+            $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:SHELL:-gencode=arch=compute_${ARCH_TAG},code=sm_${ARCH_TAG}>
+    )
+    target_compile_definitions(${tgt} PRIVATE
+            FLASHMOE_ARCH=${GPU_ARCH}
+            NUM_SMS=${CUDA_NUM_SMS}
+            FLASHMOE_NVTX=1
+    )
+endfunction()
+function(flash_target_lto tgt)
+    set_property(TARGET ${tgt} PROPERTY CUDA_ARCHITECTURES "native")
+    target_link_libraries(${tgt} PRIVATE CUDA::cudart CUDA::cuda_driver CUDA::nvtx3 atomic)
+    if(CCCL_ADDED)
+        target_link_libraries(${tgt} PRIVATE CCCL::CCCL)
+    endif()
+    if(CUTLASS_ADDED)
+        target_include_directories(${tgt} SYSTEM PRIVATE "${CUTLASS_SOURCE_DIR}/include")
+    endif()
+    if(MATX_ADDED)
+        target_link_libraries(${tgt} PRIVATE matx::matx)
+    endif()
+    target_link_libraries(${tgt} PRIVATE mathdx::cublasdx mathdx::curanddx)
+    target_compile_options(${tgt} PRIVATE
+            $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-Xfatbin -compress-all>
+            $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
+            $<$<COMPILE_LANGUAGE:CUDA>:-t0>
+    )
     # Debug/Release opts
     target_compile_options(${tgt} PRIVATE
             $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CXX>>:-O0;-g>
@@ -158,20 +189,16 @@ function(flash_target_common tgt)
             $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:-O3>
             $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:-Xptxas -v>
             $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:SHELL:-gencode=arch=compute_${ARCH_TAG},code=lto_${ARCH_TAG}>
-            $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CUDA>>:SHELL:-gencode=arch=compute_${ARCH_TAG},code=sm_${ARCH_TAG}>
     )
-
     target_link_options(${tgt} PRIVATE
             $<$<CONFIG:Release>:$<DEVICE_LINK:-Xptxas -v>>
     )
-
     target_compile_definitions(${tgt} PRIVATE
             FLASHMOE_ARCH=${GPU_ARCH}
             NUM_SMS=${CUDA_NUM_SMS}
             FLASHMOE_NVTX=1
     )
 endfunction()
-
 add_executable(testFlashMoE
         tests/flashmoe.cu
 )
@@ -179,7 +206,7 @@ set_target_properties(testFlashMoE PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
         CUDA_RESOLVE_DEVICE_SYMBOLS ON
 )
-flash_target_common(testFlashMoE)
+flash_target_lto(testFlashMoE)
 # WAR for build failure
 set_target_properties(nvshmem::nvshmem_host PROPERTIES
         IMPORTED_LOCATION_RELEASE "$ENV{NVSHMEM_LIB_HOME}/libnvshmem_host.so.3"
