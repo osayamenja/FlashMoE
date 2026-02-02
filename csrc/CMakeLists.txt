@@ -98,6 +98,10 @@ CPMAddPackage(
         GITHUB_REPOSITORY NVIDIA/MatX
         GIT_TAG v0.9.4
 )
+if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
+    message(FATAL_ERROR "Set -DCMAKE_BUILD_TYPE=Release (or Debug).")
+endif()
+
 ## NVSHMEM
 find_package(NVSHMEM REQUIRED)
 # cuBLASDx
@@ -122,60 +126,46 @@ function(flash_target_test tgt)
     set_property(TARGET ${tgt} PROPERTY CUDA_ARCHITECTURES "native")
     target_compile_options(${tgt} PRIVATE
             $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CXX>>:-O0;-g>
-            $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CUDA>>:-O0;-g;-G;--expt-relaxed-constexpr;--generate-line-info;-Xptxas=-v>
+            $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CUDA>>:-O0;-g;-G;--expt-relaxed-constexpr;-Xptxas=-v>
             $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CXX>>:-O3>
-            $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:--expt-relaxed-constexpr;--generate-line-info;-Xptxas=-v>
+            $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:-Xptxas -v>
+            $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:--expt-relaxed-constexpr;-Xptxas=-v>
     )
 endfunction()
 function(flash_target_common tgt)
-    target_link_libraries(${tgt} PRIVATE CUDA::cudart CUDA::cuda_driver CUDA::nvtx3)
-    target_link_libraries(${tgt} PRIVATE atomic)
+    target_link_libraries(${tgt} PRIVATE CUDA::cudart CUDA::cuda_driver CUDA::nvtx3 atomic)
     if(CCCL_ADDED)
         target_link_libraries(${tgt} PRIVATE CCCL::CCCL)
     endif()
     if(CUTLASS_ADDED)
         target_include_directories(${tgt} SYSTEM PRIVATE "${CUTLASS_SOURCE_DIR}/include")
-    endif ()
-    if(NVTX3_ADDED)
-        target_link_libraries(${tgt} PRIVATE nvtx3-cpp)
-        string(FIND "$ENV{CMAKE_PREFIX_PATH}" "nvtx3" INDEX)
-        if(INDEX EQUAL -1)
-            # append nvtx3 to prefix path to remove libtorch error
-            set(ENV{CMAKE_PREFIX_PATH} "$ENV{CMAKE_PREFIX_PATH}:${NVTX3_SOURCE_DIR}")
-        endif()
-    endif ()
+    endif()
     if(MATX_ADDED)
         target_link_libraries(${tgt} PRIVATE matx::matx)
-    endif ()
+    endif()
     target_link_libraries(${tgt} PRIVATE mathdx::cublasdx mathdx::curanddx)
+
     target_compile_options(${tgt} PRIVATE
             $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-Xfatbin -compress-all>
             $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
-            $<$<COMPILE_LANGUAGE:CUDA>:-t0;--generate-line-info>
-            $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-gencode=arch=compute_${ARCH_TAG},code=sm_${ARCH_TAG}>
+            $<$<COMPILE_LANGUAGE:CUDA>:-t0>
     )
-    # Debug vs Release flags
+
+    # Debug/Release opts
     target_compile_options(${tgt} PRIVATE
             $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CXX>>:-O0;-g>
             $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CXX>>:-O3>
-            $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:-Xptxas -v;--expt-relaxed-constexpr>
+            $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:-O3>
+            $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:-Xptxas -v>
+            $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:SHELL:-gencode=arch=compute_${ARCH_TAG},code=lto_${ARCH_TAG}>
+            $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CUDA>>:SHELL:-gencode=arch=compute_${ARCH_TAG},code=sm_${ARCH_TAG}>
     )
 
-    target_compile_options(${tgt} PRIVATE
-            $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Debug>>:-lineinfo -Xcompiler=-rdynamic>
+    target_link_options(${tgt} PRIVATE
+            $<$<CONFIG:Release>:$<DEVICE_LINK:-Xptxas -v>>
     )
-    
-    if("${tgt}" STREQUAL "testFlashMoE")
-        target_compile_options(${tgt} PRIVATE
-                $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:SHELL:-gencode=arch=compute_${ARCH_TAG},code=lto_${ARCH_TAG}>
-        )
-    else()
-        target_compile_options(${tgt} PRIVATE
-                $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:SHELL:-gencode=arch=compute_${ARCH_TAG},code=sm_${ARCH_TAG}>
-        )
-    endif()
-    target_compile_definitions(${tgt}
-            PRIVATE
+
+    target_compile_definitions(${tgt} PRIVATE
             FLASHMOE_ARCH=${GPU_ARCH}
             NUM_SMS=${CUDA_NUM_SMS}
             FLASHMOE_NVTX=1

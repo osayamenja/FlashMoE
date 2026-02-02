@@ -18,13 +18,17 @@
 
 #include "common.cuh"
 
-template<typename TileGEMM, typename Activation, typename ElementC, typename Element>
+template<typename TileGEMM, typename Activation, flashmoe::MLPMatmulType mt, typename ElementC, typename Element>
 __device__ __forceinline__
-void gemmMainloop(void* __restrict__ const& workspace,
+void gemmMainloop(cuda::std::byte* __restrict__ const& workspace,
     const Element* __restrict__ const& a,
     const Element* __restrict__ const& b,
+    const Element* __restrict__ const& bV,
     ElementC* __restrict__ const& c,
     const ElementC* __restrict__ const& bias,
+    const ElementC* __restrict__ const& biasV,
+    const typename TileGEMM::AccumType& swishAlpha,
+    const typename TileGEMM::AccumType& swishBeta,
     const int& M, const int& N, const int& K, const int& tileIdx) {
   using BLAS = TileGEMM::BLAS;
   auto accumulator = BLAS::suggest_accumulator();
@@ -47,13 +51,44 @@ void gemmMainloop(void* __restrict__ const& workspace,
   constexpr flashmoe::Converter<ElementC, AccumType> storeConv{};
   const auto c_frag = accumulator.get_results();
   constexpr int accum_size = cublasdx::size(c_frag);
-  cute::for_each(cute::make_int_sequence<accum_size>{}, [&c_frag, &d_frag](auto i) {
+  if constexpr (mt == flashmoe::MLPMatmulType::gated) {
+    __syncthreads();
+    auto* __restrict__ gateCache = workspace + cutlass::round_up(cute::max(TileGEMM::SharedSizeC::value,
+        TileGEMM::SharedSizeAB::value), TileGEMM::GeneralAlignment::value);
+    cute::for_each(cute::make_int_sequence<accum_size>{}, [&](auto i) {
+      const auto g = (c_frag(i) + loadConv(d_frag(i))) * swishBeta;
+      d_frag(i) = storeConv(swishAlpha * act(g));
+    });
+    // rmem -> smem, cache gate results
+    // holding in registers otherwise would blow up pressure
+    auto sGate = cublasdx::make_tensor(reinterpret_cast<ElementC*>(gateCache), BLAS::suggest_layout_smem_c());
+    cublasdx::copy_fragment<cublasdx::alignment_of<BLAS>::c>(d_frag, sGate, accumulator);
+    // now, compute v tile
+    tileMainloop(workspace, a, bV, accumulator, M, N, K, tileCoord);
+    auto cv_frag = accumulator.get_results();
+    const auto gV = flashmoe::tile::getBias<BM{}, BN{}>(biasV, M, N, cute::select<0, 1>(tileCoord));
+    cublasdx::copy_fragment<cublasdx::alignment_of<BLAS>::c>(gV, d_frag, accumulator);
+    cute::for_each(cute::make_int_sequence<accum_size>{}, [&](auto i) {
+      // x = (a @ bV) + biasV
+      cv_frag(i) = cv_frag(i) + loadConv(d_frag(i));
+    });
+    // smem -> rmem, load g
+    __syncthreads();
+    cublasdx::copy_fragment<cublasdx::alignment_of<BLAS>::c>(sGate, d_frag, accumulator);
+    cute::for_each(cute::make_int_sequence<accum_size>{}, [&](auto i) {
+      // y = x * (act(a @ b))
+      d_frag(i) = storeConv(cv_frag(i) * loadConv(d_frag(i)));
+    });
+  }
+  else {
+    cute::for_each(cute::make_int_sequence<accum_size>{}, [&c_frag, &d_frag](auto i) {
       d_frag(i) = storeConv(act(c_frag(i) + loadConv(d_frag(i))));
-  });
+    });
+  }
   auto gC = flashmoe::tile::getC<BM{}, BN{}, cublasdx::arrangement_of_v_c<BLAS>>(c, M, N,
       cute::select<0, 1>(tileCoord));
   // rmem -> smem
-  auto sC = cublasdx::make_tensor(static_cast<ElementC*>(workspace), BLAS::suggest_layout_smem_c());
+  auto sC = cublasdx::make_tensor(reinterpret_cast<ElementC*>(workspace), BLAS::suggest_layout_smem_c());
   __syncthreads();
   cublasdx::copy_fragment<cublasdx::alignment_of<BLAS>::c>(d_frag, sC, accumulator);
   __syncthreads();
@@ -61,19 +96,23 @@ void gemmMainloop(void* __restrict__ const& workspace,
   cublasdx::copy<BLAS, cublasdx::alignment_of<BLAS>::c>(sC, gC);
 }
 
-template<typename TileGEMM, typename Activation, typename Element, typename ElementC>
+template<typename TileGEMM, typename Activation, flashmoe::MLPMatmulType mt, typename Element, typename ElementC>
 requires(cublasdx::is_blas_execution_v<typename TileGEMM::BLAS>)
 __launch_bounds__(TileGEMM::BLAS::max_threads_per_block, 1)
 __global__ void gk(const Element* __restrict__ a, const Element* __restrict__ b,
-    ElementC* __restrict__ c, const ElementC* __restrict__ bias,
-    const __grid_constant__ int M, const __grid_constant__ int N, const int __grid_constant__ K) {
+  const Element* __restrict__ bV, ElementC* __restrict__ c, const ElementC* __restrict__ bias,
+  const ElementC* __restrict__ biasV, const __grid_constant__ typename TileGEMM::AccumType swishAlpha,
+  const __grid_constant__ typename TileGEMM::AccumType swishBeta,
+  const __grid_constant__ int M, const __grid_constant__ int N,
+  const int __grid_constant__ K) {
   using BLAS = TileGEMM::BLAS;
   constexpr int bM = cublasdx::size_of<BLAS>::m;
   constexpr int bN = cublasdx::size_of<BLAS>::n;
   const int nTiles = (M / bM) * (N / bN);
   extern __shared__ __align__(TileGEMM::GeneralAlignment::value) cuda::std::byte gemmWorkspace[];
   for (int tileIdx = blockIdx.x; tileIdx < nTiles; tileIdx += gridDim.x) {
-    gemmMainloop<TileGEMM, Activation>(gemmWorkspace, a, b, c, bias, M, N, K, tileIdx);
+    gemmMainloop<TileGEMM, Activation, mt>(gemmWorkspace, a, b, bV, c, bias, biasV, swishAlpha, swishBeta,
+      M, N, K, tileIdx);
   }
 }
 
@@ -144,7 +183,7 @@ __global__ void combineReference( const __grid_constant__ int S,
 }
 // single GPU E2E MoE
 template<
-  typename Config, int GEMM0SharedSize, int GEMM1SharedSize,
+  typename Config, flashmoe::MLPMatmulType mt, int GEMM0SharedSize, int GEMM1SharedSize,
   typename Activation, typename AccumType, typename Element
 >
 __host__ __forceinline__
@@ -152,13 +191,16 @@ void reference(const flashmoe::TPS* __restrict__ const& tokenIds,
   Element* __restrict__ const& tokens,
   Element* __restrict__ const& ref_input,
   Element* __restrict__ const& expertUp, // [E, H, I]
+  Element* __restrict__ const& expertUpV, // [E, H, I]
   Element* __restrict__ const& expertDown, // [E, I, H]
   Element* __restrict__ const& biasUp, // [E, I]
+  Element* __restrict__ const& biasUpV,
   Element* __restrict__ const& biasDown, // [E, H]
   Element* __restrict__ const& ref_interim0,
   Element* __restrict__ const& ref_interim1,
   int* __restrict__ const& expertCounts,
   Element* __restrict__ const& ref_out,
+  const AccumType& swishAlpha, const AccumType& swishBeta,
   const uint& S, const uint& H, const uint& EC, const uint& E, const uint I, const int& topK,
   const int& num_sms,
   cudaStream_t stream) {
@@ -179,13 +221,13 @@ void reference(const flashmoe::TPS* __restrict__ const& tokenIds,
   using TileGEMM0 = flashmoe::tile::CollectiveMainloop<bM0, bN0, bK0, arch, Element, AccumType, threads, pS0>;
   using TileGEMM1 = flashmoe::tile::CollectiveMainloop<bM1, bN1, bK1, arch, Element, AccumType, threads, pS1>;
 
-  auto kernel0 = gk<TileGEMM0, Activation, Element, Element>;
+  auto kernel0 = gk<TileGEMM0, Activation, mt, Element, Element>;
   // set shared memory
   CHECK_CUDA(cudaFuncSetAttribute(kernel0, cudaFuncAttributeMaxDynamicSharedMemorySize, GEMM0SharedSize));
   int bps = 0;
   CHECK_CUDA(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&bps, kernel0, threads, GEMM0SharedSize));
   const auto blocks0 = cute::min((roundEC / bM0) * (I / bN0), bps * num_sms);
-  auto kernel1 = gk<TileGEMM1, cublasdx::identity, Element, Element>;
+  auto kernel1 = gk<TileGEMM1, cublasdx::identity, flashmoe::MLPMatmulType::vanilla, Element, Element>;
   // set shared memory
   CHECK_CUDA(cudaFuncSetAttribute(kernel1, cudaFuncAttributeMaxDynamicSharedMemorySize, GEMM1SharedSize));
   // get blocks
@@ -194,6 +236,9 @@ void reference(const flashmoe::TPS* __restrict__ const& tokenIds,
   std::vector<int> hCounts (E);
   cudaMemcpyAsync(hCounts.data(), expertCounts, sizeof(int) * E, cudaMemcpyDeviceToHost, stream);
   cudaStreamSynchronize(stream);
+  constexpr auto nonAlpha = static_cast<AccumType>(1.f);
+  constexpr auto nonBeta = static_cast<AccumType>(1.f);
+  Element* nonV = nullptr;
   for (int i = 0; i < E; ++i) {
     const auto count = dtk == flashmoe::DropTokens::no ? hCounts[i] : cute::min(hCounts[i], EC);
     if (count > 0) {
@@ -202,14 +247,19 @@ void reference(const flashmoe::TPS* __restrict__ const& tokenIds,
       gatherTokens<<<count, threads, 0, stream>>>(tIds, tokens, ref_input, roundEC, count, S, H);
       // now do GEMM0 + bias + act
       auto* __restrict__ expertU = expertUp + i * (static_cast<size_t>(H) * I);
+      auto* __restrict__ expertUV = (mt == flashmoe::MLPMatmulType::gated ?
+        expertUpV + i * (static_cast<size_t>(H) * I) : nullptr);
       auto* __restrict__ biasU = biasUp + i * I;
-      gk<TileGEMM0, Activation><<<blocks0, threads, GEMM0SharedSize, stream>>>
-      (ref_input, expertU, ref_interim0, biasU, roundEC, I, H);
+      auto* __restrict__ biasUV = (mt == flashmoe::MLPMatmulType::gated ? biasUpV + i * I : nullptr);
+      gk<TileGEMM0, Activation, Config::MT::value><<<blocks0, threads, GEMM0SharedSize, stream>>>
+      (ref_input, expertU, expertUV, ref_interim0, biasU, biasUV, swishAlpha, swishBeta,
+        roundEC, I, H);
       // do GEMM 1 + bias
       auto* __restrict__ expertD = expertDown + i * (static_cast<size_t>(H) * I);
       auto* __restrict__ biasD = biasDown + i * H;
-      gk<TileGEMM1, cublasdx::identity><<<blocks1, threads, GEMM1SharedSize, stream>>>
-      (ref_interim0, expertD, ref_interim1, biasD, roundEC, H, I);
+      gk<TileGEMM1, cublasdx::identity, flashmoe::MLPMatmulType::vanilla><<<blocks1, threads, GEMM1SharedSize, stream>>>
+      (ref_interim0, expertD, nonV, ref_interim1, biasD, nonV,
+        nonAlpha, nonBeta, roundEC, H, I);
       // do combine
       combineReference<<<count, threads, 0, stream>>>(S, H, roundEC, count, topK, ref_interim1, tIds, ref_out);
     }
@@ -219,20 +269,11 @@ void reference(const flashmoe::TPS* __restrict__ const& tokenIds,
 struct Seeds {
   using SeedType = uint64_t;
   SeedType expertUp;
+  SeedType expertUpV;
   SeedType expertDown;
   SeedType biasUp;
+  SeedType biasUpV;
   SeedType biasDown;
-  __host__ __forceinline__
-  void dump(const int& rank) const {
-    printf("{\n\t"
-                   "expertUp: %lu,\n\t"
-                   "rank: %u, \n\t"
-                   "expertDown: %lu,\n\t"
-                   "biasUp: %lu,\n\t"
-                   "biasDown: %lu"
-                   "\n}\n",
-                   expertUp, rank, expertDown, biasUp, biasDown);
-  }
 };
 
 __host__ __forceinline__
@@ -267,7 +308,7 @@ template<
   flashmoe::Activation act,
   flashmoe::GateReductionLevel grl,
   flashmoe::SoftMaxOptimizationLevel sro,
-  flashmoe::moe::MLPType mt,
+  flashmoe::MLPMatmulType mt,
   flashmoe::DropTokens dtk = flashmoe::DropTokens::no
 >
 void kickstart(const uint& S, const uint& H, const uint& I, const uint& E, const uint& k,
@@ -321,8 +362,11 @@ void kickstart(const uint& S, const uint& H, const uint& I, const uint& E, const
   constexpr auto threads = cute::max(threadsGEMM0, threadsGEMM1, 64);
   const auto EC = dtk == flashmoe::DropTokens::no ? S : cute::min((cute::ceil_div(S, E) * k), S);
   const auto roundEC = cute::ceil_div(EC, bM) * bM;
-  constexpr auto GEMM0Sz = cutlass::round_up(sizeof(Element) * bK0 * pSK0 * (bM + bN0), flashmoe::MAX_ALIGNMENT);
-  constexpr auto GEMM1Sz = cutlass::round_up(sizeof(Element) * bK1 * pSK1 * (bM + bN1), flashmoe::MAX_ALIGNMENT);
+  constexpr auto GEMM0Sz = cutlass::round_up(cute::max(sizeof(Element) * bK0 * pSK0 * (bM + bN0),
+    sizeof(Element) * bM * bN0) + (mt == flashmoe::MLPMatmulType::gated ? sizeof(Element) * bM * bN0 : 0),
+    flashmoe::MAX_ALIGNMENT);
+  constexpr auto GEMM1Sz = cutlass::round_up(cute::max(sizeof(Element) * bK1 * pSK1 * (bM + bN1),
+    sizeof(Element) * bM * bN1), flashmoe::MAX_ALIGNMENT);
   constexpr auto GateSz = cutlass::round_up(cute::max(sizeof(Element) * bK0 * pSK0 * (bM + bNGate),
     sizeof(flashmoe::gate::SoftType) * bM * bNGate), flashmoe::MAX_ALIGNMENT);
   const auto dispatchSz = E * (sizeof(flashmoe::PEL) + sizeof(int));
@@ -385,8 +429,10 @@ void kickstart(const uint& S, const uint& H, const uint& I, const uint& E, const
   Seeds seeds{};
   if (epRank == 0) {
     seeds.expertUp = rd();
+    seeds.expertUpV = rd();
     seeds.expertDown = rd();
     seeds.biasUp = rd();
+    seeds.biasUpV = rd();
     seeds.biasDown = rd();
   }
   if (world > 1) {
@@ -404,17 +450,27 @@ void kickstart(const uint& S, const uint& H, const uint& I, const uint& E, const
   }
 
   Element* expertUpWeights = nullptr;
+  Element* expertUpV = nullptr;
   Element* expertDownWeights = nullptr;
   // allocate all expert weights since we need it for single-GPU correctness checks
   CHECK_CUDA(cudaMallocAsync(&expertUpWeights, sizeof(Element) * E * H * I, stream));
   randUniform<Arch>(expertUpWeights, static_cast<size_t>(E) * H * I, seeds.expertUp, minv, maxv, stream);
+  if (mt == flashmoe::MLPMatmulType::gated) {
+    CHECK_CUDA(cudaMallocAsync(&expertUpV, sizeof(Element) * E * H * I, stream));
+    randUniform<Arch>(expertUpV, static_cast<size_t>(E) * H * I, seeds.expertUpV, minv, maxv, stream);
+  }
   CHECK_CUDA(cudaMallocAsync(&expertDownWeights, sizeof(Element) * E * I * H, stream));
   randUniform<Arch>(expertDownWeights, static_cast<size_t>(E) * H * I, seeds.expertDown, minv, maxv, stream);
   using MT = MXE<Element>;
 
   Element* biasUp = nullptr;
+  Element* biasUpV = nullptr;
   CHECK_CUDA(cudaMallocAsync(&biasUp, sizeof(Element) * E * I, stream));
   randUniform<Arch>(biasUp, static_cast<size_t>(E) * I, seeds.biasUp, minv, maxv, stream);
+  if (mt == flashmoe::MLPMatmulType::gated) {
+    CHECK_CUDA(cudaMallocAsync(&biasUpV, sizeof(Element) * E * I, stream));
+    randUniform<Arch>(biasUp, static_cast<size_t>(E) * I, seeds.biasUpV, minv, maxv, stream);
+  }
 
   Element* biasDown = nullptr;
   CHECK_CUDA(cudaMallocAsync(&biasDown, sizeof(Element) * E * H, stream));
@@ -440,6 +496,8 @@ void kickstart(const uint& S, const uint& H, const uint& I, const uint& E, const
   if (k > 1) {
     CHECK_CUDA(cudaMemsetAsync(referenceOut, 0, sizeof(Element) * S * H, stream));
   }
+  const auto swishAlpha = static_cast<AccumType>(random_float(minv, maxv));
+  const auto swishBeta = static_cast<AccumType>(random_float(minv, maxv));
 
   // initialize
   flashmoe::MoEArgs args{
@@ -466,18 +524,24 @@ void kickstart(const uint& S, const uint& H, const uint& I, const uint& E, const
   auto moeContext = flashmoe::initialize(args, Arch,expertToEpRank.data(), epRankToGlobalRank.data(), stream);
   size_t expertBase = static_cast<size_t>(epRank) * numLocalExperts;
   auto* __restrict__ localExpertUpWeights = expertUpWeights + (expertBase * static_cast<size_t>(H) * I);
+  auto* __restrict__ localExpertUpVWeights = mt == flashmoe::MLPMatmulType::gated ?
+    expertUpV + (expertBase * static_cast<size_t>(H) * I) : nullptr;
   auto* __restrict__ localExpertDownWeights = expertDownWeights + (expertBase * static_cast<size_t>(I) * H);
   auto* __restrict__ localBiasUp = biasUp + (expertBase * I);
+  auto* __restrict__ localBiasUpV = mt == flashmoe::MLPMatmulType::gated ? biasUpV + (expertBase * I) : nullptr;
   auto* __restrict__ localBiasDown = biasDown + (expertBase * H);
 
+  constexpr auto isGated = mt == flashmoe::MLPMatmulType::gated;
   const flashmoe::moe::KernelArgs kArgs{
     reinterpret_cast<const cuda::std::byte*>(tokens),
     reinterpret_cast<const cuda::std::byte*>(localExpertUpWeights),
+    reinterpret_cast<const cuda::std::byte*>(localExpertUpVWeights),
     reinterpret_cast<const cuda::std::byte*>(localBiasUp),
+    reinterpret_cast<const cuda::std::byte*>(localBiasUpV),
     reinterpret_cast<const cuda::std::byte*>(localExpertDownWeights),
     reinterpret_cast<const cuda::std::byte*>(localBiasDown),
     expertCounts, reinterpret_cast<cuda::std::byte*>(moeOut),
-    S, H, I, E, k, EC, Arch
+    S, H, I, E, k, EC, Arch, mt, isGated ? swishAlpha : 1.f, isGated ? swishBeta : 1.f
   };
 
   // run gate to populate tokenIndices and expertCounts
@@ -500,10 +564,10 @@ void kickstart(const uint& S, const uint& H, const uint& I, const uint& E, const
   CHECK_CUDA(cudaPeekAtLastError());
   // check correctness
   using ActType = flashmoe::ActivationType<AccumType, act>::AT;
-  reference<Config, GEMM0Sz, GEMM1Sz, ActType, AccumType>(moeContext.tokenIndices, tokens,
-    referenceInput, expertUpWeights, expertDownWeights, biasUp, biasDown,
+  reference<Config, mt, GEMM0Sz, GEMM1Sz, ActType, AccumType>(moeContext.tokenIndices, tokens,
+    referenceInput, expertUpWeights, expertUpV, expertDownWeights, biasUp, biasUpV, biasDown,
     referenceInterim0, referenceInterim1, expertCounts, referenceOut,
-    S, H, EC, E, I, k, num_sms, stream);
+    swishAlpha, swishBeta, S, H, EC, E, I, k, num_sms, stream);
   CHECK_CUDA(cudaPeekAtLastError());
 
   auto tC = matx::make_tensor<MT>(reinterpret_cast<MT*>(moeOut), {S, H});
@@ -540,6 +604,10 @@ void kickstart(const uint& S, const uint& H, const uint& I, const uint& E, const
   cudaFreeAsync(tokens, stream);
   cudaFreeAsync(gateWeights, stream);
   cudaFreeAsync(expertUpWeights, stream);
+  if constexpr (mt == flashmoe::MLPMatmulType::gated) {
+    cudaFreeAsync(expertUpV, stream);
+    cudaFreeAsync(biasUpV, stream);
+  }
   cudaFreeAsync(expertDownWeights, stream);
   cudaFreeAsync(biasUp, stream);
   cudaFreeAsync(biasDown, stream);
@@ -622,14 +690,14 @@ void drive(const int argc, char** argv) {
   constexpr auto dtk = flashmoe::DropTokens::yes; // or no, both work here
   constexpr auto act = flashmoe::Activation::silu;
   constexpr auto sro = flashmoe::SoftMaxOptimizationLevel::highest;
-  constexpr auto mt = flashmoe::moe::MLPType::vanilla;
+  constexpr auto mt = flashmoe::MLPMatmulType::gated;
   if (k > E) {
     throw std::invalid_argument("k must be <= E");
   }
   // to minimize instantiated templates
   constexpr int bN0 = sizeof(Element) == 2 ? 128 : 64;
   constexpr int bN1 = bN0;
-  constexpr int bK0 = 32;
+  constexpr int bK0 = !cuda::std::is_same_v<Element, double> && mt == flashmoe::MLPMatmulType::vanilla ? 64 : 32;
   constexpr int bK1 = bK0;
   if (H <= bK0 || H % bK0 != 0 || H < bN1 || H % bN1 != 0) {
     throw std::invalid_argument("H is invalid");

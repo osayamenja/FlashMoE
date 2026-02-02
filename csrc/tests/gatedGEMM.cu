@@ -34,6 +34,7 @@ void gemmMainloop(cuda::std::byte* __restrict__ const& workspace,
     // compute gate Tile
     constexpr TileGEMM tileMainloop{};
     tileMainloop(workspace, a, b, accumulator, M, N, K, tileCoord);
+    __syncthreads();
     // gmem -> rmem: load bias
     const auto gD = flashmoe::tile::getBias<BM{}, BN{}>(bias, M, N, cute::select<0, 1>(tileCoord));
     auto d_frag = cublasdx::make_fragment_like<ElementC>(accumulator.get_results());
@@ -53,26 +54,27 @@ void gemmMainloop(cuda::std::byte* __restrict__ const& workspace,
         d_frag(i) = storeConv(swishAlpha * act(g));
     }
     // rmem -> smem, cache gate results
+    // holding in registers otherwise would blow up pressure
     auto sGate = cublasdx::make_tensor(reinterpret_cast<ElementC*>(gateCache), BLAS::suggest_layout_smem_c());
     cublasdx::copy_fragment<cublasdx::alignment_of<BLAS>::c>(d_frag, sGate, accumulator);
-
     // now, compute v tile
-    __syncthreads();
     tileMainloop(workspace, a, bV, accumulator, M, N, K, tileCoord);
     auto cv_frag = accumulator.get_results();
     const auto gV = flashmoe::tile::getBias<BM{}, BN{}>(biasV, M, N, cute::select<0, 1>(tileCoord));
     cublasdx::copy_fragment<cublasdx::alignment_of<BLAS>::c>(gV, d_frag, accumulator);
     #pragma unroll
     for (int i = 0; i < accum_size; ++i) {
+        // x = (a @ bV) + biasV
         cv_frag(i) = cv_frag(i) + loadConv(d_frag(i));
     }
     // smem -> rmem, load g
+    __syncthreads();
     cublasdx::copy_fragment<cublasdx::alignment_of<BLAS>::c>(sGate, d_frag, accumulator);
     #pragma unroll
     for (int i = 0; i < accum_size; ++i) {
+        // y = x * (act(a @ b))
         d_frag(i) = storeConv(cv_frag(i) * loadConv(d_frag(i)));
     }
-
     auto gC = flashmoe::tile::getC<BM{}, BN{}, cublasdx::arrangement_of_v_c<BLAS>>(c, M, N,
         cute::select<0, 1>(tileCoord));
     // rmem -> smem

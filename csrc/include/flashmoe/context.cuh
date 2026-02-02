@@ -21,7 +21,7 @@ namespace flashmoe
     auto checkAlignment(const void* const& p, const bool supports32 = false) {
         const auto alignment = supports32 ? 32 : 16;
         if (p == nullptr || !cuda::is_aligned(p, alignment)) {
-            printf("Pointer is not %d-byte aligned:\n", alignment);
+            printf("Pointer is not %d-byte aligned\n", alignment);
             cuda::std::terminate();
         }
     }
