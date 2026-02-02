@@ -5,6 +5,8 @@
 #ifndef FLASHMOE_COMMON_CUH
 #define FLASHMOE_COMMON_CUH
 
+#include <random>
+
 #include <cublasdx.hpp>
 #include <curanddx.hpp>
 #include <matx.h>
@@ -162,8 +164,16 @@ void randUniform(Element* __restrict__ const& out,
     else {
         generateRandUniform<Arch, false, addJitter><<<blocks, threads, 0, stream>>>(out, n, seed, minv, maxv);
     }
-
 }
+
+__host__ __forceinline__
+float random_float(const float& min, const float& max) {
+    static std::random_device rd;      // entropy source
+    static std::mt19937 gen(rd());      // Mersenne Twister RNG
+    std::uniform_real_distribution<float> dist(min, max);
+    return dist(gen);
+}
+
 template<typename Element>
 using MXE = cuda::std::conditional_t<cuda::std::is_same_v<Element, __half>, matx::matxFp16,
         cuda::std::conditional_t<cuda::std::is_same_v<Element, __nv_bfloat16>, matx::matxBf16,

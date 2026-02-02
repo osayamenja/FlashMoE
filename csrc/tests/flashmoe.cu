@@ -267,6 +267,7 @@ template<
   flashmoe::Activation act,
   flashmoe::GateReductionLevel grl,
   flashmoe::SoftMaxOptimizationLevel sro,
+  flashmoe::moe::MLPType mt,
   flashmoe::DropTokens dtk = flashmoe::DropTokens::no
 >
 void kickstart(const uint& S, const uint& H, const uint& I, const uint& E, const uint& k,
@@ -342,7 +343,7 @@ void kickstart(const uint& S, const uint& H, const uint& I, const uint& E, const
   using GEMM0Tile = cute::Shape<cute::Int<bM>, cute::Int<bN0>, cute::Int<bK0>, cute::Int<pSK0>>;
   // [S, I] x [I, H] -> [S, H]
   using GEMM1Tile = cute::Shape<cute::Int<bM>, cute::Int<bN1>, cute::Int<bK1>, cute::Int<pSK1>>;
-  using Config = flashmoe::moe::MoEConfig<Element, Arch, threads, cm, dtk, GEMM0Tile, GEMM1Tile>;
+  using Config = flashmoe::moe::MoEConfig<Element, Arch, threads, cm, dtk, mt, GEMM0Tile, GEMM1Tile>;
 
   int bps = 0;
   const auto kernelTopo = flashmoe::detectTopo();
@@ -621,13 +622,14 @@ void drive(const int argc, char** argv) {
   constexpr auto dtk = flashmoe::DropTokens::yes; // or no, both work here
   constexpr auto act = flashmoe::Activation::silu;
   constexpr auto sro = flashmoe::SoftMaxOptimizationLevel::highest;
+  constexpr auto mt = flashmoe::moe::MLPType::vanilla;
   if (k > E) {
     throw std::invalid_argument("k must be <= E");
   }
   // to minimize instantiated templates
   constexpr int bN0 = sizeof(Element) == 2 ? 128 : 64;
   constexpr int bN1 = bN0;
-  constexpr int bK0 = cuda::std::is_same_v<Element, double> ? 32 : 64;
+  constexpr int bK0 = 32;
   constexpr int bK1 = bK0;
   if (H <= bK0 || H % bK0 != 0 || H < bN1 || H % bN1 != 0) {
     throw std::invalid_argument("H is invalid");
@@ -643,66 +645,66 @@ void drive(const int argc, char** argv) {
       case 1: {
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 1, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 1, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
       break;
       case 2: {
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 2, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 2, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
       break;
       case 4: {
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 4, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 4, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
       break;
       case 8: {
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 8, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 8, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
       break;
       case 16: {
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 16, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 16, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
       break;
       case 32: {
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
       break;
@@ -712,11 +714,11 @@ void drive(const int argc, char** argv) {
         }
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::multiBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::multiBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::multiBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::multiBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
     }
@@ -728,66 +730,66 @@ void drive(const int argc, char** argv) {
       case 1: {
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 1, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 1, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
       break;
       case 2: {
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 2, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 2, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
       break;
       case 4: {
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 4, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 4, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
       break;
       case 8: {
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 8, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 8, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
       break;
       case 16: {
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 16, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 16, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
       break;
       case 32: {
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
       break;
@@ -797,11 +799,11 @@ void drive(const int argc, char** argv) {
         }
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::multiBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::multiBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::multiBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::multiBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
     }
@@ -813,66 +815,66 @@ void drive(const int argc, char** argv) {
       case 1: {
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 1, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 1, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
       break;
       case 2: {
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 2, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 2, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
       break;
       case 4: {
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 4, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 4, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
       break;
       case 8: {
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 8, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 8, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
       break;
       case 16: {
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 16, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 16, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
       break;
       case 32: {
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
       break;
@@ -882,11 +884,11 @@ void drive(const int argc, char** argv) {
         }
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::multiBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::multiBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::multiBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::multiBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
     }
@@ -898,66 +900,66 @@ void drive(const int argc, char** argv) {
       case 1: {
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 1, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 1, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
       break;
       case 2: {
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 2, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 2, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
       break;
       case 4: {
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 4, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 4, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
       break;
       case 8: {
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 8, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 8, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
       break;
       case 16: {
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 16, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 16, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
       break;
       case 32: {
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
       break;
@@ -967,11 +969,11 @@ void drive(const int argc, char** argv) {
         }
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::multiBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::multiBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::multiBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::multiBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
     }
@@ -983,66 +985,66 @@ void drive(const int argc, char** argv) {
       case 1: {
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 1, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 1, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
       break;
       case 2: {
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 2, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 2, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
       break;
       case 4: {
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 4, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 4, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
       break;
       case 8: {
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 8, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 8, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
       break;
       case 16: {
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 16, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 16, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
       break;
       case 32: {
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
       break;
@@ -1052,11 +1054,11 @@ void drive(const int argc, char** argv) {
         }
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::multiBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::multiBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::multiBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::multiBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
     }
@@ -1068,66 +1070,66 @@ void drive(const int argc, char** argv) {
       case 1: {
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 1, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 1, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
       break;
       case 2: {
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 2, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 2, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
       break;
       case 4: {
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 4, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 4, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
       break;
       case 8: {
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 8, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 8, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
       break;
       case 16: {
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 16, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 16, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
       break;
       case 32: {
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
       break;
@@ -1137,11 +1139,11 @@ void drive(const int argc, char** argv) {
         }
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::multiBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::multiBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::multiBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::multiBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
     }
@@ -1153,66 +1155,66 @@ void drive(const int argc, char** argv) {
       case 1: {
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 1, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 1, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
       break;
       case 2: {
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 2, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 2, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
       break;
       case 4: {
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 4, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 4, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
       break;
       case 8: {
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 8, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 8, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
       break;
       case 16: {
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 16, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 16, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
       break;
       case 32: {
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
       break;
@@ -1222,11 +1224,11 @@ void drive(const int argc, char** argv) {
         }
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::multiBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::multiBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::multiBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::multiBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
     }
@@ -1241,66 +1243,66 @@ void drive(const int argc, char** argv) {
       case 1: {
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 1, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 1, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
       break;
       case 2: {
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 2, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 2, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
       break;
       case 4: {
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 4, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 4, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
       break;
       case 8: {
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 8, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 8, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
       break;
       case 16: {
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 16, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 16, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
       break;
       case 32: {
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::singleBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
       break;
@@ -1310,11 +1312,11 @@ void drive(const int argc, char** argv) {
         }
         if (k > 1) {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::plural, act,
-          flashmoe::GateReductionLevel::multiBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::multiBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
         else {
           kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::single, act,
-          flashmoe::GateReductionLevel::multiBlock, sro, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
+          flashmoe::GateReductionLevel::multiBlock, sro, mt, dtk>(S, H, I, E, k, warmup, runs, rtol, atol);
         }
       }
     }

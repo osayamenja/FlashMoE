@@ -227,3 +227,8 @@ add_executable(gemmMNK
         tests/gemmMNK.cu
 )
 flash_target_common(gemmMNK)
+
+add_executable(testGatedGEMM
+        tests/gatedGEMM.cu
+)
+flash_target_common(testGatedGEMM)
