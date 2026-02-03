@@ -226,33 +226,29 @@ namespace flashmoe::tile
     using TranslatedElement = cuda::std::conditional_t<
       tfc == TF32Compute::yes && cuda::std::is_same_v<Element, float>, cublasdx::tfloat32_t, Element>;
     using BLAS = cuda::std::conditional_t<cuda::std::is_same_v<TranslatedElement, Element>,
-                                          decltype(
-                                            cublasdx::Size<bM, bN, bK>() +
-                                            cublasdx::Precision<Element, Element, MMA_C>() +
-                                            cublasdx::Type<cublasdx::type::real>() +
-                                            cublasdx::Function<cublasdx::function::MM>() +
-                                            cublasdx::Arrangement<ar, br, cr>() +
-                                            cublasdx::Block() +
-                                            cublasdx::Alignment<aAlignment, bAlignment, cAlignment>() +
-                                            cublasdx::BlockDim<threads>() +
-                                            cublasdx::StaticBlockDim() +
-                                            cublasdx::EnableInputStreaming() +
-                                            cublasdx::SM<Arch, Arch >= 900
-                                                                 ? cublasdx::sm_modifier::arch_specific
-                                                                 : cublasdx::sm_modifier::generic>()),
-                                          decltype(
-                                            cublasdx::Size<bM, bN, bK>() +
-                                            cublasdx::Precision<TranslatedElement, TranslatedElement, MMA_C>() +
-                                            cublasdx::Type<cublasdx::type::real>() +
-                                            cublasdx::Function<cublasdx::function::MM>() +
-                                            cublasdx::Arrangement<ar, br, cr>() +
-                                            cublasdx::Block() +
-                                            cublasdx::Alignment<aAlignment, bAlignment, cAlignment>() +
-                                            cublasdx::BlockDim<threads>() +
-                                            cublasdx::StaticBlockDim() +
-                                            cublasdx::SM<Arch, Arch >= 900
-                                                                 ? cublasdx::sm_modifier::arch_specific
-                                                                 : cublasdx::sm_modifier::generic>())>;
+      decltype(
+        cublasdx::Size<bM, bN, bK>() +
+        cublasdx::Precision<Element, Element, MMA_C>() +
+        cublasdx::Type<cublasdx::type::real>() +
+        cublasdx::Function<cublasdx::function::MM>() +
+        cublasdx::Arrangement<ar, br, cr>() +
+        cublasdx::Block() +
+        cublasdx::Alignment<aAlignment, bAlignment, cAlignment>() +
+        cublasdx::BlockDim<threads>() +
+        cublasdx::StaticBlockDim() +
+        cublasdx::EnableInputStreaming() +
+        cublasdx::SM<Arch, Arch >= 900 ? cublasdx::sm_modifier::arch_specific : cublasdx::sm_modifier::generic>()),
+      decltype(
+        cublasdx::Size<bM, bN, bK>() +
+        cublasdx::Precision<TranslatedElement, TranslatedElement, MMA_C>() +
+        cublasdx::Type<cublasdx::type::real>() +
+        cublasdx::Function<cublasdx::function::MM>() +
+        cublasdx::Arrangement<ar, br, cr>() +
+        cublasdx::Block() +
+        cublasdx::Alignment<aAlignment, bAlignment, cAlignment>() +
+        cublasdx::BlockDim<threads>() +
+        cublasdx::StaticBlockDim() +
+        cublasdx::SM<Arch, Arch >= 900 ? cublasdx::sm_modifier::arch_specific : cublasdx::sm_modifier::generic>())>;
     using TileArch = cute::Int<Arch>;
     using Threads = cute::Int<threads>;
     using TileShape = cute::Shape<cute::Int<bM>, cute::Int<bN>, cute::Int<bK>>;
