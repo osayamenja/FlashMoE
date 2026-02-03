@@ -123,7 +123,6 @@ function(flash_target_test tgt)
             $<$<COMPILE_LANGUAGE:CUDA>:-t0> #use sm_xxa for xx >= 90
             $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-gencode=arch=compute_${ARCH_TAG},code=sm_${ARCH_TAG}>
     )
-    set_property(TARGET ${tgt} PROPERTY CUDA_ARCHITECTURES "native")
     target_compile_options(${tgt} PRIVATE
             $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CXX>>:-O0;-g>
             $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CUDA>>:-O0;-g;-G;--expt-relaxed-constexpr;-Xptxas=-v>
@@ -133,7 +132,6 @@ function(flash_target_test tgt)
     )
 endfunction()
 function(flash_target_common tgt)
-    set_property(TARGET ${tgt} PROPERTY CUDA_ARCHITECTURES "native")
     target_link_libraries(${tgt} PRIVATE CUDA::cudart CUDA::cuda_driver CUDA::nvtx3 atomic)
     if(CCCL_ADDED)
         target_link_libraries(${tgt} PRIVATE CCCL::CCCL)
@@ -165,7 +163,6 @@ function(flash_target_common tgt)
     )
 endfunction()
 function(flash_target_lto tgt)
-    set_property(TARGET ${tgt} PROPERTY CUDA_ARCHITECTURES "native")
     target_link_libraries(${tgt} PRIVATE CUDA::cudart CUDA::cuda_driver CUDA::nvtx3 atomic)
     if(CCCL_ADDED)
         target_link_libraries(${tgt} PRIVATE CCCL::CCCL)
@@ -181,6 +178,7 @@ function(flash_target_lto tgt)
             $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-Xfatbin -compress-all>
             $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
             $<$<COMPILE_LANGUAGE:CUDA>:-t0>
+            $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-gencode=arch=compute_${ARCH_TAG},code=sm_${ARCH_TAG}>
     )
     # Debug/Release opts
     target_compile_options(${tgt} PRIVATE

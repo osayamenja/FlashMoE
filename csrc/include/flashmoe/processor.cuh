@@ -314,7 +314,7 @@ namespace flashmoe::processor
           else {
             const auto* bPv = expertUpVWeights + expertWeightSize * task.localExpertIdx();
             const auto* __restrict__ biasPv = biasUpV + I * task.localExpertIdx();
-            fGET_gated<TileGEMM0, Activation>(workspace, aP, bP, bPv, cP, biasP, biasUpV,
+            fGET_gated<TileGEMM0, Activation>(workspace, aP, bP, bPv, cP, biasP, biasPv,
               swishAlpha, swishBeta, task.M(), I, H, task.tileIdx);
           }
           __syncthreads();

@@ -167,9 +167,8 @@ void randUniform(Element* __restrict__ const& out,
 }
 
 __host__ __forceinline__
-float random_float(const float& min, const float& max) {
-    static std::random_device rd;      // entropy source
-    static std::mt19937 gen(rd());      // Mersenne Twister RNG
+float random_float(const float& min, const float& max, const uint& seed) {
+    static std::mt19937 gen(seed);      // Mersenne Twister RNG
     std::uniform_real_distribution<float> dist(min, max);
     return dist(gen);
 }

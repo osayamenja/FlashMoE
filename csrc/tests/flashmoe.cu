@@ -274,6 +274,8 @@ struct Seeds {
   SeedType biasUp;
   SeedType biasUpV;
   SeedType biasDown;
+  SeedType alpha;
+  SeedType beta;
 };
 
 template<
@@ -411,6 +413,8 @@ void kickstart(const uint& S, const uint& H, const uint& I, const uint& E, const
     seeds.biasUp = rd();
     seeds.biasUpV = rd();
     seeds.biasDown = rd();
+    seeds.alpha = rd();
+    seeds.beta = rd();
   }
   if (world > 1) {
     // Rank 0 will generate a random seed and propagate to every rank
@@ -446,7 +450,7 @@ void kickstart(const uint& S, const uint& H, const uint& I, const uint& E, const
   randUniform<Arch>(biasUp, static_cast<size_t>(E) * I, seeds.biasUp, minv, maxv, stream);
   if (mt == flashmoe::MLPMatmulType::gated) {
     CHECK_CUDA(cudaMallocAsync(&biasUpV, sizeof(Element) * E * I, stream));
-    randUniform<Arch>(biasUp, static_cast<size_t>(E) * I, seeds.biasUpV, minv, maxv, stream);
+    randUniform<Arch>(biasUpV, static_cast<size_t>(E) * I, seeds.biasUpV, minv, maxv, stream);
   }
 
   Element* biasDown = nullptr;
@@ -473,8 +477,8 @@ void kickstart(const uint& S, const uint& H, const uint& I, const uint& E, const
   if (k > 1) {
     CHECK_CUDA(cudaMemsetAsync(referenceOut, 0, sizeof(Element) * S * H, stream));
   }
-  const auto swishAlpha = static_cast<AccumType>(random_float(minv, maxv));
-  const auto swishBeta = static_cast<AccumType>(random_float(minv, maxv));
+  const auto swishAlpha = static_cast<AccumType>(random_float(minv, maxv, seeds.alpha));
+  const auto swishBeta = static_cast<AccumType>(random_float(minv, maxv, seeds.beta));
 
   // initialize
   flashmoe::MoEArgs args{
@@ -675,7 +679,8 @@ void drive(const int argc, char** argv) {
   // to minimize instantiated templates
   constexpr int bN0 = sizeof(Element) == 2 ? 128 : 64;
   constexpr int bN1 = bN0;
-  constexpr int bK0 = !cuda::std::is_same_v<Element, double> && mt == flashmoe::MLPMatmulType::vanilla ? 64 : 32;
+  constexpr int bK0 = cuda::std::is_same_v<Element, double> ? 32 : mt == flashmoe::MLPMatmulType::vanilla ? 64 :
+  arch >= 900 ? 64 : 32;
   constexpr int bK1 = bK0;
   if (H <= bK0 || H % bK0 != 0 || H < bN1 || H % bN1 != 0) {
     throw std::invalid_argument("H is invalid");
