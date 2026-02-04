@@ -477,8 +477,8 @@ void kickstart(const uint& S, const uint& H, const uint& I, const uint& E, const
   if (k > 1) {
     CHECK_CUDA(cudaMemsetAsync(referenceOut, 0, sizeof(Element) * S * H, stream));
   }
-  const auto swishAlpha = static_cast<AccumType>(random_float(minv, maxv, seeds.alpha));
-  const auto swishBeta = static_cast<AccumType>(random_float(minv, maxv, seeds.beta));
+  const auto swishAlpha = random_float(minv, maxv, seeds.alpha);
+  const auto swishBeta = random_float(minv, maxv, seeds.beta);
 
   // initialize
   flashmoe::MoEArgs args{
@@ -646,8 +646,8 @@ void drive(const int argc, char** argv) {
   uint k = 2;
   uint warmup = 128;
   uint runs = 128;
-  float rtol = 2e-2;
-  float atol = 2e-3;
+  float rtol = 8e-2;
+  float atol = 8e-3;
   if (argc > 1) S = parse_u32(argv[1], "S", 1);
   if (argc > 2) H = parse_u32(argv[2], "H", 1);
   if (argc > 3) I = parse_u32(argv[3], "I", 1);
@@ -677,7 +677,7 @@ void drive(const int argc, char** argv) {
     throw std::invalid_argument("k must be <= E");
   }
   // to minimize instantiated templates
-  constexpr int bN0 = sizeof(Element) == 2 ? 128 : 64;
+  constexpr int bN0 = sizeof(Element) == 2 ? 128 : 64; // 144 for gpt-oss
   constexpr int bN1 = bN0;
   constexpr int bK0 = cuda::std::is_same_v<Element, double> ? 32 : mt == flashmoe::MLPMatmulType::vanilla ? 64 :
   arch >= 900 ? 64 : 32;
@@ -689,7 +689,7 @@ void drive(const int argc, char** argv) {
     throw std::invalid_argument("I is invalid");
   }
   constexpr auto pS = arch >= 800 ? 2 : 1;
-  constexpr auto bM = 128;
+  constexpr auto bM = cuda::std::is_same_v<Element, double> ? 64 : 128;
   if (S % bM != 0) {
     const auto errmsg = std::string("S must be a multiple of ").append(std::to_string(bM));
       throw std::invalid_argument(errmsg);

@@ -10,6 +10,7 @@
 #define FLASHMOE_MOE_CUH
 
 #include "infra/activation.cuh"
+#include "infra/telemetry.cuh"
 
 #include "context.cuh"
 #include "dispatch.cuh"
@@ -191,6 +192,15 @@ namespace flashmoe::moe
   >
   __host__ __forceinline__
   void forwardHost(const KernelArgs& kArgs, Context& ctx, const uint& sharedSize, cudaStream_t stream) {
+#if defined(FLASHMOE_NVTX)
+    const flashmoeRange range{std::string("S: ").append(std::to_string(kArgs.S))
+      .append(", H: ").append(std::to_string(kArgs.H))
+      .append(", I: ").append(std::to_string(kArgs.I))
+      .append(", E: ").append(std::to_string(kArgs.E))
+      .append(". nLx: ").append(std::to_string(ctx.nLx))
+      .append(", k: ").append(std::to_string(kArgs.k))
+    .append(", stateNo: ").append(std::to_string(ctx.stateNumber))};
+#endif
     if constexpr (Config::CM::value == CombineMode::plural) {
       cudaMemsetAsync(kArgs.moeOut, 0, sizeof(typename Config::DType) * kArgs.S * static_cast<size_t>(kArgs.H), stream);
     }

@@ -163,7 +163,10 @@ function(flash_target_common tgt)
     )
 endfunction()
 function(flash_target_lto tgt)
-    target_link_libraries(${tgt} PRIVATE CUDA::cudart CUDA::cuda_driver CUDA::nvtx3 atomic)
+    target_link_libraries(${tgt} PRIVATE CUDA::cudart CUDA::cuda_driver atomic)
+    if(NVTX3_ADDED)
+        target_link_libraries(${tgt} PRIVATE nvtx3-cpp)
+    endif ()
     if(CCCL_ADDED)
         target_link_libraries(${tgt} PRIVATE CCCL::CCCL)
     endif()
@@ -194,7 +197,7 @@ function(flash_target_lto tgt)
     target_compile_definitions(${tgt} PRIVATE
             FLASHMOE_ARCH=${GPU_ARCH}
             NUM_SMS=${CUDA_NUM_SMS}
-            FLASHMOE_NVTX=1
+            FLASHMOE_NVTX=0
     )
 endfunction()
 add_executable(testFlashMoE

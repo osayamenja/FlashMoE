@@ -15,7 +15,7 @@
 #include <nvtx3/nvtx3.hpp>
 namespace flashmoe {
     struct flashmoeDomain {
-        static constexpr auto const* name{"Flashmoe"};
+        static constexpr auto const* name{"FlashMoE"};
     };
     using flashmoeRange = nvtx3::scoped_range_in<flashmoeDomain>;
 }
