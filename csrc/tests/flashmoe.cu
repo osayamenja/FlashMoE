@@ -204,6 +204,9 @@ void reference(const flashmoe::TPS* __restrict__ const& tokenIds,
   const uint& S, const uint& H, const uint& EC, const uint& E, const uint I, const int& topK,
   const int& num_sms,
   cudaStream_t stream) {
+#if defined(FLASHMOE_NVTX) && FLASHMOE_NVTX
+  const flashmoe::flashmoeRange range{"Reference"};
+#endif
   constexpr auto dtk = Config::DTK::value;
   constexpr int bM0 = cute::get<0>(typename Config::G0TS{});
   constexpr int bN0 = cute::get<1>(typename Config::G0TS{});
@@ -292,11 +295,6 @@ template<
 >
 void kickstart(const uint& S, const uint& H, const uint& I, const uint& E, const uint& k,
   const uint warmup, const uint runs, const float& rtol, const float& atol) {
-  nvtx3::scoped_range driverRange{std::string("flashMoE, S: ")
-        .append(std::to_string(S)).append(", E: ")
-        .append(std::to_string(E)).append(", H: ")
-        .append(std::to_string(H).append(", topK: ")
-        .append(std::to_string(k)))};
 
   nvshmem_init();
   const uint devId = nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE);
@@ -563,22 +561,32 @@ void kickstart(const uint& S, const uint& H, const uint& I, const uint& E, const
   cudaEvent_t start, stop;
   CHECK_CUDA(cudaEventCreate(&start));
   CHECK_CUDA(cudaEventCreate(&stop));
-  // benchmark distributed moe fused kernel
-  flashMK(moeContext.topo, warmup);
-  CHECK_CUDA(cudaStreamSynchronize(stream));
-  cudaEventRecord(start, stream);
-  flashMK(moeContext.topo, runs);
-  cudaEventRecord(stop, stream);
-  CHECK_CUDA(cudaEventSynchronize(stop));
-  float m_ms = 0;
-  CHECK_CUDA(cudaEventElapsedTime(&m_ms, start, stop));
-  const float m_time_ms = m_ms / static_cast<float>(runs);
-  printf("EP Rank, S, H, I, E, k, EC, bM, bN0, bK0, bN1, bK1, threads, blocks/SM, SMs,blocks, rtol, atol, "
-         "error(%%), warmup, runs, workspace_bytes(MiB), "
-         "FlashMoE_Time(ms)\n"
-         "%d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %.1e, %.1e, %f, %d, %d, %.4lf, %f\n",
-         epRank, S, H, I, E, k, EC, bM, bN0, bK0, bN1, bK1, threads, bps, num_sms, blocks, rtol, atol, ep,
-         warmup, runs, workspaceBytesMiB, m_time_ms);
+  {
+    // benchmark distributed moe fused kernel
+    flashMK(moeContext.topo, warmup);
+    CHECK_CUDA(cudaStreamSynchronize(stream));
+#if defined(FLASHMOE_NVTX) && FLASHMOE_NVTX
+    const flashmoe::flashmoeRange range{std::string("FlashMoE Bench, S: ").append(std::to_string(S))
+        .append(", H: ").append(std::to_string(H))
+        .append(", I: ").append(std::to_string(I))
+        .append(", E: ").append(std::to_string(E))
+        .append(". nLx: ").append(std::to_string(moeContext.nLx))
+        .append(", k: ").append(std::to_string(k))};
+#endif
+    cudaEventRecord(start, stream);
+    flashMK(moeContext.topo, runs);
+    cudaEventRecord(stop, stream);
+    CHECK_CUDA(cudaEventSynchronize(stop));
+    float m_ms = 0;
+    CHECK_CUDA(cudaEventElapsedTime(&m_ms, start, stop));
+    const float m_time_ms = m_ms / static_cast<float>(runs);
+    printf("EP Rank, S, H, I, E, k, EC, bM, bN0, bK0, bN1, bK1, threads, blocks/SM, SMs,blocks, rtol, atol, "
+           "error(%%), warmup, runs, workspace_bytes(MiB), "
+           "FlashMoE_Time(ms)\n"
+           "%d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %.1e, %.1e, %f, %d, %d, %.4lf, %f\n",
+           epRank, S, H, I, E, k, EC, bM, bN0, bK0, bN1, bK1, threads, bps, num_sms, blocks, rtol, atol, ep,
+           warmup, runs, workspaceBytesMiB, m_time_ms);
+  }
 
   // finalize
   flashmoe::finalizeGate(gateCtx, stream);
@@ -658,7 +666,7 @@ void drive(const int argc, char** argv) {
   if (argc > 8) rtol = parse_f32(argv[8], "rtol");
   if (argc > 9) atol = parse_f32(argv[9], "atol");
 
-  using Element = __half;
+  using Element = float;
   static_assert(cuda::std::is_same_v<Element, __half> ||
     cuda::std::is_same_v<Element, __nv_bfloat16> ||
     cuda::std::is_same_v<Element, float> ||

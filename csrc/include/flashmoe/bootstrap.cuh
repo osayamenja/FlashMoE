@@ -15,6 +15,7 @@
 #include <cuda/cmath>
 
 #include "infra/constants.cuh"
+#include "infra/telemetry.cuh"
 #include "infra/bitset.cuh"
 #include "context.cuh"
 #include "infra/atomics.cuh"
@@ -79,6 +80,9 @@ namespace flashmoe
         cuda::std::byte* const& sHeap, uint64_t* const& signals,
         PEL* const& pel, PLI* const& pli, ELI* const& eli, LXI* const& lxi,
         cudaStream_t stream) {
+#if defined(FLASHMOE_NVTX) && FLASHMOE_NVTX
+        const flashmoeRange range{"FlashMoE::expertParallelBookkeeping"};
+#endif
         if (nvshmemx_init_status() == NVSHMEM_STATUS_NOT_INITIALIZED) {
             throw std::runtime_error("nvshmem is not initialized");
         }
@@ -149,6 +153,9 @@ namespace flashmoe
     __host__ __forceinline__
     Context initialize(const MoEArgs& args, const int& arch, const uint* __restrict__ const& expertToEpRank,
         const int* __restrict__ const& epRankToGlobalRank, cudaStream_t stream){
+#if defined(FLASHMOE_NVTX) && FLASHMOE_NVTX
+        const flashmoeRange range{"FlashMoE::initialize"};
+#endif
         // fused gate + moe layer
         if (args.tokenDim % args.bK0 != 0 || args.tokenDim % args.bN1 != 0) {
             throw std::runtime_error("token dimension should be multiples of tile dimensions");
@@ -349,6 +356,9 @@ namespace flashmoe
 
     __host__ __forceinline__
     GateContext initializeGate(const uint& bNGate, const uint& numExperts, const uint& S, cudaStream_t stream) {
+#if defined(FLASHMOE_NVTX) && FLASHMOE_NVTX
+        const flashmoeRange range{"FlashMoE::initializeGate"};
+#endif
         int* ecGuards = nullptr;
         CHECK_CUDA(cudaMallocAsync(&ecGuards, sizeof(int) * numExperts, stream));
         CHECK_CUDA(cudaMemsetAsync(ecGuards, flashmoe::STALE_AS_BYTE, sizeof(int) * numExperts, stream));
@@ -367,6 +377,9 @@ namespace flashmoe
 
     __host__ __forceinline__
     void finalizeGate(const GateContext& gCtx, cudaStream_t stream) {
+#if defined(FLASHMOE_NVTX) && FLASHMOE_NVTX
+        const flashmoeRange range{"FlashMoE::finalizeGate"};
+#endif
         cudaFreeAsync(gCtx.ecGuards, stream);
         if (gCtx.ssp != nullptr) {
             cudaFreeAsync(gCtx.ssp, stream);
@@ -379,6 +392,9 @@ namespace flashmoe
     }
     __host__ __forceinline__
     void finalize(const Context& ctx, cudaStream_t stream) {
+#if defined(FLASHMOE_NVTX) && FLASHMOE_NVTX
+        const flashmoeRange range{"FlashMoE::finalize"};
+#endif
         if (ctx.initialized) {
             // free workspace memory
             cudaFreeAsync(ctx.tQ, stream);

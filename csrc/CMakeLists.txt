@@ -197,7 +197,7 @@ function(flash_target_lto tgt)
     target_compile_definitions(${tgt} PRIVATE
             FLASHMOE_ARCH=${GPU_ARCH}
             NUM_SMS=${CUDA_NUM_SMS}
-            FLASHMOE_NVTX=0
+            FLASHMOE_NVTX=1
     )
 endfunction()
 add_executable(testFlashMoE
