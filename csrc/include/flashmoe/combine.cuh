@@ -71,7 +71,6 @@ namespace flashmoe
       constexpr auto nElems = vbN * bM;
       const auto actualElems = tileSize * vbN;
       constexpr auto elemsPerThread = nElems / threads;
-      uint cache[cute::ceil_div(nElems, threads)]; // use ceil_div to avoid 0
       // row major output
       const auto vH = H / vw;
       auto mC = cute::make_tensor(cute::make_gmem_ptr(reinterpret_cast<VT*>(moeOutput)),
@@ -84,17 +83,12 @@ namespace flashmoe
       const auto vsC = cute::make_tensor(cute::make_smem_ptr(static_cast<const VT*>(workspace)),
                                          VSL{});
       // vector copy results to gmem and call it a day
-      for (int i = 0; i < elemsPerThread; ++i) {
-        const auto idx = threadIdx.x + i * threads;
-        const auto rowIdx = idx / vbN;
-        cache[i] = stIds[rowIdx].tokenIdx;
-      }
       if (tileSize == bM) {
         for (int i = 0; i < elemsPerThread; ++i) {
           const auto idx = threadIdx.x + i * threads;
           const auto rowIdx = idx / vbN;
           const auto colIdx = idx % vbN;
-          const auto tokenIdx = cache[i];
+          const auto tokenIdx = stIds[rowIdx].tokenIdx;
           // smem -> gmem.
           tC(tokenIdx, colIdx) = vsC(rowIdx, colIdx);
         }
@@ -104,7 +98,7 @@ namespace flashmoe
           const auto idx = threadIdx.x + i * threads;
           const auto rowIdx = idx / vbN;
           const auto colIdx = idx % vbN;
-          const auto tokenIdx = cache[i];
+          const auto tokenIdx = stIds[rowIdx].tokenIdx;
           // smem -> gmem.
           if (idx < actualElems) {
             tC(tokenIdx, colIdx) = vsC(rowIdx, colIdx);

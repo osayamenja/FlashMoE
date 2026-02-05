@@ -666,7 +666,7 @@ void drive(const int argc, char** argv) {
   if (argc > 8) rtol = parse_f32(argv[8], "rtol");
   if (argc > 9) atol = parse_f32(argv[9], "atol");
 
-  using Element = float;
+  using Element = __half;
   static_assert(cuda::std::is_same_v<Element, __half> ||
     cuda::std::is_same_v<Element, __nv_bfloat16> ||
     cuda::std::is_same_v<Element, float> ||
@@ -677,7 +677,8 @@ void drive(const int argc, char** argv) {
   // some values are 700 (Volta), 750 (Turing), 800 (Ampere), 900 (Hopper), 1000 (Blackwell), 1100 (?), 1200 (?)
   static_assert(FLASHMOE_ARCH >= 700);
   constexpr auto arch = FLASHMOE_ARCH;
-  constexpr auto dtk = flashmoe::DropTokens::yes; // or no, both work here
+  // If yes, routed tokens exceeding ceil(S/E) * k, will be dropped.
+  constexpr auto dtk = flashmoe::DropTokens::yes;
   constexpr auto act = flashmoe::Activation::silu;
   constexpr auto sro = flashmoe::SoftMaxOptimizationLevel::highest;
   constexpr auto mt = flashmoe::MLPMatmulType::gated;

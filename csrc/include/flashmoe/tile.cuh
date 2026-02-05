@@ -73,11 +73,17 @@ namespace flashmoe
   };
 
   template <>
+  struct Converter<float, double> {
+    __device__ auto operator()(const double& x) const {
+      return __double2float_rn(x);
+    }
+  };
+
+  template <>
   struct Converter<cublasdx::tfloat32_t, float> {
     __device__ auto operator()(const float& x) const {
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
       uint32_t storage = cuda::std::bit_cast<uint32_t>(x);
-      // PTX supports: cvt.rna.tf32.f32 (round-to-nearest-away)
       asm("cvt.rna.tf32.f32 %0, %1;" : "=r"(storage) : "r"(storage));
       return cuda::std::bit_cast<cublasdx::tfloat32_t>(storage);
 #else

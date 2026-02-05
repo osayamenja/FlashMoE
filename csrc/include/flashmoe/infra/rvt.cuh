@@ -35,6 +35,7 @@ namespace flashmoe
         static_assert(Arch == 700 || Arch == 800 || Arch == 900);
         static_assert(cuda::std::is_same_v<Element, double> || cuda::std::is_same_v<Element, float> ||
             cuda::std::is_same_v<Element, __half> || cuda::std::is_same_v<Element, __nv_bfloat16>);
+        static_assert(cuda::std::is_same_v<Element, __nv_bfloat16> && Arch >= 800);
     };
 
     template<int MaxVectorWidth>

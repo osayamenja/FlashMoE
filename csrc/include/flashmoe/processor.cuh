@@ -113,9 +113,11 @@ namespace flashmoe::processor
     // Epilogue
     constexpr Activation act{}; // activation function like silu, gelu, etc
     // ElementC -> accum type
-    constexpr Converter<typename decltype(accumulator)::value_type, ElementC> loadConv{};
+    using AccumType = decltype(accumulator)::value_type;
+    static_assert(cuda::std::is_same_v<AccumType, typename TileGEMM::AccumType>);
+    constexpr Converter<AccumType, ElementC> loadConv{};
     // accum type -> ElementC
-    constexpr Converter<ElementC, typename decltype(accumulator)::value_type> storeConv{};
+    constexpr Converter<ElementC, AccumType> storeConv{};
     const auto c_frag = accumulator.get_results();
     constexpr int accum_size = cublasdx::size(c_frag);
     cute::for_each(cute::make_int_sequence<accum_size>{}, [&](auto i) {
