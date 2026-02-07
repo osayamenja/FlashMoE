@@ -281,6 +281,20 @@ struct Seeds {
   SeedType beta;
 };
 
+template <typename Element>
+constexpr const char* element_string() {
+  static_assert(
+    cuda::std::is_same_v<Element, __half> ||
+    cuda::std::is_same_v<Element, __nv_bfloat16> ||
+    cuda::std::is_same_v<Element, float> ||
+    cuda::std::is_same_v<Element, double>,
+    "Unsupported Element type"
+  );
+  if constexpr (cuda::std::is_same_v<Element, double>) return "fp64";
+  else if constexpr (cuda::std::is_same_v<Element, float>) return "fp32";
+  else if constexpr (cuda::std::is_same_v<Element, __half>) return "fp16";
+  else return "bf16";
+}
 template<
   typename Element, typename AccumType,
   int Arch,
@@ -293,6 +307,7 @@ template<
   flashmoe::MLPMatmulType mt,
   flashmoe::DropTokens dtk = flashmoe::DropTokens::no
 >
+__host__
 void kickstart(const uint& S, const uint& H, const uint& I, const uint& E, const uint& k,
   const uint warmup, const uint runs, const float& rtol, const float& atol) {
 
@@ -313,8 +328,13 @@ void kickstart(const uint& S, const uint& H, const uint& I, const uint& E, const
   int num_sms = 0;
   CHECK_CUDA(cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, devId));
 
-  const auto world = nvshmem_n_pes();
-  const auto epRank = nvshmem_my_pe();
+  const auto world = nvshmem_n_pes(); // this is not a requrement
+  const auto epRank = nvshmem_my_pe(); // this is not a requirement
+  if (epRank == 0) {
+    printf("EP Rank, dtype, S, H, I, E, k, EC, bM, bN0, bK0, bN1, bK1, threads, blocks/SM, SMs,blocks, rtol, atol, "
+           "error(%%), warmup, runs, workspace_bytes(MiB), "
+           "FlashMoE_Time(ms)\n");
+  }
   nvshmem_sync_all(); // this is needed to force initialization of NVSHMEM state.
 
   if (E % world != 0) {
@@ -378,7 +398,7 @@ void kickstart(const uint& S, const uint& H, const uint& I, const uint& E, const
     CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kernelSz));
     CHECK_CUDA(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&bps, kernel, threads, kernelSz));
   }
-  const auto processorBlocks = (S /bM) * cute::max(I / bN0, H / bN1);
+  const auto processorBlocks = ((S /bM) * ((I / bN0) + (H / bN1))) + ((S/bM) * (H / bN1));
   const auto dispatchBlocks = flashmoe::moe::dispatchSuperBlockSize(E) * E;
   const uint blocks = cute::max(cute::min(cute::max(processorBlocks, dispatchBlocks) + 1, bps * num_sms), 2);
 
@@ -580,11 +600,9 @@ void kickstart(const uint& S, const uint& H, const uint& I, const uint& E, const
     float m_ms = 0;
     CHECK_CUDA(cudaEventElapsedTime(&m_ms, start, stop));
     const float m_time_ms = m_ms / static_cast<float>(runs);
-    printf("EP Rank, S, H, I, E, k, EC, bM, bN0, bK0, bN1, bK1, threads, blocks/SM, SMs,blocks, rtol, atol, "
-           "error(%%), warmup, runs, workspace_bytes(MiB), "
-           "FlashMoE_Time(ms)\n"
-           "%d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %.1e, %.1e, %f, %d, %d, %.4lf, %f\n",
-           epRank, S, H, I, E, k, EC, bM, bN0, bK0, bN1, bK1, threads, bps, num_sms, blocks, rtol, atol, ep,
+    constexpr auto es = element_string<Element>();
+    printf("%d, %s, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %.1e, %.1e, %f, %d, %d, %.4lf, %f\n",
+           epRank, es, S, H, I, E, k, EC, bM, bN0, bK0, bN1, bK1, threads, bps, num_sms, blocks, rtol, atol, ep,
            warmup, runs, workspaceBytesMiB, m_time_ms);
   }
 
@@ -666,7 +684,7 @@ void drive(const int argc, char** argv) {
   if (argc > 8) rtol = parse_f32(argv[8], "rtol");
   if (argc > 9) atol = parse_f32(argv[9], "atol");
 
-  using Element = __half;
+  using Element = __nv_bfloat16;
   static_assert(cuda::std::is_same_v<Element, __half> ||
     cuda::std::is_same_v<Element, __nv_bfloat16> ||
     cuda::std::is_same_v<Element, float> ||
@@ -678,9 +696,9 @@ void drive(const int argc, char** argv) {
   static_assert(FLASHMOE_ARCH >= 700);
   constexpr auto arch = FLASHMOE_ARCH;
   // If yes, routed tokens exceeding ceil(S/E) * k, will be dropped.
-  constexpr auto dtk = flashmoe::DropTokens::yes;
+  // note that option 'no' requires significantly more GPU memory as the worst-case size is used for the expert token buffer
+  constexpr auto dtk = flashmoe::DropTokens::no;
   constexpr auto act = flashmoe::Activation::silu;
-  constexpr auto sro = flashmoe::SoftMaxOptimizationLevel::highest;
   constexpr auto mt = flashmoe::MLPMatmulType::gated;
   if (k > E) {
     throw std::invalid_argument("k must be <= E");
@@ -703,6 +721,7 @@ void drive(const int argc, char** argv) {
     const auto errmsg = std::string("S must be a multiple of ").append(std::to_string(bM));
       throw std::invalid_argument(errmsg);
   }
+  constexpr auto sro = flashmoe::SoftMaxOptimizationLevel::highest; // for the gate kernel
   switch (E) {
     case 8: {
       if (k > 1) {
