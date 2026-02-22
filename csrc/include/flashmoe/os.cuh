@@ -66,7 +66,6 @@ namespace flashmoe::os
     int subscriberCount,
     int threads,
     int bM,
-    DropTokens d,
     typename ElementC
   >
   __device__ __forceinline__
@@ -160,7 +159,7 @@ namespace flashmoe::os
     // Combine tasks
     // known a priori
     for (uint i = threadIdx.x; i < E; i += threads) {
-      const auto eCount = d == DropTokens::yes ? cute::min(eCs[i], EC) : eCs[i];
+      const auto eCount = cute::min(eCs[i], EC);
       const auto eCt = cute::ceil_div(eCount, bM);
       atomicAdd_block(taskBound, eCt * tilesN1);
     }
@@ -180,7 +179,7 @@ namespace flashmoe::os
           const bool isRemote = eL[expertIdx].isRemote;
           const auto tileRowIdx = (flagIdx % nRows) % ecTilesM;
           const auto tileColIdx = flagIdx / nRows;
-          const auto expertCount = d == DropTokens::yes ? cute::min(eCs[expertIdx], EC) : eCs[expertIdx];
+          const auto expertCount = cute::min(eCs[expertIdx], EC);
           const auto actualTiles = cute::ceil_div(expertCount, bM);
           if ((isRemote && tileColIdx > 0) || tileRowIdx >= actualTiles) {
             bitset.set(j);

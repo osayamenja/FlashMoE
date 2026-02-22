@@ -24,7 +24,6 @@ namespace flashmoe::moe
     int arch, //  GPU Architecture, Volta - Blackwell (700 - 1200), See cuBLASDx docs
     int _threads, // see tile::suggest_thread_count
     CombineMode cm, // plural, if k > 1; single otherwise
-    DropTokens _dTk, // yes or no,
     MLPMatmulType mt,
     typename GEMM0Tile, // cute::Shape<bM,bN,bK,pipeStages>
     typename GEMM1Tile // cute::Shape<bM,bN,bK,pipeStages>
@@ -37,7 +36,6 @@ namespace flashmoe::moe
     static_assert(cute::get<0>(GEMM0Tile{}) == cute::get<0>(GEMM1Tile{}));
     using Arch = cute::Int<arch>;
     using Threads = cute::Int<_threads>;
-    using DTK = cute::C<_dTk>;
     using CM = cute::C<cm>;
     using MT = cute::C<mt>;
     using DType = Element;
@@ -51,7 +49,7 @@ namespace flashmoe::moe
       const cuda::std::byte* bias_up, const cuda::std::byte* bias_up_v,
       const cuda::std::byte* expert_down_weights, const cuda::std::byte* bias_down,
       int* expert_counts, cuda::std::byte* moe_out,
-      const uint s, const uint h, const uint i, const uint e, const uint k, const uint ec,
+      const size_t s, const size_t h, const size_t i, const size_t e, const size_t k, const size_t ec,
       const int& arch, const MLPMatmulType m, const float swishAlpha = 1.f, const float swishBeta = 1.f)
       : tokens(tokens),
         expertUpWeights(expert_up_weights),
@@ -61,12 +59,12 @@ namespace flashmoe::moe
         biasDown(bias_down),
         expertCounts(expert_counts),
         moeOut(moe_out),
-        S(s),
-        H(h),
-        I(i),
-        E(e),
-        k(k),
-        EC(ec), swishAlpha(swishAlpha), swishBeta(swishBeta) {
+        S(static_cast<uint>(s)),
+        H(static_cast<uint>(h)),
+        I(static_cast<uint>(i)),
+        E(static_cast<uint>(e)),
+        k(static_cast<uint>(k)),
+        EC(static_cast<uint>(ec)), swishAlpha(swishAlpha), swishBeta(swishBeta) {
       const auto supports32 = arch >= 1000;
       checkAlignment(tokens, supports32);
       checkAlignment(expert_up_weights);
@@ -139,14 +137,14 @@ namespace flashmoe::moe
       // call OS
       constexpr auto subscriberCount = threads - scheduler::SCHEDULER_COUNT;
       static_assert(subscriberCount > 0 && subscriberCount % WARP_SIZE == 0);
-      os::start<topo, subscriberCount, threads, bM, Config::DTK::value, DataType>(flashWorkspace,
+      os::start<topo, subscriberCount, threads, bM, DataType>(flashWorkspace,
         kArgs.expertCounts, symHeap, ctx, kArgs.EC,kArgs.I / bN0, kArgs.H / bN1, dispatchBlocks,
         kArgs.E, kArgs.I, processors);
       return;
     }
     if (blockIdx.x < dispatchBlocks) {
       // dispatch
-      dispatch<topo, Config::Threads::value, bM, bN0, Config::DTK::value>(kArgs.H, kArgs.E, symHeap, kArgs.EC, roundEC,
+      dispatch<topo, Config::Threads::value, bM, bN0>(kArgs.H, kArgs.E, symHeap, kArgs.EC, roundEC,
         ctx.epRank, ctx.world, superBlockSize, dispatchBlocks, tokens, ctx.signals, kArgs.expertCounts,
         ctx.tokenIndices, ctx.dispatchSync, ctx.pel, flashWorkspace, ctx.stateNumber);
     }

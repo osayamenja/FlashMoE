@@ -13,7 +13,6 @@
 #include <mpi.h>
 
 #include "../include/flashmoe/bootstrap.cuh"
-#include "../include/flashmoe/gate.cuh"
 #include "../include/flashmoe/moe.cuh"
 
 #include "common.cuh"
@@ -201,13 +200,12 @@ void reference(const flashmoe::TPS* __restrict__ const& tokenIds,
   int* __restrict__ const& expertCounts,
   Element* __restrict__ const& ref_out,
   const AccumType& swishAlpha, const AccumType& swishBeta,
-  const uint& S, const uint& H, const uint& EC, const uint& E, const uint I, const int& topK,
+  const size_t& S, const size_t& H, const size_t& EC, const size_t& E, const size_t& I, const size_t& topK,
   const int& num_sms,
   cudaStream_t stream) {
 #if defined(FLASHMOE_NVTX) && FLASHMOE_NVTX
   const flashmoe::flashmoeRange range{"Reference"};
 #endif
-  constexpr auto dtk = Config::DTK::value;
   constexpr int bM0 = cute::get<0>(typename Config::G0TS{});
   constexpr int bN0 = cute::get<1>(typename Config::G0TS{});
   constexpr int bK0 = cute::get<2>(typename Config::G0TS{});
@@ -243,7 +241,7 @@ void reference(const flashmoe::TPS* __restrict__ const& tokenIds,
   constexpr auto nonBeta = static_cast<AccumType>(1.f);
   Element* nonV = nullptr;
   for (int i = 0; i < E; ++i) {
-    const auto count = dtk == flashmoe::DropTokens::no ? hCounts[i] : cute::min(hCounts[i], EC);
+    const auto count = cute::min(hCounts[i], EC);
     if (count > 0) {
       // get the tokens routed to expert i
       auto* __restrict__ tIds = tokenIds + i * roundEC;
@@ -299,16 +297,12 @@ template<
   typename Element, typename AccumType,
   int Arch,
   int bM, int bN0, int bK0, int pSK0,
-  int bN1, int bK1, int bNGate, int pSK1,
+  int bN1, int bK1, int pSK1,
   flashmoe::CombineMode cm,
   flashmoe::Activation act,
-  flashmoe::GateReductionLevel grl,
-  flashmoe::SoftMaxOptimizationLevel sro,
-  flashmoe::MLPMatmulType mt,
-  flashmoe::DropTokens dtk = flashmoe::DropTokens::no
+  flashmoe::MLPMatmulType mt
 >
-__host__
-void kickstart(const uint& S, const uint& H, const uint& I, const uint& E, const uint& k,
+void kickstart(const size_t& S, const size_t& H, const size_t& I, const size_t& E, const size_t& EC, const size_t& k,
   const uint warmup, const uint runs, const float& rtol, const float& atol) {
 
   nvshmem_init();
@@ -357,15 +351,12 @@ void kickstart(const uint& S, const uint& H, const uint& I, const uint& E, const
   constexpr auto threadsGEMM0 = flashmoe::tile::suggest_thread_count<bM, bN0, bK0, Arch, Element, AccumType>();
   constexpr auto threadsGEMM1 = flashmoe::tile::suggest_thread_count<bM, bN1, bK1, Arch, Element, AccumType>();
   constexpr auto threads = cute::max(threadsGEMM0, threadsGEMM1, 64);
-  const auto EC = dtk == flashmoe::DropTokens::no ? S : cute::min((cute::ceil_div(S, E) * k), S);
   const auto roundEC = cute::ceil_div(EC, bM) * bM;
   constexpr auto GEMM0Sz = cutlass::round_up(cute::max(sizeof(Element) * bK0 * pSK0 * (bM + bN0),
     sizeof(Element) * bM * bN0) + (mt == flashmoe::MLPMatmulType::gated ? sizeof(Element) * bM * bN0 : 0),
     flashmoe::MAX_ALIGNMENT);
   constexpr auto GEMM1Sz = cutlass::round_up(cute::max(sizeof(Element) * bK1 * pSK1 * (bM + bN1),
     sizeof(Element) * bM * bN1), flashmoe::MAX_ALIGNMENT);
-  constexpr auto GateSz = cutlass::round_up(cute::max(sizeof(Element) * bK0 * pSK0 * (bM + bNGate),
-    sizeof(flashmoe::gate::SoftType) * bM * bNGate), flashmoe::MAX_ALIGNMENT);
   const auto dispatchSz = E * (sizeof(flashmoe::PEL) + sizeof(int));
   const auto OSSz = flashmoe::os::getSharedSize<threads, bM>(world, numLocalExperts, E, EC, tilesN1);
   const auto taskSz = sizeof(flashmoe::Task) * tilesN1;
@@ -378,13 +369,11 @@ void kickstart(const uint& S, const uint& H, const uint& I, const uint& E, const
     .append(" exceeds hardware limits: ").append(std::to_string(maxSharedMemory)).append(" Reduce tile shapes or input sizes.");
     throw std::runtime_error(errmsg);
   }
-  // [S, H] x [H, E] -> [S, E]
-  using GateTile = cute::Shape<cute::Int<bM>, cute::Int<bNGate>, cute::Int<bK0>, cute::Int<pSK0>>;
   // [S, H] x [H, I] -> [S, I]
   using GEMM0Tile = cute::Shape<cute::Int<bM>, cute::Int<bN0>, cute::Int<bK0>, cute::Int<pSK0>>;
   // [S, I] x [I, H] -> [S, H]
   using GEMM1Tile = cute::Shape<cute::Int<bM>, cute::Int<bN1>, cute::Int<bK1>, cute::Int<pSK1>>;
-  using Config = flashmoe::moe::MoEConfig<Element, Arch, threads, cm, dtk, mt, GEMM0Tile, GEMM1Tile>;
+  using Config = flashmoe::moe::MoEConfig<Element, Arch, threads, cm, mt, GEMM0Tile, GEMM1Tile>;
 
   int bps = 0;
   const auto kernelTopo = flashmoe::detectTopo();
@@ -402,26 +391,12 @@ void kickstart(const uint& S, const uint& H, const uint& I, const uint& E, const
   const auto dispatchBlocks = flashmoe::moe::dispatchSuperBlockSize(E) * E;
   const uint blocks = cute::max(cute::min(cute::max(processorBlocks, dispatchBlocks) + 1, bps * num_sms), 2);
 
-  int bps1 = 0;
-  constexpr auto gateThreads = cute::max(flashmoe::tile::suggest_thread_count<bM, bNGate, bK0, Arch, Element, AccumType>(), bM);
-  auto gateKernel = flashmoe::gate::forwardKernel<GateTile, Arch, gateThreads, grl, sro, AccumType, Element, Element>;
-  CHECK_CUDA(cudaFuncSetAttribute(gateKernel, cudaFuncAttributeMaxDynamicSharedMemorySize, GateSz));
-  CHECK_CUDA(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&bps1, gateKernel, gateThreads, GateSz));
-  const auto gateBlocks = cute::min((S / bM) * (E / bNGate), bps1 * num_sms);
-  if (E > gateBlocks * bNGate) {
-    throw std::invalid_argument("E is too big!");
-  }
-
   constexpr float minv = -1.0f;
   constexpr float maxv = 1.0f;
   std::random_device rd;
   Element* tokens = nullptr;
   CHECK_CUDA(cudaMallocAsync(&tokens, sizeof(Element) * S * H, stream));
   randUniform<Arch>(tokens, static_cast<size_t>(S) * H, rd(), minv, maxv, stream);
-
-  Element* gateWeights = nullptr;
-  CHECK_CUDA(cudaMallocAsync(&gateWeights, sizeof(Element) * H * E, stream));
-  randUniform<Arch>(gateWeights, static_cast<size_t>(H) * E, rd(), minv, maxv, stream);
 
   Seeds seeds{};
   if (epRank == 0) {
@@ -475,9 +450,6 @@ void kickstart(const uint& S, const uint& H, const uint& I, const uint& E, const
   CHECK_CUDA(cudaMallocAsync(&biasDown, sizeof(Element) * E * H, stream));
   randUniform<Arch>(biasDown, static_cast<size_t>(E) * H, seeds.biasDown, minv, maxv, stream);
 
-  Element* gateOut = nullptr;
-  CHECK_CUDA(cudaMallocAsync(&gateOut, sizeof(Element) * S * E, stream));
-
   int* expertCounts = nullptr;
   CHECK_CUDA(cudaMallocAsync(&expertCounts, sizeof(int) * E, stream));
 
@@ -500,7 +472,8 @@ void kickstart(const uint& S, const uint& H, const uint& I, const uint& E, const
 
   // initialize
   flashmoe::MoEArgs args{
-    sizeof(Element), S, H, I, EC, bM, bN0, bN1, bK0, bK1, threads,
+    sizeof(Element), static_cast<uint>(S), static_cast<uint>(H), static_cast<uint>(I), EC,
+    bM, bN0, bN1, bK0, bK1, threads,
     blocks, static_cast<uint16_t>(epRank), static_cast<uint16_t>(world),
     static_cast<uint16_t>(nvshmem_my_pe()), static_cast<uint16_t>(E),
     static_cast<uint16_t>(numLocalExperts), kernelTopo
@@ -519,7 +492,6 @@ void kickstart(const uint& S, const uint& H, const uint& I, const uint& E, const
   for (int i = 0; i < world; ++i) {
     epRankToGlobalRank[i] = i;
   }
-  auto gateCtx = flashmoe::initializeGate(bNGate, E, S, stream);
   auto moeContext = flashmoe::initialize(args, Arch,expertToEpRank.data(), epRankToGlobalRank.data(), stream);
 
   size_t expertBase = static_cast<size_t>(epRank) * numLocalExperts;
@@ -544,10 +516,16 @@ void kickstart(const uint& S, const uint& H, const uint& I, const uint& E, const
     S, H, I, E, k, EC, Arch, mt, isGated ? swishAlpha : 1.f, isGated ? swishBeta : 1.f
   };
 
-  // run gate to populate tokenIndices and expertCounts
-  flashmoe::gate::forwardKernel<GateTile, Arch, gateThreads, grl, sro, AccumType>
-  <<<gateBlocks, gateThreads, GateSz, stream>>>(tokens, gateWeights, gateOut,
-    expertCounts, S, H, E, k, EC, moeContext.tokenIndices, gateCtx.ecGuards, gateCtx.ssp, gateCtx.rtp);
+  const auto ids_counts = generate_token_ids_and_expert_counts(
+    static_cast<int>(S), static_cast<int>(E), static_cast<int>(EC), roundEC, static_cast<int>(k), 0.f, 0.001f);
+  auto counts = std::get<0>(ids_counts);
+  auto indices = std::get<1>(ids_counts);
+  using CT = decltype(counts)::value_type;
+  using IT = decltype(indices)::value_type;
+  CHECK_CUDA(cudaMemcpyAsync(expertCounts, counts.data(), sizeof(CT) * counts.size(),
+    cudaMemcpyHostToDevice, stream));
+  CHECK_CUDA(cudaMemcpyAsync(moeContext.tokenIndices, indices.data(), sizeof(IT) * indices.size(),
+    cudaMemcpyHostToDevice, stream));
   auto flashMK = [&](const flashmoe::Topology topology, const uint& k_runs) {
     if (topology == flashmoe::Topology::NVLINK_ONLY) {
       for (int i = 0; i < k_runs; ++i) {
@@ -570,8 +548,8 @@ void kickstart(const uint& S, const uint& H, const uint& I, const uint& E, const
     swishAlpha, swishBeta, S, H, EC, E, I, k, num_sms, stream);
   CHECK_CUDA(cudaPeekAtLastError());
 
-  auto tC = matx::make_tensor<MT>(reinterpret_cast<MT*>(moeOut), {S, H});
-  auto tRef = matx::make_tensor<MT>(reinterpret_cast<MT*>(referenceOut), {S, H});
+  auto tC = matx::make_tensor<MT>(reinterpret_cast<MT*>(moeOut), {static_cast<matx::index_t>(S), static_cast<matx::index_t>(H)});
+  auto tRef = matx::make_tensor<MT>(reinterpret_cast<MT*>(referenceOut), tC.Shape());
   auto num_matches = matx::make_tensor<long int>({});
   matx::cudaExecutor exec{stream};
   (num_matches = matx::sum(matx::isclose(tC, tRef, rtol, atol))).run(exec);
@@ -601,13 +579,12 @@ void kickstart(const uint& S, const uint& H, const uint& I, const uint& E, const
     CHECK_CUDA(cudaEventElapsedTime(&m_ms, start, stop));
     const float m_time_ms = m_ms / static_cast<float>(runs);
     constexpr auto es = element_string<Element>();
-    printf("%d, %s, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %.1e, %.1e, %f, %d, %d, %.4lf, %f\n",
+    printf("%d, %s, %lu, %lu, %lu, %lu, %lu, %lu, %d, %d, %d, %d, %d, %d, %d, %d, %d, %.1e, %.1e, %f, %d, %d, %.4lf, %f\n",
            epRank, es, S, H, I, E, k, EC, bM, bN0, bK0, bN1, bK1, threads, bps, num_sms, blocks, rtol, atol, ep,
            warmup, runs, workspaceBytesMiB, m_time_ms);
   }
 
   // finalize
-  flashmoe::finalizeGate(gateCtx, stream);
   flashmoe::finalize(moeContext, stream);
   cudaFreeAsync(tokens, stream);
   cudaFreeAsync(expertUpWeights, stream);
@@ -615,8 +592,6 @@ void kickstart(const uint& S, const uint& H, const uint& I, const uint& E, const
     cudaFreeAsync(expertUpV, stream);
     cudaFreeAsync(biasUpV, stream);
   }
-  cudaFreeAsync(gateWeights, stream);
-  cudaFreeAsync(gateOut, stream);
   cudaFreeAsync(expertDownWeights, stream);
   cudaFreeAsync(biasUp, stream);
   cudaFreeAsync(biasDown, stream);
@@ -634,7 +609,7 @@ void kickstart(const uint& S, const uint& H, const uint& I, const uint& E, const
 }
 
 __host__ __forceinline__
-uint parse_u32(const char* s, const char* name, const uint lo = 1, const uint hi = std::numeric_limits<uint>::max()) {
+size_t parse_integer(const char* s, const char* name, const uint lo = 1, const uint hi = std::numeric_limits<uint>::max()) {
   // Fast, non-allocating, rejects negatives automatically
   std::string_view sv{s};
   uint64_t v = 0;
@@ -645,7 +620,7 @@ uint parse_u32(const char* s, const char* name, const uint lo = 1, const uint hi
   if (v < lo || v > hi) {
     throw std::invalid_argument(std::string(name) + " out of range");
   }
-  return static_cast<uint>(v);
+  return v;
 }
 
 __host__ __forceinline__
@@ -662,27 +637,35 @@ float parse_f32(const char* s, const char* name) {
   }
 }
 
-//./testFlashMoE <S> <H> <I> <E> <k> <warmup> <runs> <rtol> <atol>
+//./testFlashMoE <S> <H> <I> <E> <k> <warmup> <runs> <rtol> <atol> <EC>
 __host__
 void drive(const int argc, char** argv) {
-  uint S = 8192;
-  uint H = 2048;
-  uint I = 2048;
-  uint E = 32;
-  uint k = 2;
+  size_t S = 8192;
+  size_t H = 2048;
+  size_t I = 2048;
+  size_t E = 32;
+  size_t k = 2;
+  size_t EC = cute::ceil_div(S, E) * k;
   uint warmup = 128;
   uint runs = 128;
   float rtol = 8e-2;
   float atol = 8e-3;
-  if (argc > 1) S = parse_u32(argv[1], "S", 1);
-  if (argc > 2) H = parse_u32(argv[2], "H", 1);
-  if (argc > 3) I = parse_u32(argv[3], "I", 1);
-  if (argc > 4) E = parse_u32(argv[4], "E", 1);
-  if (argc > 5) k = parse_u32(argv[5], "k", 1);
-  if (argc > 6) warmup = parse_u32(argv[6], "warmup", 0);
-  if (argc > 7) runs = parse_u32(argv[7], "runs", 1);
+  if (argc > 1) S = parse_integer(argv[1], "S", 1);
+  if (argc > 2) H = parse_integer(argv[2], "H", 1);
+  if (argc > 3) I = parse_integer(argv[3], "I", 1);
+  if (argc > 4) E = parse_integer(argv[4], "E", 1);
+  if (argc > 5) k = parse_integer(argv[5], "k", 1);
+  if (argc > 6) warmup = static_cast<uint>(parse_integer(argv[6], "warmup", 0));
+  if (argc > 7) runs = static_cast<uint>(parse_integer(argv[7], "runs", 1));
   if (argc > 8) rtol = parse_f32(argv[8], "rtol");
   if (argc > 9) atol = parse_f32(argv[9], "atol");
+  if (argc > 10) {
+    EC = parse_integer(argv[10], "EC", 1, S);
+  }
+  else {
+    EC = cute::ceil_div(S, E) * k;
+  }
+
 
   using Element = __nv_bfloat16;
   static_assert(cuda::std::is_same_v<Element, __half> ||
@@ -695,9 +678,6 @@ void drive(const int argc, char** argv) {
   // some values are 700 (Volta), 750 (Turing), 800 (Ampere), 900 (Hopper), 1000 (Blackwell), 1100 (?), 1200 (?)
   static_assert(FLASHMOE_ARCH >= 700);
   constexpr auto arch = FLASHMOE_ARCH;
-  // If yes, routed tokens exceeding ceil(S/E) * k, will be dropped.
-  // note that option 'no' requires significantly more GPU memory as the worst-case size is used for the expert token buffer
-  constexpr auto dtk = flashmoe::DropTokens::no;
   constexpr auto act = flashmoe::Activation::silu;
   constexpr auto mt = flashmoe::MLPMatmulType::gated;
   if (k > E) {
@@ -717,66 +697,18 @@ void drive(const int argc, char** argv) {
   }
   constexpr auto pS = arch >= 800 ? 2 : 1;
   constexpr auto bM = cuda::std::is_same_v<Element, double> ? 64 : 128;
+  static_assert(bM >= 1);
   if (S % bM != 0) {
     const auto errmsg = std::string("S must be a multiple of ").append(std::to_string(bM));
       throw std::invalid_argument(errmsg);
   }
-  constexpr auto sro = flashmoe::SoftMaxOptimizationLevel::highest; // for the gate kernel
-  switch (E) {
-    case 8: {
-      if (k > 1) {
-        kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 8, pS, flashmoe::CombineMode::plural, act,
-        flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>
-        (S, H, I, E, k, warmup, runs, rtol, atol);
-      }
-      else {
-        kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 8, pS, flashmoe::CombineMode::single, act,
-        flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>
-        (S, H, I, E, k, warmup, runs, rtol, atol);
-      }
-    }
-    break;
-    case 16: {
-      if (k > 1) {
-        kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 16, pS, flashmoe::CombineMode::plural, act,
-        flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>
-        (S, H, I, E, k, warmup, runs, rtol, atol);
-      }
-      else {
-        kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 16, pS, flashmoe::CombineMode::single, act,
-        flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>
-        (S, H, I, E, k, warmup, runs, rtol, atol);
-      }
-    }
-    break;
-    case 32: {
-      if (k > 1) {
-        kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::plural, act,
-        flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>
-        (S, H, I, E, k, warmup, runs, rtol, atol);
-      }
-      else {
-        kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::single, act,
-        flashmoe::GateReductionLevel::singleBlock, sro, mt, dtk>
-        (S, H, I, E, k, warmup, runs, rtol, atol);
-      }
-    }
-    break;
-    default: {
-      if (E % 32 != 0) {
-        throw std::invalid_argument("E is invalid");
-      }
-      if (k > 1) {
-        kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::plural, act,
-        flashmoe::GateReductionLevel::multiBlock, sro, mt, dtk>
-        (S, H, I, E, k, warmup, runs, rtol, atol);
-      }
-      else {
-        kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, 32, pS, flashmoe::CombineMode::single, act,
-        flashmoe::GateReductionLevel::multiBlock, sro, mt, dtk>
-        (S, H, I, E, k, warmup, runs, rtol, atol);
-      }
-    }
+  if (k > 1) {
+    kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, pS, flashmoe::CombineMode::plural, act, mt>
+    (S, H, I, E, EC, k, warmup, runs, rtol, atol);
+  }
+  else {
+    kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, pS, flashmoe::CombineMode::single, act, mt>
+    (S, H, I, E, EC, k, warmup, runs, rtol, atol);
   }
 }
 int main(const int argc, char** argv) {

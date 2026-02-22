@@ -24,7 +24,6 @@ namespace flashmoe
     int threads, // not necessarily required, but may help perf a little?
     int bM, // for GEMM0
     int bN, // for GEMM0
-    DropTokens d = DropTokens::yes,
     int batch = cute::min(bM, 8), // number of tokens dispatched in one go by a CTA
     typename Element
   >
@@ -73,7 +72,7 @@ namespace flashmoe
     __syncthreads();
     for (int i = threadIdx.x; i < E; i += threads) {
       const auto peer = enL[i].peer;
-      const auto nTokens = d == DropTokens::yes ? cute::min(seC[i], EC) : seC[i];
+      const auto nTokens = cute::min(seC[i], EC);
       const auto tilesM = cute::ceil_div(nTokens, bM);
       atomicAdd_block(sPTT + peer, tilesM);
     }
@@ -103,7 +102,7 @@ namespace flashmoe
       const auto lI = expertLookup[expertIdx];
       const auto flagOffset = epRank * lI.nLocalExperts + lI.expertLocalIdx;
       // note that for DropTokens:no, we set EC to be the entire sequence length (S) to accommodate the worst-case
-      const auto routedTokens = d == DropTokens::yes ? cute::min(lI.eC, EC) : lI.eC;
+      const auto routedTokens = cute::min(lI.eC, EC);
       auto* __restrict__ peerHeap = reinterpret_cast<VectorElement*>(topo == Topology::MIXED && lI.isRemote ?
         symHeap.advance<0, 0>(lI.peer, lI.expertLocalIdx): lI.remoteSHeap +
         symHeap.advanceOffset<0, 1>(epRank, lI.expertLocalIdx));

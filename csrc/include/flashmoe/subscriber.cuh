@@ -366,7 +366,7 @@ namespace flashmoe::subscriber
       constexpr int wSet = 16;
       constexpr int bSw = sizeof(uint) * 8U;
       static_assert(wSet == 16 || wSet == 32);
-      const int stageTrips = stageLength / wSet;
+      const int stageTrips = static_cast<int>(stageLength) / wSet;
       constexpr Decoder<subscriberCount, PacketStage::last, PeerConnectivity::p2p> lPd{};
       constexpr Decoder<subscriberCount, PacketStage::last, PeerConnectivity::remote> lRd{};
       const auto nRows = args.ecTilesM * args.E;

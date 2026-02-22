@@ -40,7 +40,7 @@ namespace flashmoe
     struct MoEArgs {
         const size_t elementBytes;
         const uint sequenceLength;
-        const uint EC;
+        const size_t EC;
         const uint tokenDim;
         const uint ffnIntermediateSize;
         const uint bM;
@@ -53,11 +53,11 @@ namespace flashmoe
         const uint16_t epRank;
         const uint16_t epWorld;
         const uint16_t myPE; // NVSHMEM PE
-        const uint16_t numExperts;
+        const size_t numExperts;
         const uint16_t numLocalExperts;
         const Topology topo;
 
-        MoEArgs(const size_t& eb, const uint& S, const uint& H, const uint& I, const uint& _EC,
+        MoEArgs(const size_t& eb, const uint& S, const uint& H, const uint& I, const size_t& _EC,
             const uint& bm, const uint& bn0, const uint& bn1, const uint& bk0, const uint bk1,
             const uint& _threads, const uint& ctas, const uint16_t& ep_rank, const uint16_t& ep_world,
             const uint16_t& mype, const uint16_t& experts,
@@ -199,7 +199,7 @@ namespace flashmoe
             throw std::runtime_error("failed to allocate signals via NVSHMEM");
         }
         // symmetric heap ~= 4*S*H
-        const auto heapLength = args.elementBytes * HEAP_STAGES * HEAP_CELLS * args.epWorld * args.numLocalExperts * roundEC * args.tokenDim;
+        const auto heapLength = args.elementBytes * HEAP_STAGES * HEAP_CELLS * static_cast<size_t>(args.epWorld * args.numLocalExperts) * static_cast<size_t>(roundEC * args.tokenDim);
         auto* sHeap = static_cast<cuda::std::byte*>(nvshmem_malloc(heapLength));
         if (sHeap == nullptr) {
             throw std::runtime_error("failed to allocate heap via NVSHMEM");
@@ -307,12 +307,12 @@ namespace flashmoe
             .S = args.sequenceLength,
             .H = args.tokenDim,
             .I = args.ffnIntermediateSize,
-            .EC = args.EC,
+            .EC = static_cast<uint>(args.EC),
             .bM = static_cast<uint16_t>(args.bM),
             .bN0 = static_cast<uint16_t>(args.bN0),
             .bN1 = static_cast<uint16_t>(args.bN1),
             .nLx = args.numLocalExperts,
-            .E = args.numExperts,
+            .E = static_cast<uint16_t>(args.numExperts),
             .world = args.epWorld,
             .epRank = args.epRank,
             .myPE = args.myPE,

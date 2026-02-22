@@ -2,11 +2,6 @@
 // Created by osayamen on 1/14/26.
 //
 // unit tests for combine
-#include <algorithm>
-#include <vector>
-#include <tuple>
-#include <random>
-#include <cassert>
 #include <stdexcept>
 
 #include "common.cuh"
@@ -33,7 +28,7 @@ __global__ void combineKernel(const __grid_constant__ size_t EC,
     const auto tilesPerExpert = tilesM * tilesN;
     const auto numTiles = E * tilesM * tilesN;
     const auto tokTensor = cute::make_tensor(cute::make_gmem_ptr(tokens),
-        cute::make_layout(cute::make_shape(E, EC, H), cute::LayoutRight{}));
+        cute::make_layout(cute::make_shape(E, EC, static_cast<size_t>(H)), cute::LayoutRight{}));
     const auto tokenIds = cute::make_tensor(cute::make_gmem_ptr(tokenIndices),
         cute::make_layout(cute::make_shape(E, EC), cute::LayoutRight{}));
     for (int globalIdx = blockIdx.x; globalIdx < numTiles; globalIdx += gridDim.x) {
@@ -58,7 +53,7 @@ __global__ void combineKernel(const __grid_constant__ size_t EC,
 // Note this is not an optimal implementation
 template<typename AccumType, typename Element>
 __global__ void combineReference(const __grid_constant__ int E, const __grid_constant__ int S,
-    const __grid_constant__ int H, const __grid_constant__ int EC, const __grid_constant__ int topK,
+    const __grid_constant__ int H, const __grid_constant__ size_t EC, const __grid_constant__ int topK,
     const Element* __restrict__ tokens, // [E, EC, H]
     const flashmoe::TPS* __restrict__ tokenIds, //[E, EC] metadata
     const int* __restrict__ expertCounts, // [E]
@@ -72,7 +67,7 @@ __global__ void combineReference(const __grid_constant__ int E, const __grid_con
     const auto tIds = cute::make_tensor(cute::make_gmem_ptr(tokenIds),
         cute::make_layout(cute::make_shape(E, EC), cute::LayoutRight{}));
     const auto tokTensor = cute::make_tensor(cute::make_gmem_ptr(tokens),
-        cute::make_layout(cute::make_shape(E, EC, H), cute::LayoutRight{}));
+        cute::make_layout(cute::make_shape(E, EC, static_cast<size_t>(H)), cute::LayoutRight{}));
     auto resultTensor = cute::make_tensor(cute::make_gmem_ptr(result),
         cute::make_layout(cute::make_shape(S, H), cute::LayoutRight{}));
     auto oracleT = cute::make_tensor(cute::make_gmem_ptr(oracleResult),
@@ -112,166 +107,13 @@ __global__ void combineReference(const __grid_constant__ int E, const __grid_con
     }
 }
 
-__host__ __forceinline__
-auto getEC(const int& S) {
-    return S; // no dropping
-}
-enum class WeightDistribution {
-  Uniform01,      // U(0,1]
-  Exponential1,   // Exp(lambda=1)
-  LogNormal       // logN(mu=0, sigma=1)
-};
-
-// Generates a routing assignment with NO token dropping:
-// - EC == S
-// - each token appears exactly k times globally
-// - within each expert row, each token appears at most once (guaranteed by construction)
-// - expertCounts[e] <= EC == S always
-//
-// Returns: (expertCounts[E], tokenIds[E*EC] in row-major [e, j])
-template<WeightDistribution Dist>
-__host__ __forceinline__
-float sample_positive_weight(std::mt19937& rng) {
-  float w = 0.0f;
-  if constexpr (Dist == WeightDistribution::Uniform01) {
-    std::uniform_real_distribution<float> uni01(0.0f, 1.0f);
-    w = uni01(rng);
-  } else if constexpr (Dist == WeightDistribution::Exponential1) {
-    std::exponential_distribution<float> exp1(1.0f);
-    w = exp1(rng);
-  } else if constexpr (Dist == WeightDistribution::LogNormal) {
-    std::lognormal_distribution<float> logn(0.0f, 1.0f);
-    w = logn(rng);
-  } else {
-    static_assert(Dist == WeightDistribution::Uniform01 ||
-                  Dist == WeightDistribution::Exponential1 ||
-                  Dist == WeightDistribution::LogNormal,
-                  "Unsupported distribution");
-  }
-  if (w == 0.0f) w = 1e-7f;
-  return w;
-}
-
-std::vector<int>
-__host__ __forceinline__
-choose_topk_experts_from_scores(std::mt19937& rng, const int& E, const int& k) {
-  assert(E > 0 && k > 0 && k <= E);
-
-  std::uniform_real_distribution<float> score_dist(0.0f, 1.0f);
-  std::vector<std::pair<float,int>> scored;
-  scored.reserve(static_cast<size_t>(E));
-  for (int e = 0; e < E; ++e) scored.emplace_back(score_dist(rng), e);
-
-  auto nth = scored.begin() + (E - k);
-  std::ranges::nth_element(
-      scored.begin(), nth, scored.end(),
-      [](auto const& a, auto const& b) { return a.first < b.first; });
-
-  std::vector<int> experts;
-  experts.reserve(static_cast<size_t>(k));
-  for (int r = 0; r < k; ++r) experts.push_back(scored[E - k + r].second);
-  return experts;
-}
-
-// Dynamic S, E, k; EC is assumed equal to S (no dropping).
-// Returns: (expertCounts[E], tokenIds[E*EC] in row-major [e, j])
-template<WeightDistribution Dist = WeightDistribution::Uniform01>
-std::tuple<std::vector<int>, std::vector<flashmoe::TPS>>
-generate_token_ids_and_expert_counts(const int& S, const int& E, const int& k) {
-  assert(S > 0 && E > 0 && k > 0);
-  assert(k <= E && "Need k <= E to pick k unique experts per token");
-  const int EC = S;
-
-  std::random_device rd;
-  std::mt19937 rng(rd());
-
-  std::vector<int> expertCounts(static_cast<size_t>(E), 0);
-  std::vector<int> writePos(static_cast<size_t>(E), 0);
-  std::vector<int> seen(static_cast<size_t>(S), 0);
-
-  std::vector<flashmoe::TPS> tokenIds(
-      static_cast<size_t>(E) * static_cast<size_t>(EC),
-      flashmoe::TPS{0, 0.0f});
-
-  // For each token, select k unique experts, generate k weights, normalize, append.
-  for (uint t = 0; t < S; ++t) {
-    const std::vector<int> experts = choose_topk_experts_from_scores(rng, E, k);
-
-    // Raw weights
-    std::vector<float> w(static_cast<size_t>(k), 0.0f);
-    float sumW = 0.0f;
-    for (int r = 0; r < k; ++r) {
-      w[static_cast<size_t>(r)] = sample_positive_weight<Dist>(rng);
-      sumW += w[static_cast<size_t>(r)];
-    }
-    const float invSum = 1.0f / sumW;
-
-    // Append to experts
-    for (int r = 0; r < k; ++r) {
-      const int e = experts[static_cast<size_t>(r)];
-      const int j = writePos[static_cast<size_t>(e)]++;
-
-      assert(j < EC && "expert row overflow (unexpected with EC==S)");
-      tokenIds[static_cast<size_t>(e) * static_cast<size_t>(EC) +
-               static_cast<size_t>(j)] =
-          flashmoe::TPS{t, w[static_cast<size_t>(r)] * invSum};
-
-      expertCounts[static_cast<size_t>(e)] = writePos[static_cast<size_t>(e)];
-      seen[static_cast<size_t>(t)] += 1;
-    }
-  }
-
-  // Pad remaining entries (optional)
-  for (int e = 0; e < E; ++e) {
-    for (int j = expertCounts[static_cast<size_t>(e)]; j < EC; ++j) {
-      tokenIds[static_cast<size_t>(e) * static_cast<size_t>(EC) +
-               static_cast<size_t>(j)] = flashmoe::TPS{0, 0.0f};
-    }
-  }
-
-  // Sanity checks
-  {
-    long long total = 0;
-    for (int e = 0; e < E; ++e) {
-      assert(expertCounts[static_cast<size_t>(e)] <= EC);
-      total += expertCounts[static_cast<size_t>(e)];
-    }
-    assert(total == 1LL * S * k);
-    for (int t = 0; t < S; ++t) assert(seen[static_cast<size_t>(t)] == k);
-  }
-
-  return {std::move(expertCounts), std::move(tokenIds)};
-}
-
-__host__ __forceinline__
-void printMetadata(const std::vector<int>& counts, const std::vector<flashmoe::TPS>& ids,
-    const int& EC, const int& E) {
-    const auto t0 = cute::make_tensor(counts.data(), cute::make_layout(
-        cute::make_shape(E, 1), cute::LayoutRight{}));
-    print_tensor(t0);
-    void* p = std::malloc(ids.size() * sizeof(uint));
-    auto* indices = static_cast<uint*>(p);
-    std::ranges::transform(ids.begin(), ids.end(), indices, [](const flashmoe::TPS t) {
-        return t.tokenIdx;
-    });
-    const auto t1 = cute::make_tensor(indices, cute::make_layout(
-        cute::make_shape(E, EC), cute::LayoutRight{}));
-    print_tensor(t1);
-    auto* scales = static_cast<float*>(p);
-    std::ranges::transform(ids.begin(), ids.end(), scales, [](const flashmoe::TPS t) {
-        return t.probability;
-    });
-    const auto t2 = cute::make_tensor(scales, cute::make_layout(
-        cute::make_shape(E, EC), cute::LayoutRight{}));
-    print_tensor(t2);
-    std::free(p);
-}
-
 template<int Arch, int H, int bM, int bN, typename Element>
 __host__ __forceinline__
 void kickStart(const int& S, const int& E, const int& k, const float& rtol, const float& atol) {
-    const auto EC = getEC(S);
-    const auto [counts, indices] = generate_token_ids_and_expert_counts(S, E, k);
+    const size_t EC = S;
+    const size_t roundEC = cute::ceil_div(EC, bM) * bM;
+    const auto [counts, indices] = generate_token_ids_and_expert_counts(S, E, EC, roundEC,
+        k, 0.f, 0.001f);
     cudaSetDevice(0);
     cudaStream_t stream;
     cudaStreamCreate(&stream);
@@ -291,19 +133,19 @@ void kickStart(const int& S, const int& E, const int& k, const float& rtol, cons
     Element* ref_result = nullptr;
     float* oracleResult = nullptr;
 
-    cudaMallocAsync(&tokens, sizeof(Element) * E * EC * H, stream);
-    cudaMallocAsync(&tIds, sizeof(flashmoe::TPS) * E * EC, stream);
-    cudaMallocAsync(&expertCounts, sizeof(int) * E, stream);
-    cudaMallocAsync(&ref_result, sizeof(Element) * S * H, stream);
-    cudaMemsetAsync(ref_result, 0, sizeof(Element) * S * H, stream);
+    CHECK_CUDA(cudaMallocAsync(&tokens, sizeof(Element) * E * EC * H, stream));
+    CHECK_CUDA(cudaMallocAsync(&tIds, sizeof(flashmoe::TPS) * E * EC, stream));
+    CHECK_CUDA(cudaMallocAsync(&expertCounts, sizeof(int) * E, stream));
+    CHECK_CUDA(cudaMallocAsync(&ref_result, sizeof(Element) * S * H, stream));
+    CHECK_CUDA(cudaMemsetAsync(ref_result, 0, sizeof(Element) * S * H, stream));
 
     std::random_device rd;
-    cudaMallocAsync(&kut_result, sizeof(Element) * S * H, stream);
+    CHECK_CUDA(cudaMallocAsync(&kut_result, sizeof(Element) * S * H, stream));
     if (k > 1) {
         // needed since we accumulate into the buffer
-        cudaMemsetAsync(kut_result, 0, sizeof(Element) * S * H, stream);
-        cudaMallocAsync(&oracleResult, sizeof(float) * S * H, stream);
-        cudaMemsetAsync(oracleResult, 0, sizeof(float) * S * H, stream);
+        CHECK_CUDA(cudaMemsetAsync(kut_result, 0, sizeof(Element) * S * H, stream));
+        CHECK_CUDA(cudaMallocAsync(&oracleResult, sizeof(float) * S * H, stream));
+        CHECK_CUDA(cudaMemsetAsync(oracleResult, 0, sizeof(float) * S * H, stream));
     }
     CHECK_CUDA(cudaPeekAtLastError());
     // fill token array
@@ -396,7 +238,7 @@ void doTest(const int argc, char** argv) {
     }
     // fix H to minimize template instantiations.
     using Element = __half;
-    constexpr int H = 4096;
+    constexpr int H = 2048;
     constexpr int bN = cute::min(H, 64 * (sizeof(Element) == 2 ? 2 : 1));
     static_assert(H % bN == 0);
     constexpr int Arch = FLASHMOE_ARCH; // compute capability
