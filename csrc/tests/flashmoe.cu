@@ -640,12 +640,12 @@ float parse_f32(const char* s, const char* name) {
 //./testFlashMoE <S> <H> <I> <E> <k> <warmup> <runs> <rtol> <atol> <EC>
 __host__
 void drive(const int argc, char** argv) {
-  size_t S = 8192;
-  size_t H = 2048;
-  size_t I = 2048;
-  size_t E = 32;
-  size_t k = 2;
-  size_t EC = cute::ceil_div(S, E) * k;
+  size_t S = 8192; //  number of tokens per rank
+  size_t H = 2048; // token dimension
+  size_t I = 2048; // FFN intermediate dimension
+  size_t E = 32; // number of expers
+  size_t k = 2; // topK
+  size_t EC = cute::ceil_div(S, E) * k; // expert capacity at a peer granularity EC in {1,...,S}
   uint warmup = 128;
   uint runs = 128;
   float rtol = 8e-2;
@@ -679,7 +679,7 @@ void drive(const int argc, char** argv) {
   static_assert(FLASHMOE_ARCH >= 700);
   constexpr auto arch = FLASHMOE_ARCH;
   constexpr auto act = flashmoe::Activation::silu;
-  constexpr auto mt = flashmoe::MLPMatmulType::gated;
+  constexpr auto mt = flashmoe::MLPMatmulType::vanilla;
   if (k > E) {
     throw std::invalid_argument("k must be <= E");
   }

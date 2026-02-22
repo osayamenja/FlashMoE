@@ -332,7 +332,7 @@ namespace flashmoe
         const auto processors = args.blocks - 1;
 
         size_t bytes = 0;
-        bytes += sizeof(uint64_t) * (args.epWorld * args.numLocalExperts) + (args.numExperts * ecTilesM * tilesN1);
+        bytes += sizeof(uint64_t) * (args.epWorld * args.numLocalExperts + (args.numExperts * ecTilesM * tilesN1));
         bytes += args.elementBytes * HEAP_STAGES * HEAP_CELLS * args.epWorld * args.numLocalExperts * roundEC * args.tokenDim;
         const size_t tQLength = subscriberTQLength<WARP_SIZE>(args.epWorld, args.numLocalExperts, ecTilesM, args.numExperts, tilesN0,
             tilesN1, args.threads - WARP_SIZE);

@@ -86,7 +86,7 @@ namespace flashmoe
         static_assert(alignof(cuda::fast_mod_div<uint>) <= 8);
     };
 
-    struct __align__(8) GateContext{
+    struct GateContext{
         int* const ecGuards = nullptr; // [E]
         SoftmaxStatePacked* const ssp = nullptr; // [S, tiles(E)]
         RingTopKPayload* const rtp = nullptr; // [2, S, tiles(E)]

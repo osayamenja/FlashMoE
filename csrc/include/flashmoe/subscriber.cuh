@@ -25,7 +25,7 @@
 
 namespace flashmoe::subscriber
 {
-  struct __align__(16) Args {
+  struct Args {
     uint64_t* const flags; // symmetric global
     Task* const tQ; // global
     cuda::std::byte* const GEMM0Staging;
@@ -475,6 +475,7 @@ namespace flashmoe::subscriber
                 }
                 Ingredients ingredients{};
                 const auto tokenIdx = sigPayload.batchIdx * bM;
+                ingredients.expertIdx = expertIdx;
                 ingredients.M = tokenIdx;
                 ingredients.localExpertIdx = lookup.localExpertIndex;
                 ingredients.peerIdx = lookup.epRank;
@@ -498,6 +499,7 @@ namespace flashmoe::subscriber
                 const auto tokenIdx = sigPayload.batchIdx * bM;
                 // construct combine ingredients
                 Ingredients ingredients{};
+                ingredients.expertIdx  = expertIdx;
                 ingredients.M = tokenIdx;
                 ingredients.localExpertIdx = lookup.localExpertIndex;
                 ingredients.peerIdx = lookup.epRank;
