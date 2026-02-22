@@ -1,590 +1,421 @@
-/*
- * Copyright (c) 2025, Osayamen Jonathan Aimuyo
- * All rights reserved.
- *
- * This file is part of the Flashmoe Project and is licensed under the BSD 3-Clause License.
- * See the LICENSE file in the root directory for full terms.
- */
-
 //
-// Created by oja7 on 11/12/24.
+// Created by osayamen on 1/17/26.
 //
 
-#ifndef BOOTSRAP_CUH
-#define BOOTSTRAP_CUH
+#ifndef FLASHMOE_BOOTSTRAP_CUH
+#define FLASHMOE_BOOTSTRAP_CUH
+#include <algorithm>
+#include <stdexcept>
+#include <vector>
 
-#include <cstdlib>
+#include <cuda_runtime.h>
+#include <cstdio>
+#include <nvshmem.h>
 
-#include <cute/layout.hpp>
-#include <cute/tensor.hpp>
-#include <fmt/ranges.h>
+#include <cuda/cmath>
 
-#include "throughput.cuh"
-#include "topo.cuh"
-#include "debug.cuh"
-#include "telemetry.cuh"
-#include "types.cuh"
-#include "moe/expert.cuh"
-#include "os/decider/decider.cuh"
-#include "os/decider/comps/expert.cuh"
-#include "os/decider/comps/niche.cuh"
-#include "os/decider/comps/worker.cuh"
+#include "infra/constants.cuh"
+#include "infra/telemetry.cuh"
+#include "infra/bitset.cuh"
+#include "context.cuh"
+#include "infra/atomics.cuh"
+#include "infra/signal.cuh"
+#include "infra/heap.cuh"
+#if !defined(CHECK_CUDA)
+#  define CHECK_CUDA(e)                                      \
+do {                                                         \
+    cudaError_t code = (e);                                  \
+    if (code != cudaSuccess) {                               \
+        fprintf(stderr, "<%s:%d> %s:\n    %s: %s\n",         \
+            __FILE__, __LINE__, #e,                          \
+            cudaGetErrorName(code),                          \
+            cudaGetErrorString(code));                       \
+        fflush(stderr);                                      \
+        exit(1);                                             \
+    }                                                        \
+} while (0)
+#endif
+namespace flashmoe
+{
+    struct MoEArgs {
+        const size_t elementBytes;
+        const uint sequenceLength;
+        const size_t EC;
+        const uint tokenDim;
+        const uint ffnIntermediateSize;
+        const uint bM;
+        const uint bN0;
+        const uint bN1;
+        const uint bK0;
+        const uint bK1;
+        const uint threads;
+        const uint blocks; //CTAs
+        const uint16_t epRank;
+        const uint16_t epWorld;
+        const uint16_t myPE; // NVSHMEM PE
+        const size_t numExperts;
+        const uint16_t numLocalExperts;
+        const Topology topo;
 
-#define SUPPORTED = 1;
-namespace flashmoe{
+        MoEArgs(const size_t& eb, const uint& S, const uint& H, const uint& I, const size_t& _EC,
+            const uint& bm, const uint& bn0, const uint& bn1, const uint& bk0, const uint bk1,
+            const uint& _threads, const uint& ctas, const uint16_t& ep_rank, const uint16_t& ep_world,
+            const uint16_t& mype, const uint16_t& experts,
+            const uint16_t& nlx, const Topology& topo_):
+        elementBytes(eb), sequenceLength(S),
+        EC(_EC),
+        tokenDim(H), ffnIntermediateSize(I), bM(bm), bN0(bn0), bN1(bn1), bK0(bk0), bK1(bk1),
+        threads(_threads), blocks(ctas), epRank(ep_rank), epWorld(ep_world), myPE(mype), numExperts(experts),
+        numLocalExperts(nlx), topo(topo_) {}
+    };
+
+    __global__ void bI(cuda::barrier<cuda::thread_scope_device>* db, const uint blocks) {
+        init(db, blocks);
+    }
+
     __host__ __forceinline__
-    void imposeStrategy(EPG* __restrict__ const& ePg,
-        uint* __restrict__ const& pT, uint* __restrict__ const& ePs, const uint& rank, const uint& globalWorld) {
-        constexpr auto E = ACC::E::value;
-        *ePg = EPG{
-            static_cast<uint16_t>(rank),
-            static_cast<uint16_t>(E / globalWorld),
-            static_cast<uint16_t>(E / globalWorld),
-            static_cast<uint16_t>(globalWorld)
-        };
-        for (uint i = 0; i < globalWorld; ++i) {
-            pT[i] = i;
+    void expertParallelBookkeeping(const uint* __restrict__ const& expertToEpRank,
+        const int* __restrict__ const& epRankToGlobalRank, const uint& epWorld,
+        const int& myPE, const uint& E, const uint& nLx,
+        cuda::std::byte* const& sHeap, uint64_t* const& signals,
+        PEL* const& pel, PLI* const& pli, ELI* const& eli, LXI* const& lxi,
+        cudaStream_t stream) {
+#if defined(FLASHMOE_NVTX) && FLASHMOE_NVTX
+        const flashmoeRange range{"FlashMoE::expertParallelBookkeeping"};
+#endif
+        if (nvshmemx_init_status() == NVSHMEM_STATUS_NOT_INITIALIZED) {
+            throw std::runtime_error("nvshmem is not initialized");
         }
-        const auto split = E / globalWorld;
+        std::vector<uint> lxIndices(epWorld);
+        std::vector<PEL> pelHost(E);
+        std::vector<PLI> pliHost(epWorld);
+        std::vector<ELI> eliHost(E);
+        std::vector<LXI> lxiHost(nLx);
+
+        std::ranges::fill(lxIndices.begin(), lxIndices.end(), 0);
         for (uint i = 0; i < E; ++i) {
-            ePs[i] = i / split;
-        }
-    }
+            const auto epRank = expertToEpRank[i];
+            const auto pe = epRankToGlobalRank[epRank];
+            auto* rSheap = static_cast<cuda::std::byte*>(nvshmem_ptr(sHeap, pe));
+            auto* rFlags = static_cast<uint64_t*>(nvshmem_ptr(signals, pe));
+            const uint lxIdx = lxIndices[epRank]++;
+            const auto isRemote = rSheap == nullptr;
 
-    __host__ __forceinline__
-    auto gEI(const char* const& eV, const int& eVd) {
-        if (std::getenv(eV) == nullptr) {
-            return eVd;
-        }
-        return std::stoi(std::getenv(eV));
-    }
-
-    __host__ __forceinline__
-    void uEI(const char* const& eV, const int& v) {
-        if (setenv(eV, std::to_string(v).c_str(), 1)) {
-            perror(std::string("failed to set environment variable: " + std::string(eV)).c_str());
-        }
-    }
-
-    __host__ __forceinline__
-    void exportTopo(const floatPair* __restrict__ const& aP,
-        const WorkerAttribute* __restrict__ const& attributes,
-        const uint& world, const uint& rank) {
-        const auto aM = make_tensor(aP,
-            make_layout(cute::make_shape(world, world), cute::LayoutRight{}));
-        std::vector<std::array<float, 2>> tAM(world);
-        std::vector<float> tWT(world);
-        std::vector<uint16_t> tWM(world);
-
-        auto* file = std::fopen(std::string("adjMatrix_Rank")
-            .append(std::to_string(rank)).append(".txt").c_str(), "w");
-        fmt::print(file, "----> {} processes pair-wise (𝛼 ms, 𝛽 ms/MB) costs <------\n", world);
-        for (uint i = 0; i < world; ++i){
-            for (uint j = 0; j < world; ++j){
-                const auto [alpha, beta] = aM(i, j);
-                tAM[j] = {alpha, beta};
-            }
-            fmt::print(file, "Rank {}: {:::.2e}\n", i, tAM);
-        }
-        for (uint i = 0; i < world; ++i) {
-            const auto [t, m] = attributes[i];
-            tWT[i] = static_cast<float>(t);
-            tWM[i] = m;
-        }
-        fmt::print(file, "Rank {}: \n\t Throughput: {}\n\t MemoryCapacity: {}\n", rank, tWT, tWM);
-        std::fclose(file);
-    }
-
-    __host__ __forceinline__
-    void estimateMemory(WorkerAttribute* __restrict__ const& dWa) {
-        #if FLASHMOE_NVTX
-        flashmoeRange estRange{__PRETTY_FUNCTION__};
-        #endif
-        // estimate available device memory
-        size_t free = 0, total = 0;
-        FLASHMOE_CHECK_CUDA(cudaMemGetInfo(&free, &total));
-        // Deduct cost for the dense case, assuming at least one expert per device
-        free -= ACC::BPP::value * (ACC::PC::value + ACC::S::value * ACC::H::value);
-        constexpr size_t mX = cute::ceil_div(ACC::L::value, ACC::F::value) * ACC::BPP::value * 2UL *
-            (ACC::P::value * ACC::H::value);
-        dWa->memoryCapacity = free / mX;
-    }
-
-    __host__ __forceinline__
-    void discoverTopology(void* const& hAp, const uint& n, const uint& globalRank,
-        const WorkerAttribute& lWa, WorkerAttribute* __restrict__ const& wAp) {
-        #if FLASHMOE_NVTX
-        flashmoeRange discRange{__func__};
-        #endif
-        const auto aD = n * n;
-        const auto heapBytes = n * BETA_BUFFER;
-        const auto sBkz =  n + aD;
-        WorkerAttribute* attributes;
-        cuda::barrier<cuda::thread_scope_device>* dvB;
-        FLASHMOE_CHECK_CUDA(cudaMallocAsync(&attributes, sizeof(WorkerAttribute) * n,
-            flashmoeStream));
-        FLASHMOE_CHECK_CUDA(cudaMallocAsync(&dvB,
-            sizeof(cuda::barrier<cuda::thread_scope_device>), flashmoeStream));
-        const auto hB = new cuda::barrier<cuda::thread_scope_device>{FLASHMOE_STATIC_SBZ};
-        FLASHMOE_CHECK_CUDA(cudaMemcpyAsync(dvB, hB,
-            sizeof(cuda::barrier<cuda::thread_scope_device>),
-            cudaMemcpyHostToDevice, flashmoeStream));
-        static_assert(sizeof(floatPair) == sizeof(flagsType) &&
-            alignof(floatPair) == sizeof(flagsType));
-        auto* symBook = nvshmem_calloc(sBkz, sizeof(flagsType));
-        auto* symHeap = nvshmem_align(16, heapBytes);
-        FLASHMOE_ASSERT(symBook != nullptr, "nvshmem_calloc failed");
-        FLASHMOE_ASSERT(symHeap != nullptr, "nvshmem_align failed");
-        // Pointer orchestration
-        // Starting index of flags array
-        auto* flags = static_cast<flagsType*>(symBook);
-        auto* adj = CAST_TO(floatPair, flags + n);
-        // Navigate to our slice of the adjacency matrix
-        auto* results = adj + globalRank * n;
-        const auto remotePresent = [&n, &results] {
-            for (int i = 0; i < n; ++i) {
-                if (nvshmem_ptr(results, i) == nullptr) return true;
-            }
-            return false;
-        };
-        const auto isRemotePresent = remotePresent();
-        const auto sharedSize = n * (sizeof(floatPair) + sizeof(unsigned int));
-        constexpr auto seqNo = 1U;
-        topology::discover<<<FLASHMOE_STATIC_SBZ, FLASHMOE_BLOCK_SIZE, sharedSize, flashmoeStream>>>(n, globalRank,
-            isRemotePresent, lWa,
-            static_cast<cuda::std::byte*>(symHeap),
-            flags, results, dvB, attributes, seqNo);
-        FLASHMOE_CHECK_CUDA(cudaMemcpyAsync(hAp, adj, aD * sizeof(floatPair),
-            cudaMemcpyDeviceToHost, flashmoeStream));
-        FLASHMOE_CHECK_CUDA(cudaMemcpyAsync(wAp, attributes, n * sizeof(WorkerAttribute),
-            cudaMemcpyDeviceToHost, flashmoeStream));
-        FLASHMOE_CHECK_CUDA(cudaFreeAsync(attributes, flashmoeStream));
-        FLASHMOE_CHECK_CUDA(cudaFreeAsync(dvB, flashmoeStream));
-        FLASHMOE_CHECK_CUDA(cudaPeekAtLastError());
-        FLASHMOE_CHECK_CUDA(cudaStreamSynchronize(flashmoeStream));
-        delete hB;
-        nvshmem_free(symHeap);
-        nvshmem_free(symBook);
-    }
-
-    __host__ __forceinline__
-    bool runDecider(EPG* __restrict__ const& ePg,
-        Expert* __restrict__ const& experts,
-        Worker* __restrict__ const& wG,
-        Worker* __restrict__ const& ePwG,
-        uint* __restrict__ const& dTg,
-        uint* __restrict__ const& pT,
-        uint* __restrict__ const& pTs,
-        uint* __restrict__ const& ePs,
-        uint* __restrict__ const& ePsX,
-        uint16_t* __restrict__ const& scratch,
-        const floatPair* __restrict__ const& aP,
-        const WorkerAttribute* __restrict__ const& attributes,
-        const uint& rank, const uint& world) {
-        #if FLASHMOE_NVTX
-        flashmoeRange decRange{__func__};
-        #endif
-        constexpr auto E = ACC::E::value;
-        constexpr cutlass::NumericConverter<float, cute::half_t> h2f{};
-        for (uint16_t i = 0; i < world; ++i) {
-            const auto [t, m] = attributes[i];
-            wG[i] = Worker{i, h2f(t), m};
-        }
-        const auto adj = make_tensor(aP, make_layout(cute::make_shape(world, world), cute::LayoutRight{}));
-        constexpr Decider<ACC::JT::value> decider{};
-        if (!decider(adj, wG, E, E, dTg)) {
-            // this means there isn't enough device memory for the input model configuration.
-            // we propagate this information above
-            return false;
-        }
-        const auto epWorld = subsets(dTg, pT, world, dTg[rank]);
-        for (uint i = 0; i < E; ++i) {
-            // assuming homogenous experts, where each has normalized compute cost of 1
-            experts[i] = Expert{i, 1};
-        }
-        // repurpose memory as the expert parallel group
-        uint16_t epRank = 0U;
-        for (uint16_t i = 0; i < epWorld; ++i) {
-            const auto wRank = pT[i];
-            if (wRank == rank) {
-                epRank = i;
-            }
-            ePwG[i] = Worker{i, wG[wRank].processingRate, wG[wRank].memoryCapacity};
-        }
-        assign(ePwG, epWorld, experts, E, ePs);
-        uint16_t expertSlots = 0U;
-        std::ranges::fill(scratch, scratch + world, 0U);
-        // compute expert slots for our group
-        for (uint16_t i = 0; i < E; ++i) {
-            const auto wIdx = ePs[i];
-            const uint16_t tally = scratch[wIdx] + 1U;
-            scratch[wIdx] = tally;
-            expertSlots = cuda::std::max(tally, expertSlots);
-        }
-        const auto numLocalExperts = scratch[epRank];
-        auto epg = EPG{
-            epRank,
-            expertSlots,
-            numLocalExperts,
-            epWorld
-        };
-        if (epWorld < world) {
-            // Get other group ids
-            // The global maximum of epW and expertSlots is necessary for allocating a uniformly sized symmetric heap
-            // across all PEs.
-            std::unordered_set<uint> groups{};
-            for (uint i = 0; i < world; ++i) {
-                groups.emplace(dTg[i]);
-            }
-            const auto myGroup = dTg[rank];
-            for (const auto& group : groups) {
-                if (group != myGroup) {
-                    std::ranges::fill(scratch, scratch + world, 0U);
-                    const auto ePw = subsets(dTg, pTs, world, group);
-                    epg.epWorldM = cute::max(epg.epWorldM, ePw);
-                    for (uint i = 0; i < ePw; ++i) {
-                        const auto wRank = pTs[i];
-                        ePwG[i] = Worker{
-                            static_cast<uint16_t>(wRank),
-                            wG[wRank].processingRate,
-                            wG[wRank].memoryCapacity
-                        };
-                    }
-                    assign(ePwG, ePw, experts, E, ePsX);
-                    for (uint16_t i = 0; i < E; ++i) {
-                        const auto wIdx = ePsX[i];
-                        const uint16_t tally = scratch[wIdx] + 1U;
-                        scratch[wIdx] = tally;
-                        epg.expertSlots = cuda::std::max(tally, epg.expertSlots);
-                    }
-                }
-            }
-        }
-        *ePg = epg;
-        return true;
-    }
-
-    __host__ __forceinline__
-    void cleanup() {
-        #if FLASHMOE_NVTX
-        flashmoeRange finalRange{__PRETTY_FUNCTION__};
-        #endif
-        FLASHMOE_ASSERT(isInitialized, "Not initialized!");
-        isInitialized = false;
-        FLASHMOE_CHECK_CUDA(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
-        nvshmem_finalize();
-    }
-
-    template<EP e = EP::yes>
-    __host__ __forceinline__
-    void distributedInit() {
-        #if FLASHMOE_NVTX
-        flashmoeRange distRange{__PRETTY_FUNCTION__};
-        #endif
-        static_assert(e == EP::yes);
-        constexpr auto blocks = ACC::PeakHardware::blocks::value;
-        using Element = ACC::Element;
-        constexpr uint E = ACC::E::value;
-        // Below forces NVSHMEM to statically allocate memory, which is desirable
-        uEI("NVSHMEM_DISABLE_CUDA_VMM", 1);
-        // initialize communication backend
-        {
-            #if FLASHMOE_NVTX
-            flashmoeRange cR{"distributedInit::nvshmem_init()"};
-            #endif
-            nvshmem_init();
-        }
-        const uint devId = nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE);
-        FLASHMOE_CHECK_CUDA(cudaSetDevice(devId));
-        const auto globalWorld = nvshmem_n_pes();
-        const auto rank = nvshmem_my_pe();
-
-        // Pointer to adjacency matrix and throughput of all devices
-        const auto aD = globalWorld * globalWorld;
-        const auto dZ = 2 * sizeof(Worker) * globalWorld +
-                sizeof(Expert) * E +
-                aD * sizeof(floatPair) +
-                globalWorld * sizeof(WorkerAttribute) +
-                2 * sizeof(uint) * globalWorld;
-        const auto aXz = (sizeof(ELI) + sizeof(PEL)) * E +
-            (sizeof(PLI) * globalWorld) + sizeof(LXI) * E +
-                (sizeof(uint) * (E * ACC::TCM::value * ACC::TNx::value));
-        const auto pZ = cuda::std::max(dZ, aXz);
-        const auto sZ = sizeof(uint) * (globalWorld + 2 * E) + sizeof(uint16_t) * globalWorld;
-        auto* mP = static_cast<cuda::std::byte*>(std::calloc(pZ + sZ, sizeof(cuda::std::byte)));;
-
-        // Pointer salami slicing
-        auto* workers = CAST_TO(Worker, mP);
-        auto* ePWorkers = workers + globalWorld;
-        static_assert(alignof(Worker) % alignof(Expert) == 0);
-        auto* experts = CAST_TO(Expert, ePWorkers + globalWorld);
-        static_assert(alignof(Expert) % alignof(floatPair) == 0);
-        auto* aP = CAST_TO(floatPair, experts + E);
-        static_assert(alignof(floatPair) % alignof(WorkerAttribute) == 0);
-        auto* wAp = CAST_TO(WorkerAttribute, aP + aD);
-        static_assert(alignof(WorkerAttribute) % alignof(uint) == 0);
-        auto* dTg = CAST_TO(uint, wAp + globalWorld);
-        auto* pTs = CAST_TO(uint, dTg + globalWorld);
-
-        // Result buffers
-        auto* pT = CAST_TO(uint, mP + pZ);
-        auto* ePs = pT + globalWorld;
-        auto* ePsX = ePs + E; // scratch
-        auto* scratch = CAST_TO(uint16_t, ePsX + E);
-
-        estimateMemory(&wAp[rank]);
-        mT(wAp + rank);
-
-        discoverTopology(aP, globalWorld, rank, wAp[rank], wAp);
-        auto ePgD = EPG{};
-        // The topology adjacency matrix is ready, let's map devices to optimal cooperative process groups
-        const auto isFeasible = runDecider(&ePgD, experts, workers, ePWorkers, dTg, pT, pTs, ePs, ePsX,
-            scratch, aP, wAp, rank, globalWorld);
-        if (!isFeasible) {
-            cleanup();
-            FLASHMOE_ASSERT(isFeasible, "Insufficient Memory for Experts");
-        }
-        // Now allocate memory
-        const auto heapElems = STAGES * CELLS * ePgD.epWorldM * ePgD.expertSlots * ACC::pEC::value *
-            ACC::H::value;
-        const auto flagElems = (ePgD.epWorldM * ePgD.expertSlots + E * ACC::TCM::value * ACC::TNx::value);
-        auto tHB = flagElems * sizeof(flagsType) + heapElems * sizeof(Element);
-        // Required for large allocations
-        const auto nss = gEI("NVSHMEM_SYMMETRIC_SIZE", ACC::SZD::value); // default is 1GB
-        if (tHB >= nss) {
-            const auto nGB = cute::ceil_div(tHB, nss) * nss;
-            uEI("NVSHMEM_SYMMETRIC_SIZE", nGB);
-        }
-        // Note every symmetric memory allocation's size has to be identical across all PEs
-        auto* flags = static_cast<flagsType*>(nvshmem_calloc(flagElems, sizeof(flagsType)));
-        auto* sHeap = static_cast<cuda::std::byte*>(nvshmem_align(16, heapElems * sizeof(Element)));
-        FLASHMOE_ASSERT(flags != nullptr, "nvshmem_calloc failed");
-        FLASHMOE_ASSERT(sHeap != nullptr, "nvshmem_align failed");
-
-        // local bookkeeping memory
-        Task* bookTask = nullptr;
-        PEL* bookPEL = nullptr;
-        PLI* bookPLI = nullptr;
-        TPS* bookTPS = nullptr;
-        cuda::barrier<cuda::thread_scope_device>* bookDB = nullptr;
-        TQSignal* bookTQS = nullptr;
-        RingSoftmaxPayload* bookRSP = nullptr;
-        RingTopKPayload* bookRTP = nullptr;
-        ELI* bookELI = nullptr;
-        BookType* book = nullptr;
-        cuda::std::byte* bookElement = nullptr;
-
-        FLASHMOE_CHECK_CUDA(cudaMallocAsync(&bookTask, sizeof(Task) * Bookkeeping::tQlt(ePgD.nLx, ePgD.epWorld), flashmoeStream));
-        FLASHMOE_CHECK_CUDA(cudaMallocAsync(&bookPEL, sizeof(PEL) * ACC::E::value, flashmoeStream));
-        FLASHMOE_CHECK_CUDA(cudaMallocAsync(&bookPLI, sizeof(PLI) * ePgD.epWorld, flashmoeStream));
-        FLASHMOE_CHECK_CUDA(cudaMallocAsync(&bookTPS, sizeof(TPS) * Bookkeeping::tPlt(), flashmoeStream));
-        FLASHMOE_CHECK_CUDA(cudaMallocAsync(&bookDB, sizeof(cuda::barrier<cuda::thread_scope_device>) *
-            Bookkeeping::dBlt(), flashmoeStream));
-        FLASHMOE_CHECK_CUDA(cudaMallocAsync(&bookTQS, sizeof(TQSignal) * Bookkeeping::pDBlt(),
-            flashmoeStream));
-        FLASHMOE_CHECK_CUDA(cudaMallocAsync(&bookRSP, sizeof(RingSoftmaxPayload) * Bookkeeping::rSlt(),
-            flashmoeStream));
-        FLASHMOE_CHECK_CUDA(cudaMallocAsync(&bookRTP, sizeof(RingTopKPayload) * Bookkeeping::rTlt(),
-            flashmoeStream));
-        FLASHMOE_CHECK_CUDA(cudaMallocAsync(&bookELI, sizeof(ELI) * Bookkeeping::eLlt(), flashmoeStream));
-        FLASHMOE_CHECK_CUDA(cudaMallocAsync(&book, sizeof(BookType) * Bookkeeping::b4lt(ePgD.nLx, ePgD.epWorld), flashmoeStream));
-        FLASHMOE_CHECK_CUDA(cudaMallocAsync(&bookElement, sizeof(ACC::Element) * Bookkeeping::xMlt(ePgD.nLx, ePgD.epWorld), flashmoeStream));
-        // Initialize bookkeeping
-        FLASHMOE_CHECK_CUDA(cudaMemsetAsync(book, 0, sizeof(BookType) * Bookkeeping::b4lt(ePgD.nLx, ePgD.epWorld),
-            flashmoeStream));
-        FLASHMOE_CHECK_CUDA(cudaMemsetAsync(bookTQS, 0, sizeof(TQSignal) * Bookkeeping::pDBlt(), flashmoeStream));
-        FLASHMOE_CHECK_CUDA(cudaMemsetAsync(bookRSP, 0, sizeof(RingSoftmaxPayload) * Bookkeeping::rSlt(), flashmoeStream));
-        FLASHMOE_CHECK_CUDA(cudaMemsetAsync(bookRTP, 0, sizeof(RingTopKPayload) * Bookkeeping::rTlt(), flashmoeStream));
-        hostBookkeeping = Bookkeeping{
-            flags,
-            sHeap,
-            bookTask,
-            bookPEL,
-            bookPLI,
-            bookTPS,
-            bookDB,
-            bookTQS,
-            bookRSP,
-            bookRTP,
-            bookELI,
-            book,
-            bookElement,
-            ePgD
-        };
-        // copy device-wide barrier
-        const auto hB = new cuda::barrier<cuda::thread_scope_device>{blocks};
-        FLASHMOE_CHECK_CUDA(cudaMemcpyAsync(hostBookkeeping.dB(), hB,
-            sizeof(cuda::barrier<cuda::thread_scope_device>),
-            cudaMemcpyHostToDevice, flashmoeStream));
-        FLASHMOE_CHECK_CUDA(cudaMemcpyToSymbolAsync(bookkeeping, &hostBookkeeping, sizeof(Bookkeeping), 0,
-            cudaMemcpyHostToDevice, flashmoeStream));
-
-        // reuse pre-allocated memory for device data structures
-        auto* __restrict__ pEL = CAST_TO(PEL, mP);
-        static_assert(alignof(PEL) % alignof(PLI) == 0);
-        auto* __restrict__ pLI = CAST_TO(PLI, pEL + E);
-        static_assert(alignof(PLI) % alignof(ELI) == 0);
-        auto* __restrict__ eLI = CAST_TO(ELI, pLI + ePgD.epWorld);
-        static_assert(alignof(ELI) % alignof(LXI) == 0);
-        auto* __restrict__ lxI = CAST_TO(LXI, eLI + E);
-        static_assert(alignof(LXI) % alignof(uint) == 0);
-        auto* __restrict__ tileIndices = CAST_TO(uint, lxI + ePgD.nLx);
-
-        auto pel = PEL{};
-        auto eli = ELI{};
-        auto pli = PLI{};
-        auto tileIndex = 0U;
-        auto current = 0U;
-        std::ranges::fill(scratch, scratch + ePgD.epWorld, 0U);
-        for (uint i = 0; i < E; ++i) {
-            const auto ePrank = ePs[i];
-            const auto gRank = pT[ePrank];
-            auto* rSHeap = CAST_TO(cuda::std::byte, nvshmem_ptr(sHeap, gRank));
-            auto* rFlags = CAST_TO(flagsType, nvshmem_ptr(flags, gRank));
-            rFlags = rFlags == nullptr ? flags : rFlags;
-            const auto xLi = scratch[ePrank]++;
-            const auto isRemote = rSHeap == nullptr;
             // PEL
-            pel.isRemote = isRemote;
-            pel.expertLocalIdx = xLi;
-            pel.pe = gRank;
-            pel.remoteSFlags = rFlags;
-            pel.remoteSHeap = rSHeap;
-            pel.peer = ePrank;
+            pelHost[i].isRemote = isRemote;
+            pelHost[i].expertLocalIdx = lxIdx;
+            pelHost[i].pe = pe;
+            pelHost[i].remoteSFlags = rFlags;
+            pelHost[i].remoteSHeap = rSheap;
+            pelHost[i].peer = epRank;
 
             // ELI
-            eli.epRank = ePrank;
-            eli.isRemote = isRemote;
-            eli.localExpertIndex = xLi;
+            eliHost[i].epRank = epRank;
+            eliHost[i].isRemote = isRemote;
+            eliHost[i].localExpertIndex = lxIdx;
 
             // PLI
-            pli.isRemote = isRemote;
-            pli.pe = gRank;
-            pli.remoteSFlags = rFlags;
-            pli.remoteSHeap = rSHeap;
+            pliHost[epRank].isRemote = isRemote;
+            pliHost[epRank].pe = pe;
+            pliHost[epRank].remoteSFlags = rFlags;
+            pliHost[epRank].remoteSHeap = rSheap;
 
-            // LXI
-            if (gRank == rank) {
-                (lxI + xLi)->expertIndex = i;
-            }
-
-            pEL[i] = pel;
-            eLI[i] = eli;
-            pLI[ePrank] = pli;
-            if (isRemote) {
-                for (uint j = 0; j < ACC::TCM::value; ++j) {
-                    tileIndices[current++] = tileIndex;
-                    tileIndex += ACC::TNx::value;
-                }
-            }
-            else {
-                for (uint j = 0; j < ACC::TCM::value * ACC::TNx::value; ++j) {
-                    tileIndices[current++] = tileIndex++;
-                }
+            //LXI
+            if (pe == myPE) {
+                lxiHost[lxIdx].expertIndex = i;
             }
         }
 
+        const auto nlxUniform = lxIndices[0];
         for (uint i = 0; i < E; ++i) {
-            pel = pEL[i];
-            pel.nLocalExperts = scratch[pel.peer];
-            pEL[i] = pel;
+            auto pt = pelHost[i];
+            pt.nLocalExperts = lxIndices[pt.peer];
+            if (pt.nLocalExperts != nlxUniform) {
+                // may relax this later
+                throw std::runtime_error("Number of local experts should be equal across the ep group");
+            }
+            pelHost[i] = pt;
         }
 
-        FLASHMOE_CHECK_CUDA(cudaMemcpyAsync(hostBookkeeping.pEL(), pEL,
-            sizeof(PEL) * E, cudaMemcpyHostToDevice, flashmoeStream));
-        FLASHMOE_CHECK_CUDA(cudaMemcpyAsync(hostBookkeeping.pL(), pLI,
-            sizeof(PLI) * ePgD.epWorld,
-            cudaMemcpyHostToDevice, flashmoeStream));
-        FLASHMOE_CHECK_CUDA(cudaMemcpyAsync(hostBookkeeping.eL(), eLI,
-            sizeof(ELI) * E,
-            cudaMemcpyHostToDevice, flashmoeStream));
-        FLASHMOE_CHECK_CUDA(cudaMemcpyAsync(hostBookkeeping.lX(), lxI,
-            sizeof(LXI) * ePgD.nLx,
-            cudaMemcpyHostToDevice, flashmoeStream));
-        FLASHMOE_CHECK_CUDA(cudaMemcpyAsync(hostBookkeeping.ssFc(), &current,
-            sizeof(BookType), cudaMemcpyHostToDevice, flashmoeStream));
-        FLASHMOE_CHECK_CUDA(cudaMemcpyAsync(hostBookkeeping.tIx(), tileIndices,
-            sizeof(uint) * current, cudaMemcpyHostToDevice, flashmoeStream));
-        FLASHMOE_CHECK_CUDA(cudaPeekAtLastError());
-        FLASHMOE_CHECK_CUDA(cudaStreamSynchronize(flashmoeStream));
-        delete hB;
-        std::free(mP);
-    }
-
-    template<>
-    __host__ __forceinline__
-    void distributedInit<EP::no>() {
-        BookType* book = nullptr;
-        cuda::std::byte* bookElement = nullptr;
-        FLASHMOE_CHECK_CUDA(cudaMallocAsync(&book,
-            sizeof(BookType) * Bookkeeping::b4lt(), flashmoeStream));
-        FLASHMOE_CHECK_CUDA(cudaMallocAsync(&bookElement,
-            sizeof(ACC::Element) * Bookkeeping::xMlt(), flashmoeStream));
-        hostBookkeeping = Bookkeeping{book, bookElement};
-        FLASHMOE_CHECK_CUDA(cudaMemcpyToSymbolAsync(bookkeeping, &hostBookkeeping,
-            sizeof(Bookkeeping), 0,
-            cudaMemcpyHostToDevice, flashmoeStream));
-        FLASHMOE_CHECK_CUDA(cudaPeekAtLastError());
-        FLASHMOE_CHECK_CUDA(cudaStreamSynchronize(flashmoeStream));
-    }
-
-    // Should be called before loading the model
-    __host__ __forceinline__
-    void initialize() {
-        #if FLASHMOE_NVTX
-        flashmoeRange initRange{__PRETTY_FUNCTION__};
-        #endif
-        FLASHMOE_ASSERT(!isInitialized, "Already Initialized");
-        using GPUType = flashmoe::Hardware<FLASHMOE_ARCH, 255>;
-        constexpr auto blocks = GPUType::OS::processorBlocks::value;
-        static_assert(FLASHMOE_ARCH >= 700, "Volta and above is required!");
-        isInitialized = true;
-        static_assert(ACC::S::value % BLOCK_M == 0 && ACC::S::value < BLOCK_M * blocks * ACC::TMU::value &&
-        ACC::P::value % BLOCK_N == 0 && ACC::H::value % BLOCK_N == 0);
-        static_assert(NUM_EXPERTS <= cuda::std::numeric_limits<uint16_t>::max(),
-            "For performance, we assume number of experts <= UINT16_MAX");
-        distributedInit<(ACC::E::value > 1) ? EP::yes : EP::no>();
+        cudaMemcpyAsync(pel, pelHost.data(), sizeof(PEL) * pelHost.size(),cudaMemcpyHostToDevice,stream);
+        cudaMemcpyAsync(pli, pliHost.data(), sizeof(PLI) * pliHost.size(),cudaMemcpyHostToDevice,stream);
+        cudaMemcpyAsync(eli, eliHost.data(), sizeof(ELI) * eliHost.size(), cudaMemcpyHostToDevice, stream);
+        cudaMemcpyAsync(lxi, lxiHost.data(), sizeof(LXI) * lxiHost.size(), cudaMemcpyHostToDevice, stream);
     }
 
     __host__ __forceinline__
-    void setDevice() {
-        FLASHMOE_ASSERT(isInitialized, "Not initialized!");
-        FLASHMOE_CHECK_CUDA(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
+    Topology detectTopo() {
+        if (nvshmemx_init_status() == NVSHMEM_STATUS_NOT_INITIALIZED) {
+            throw std::runtime_error("nvshmem is not initialized");
+        }
+        return nvshmem_team_n_pes(NVSHMEM_TEAM_SHARED_INDEX) == nvshmem_n_pes() ? Topology::NVLINK_ONLY : Topology::MIXED;
+    }
+    __host__ __forceinline__
+    Context initialize(const MoEArgs& args, const int& arch, const uint* __restrict__ const& expertToEpRank,
+        const int* __restrict__ const& epRankToGlobalRank, cudaStream_t stream){
+#if defined(FLASHMOE_NVTX) && FLASHMOE_NVTX
+        const flashmoeRange range{"FlashMoE::initialize"};
+#endif
+        // fused gate + moe layer
+        if (args.tokenDim % args.bK0 != 0 || args.tokenDim % args.bN1 != 0) {
+            throw std::runtime_error("token dimension should be multiples of tile dimensions");
+        }
+        if (args.ffnIntermediateSize % args.bN0 != 0 || args.ffnIntermediateSize % args.bK1 != 0) {
+            throw std::runtime_error("Intermediate size should be multiples of tile dimensions");
+        }
+        if (args.blocks < 2) {
+            throw std::runtime_error("blocks must be at least 2");
+        }
+        const auto processors = args.blocks - 1;
+        if (processors > scheduler::MAX_PROCESSORS) {
+            const auto errmsg = std::string("processor count: ").append(std::to_string(processors))
+            .append(" is too high");
+            throw std::runtime_error(errmsg);
+        }
+        // maximum tiles that a peer will send to another peer in aggregate.
+        const auto maxPeerTaskTiles = cute::ceil_div(args.EC, args.bM) * args.numExperts;
+        if (maxPeerTaskTiles > cuda::std::numeric_limits<uint16_t>::max()) {
+            throw std::runtime_error("Max peer task tiles exceeds supported limit. Inform the maintainer.");
+        }
+        const auto roundEC = cute::ceil_div(args.EC, args.bM) * args.bM;
+        const auto ecTilesM = cute::ceil_div(roundEC, args.bM);
+        const auto tilesN0 = cute::ceil_div(args.ffnIntermediateSize, args.bN0);
+        const auto tilesN1 = cute::ceil_div(args.tokenDim, args.bN1);
+
+        if (nvshmemx_init_status() == NVSHMEM_STATUS_NOT_INITIALIZED) {
+            throw std::runtime_error("nvshmem is not initialized");
+        }
+        const bool elementBytesConditions = cutlass::ispow2(args.elementBytes) &&
+            (args.elementBytes == 2 || args.elementBytes == 4 || args.elementBytes == 8);
+        if (!elementBytesConditions) {
+            throw std::runtime_error("elementBytes not supported");
+        }
+        // signals ~= tiles(S) * tiles(H)
+        // below ensures the following calloc initializes our signals to the expected value 0
+        static_assert(SignalConstants::ground == 0);
+        const size_t signalLength = (args.epWorld * args.numLocalExperts) + (args.numExperts * ecTilesM * tilesN1);
+        auto* signals = static_cast<uint64_t*>(nvshmem_calloc(signalLength, sizeof(uint64_t)));
+        if (signals == nullptr) {
+            throw std::runtime_error("failed to allocate signals via NVSHMEM");
+        }
+        // symmetric heap ~= 4*S*H
+        const auto heapLength = args.elementBytes * HEAP_STAGES * HEAP_CELLS * static_cast<size_t>(args.epWorld * args.numLocalExperts) * static_cast<size_t>(roundEC * args.tokenDim);
+        auto* sHeap = static_cast<cuda::std::byte*>(nvshmem_malloc(heapLength));
+        if (sHeap == nullptr) {
+            throw std::runtime_error("failed to allocate heap via NVSHMEM");
+        }
+        const auto supports32 = arch >= 1000;
+        checkAlignment(sHeap, supports32);
+
+        Task* tQ = nullptr;
+        const bool threadConditions = args.threads >= WARP_SIZE * 2 && args.threads % WARP_SIZE == 0;
+        if (!threadConditions) {
+            throw std::runtime_error("threads not supported");
+        }
+        const auto subscriberCount = args.threads - WARP_SIZE;
+        const size_t tQLength = subscriberTQLength<WARP_SIZE>(args.epWorld, args.numLocalExperts, ecTilesM, args.numExperts, tilesN0,
+            tilesN1, args.threads - WARP_SIZE);
+        const size_t secondaryTQL = secondaryTQLength(args.epWorld, args.numLocalExperts, ecTilesM, tilesN1);
+        CHECK_CUDA(cudaMallocAsync(&tQ, sizeof(Task) * (tQLength + secondaryTQL), stream));
+        Task* pTq = tQ + tQLength;
+        if (tQLength + secondaryTQL > cuda::std::numeric_limits<uint>::max()) {
+            throw std::runtime_error("Task Queue length > UINT32_MAX. Not an error: need to migrate to uint64");
+        }
+        const size_t gRQIdxMax = (args.numLocalExperts * args.epWorld * ecTilesM * (tilesN0 + tilesN1)) +
+            (cute::ceil_div(roundEC, args.bM) * tilesN1) + (cute::ceil_div(processors, scheduler::SCHEDULER_COUNT));
+        if (gRQIdxMax >= cuda::std::numeric_limits<uint>::max()) {
+            // catches overflow in scheduler. See circularIdx function
+            throw std::runtime_error("gRQIdxMax >= UINT32_MAX. Not an error: need to migrate to uint64");
+        }
+        checkAlignment(tQ);
+        checkAlignment(pTq);
+
+        cuda::std::byte* GEMM0Staging = nullptr;
+        const size_t stagingLength = static_cast<size_t>(args.epWorld * args.numLocalExperts * roundEC) * args.ffnIntermediateSize;
+        CHECK_CUDA(cudaMallocAsync(&GEMM0Staging, stagingLength * args.elementBytes, stream));
+
+        BitSet* consumerBitMap = nullptr;
+        const auto cbmLength = nSI(args.numExperts * ecTilesM * tilesN1, subscriberCount);
+        CHECK_CUDA(cudaMallocAsync(&consumerBitMap, sizeof(BitSet) * cbmLength, stream));
+        CHECK_CUDA(cudaMemsetAsync(consumerBitMap, 0, sizeof(BitSet) * cbmLength, stream));
+
+        uint8_t* producerBitMap = nullptr;
+        const auto pbmLength = args.epWorld * args.numLocalExperts * ecTilesM * tilesN1;
+        CHECK_CUDA(cudaMallocAsync(&producerBitMap, sizeof(uint8_t) * pbmLength, stream));
+        CHECK_CUDA(cudaMemsetAsync(producerBitMap, 0, sizeof(uint8_t) * pbmLength, stream));
+
+        PEL* pel = nullptr;
+        CHECK_CUDA(cudaMallocAsync(&pel, sizeof(PEL) * args.numExperts, stream));
+
+        PLI* pli = nullptr;
+        CHECK_CUDA(cudaMallocAsync(&pli, sizeof(PLI) * args.epWorld, stream));
+
+        ELI* eli = nullptr;
+        CHECK_CUDA(cudaMallocAsync(&eli, sizeof(ELI) * args.numExperts, stream));
+
+        LXI* lxi = nullptr;
+        CHECK_CUDA(cudaMallocAsync(&lxi, sizeof(LXI) * args.numLocalExperts, stream));
+
+        TPS* tps = nullptr;
+        CHECK_CUDA(cudaMallocAsync(&tps, sizeof(TPS) * args.numExperts * roundEC, stream));
+
+        TQSignal* tqs = nullptr;
+        CHECK_CUDA(cudaMallocAsync(&tqs, sizeof(TQSignal) * processors, stream));
+        CHECK_CUDA(cudaMemsetAsync(tqs, 0, sizeof(TQSignal) * processors, stream));
+
+        uint* dispatchSync = nullptr;
+        CHECK_CUDA(cudaMallocAsync(&dispatchSync, sizeof(uint) * args.numExperts, stream));
+        CHECK_CUDA(cudaMemsetAsync(dispatchSync, 0, sizeof(uint) * args.numExperts, stream));
+
+        uint* gtqHeads = nullptr;
+        // ~= tiles(S)
+        const size_t gtqHeadsLength = args.epWorld * args.numLocalExperts * ecTilesM;
+        CHECK_CUDA(cudaMallocAsync(&gtqHeads, sizeof(uint) * gtqHeadsLength, stream));
+        CHECK_CUDA(cudaMemsetAsync(gtqHeads, 0, sizeof(uint) * gtqHeadsLength, stream));
+
+        uint* tileSync = nullptr;
+        CHECK_CUDA(cudaMallocAsync(&tileSync, sizeof(uint) * gtqHeadsLength, stream));
+        CHECK_CUDA(cudaMemsetAsync(tileSync, 0, sizeof(uint) * gtqHeadsLength, stream));
+
+        uint* statusQ = nullptr;
+        CHECK_CUDA(cudaMallocAsync(&statusQ, sizeof(uint) * processors, stream));
+        static_assert(ReadySignal::observed == 0);
+        CHECK_CUDA(cudaMemsetAsync(statusQ, 0, sizeof(uint) * processors, stream));
+
+        CHECK_CUDA(cudaPeekAtLastError());
+        expertParallelBookkeeping(expertToEpRank, epRankToGlobalRank, args.epWorld, args.myPE,
+            args.numExperts, args.numLocalExperts, sHeap, signals, pel, pli, eli, lxi, stream);
+
+        return Context{
+            .symHeap = sHeap,
+            .signals = signals,
+            .tQ = tQ,
+            .pTq = pTq,
+            .GEMM0Staging =  GEMM0Staging,
+            .consumerCombineBitMap = consumerBitMap,
+            .producerCombineBitMap = producerBitMap,
+            .pel = pel,
+            .pli = pli,
+            .eli = eli, .lxi = lxi, .tqs = tqs,
+            .dispatchSync = dispatchSync,
+            .gTqHeads = gtqHeads,
+            .tileSync = tileSync,
+            .statusQueue = statusQ,
+            .tokenIndices = tps,
+            .processors_v = cuda::fast_mod_div(processors),
+            .blocks = args.blocks,
+            .S = args.sequenceLength,
+            .H = args.tokenDim,
+            .I = args.ffnIntermediateSize,
+            .EC = static_cast<uint>(args.EC),
+            .bM = static_cast<uint16_t>(args.bM),
+            .bN0 = static_cast<uint16_t>(args.bN0),
+            .bN1 = static_cast<uint16_t>(args.bN1),
+            .nLx = args.numLocalExperts,
+            .E = static_cast<uint16_t>(args.numExperts),
+            .world = args.epWorld,
+            .epRank = args.epRank,
+            .myPE = args.myPE,
+            .initialized = true,
+            .topo = args.topo,
+            .stateNumber = SignalConstants::sequenceStart
+        };
+    }
+
+    // profiling purposes
+    __host__ __forceinline__ size_t getWorkspaceBytes(const MoEArgs& args) {
+        const auto roundEC = cute::ceil_div(args.EC, args.bM) * args.bM;
+        const auto ecTilesM = cute::ceil_div(roundEC, args.bM);
+        const auto tilesN0 = cute::ceil_div(args.ffnIntermediateSize, args.bN0);
+        const auto tilesN1 = cute::ceil_div(args.tokenDim, args.bN1);
+        const auto subscriberCount = args.threads - WARP_SIZE;
+        const auto processors = args.blocks - 1;
+
+        size_t bytes = 0;
+        bytes += sizeof(uint64_t) * (args.epWorld * args.numLocalExperts + (args.numExperts * ecTilesM * tilesN1));
+        bytes += args.elementBytes * HEAP_STAGES * HEAP_CELLS * args.epWorld * args.numLocalExperts * roundEC * args.tokenDim;
+        const size_t tQLength = subscriberTQLength<WARP_SIZE>(args.epWorld, args.numLocalExperts, ecTilesM, args.numExperts, tilesN0,
+            tilesN1, args.threads - WARP_SIZE);
+        const size_t secondaryTQL = secondaryTQLength(args.epWorld, args.numLocalExperts, ecTilesM, tilesN1);
+        bytes += sizeof(Task) * (tQLength + secondaryTQL);
+        bytes += args.elementBytes * static_cast<size_t>(args.epWorld * args.numLocalExperts * roundEC) * args.ffnIntermediateSize;
+        bytes += sizeof(BitSet) * nSI(args.numExperts * ecTilesM * tilesN1, subscriberCount);
+        bytes += sizeof(uint8_t) * args.epWorld * args.numLocalExperts * ecTilesM * tilesN1;
+        bytes += sizeof(PEL) * args.numExperts;
+        bytes += sizeof(PLI) * args.epWorld;
+        bytes += sizeof(ELI) * args.numExperts;
+        bytes += sizeof(LXI) * args.numLocalExperts;
+        bytes += sizeof(TPS) * args.numExperts * roundEC;
+        bytes += sizeof(TQSignal) * processors;
+        bytes += sizeof(uint) * args.numExperts;
+        bytes += sizeof(uint) * args.epWorld * args.numLocalExperts * ecTilesM;
+        bytes += sizeof(uint) * args.epWorld * args.numLocalExperts * ecTilesM;
+        bytes += sizeof(uint) * processors;
+        return bytes;
     }
 
     __host__ __forceinline__
-    auto getRank() {
-        FLASHMOE_ASSERT(isInitialized, "Not initialized!");
-        return nvshmem_my_pe();
+    GateContext initializeGate(const uint& bNGate, const uint& numExperts, const uint& S, cudaStream_t stream) {
+#if defined(FLASHMOE_NVTX) && FLASHMOE_NVTX
+        const flashmoeRange range{"FlashMoE::initializeGate"};
+#endif
+        int* ecGuards = nullptr;
+        CHECK_CUDA(cudaMallocAsync(&ecGuards, sizeof(int) * numExperts, stream));
+        CHECK_CUDA(cudaMemsetAsync(ecGuards, flashmoe::STALE_AS_BYTE, sizeof(int) * numExperts, stream));
+        SoftmaxStatePacked* ssp = nullptr;
+        RingTopKPayload* rtp = nullptr;
+        if (numExperts > bNGate) {
+            const auto tE = cute::ceil_div(numExperts, bNGate);
+            CHECK_CUDA(cudaMallocAsync(&ssp, sizeof(SoftmaxStatePacked) * S * tE, stream));
+            CHECK_CUDA(cudaMemsetAsync(ssp, 0, sizeof(SoftmaxStatePacked) * S * tE, stream));
+
+            CHECK_CUDA(cudaMallocAsync(&rtp, 2 * sizeof(RingTopKPayload) * S * tE, stream));
+            CHECK_CUDA(cudaMemsetAsync(rtp, 0, 2 * sizeof(RingTopKPayload) * S * tE, stream));
+        }
+        return GateContext{ecGuards, ssp, rtp};
     }
 
     __host__ __forceinline__
-    void finalize(){
-        #if FLASHMOE_NVTX
-        flashmoeRange finalRange{__PRETTY_FUNCTION__};
-        #endif
-        FLASHMOE_ASSERT(isInitialized, "Not initialized!");
-        isInitialized = false;
-        FLASHMOE_CHECK_CUDA(cudaSetDevice(nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE)));
-        FLASHMOE_CHECK_CUDA(cudaFreeAsync(hostBookkeeping.bookTask, flashmoeStream));
-        FLASHMOE_CHECK_CUDA(cudaFreeAsync(hostBookkeeping.bookPEL, flashmoeStream));
-        FLASHMOE_CHECK_CUDA(cudaFreeAsync(hostBookkeeping.bookPLI, flashmoeStream));
-        FLASHMOE_CHECK_CUDA(cudaFreeAsync(hostBookkeeping.bookTPS, flashmoeStream));
-        FLASHMOE_CHECK_CUDA(cudaFreeAsync(hostBookkeeping.bookDB, flashmoeStream));
-        FLASHMOE_CHECK_CUDA(cudaFreeAsync(hostBookkeeping.bookTQS, flashmoeStream));
-        FLASHMOE_CHECK_CUDA(cudaFreeAsync(hostBookkeeping.bookRSP, flashmoeStream));
-        FLASHMOE_CHECK_CUDA(cudaFreeAsync(hostBookkeeping.bookRTP, flashmoeStream));
-        FLASHMOE_CHECK_CUDA(cudaFreeAsync(hostBookkeeping.bookELI, flashmoeStream));
-        FLASHMOE_CHECK_CUDA(cudaFreeAsync(hostBookkeeping.book, flashmoeStream));
-        FLASHMOE_CHECK_CUDA(cudaPeekAtLastError());
-        FLASHMOE_CHECK_CUDA(cudaFreeAsync(hostBookkeeping.bookElement, flashmoeStream));
-        // Below ensures all work is done before deallocating via the external API
-        FLASHMOE_CHECK_CUDA(cudaStreamSynchronize(flashmoeStream));
-        nvshmem_free(hostBookkeeping.flags);
-        nvshmem_free(hostBookkeeping.sHeap);
-        nvshmem_finalize();
-        FLASHMOE_CHECK_CUDA(cudaPeekAtLastError());
-        FLASHMOE_CHECK_CUDA(cudaStreamSynchronize(flashmoeStream));
+    void finalizeGate(const GateContext& gCtx, cudaStream_t stream) {
+#if defined(FLASHMOE_NVTX) && FLASHMOE_NVTX
+        const flashmoeRange range{"FlashMoE::finalizeGate"};
+#endif
+        cudaFreeAsync(gCtx.ecGuards, stream);
+        if (gCtx.ssp != nullptr) {
+            cudaFreeAsync(gCtx.ssp, stream);
+        }
+        if (gCtx.rtp != nullptr) {
+            cudaFreeAsync(gCtx.rtp, stream);
+        }
+        CHECK_CUDA(cudaPeekAtLastError());
+        CHECK_CUDA(cudaStreamSynchronize(stream));
+    }
+    __host__ __forceinline__
+    void finalize(const Context& ctx, cudaStream_t stream) {
+#if defined(FLASHMOE_NVTX) && FLASHMOE_NVTX
+        const flashmoeRange range{"FlashMoE::finalize"};
+#endif
+        if (ctx.initialized) {
+            // free workspace memory
+            cudaFreeAsync(ctx.tQ, stream);
+            cudaFreeAsync(ctx.GEMM0Staging, stream);
+            cudaFreeAsync(ctx.pel, stream);
+            cudaFreeAsync(ctx.pli, stream);
+            cudaFreeAsync(ctx.eli, stream);
+            cudaFreeAsync(ctx.lxi, stream);
+            cudaFreeAsync(ctx.consumerCombineBitMap, stream);
+            cudaFreeAsync(ctx.producerCombineBitMap, stream);
+            cudaFreeAsync(ctx.tokenIndices, stream);
+            cudaFreeAsync(ctx.tqs, stream);
+            cudaFreeAsync(ctx.dispatchSync, stream);
+            cudaFreeAsync(ctx.gTqHeads, stream);
+            cudaFreeAsync(ctx.tileSync, stream);
+            cudaFreeAsync(ctx.statusQueue, stream);
+            CHECK_CUDA(cudaStreamSynchronize(stream));
+            nvshmem_free(ctx.symHeap);
+            nvshmem_free(ctx.signals);
+        }
+        CHECK_CUDA(cudaPeekAtLastError());
     }
 }
-#endif //BOOTSTRAP_CUH
+#endif //FLASHMOE_BOOTSTRAP_CUH

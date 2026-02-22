@@ -8,3 +8,6 @@ csrc/cmake-build-*
 csrc/.idea
 csrc/*.iml
 csrc/cmake/cache
+csrc/include/flashmoe/*.txt
+csrc/include/flashmoe/*.log
+

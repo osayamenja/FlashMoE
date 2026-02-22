@@ -31,7 +31,7 @@ endif ()
 set(FLASHMOE_CUDA_CXX_FLAGS "${FLASHMOE_CUDA_CXX_FLAGS} -Wno-unknown-pragmas -Wnull-dereference -Wnarrowing")
 set(FLASHMOE_CUDA_CXX_FLAGS "${FLASHMOE_CUDA_CXX_FLAGS} -Wno-switch -Wduplicated-branches -Wformat=2")
 set(FLASHMOE_CUDA_CXX_FLAGS "${FLASHMOE_CUDA_CXX_FLAGS} -Wno-unused-but-set-parameter")
-set(FLASHMOE_CUDA_CXX_FLAGS "${FLASHMOE_CUDA_CXX_FLAGS} -Wno-sign-compare -v")
+set(FLASHMOE_CUDA_CXX_FLAGS "${FLASHMOE_CUDA_CXX_FLAGS} -Wno-sign-compare")
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -55,15 +55,20 @@ include(CheckCompilerFlag)
 check_compiler_flag(CUDA -t4 NVCC_THREADS)
 
 find_package(CUDAToolkit REQUIRED)
-string(SUBSTRING "${CMAKE_CUDA_ARCHITECTURES_NATIVE}" 0 2 COMPUTE_CAPABILITY) # xx-real -> xx
-math(EXPR GPU_ARCH "${COMPUTE_CAPABILITY} * 10" OUTPUT_FORMAT DECIMAL)
-message(STATUS "GPU 0 Compute Capability: ${COMPUTE_CAPABILITY}")
-set(ENV{CUTLASS_NVCC_ARCHS} "${COMPUTE_CAPABILITY}")
+string(REGEX MATCH "^[0-9]+" ARCH "${CMAKE_CUDA_ARCHITECTURES_NATIVE}") # xx-real -> xx
+math(EXPR GPU_ARCH "${ARCH} * 10" OUTPUT_FORMAT DECIMAL)
+message(STATUS "GPU 0 Compute Capability: ${ARCH}")
+
+set(ARCH_TAG "${ARCH}")
+if(ARCH GREATER_EQUAL 90)
+    string(APPEND ARCH_TAG "a") # accelerated arch-specific instruction set
+endif()
+set(ENV{CUTLASS_NVCC_ARCHS} "${ARCH_TAG}")
 
 set(ENV{CPM_SOURCE_CACHE} "./cmake/cache")
 set(CCCL_ENABLE_UNSTABLE ON)
 include(cmake/CPM.cmake)
-# add dependencies
+# CCCL
 CPMAddPackage(
         NAME CCCL
         GITHUB_REPOSITORY nvidia/cccl
@@ -76,16 +81,7 @@ CPMAddPackage(
         GIT_TAG main
         DOWNLOAD_ONLY TRUE
         OPTIONS
-        "CUTLASS_NVCC_ARCHS=${COMPUTE_CAPABILITY}"
-)
-
-set(FMT_SYSTEM_HEADERS ON)
-CPMAddPackage(
-        NAME FMT
-        GITHUB_REPOSITORY fmtlib/fmt
-        GIT_TAG 11.1.4
-        OPTIONS
-        "FMT_SYSTEM_HEADERS=ON"
+        "CUTLASS_NVCC_ARCHS=${ARCH_TAG}"
 )
 
 CPMAddPackage(
@@ -97,68 +93,22 @@ CPMAddPackage(
 
 # MatX
 set(MATX_NVTX_FLAGS ON)
-set(MATX_ENABLE_FILEIO ON)
 CPMAddPackage(
         NAME MATX
         GITHUB_REPOSITORY NVIDIA/MatX
         GIT_TAG v0.9.4
 )
+if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
+    message(FATAL_ERROR "Set -DCMAKE_BUILD_TYPE=Release (or Debug).")
+endif()
+
 ## NVSHMEM
-find_package(NVSHMEM REQUIRED HINTS "$ENV{NVSHMEM_HOME}/lib/cmake/nvshmem")
+find_package(NVSHMEM REQUIRED)
 # cuBLASDx
 find_package(mathdx REQUIRED COMPONENTS cublasdx CONFIG)
-
-
-# Pre-compile constants
-# Read JSON file content
-file(READ "flashmoe_config.json" FLASHMOE_CONFIG)
-
-string(JSON CAP_FACTOR_V GET ${FLASHMOE_CONFIG} "capacity_factor")
-message(STATUS "capacity_factor: ${CAP_FACTOR_V}")
-
-string(JSON DROP_TOKENS_V GET ${FLASHMOE_CONFIG} "drop_tokens")
-message(STATUS "drop_tokens: ${DROP_TOKENS_V}")
-
-string(JSON E_TOP_K_V GET ${FLASHMOE_CONFIG} "expert_top_k")
-message(STATUS "expert_top_k: ${E_TOP_K_V}")
-
-string(JSON GLOBAL_BATCH_V GET ${FLASHMOE_CONFIG} "global_batch")
-message(STATUS "global_batch: ${GLOBAL_BATCH_V}")
-
-string(JSON IS_TRAINING_V GET ${FLASHMOE_CONFIG} "is_training")
-message(STATUS "is_training: ${IS_TRAINING_V}")
-
-string(JSON HIDDEN_ACT_V GET ${FLASHMOE_CONFIG} "hidden_act")
-message(STATUS "hidden_act: ${HIDDEN_ACT_V}")
-
-string(JSON HIDDEN_SIZE_V GET ${FLASHMOE_CONFIG} "hidden_size")
-message(STATUS "hidden_size: ${HIDDEN_SIZE_V}")
-
-string(JSON I_SIZE_V GET ${FLASHMOE_CONFIG} "intermediate_size")
-message(STATUS "intermediate_size: ${I_SIZE_V}")
-
-string(JSON MINI_BATCH_V GET ${FLASHMOE_CONFIG} "mini_batch")
-message(STATUS "mini_batch: ${MINI_BATCH_V}")
-
-string(JSON MOE_FREQ_V GET ${FLASHMOE_CONFIG} "moe_frequency")
-message(STATUS "moe_frequency: ${MOE_FREQ_V}")
-
-string(JSON NUM_EXPERTS_V GET ${FLASHMOE_CONFIG} "num_experts")
-message(STATUS "num_experts: ${NUM_EXPERTS_V}")
-
-string(JSON NUM_LAYERS_V GET ${FLASHMOE_CONFIG} "num_layers")
-message(STATUS "num_layers: ${NUM_LAYERS_V}")
-
-string(JSON SEQ_LEN_V GET ${FLASHMOE_CONFIG} "sequence_len")
-message(STATUS "sequence_len: ${SEQ_LEN_V}")
-
-string(JSON DTYPE_V GET ${FLASHMOE_CONFIG} "torch_dtype")
-message(STATUS "torch_dtype: ${DTYPE_V}")
-
-string(JSON VOCAB_SIZE_V GET ${FLASHMOE_CONFIG} "vocab_size")
-message(STATUS "vocab_size: ${VOCAB_SIZE_V}")
-
-function(flash_target_common tgt)
+find_package(mathdx REQUIRED COMPONENTS curanddx CONFIG)
+include(CheckCompilerFlag)
+function(flash_target_test tgt)
     target_link_libraries(${tgt} PRIVATE CUDA::cudart CUDA::cuda_driver CUDA::nvtx3)
     target_link_libraries(${tgt} PRIVATE atomic)
     if(CCCL_ADDED)
@@ -167,95 +117,139 @@ function(flash_target_common tgt)
     if(CUTLASS_ADDED)
         target_include_directories(${tgt} SYSTEM PRIVATE "${CUTLASS_SOURCE_DIR}/include")
     endif ()
-    if(FMT_ADDED)
-        target_link_libraries(${tgt} PRIVATE fmt::fmt)
-    endif ()
-    if(NVTX3_ADDED)
-        target_link_libraries(${tgt} PRIVATE nvtx3-cpp)
-        string(FIND "$ENV{CMAKE_PREFIX_PATH}" "nvtx3" INDEX)
-        if(INDEX EQUAL -1)
-            # append nvtx3 to prefix path to remove libtorch error
-            set(ENV{CMAKE_PREFIX_PATH} "$ENV{CMAKE_PREFIX_PATH}:${NVTX3_SOURCE_DIR}")
-        endif()
-    endif ()
-    if(MATX_ADDED)
-        target_link_libraries(${tgt} PRIVATE matx::matx)
-    endif ()
-    if(DEFINED ENV{NERSC_HOST} AND "$ENV{NERSC_HOST}" STREQUAL "perlmutter")
-        target_link_libraries(${tgt} PRIVATE nvshmem::nvshmem_host nvshmem::nvshmem_device)
-    else ()
-        target_link_libraries(${tgt} PRIVATE nvshmem::nvshmem)
-    endif ()
-    target_link_libraries(${tgt} PRIVATE mathdx::cublasdx)
     target_compile_options(${tgt} PRIVATE
             $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-Xfatbin -compress-all>
             $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
-            $<$<COMPILE_LANGUAGE:CUDA>:-t0; --generate-line-info>
-            $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-gencode=arch=compute_${COMPUTE_CAPABILITY},code=sm_${COMPUTE_CAPABILITY}>
+            $<$<COMPILE_LANGUAGE:CUDA>:-t0> #use sm_xxa for xx >= 90
+            $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-gencode=arch=compute_${ARCH_TAG},code=sm_${ARCH_TAG}>
     )
-    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-        target_compile_options(${tgt} PRIVATE
-                $<$<COMPILE_LANGUAGE:CXX>:-O0;-g;>
-                $<$<COMPILE_LANGUAGE:CUDA>:-O0; -g; -G>
-        )
-    elseif(CMAKE_BUILD_TYPE STREQUAL "Release")
-        if(${tgt} STREQUAL "fb")
-            target_compile_options(${tgt} PRIVATE
-                    $<$<COMPILE_LANGUAGE:CXX>:-O3>
-                    $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-gencode=arch=compute_${COMPUTE_CAPABILITY},code=lto_${COMPUTE_CAPABILITY}>
-                    $<$<COMPILE_LANGUAGE:CUDA>:-Xptxas -v;--expt-relaxed-constexpr; -diag-suppress 186>
-            )
-        else ()
-            target_compile_options(${tgt} PRIVATE
-                    $<$<COMPILE_LANGUAGE:CXX>:-O3>
-                    $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-gencode=arch=compute_${COMPUTE_CAPABILITY},code=sm_${COMPUTE_CAPABILITY}>
-                    $<$<COMPILE_LANGUAGE:CUDA>:-Xptxas -v;--expt-relaxed-constexpr;--extended-lambda;-diag-suppress 186>
-            )
-        endif ()
+    target_compile_options(${tgt} PRIVATE
+            $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CXX>>:-O0;-g>
+            $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CUDA>>:-O0;-g;-G;--expt-relaxed-constexpr;-Xptxas=-v>
+            $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CXX>>:-O3>
+            $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:-Xptxas -v>
+            $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:--expt-relaxed-constexpr;-Xptxas=-v>
+    )
+endfunction()
+function(flash_target_common tgt)
+    target_link_libraries(${tgt} PRIVATE CUDA::cudart CUDA::cuda_driver atomic)
+    if(NVTX3_ADDED)
+        target_link_libraries(${tgt} PRIVATE nvtx3-cpp)
     endif ()
-    # TODO (Jonathan): make the below opt-in
-    target_compile_definitions(${tgt}
-            PRIVATE
+    if(CCCL_ADDED)
+        target_link_libraries(${tgt} PRIVATE CCCL::CCCL)
+    endif()
+    if(CUTLASS_ADDED)
+        target_include_directories(${tgt} SYSTEM PRIVATE "${CUTLASS_SOURCE_DIR}/include")
+    endif()
+    if(MATX_ADDED)
+        target_link_libraries(${tgt} PRIVATE matx::matx)
+    endif()
+    target_link_libraries(${tgt} PRIVATE mathdx::cublasdx mathdx::curanddx)
+    target_compile_options(${tgt} PRIVATE
+            $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-Xfatbin -compress-all>
+            $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
+            $<$<COMPILE_LANGUAGE:CUDA>:-t0>
+    )
+    # Debug/Release opts
+    target_compile_options(${tgt} PRIVATE
+            $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CXX>>:-O0;-g>
+            $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CXX>>:-O3>
+            $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:-O3>
+            $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:-Xptxas -v>
+            $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:SHELL:-gencode=arch=compute_${ARCH_TAG},code=sm_${ARCH_TAG}>
+    )
+    target_compile_definitions(${tgt} PRIVATE
             FLASHMOE_ARCH=${GPU_ARCH}
-            CAP_FACTOR=${CAP_FACTOR_V}
-            DROP_TOKENS=${DROP_TOKENS_V}
-            E_TOP_K=${E_TOP_K_V}
-            GLOBAL_BATCH=${GLOBAL_BATCH_V}
-            IS_TRAINING=${IS_TRAINING_V}
-            HIDDEN_ACT=${HIDDEN_ACT_V}
-            HIDDEN_SIZE=${HIDDEN_SIZE_V}
-            I_SIZE=${I_SIZE_V}
-            MOE_FREQ=${MOE_FREQ_V}
-            MINI_BATCH=${MINI_BATCH_V}
-            NUM_EXPERTS=${NUM_EXPERTS_V}
-            NUM_LAYERS=${NUM_LAYERS_V}
-            SEQ_LEN=${SEQ_LEN_V}
-            DTYPE=${DTYPE_V}
-            VOCAB_SIZE=${VOCAB_SIZE_V}
             NUM_SMS=${CUDA_NUM_SMS}
             FLASHMOE_NVTX=1
     )
 endfunction()
-
-add_executable(fb benchmarks/flash_bench.cu
-        include/flashmoe/flashmoe.cuh
+function(flash_target_lto tgt)
+    target_link_libraries(${tgt} PRIVATE CUDA::cudart CUDA::cuda_driver atomic)
+    if(NVTX3_ADDED)
+        target_link_libraries(${tgt} PRIVATE nvtx3-cpp)
+    endif ()
+    if(CCCL_ADDED)
+        target_link_libraries(${tgt} PRIVATE CCCL::CCCL)
+    endif()
+    if(CUTLASS_ADDED)
+        target_include_directories(${tgt} SYSTEM PRIVATE "${CUTLASS_SOURCE_DIR}/include")
+    endif()
+    if(MATX_ADDED)
+        target_link_libraries(${tgt} PRIVATE matx::matx)
+    endif()
+    target_link_libraries(${tgt} PRIVATE mathdx::cublasdx mathdx::curanddx)
+    target_compile_options(${tgt} PRIVATE
+            $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-Xfatbin -compress-all>
+            $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr> #--Werror=all-warnings
+            $<$<COMPILE_LANGUAGE:CUDA>:-t0; -lineinfo>
+            $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-gencode=arch=compute_${ARCH_TAG},code=sm_${ARCH_TAG}>
+    )
+    # Debug/Release opts
+    target_compile_options(${tgt} PRIVATE
+            $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CXX>>:-O0;-g>
+            $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CXX>>:-O3>
+            $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:-O3>
+            $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:-Xptxas -v>
+            $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:SHELL:-gencode=arch=compute_${ARCH_TAG},code=lto_${ARCH_TAG}>
+    )
+    target_link_options(${tgt} PRIVATE
+            $<$<CONFIG:Release>:$<DEVICE_LINK:-Xptxas -v>>
+    )
+    target_compile_definitions(${tgt} PRIVATE
+            FLASHMOE_ARCH=${GPU_ARCH}
+            NUM_SMS=${CUDA_NUM_SMS}
+            FLASHMOE_NVTX=1
+    )
+endfunction()
+add_executable(testFlashMoE
+        tests/flashmoe.cu
 )
-set_target_properties(fb PROPERTIES
+set_target_properties(testFlashMoE PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
         CUDA_RESOLVE_DEVICE_SYMBOLS ON
 )
-flash_target_common(fb)
-
-add_executable(gb
-        benchmarks/gemm_bench.cu
-        include/flashmoe/os/processor/gemm.cuh
-        include/flashmoe/os/processor/mmaConfig.cuh
-        benchmarks/cdx_gemm.cuh
-        benchmarks/v0_gemm.cuh
+flash_target_lto(testFlashMoE)
+# WAR for build failure
+set_target_properties(nvshmem::nvshmem_host PROPERTIES
+        IMPORTED_LOCATION_RELEASE "$ENV{NVSHMEM_LIB_HOME}/libnvshmem_host.so.3"
 )
-flash_target_common(gb)
+target_link_libraries(testFlashMoE PRIVATE nvshmem::nvshmem_host nvshmem::nvshmem_device)
+find_package(MPI REQUIRED COMPONENTS CXX)
+target_link_libraries(testFlashMoE PRIVATE MPI::MPI_CXX)
 
-add_executable(pl
-        benchmarks/playground.cu
+add_executable(testScheduler
+        tests/scheduler.cu
 )
-flash_target_common(pl)
+flash_target_test(testScheduler)
+
+add_executable(testGEMM
+        tests/gemm.cu
+)
+flash_target_common(testGEMM)
+
+add_executable(playground
+        tests/playground.cu
+)
+flash_target_common(playground)
+
+add_executable(testGate
+        tests/gate.cu
+)
+flash_target_common(testGate)
+
+add_executable(testCombine
+        tests/combine.cu
+)
+flash_target_common(testCombine)
+
+add_executable(gemmMNK
+        tests/gemmMNK.cu
+)
+flash_target_common(gemmMNK)
+
+add_executable(testGatedGEMM
+        tests/gatedGEMM.cu
+)
+flash_target_common(testGatedGEMM)
