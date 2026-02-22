@@ -135,13 +135,6 @@ __global__ void gatherTokens(const flashmoe::TPS* __restrict__ tokenIds,
   }
 }
 
-struct SplitFunctor {
-  __host__ __device__
-  auto operator()(const flashmoe::TPS& t) const {
-    return t.tokenIdx;
-  }
-};
-
 template<typename Element>
 __global__ void combineReference( const __grid_constant__ int S,
     const __grid_constant__ int H, const __grid_constant__ int roundEC,
@@ -181,6 +174,7 @@ __global__ void combineReference( const __grid_constant__ int S,
   }
 }
 // single GPU E2E MoE
+// It's execution is deterministic
 template<
   typename Config, flashmoe::MLPMatmulType mt, int GEMM0SharedSize, int GEMM1SharedSize,
   typename Activation, typename AccumType, typename Element
@@ -280,7 +274,7 @@ struct Seeds {
 };
 
 template <typename Element>
-constexpr const char* element_string() {
+consteval const char* element_string() {
   static_assert(
     cuda::std::is_same_v<Element, __half> ||
     cuda::std::is_same_v<Element, __nv_bfloat16> ||
@@ -322,7 +316,7 @@ void kickstart(const size_t& S, const size_t& H, const size_t& I, const size_t& 
   int num_sms = 0;
   CHECK_CUDA(cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, devId));
 
-  const auto world = nvshmem_n_pes(); // this is not a requrement
+  const auto world = nvshmem_n_pes(); // this is not a requirement
   const auto epRank = nvshmem_my_pe(); // this is not a requirement
   if (epRank == 0) {
     printf("EP Rank, dtype, S, H, I, E, k, EC, bM, bN0, bK0, bN1, bK1, threads, blocks/SM, SMs,blocks, rtol, atol, "
