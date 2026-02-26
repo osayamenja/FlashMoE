@@ -649,10 +649,10 @@ void drive(const int argc, char** argv) {
   uint runs = 128;
   float rtol = 8e-2;
   float atol = 8e-3;
-  if (argc > 1) S = parse_integer(argv[1], "S", 1);
-  if (argc > 2) H = parse_integer(argv[2], "H", 1);
-  if (argc > 3) I = parse_integer(argv[3], "I", 1);
-  if (argc > 4) E = parse_integer(argv[4], "E", 1);
+  if (argc > 1) S = parse_integer(argv[1], "S", 1, INT32_MAX);
+  if (argc > 2) H = parse_integer(argv[2], "H", 1, INT32_MAX);
+  if (argc > 3) I = parse_integer(argv[3], "I", 1, INT32_MAX);
+  if (argc > 4) E = parse_integer(argv[4], "E", 1, INT32_MAX);
   if (argc > 5) k = parse_integer(argv[5], "k", 1);
   if (argc > 6) warmup = static_cast<uint>(parse_integer(argv[6], "warmup", 0));
   if (argc > 7) runs = static_cast<uint>(parse_integer(argv[7], "runs", 1));
@@ -665,7 +665,7 @@ void drive(const int argc, char** argv) {
     EC = cute::ceil_div(S, E) * k;
   }
 
-  using Element = __half;
+  using Element = __nv_bfloat16;
   static_assert(cuda::std::is_same_v<Element, __half> ||
     cuda::std::is_same_v<Element, __nv_bfloat16> ||
     cuda::std::is_same_v<Element, float> ||
@@ -694,7 +694,7 @@ void drive(const int argc, char** argv) {
     throw std::invalid_argument("I is invalid");
   }
   constexpr auto pS = arch >= 800 ? 2 : 1; // Hopper 3
-  constexpr auto bM = cuda::std::is_same_v<Element, double> ? 64 : 128; // hopper 256
+  constexpr auto bM = cuda::std::is_same_v<Element, double> ? 64 : 128; // hopper, >= 4096 -> 256
   static_assert(bM >= 1);
   // if (S % bM != 0) {
   //   const auto errmsg = std::string("S must be a multiple of ").append(std::to_string(bM));
