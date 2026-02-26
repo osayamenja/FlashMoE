@@ -150,7 +150,7 @@ __global__ void combineReference( const __grid_constant__ int S,
       cute::make_layout(cute::make_shape(roundEC, H), cute::LayoutRight{}));
   auto resultTensor = cute::make_tensor(cute::make_gmem_ptr(result),
       cute::make_layout(cute::make_shape(S, H), cute::LayoutRight{}));
-  for (int j = blockIdx.x; j < expertCount; j += gridDim.x) {
+  for (int j = static_cast<int>(blockIdx.x); j < expertCount; j += static_cast<int>(gridDim.x)) {
     const auto tokenId = tIds(j);
     if (topK == 1) {
       for (auto k = threadIdx.x; k < H; k += blockDim.x) {
@@ -319,7 +319,7 @@ void kickstart(const size_t& S, const size_t& H, const size_t& I, const size_t& 
   const auto world = nvshmem_n_pes(); // this is not a requirement
   const auto epRank = nvshmem_my_pe(); // this is not a requirement
   if (epRank == 0) {
-    printf("EP Rank, dtype, S, H, I, E, k, EC, bM, bN0, bK0, bN1, bK1, threads, blocks/SM, SMs,blocks, rtol, atol, "
+    printf("GPU, Arch, EP Rank, dtype, S, H, I, E, k, EC, bM, bN0, bK0, bN1, bK1, threads, blocks/SM, SMs, blocks, rtol, atol, "
            "error(%%), warmup, runs, workspace_bytes(MiB), "
            "FlashMoE_Time(ms)\n");
   }
@@ -381,7 +381,8 @@ void kickstart(const size_t& S, const size_t& H, const size_t& I, const size_t& 
     CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kernelSz));
     CHECK_CUDA(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&bps, kernel, threads, kernelSz));
   }
-  const auto processorBlocks = ((S /bM) * ((I / bN0) + (H / bN1))) + ((S/bM) * (H / bN1));
+  const auto processorBlocks = (cute::ceil_div(S * k, bM) * ((I / bN0) + (H / bN1))) +
+    (cute::ceil_div(S * k, bM) * (H / bN1));
   const auto dispatchBlocks = flashmoe::moe::dispatchSuperBlockSize(E) * E;
   const uint blocks = cute::max(cute::min(cute::max(processorBlocks, dispatchBlocks) + 1, bps * num_sms), 2);
 
@@ -573,8 +574,11 @@ void kickstart(const size_t& S, const size_t& H, const size_t& I, const size_t& 
     CHECK_CUDA(cudaEventElapsedTime(&m_ms, start, stop));
     const float m_time_ms = m_ms / static_cast<float>(runs);
     constexpr auto es = element_string<Element>();
-    printf("%d, %s, %lu, %lu, %lu, %lu, %lu, %lu, %d, %d, %d, %d, %d, %d, %d, %d, %d, %.1e, %.1e, %f, %d, %d, %.4lf, %f\n",
-           epRank, es, S, H, I, E, k, EC, bM, bN0, bK0, bN1, bK1, threads, bps, num_sms, blocks, rtol, atol, ep,
+    cudaDeviceProp prop{};
+    CHECK_CUDA(cudaGetDeviceProperties(&prop, 0)); // Get properties for device i
+    const auto sms = "sm_" + std::to_string(Arch / 10);
+    printf("%s, %s, %d, %s, %lu, %lu, %lu, %lu, %lu, %lu, %d, %d, %d, %d, %d, %d, %d, %d, %d, %.1e, %.1e, %f, %d, %d, %.4lf, %f\n",
+           prop.name, sms.c_str(), epRank, es, S, H, I, E, k, EC, bM, bN0, bK0, bN1, bK1, threads, bps, num_sms, blocks, rtol, atol, ep,
            warmup, runs, workspaceBytesMiB, m_time_ms);
   }
 
@@ -637,9 +641,10 @@ void drive(const int argc, char** argv) {
   size_t S = 8192; //  number of tokens per rank
   size_t H = 2048; // token dimension
   size_t I = 2048; // FFN intermediate dimension
-  size_t E = 32; // number of expers
+  size_t E = 32; // number of experts
   size_t k = 2; // topK
-  size_t EC = cute::ceil_div(S, E) * k; // expert capacity at a peer granularity EC in {1,...,S}
+  // expert capacity at a peer granularity. EC ∈ {1,...,ceil(S/E)*k,...,S}
+  size_t EC = cute::ceil_div(S, E) * k;
   uint warmup = 128;
   uint runs = 128;
   float rtol = 8e-2;
@@ -660,8 +665,7 @@ void drive(const int argc, char** argv) {
     EC = cute::ceil_div(S, E) * k;
   }
 
-
-  using Element = __nv_bfloat16;
+  using Element = __half;
   static_assert(cuda::std::is_same_v<Element, __half> ||
     cuda::std::is_same_v<Element, __nv_bfloat16> ||
     cuda::std::is_same_v<Element, float> ||
@@ -673,7 +677,7 @@ void drive(const int argc, char** argv) {
   static_assert(FLASHMOE_ARCH >= 700);
   constexpr auto arch = FLASHMOE_ARCH;
   constexpr auto act = flashmoe::Activation::silu;
-  constexpr auto mt = flashmoe::MLPMatmulType::vanilla;
+  constexpr auto mt = flashmoe::MLPMatmulType::gated;
   if (k > E) {
     throw std::invalid_argument("k must be <= E");
   }
@@ -689,12 +693,15 @@ void drive(const int argc, char** argv) {
   if (I <= bK1 || I % bK1 != 0 || I < bN0 || I % bN0 != 0) {
     throw std::invalid_argument("I is invalid");
   }
-  constexpr auto pS = arch >= 800 ? 2 : 1;
-  constexpr auto bM = cuda::std::is_same_v<Element, double> ? 64 : 128;
+  constexpr auto pS = arch >= 800 ? 2 : 1; // Hopper 3
+  constexpr auto bM = cuda::std::is_same_v<Element, double> ? 64 : 128; // hopper 256
   static_assert(bM >= 1);
-  if (S % bM != 0) {
-    const auto errmsg = std::string("S must be a multiple of ").append(std::to_string(bM));
-      throw std::invalid_argument(errmsg);
+  // if (S % bM != 0) {
+  //   const auto errmsg = std::string("S must be a multiple of ").append(std::to_string(bM));
+  //     throw std::invalid_argument(errmsg);
+  // }
+  if (S < 1) {
+    throw std::invalid_argument("S is invalid");
   }
   if (k > 1) {
     kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, pS, flashmoe::CombineMode::plural, act, mt>

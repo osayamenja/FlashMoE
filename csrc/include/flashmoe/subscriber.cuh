@@ -224,8 +224,7 @@ namespace flashmoe::subscriber
     Topology topo,
     typename Element,
     int subscriberCount,
-    int bM,
-    int sNW = subscriberCount / WARP_SIZE
+    int bM
   >
   struct Subscriber {
     static_assert(s == SubscriberStage::initial);
@@ -236,6 +235,7 @@ namespace flashmoe::subscriber
                     BitSet* __restrict__ const& bitSet,
                     const int& stageLength,
                     uint& pending, uint& ltQHead) const {
+      constexpr int sNW = subscriberCount / WARP_SIZE;
       const auto currentStateNumber = static_cast<uint16_t>(args.stateNumber);
       /// Flags has dimension [W, L], where W is expert parallel world and L is number of local experts
       constexpr Decoder<subscriberCount, PacketStage::initial, PeerConnectivity::p2p, bM, Element> fPd{};

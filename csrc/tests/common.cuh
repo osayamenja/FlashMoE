@@ -186,7 +186,7 @@ enum class WeightDistribution {
 
 template<WeightDistribution Dist>
 __host__ __forceinline__
-float sample_positive_weight(std::mt19937& rng, const float d_a = -1.0f, const float d_b = 1.0f) {
+float sample_positive_weight(std::mt19937& rng, const float d_a = 0.5f, const float d_b = 1.0f) {
   float w = 0.0f;
   if constexpr (Dist == WeightDistribution::Uniform) {
     std::uniform_real_distribution<float> uni01(d_a, d_b);
@@ -259,7 +259,7 @@ auto generate_token_ids_and_expert_counts(const int& S, const int& E, const int&
     std::vector<float> w(static_cast<size_t>(k), 0.0f);
     float sumW = 0.0f;
     for (int r = 0; r < k; ++r) {
-      w[static_cast<size_t>(r)] = sample_positive_weight<Dist>(rng, d_a, d_b);
+      w[static_cast<size_t>(r)] = sample_positive_weight<Dist>(rng);
       sumW += w[static_cast<size_t>(r)];
     }
     const float invSum = 1.0f / sumW;

@@ -34,8 +34,9 @@ namespace flashmoe
             cutlass::is_pow2<VectorWidth>::value);
         static_assert(Arch == 700 || Arch == 800 || Arch == 900);
         static_assert(cuda::std::is_same_v<Element, double> || cuda::std::is_same_v<Element, float> ||
-            cuda::std::is_same_v<Element, __half> || cuda::std::is_same_v<Element, __nv_bfloat16>);
-        static_assert(cuda::std::is_same_v<Element, __nv_bfloat16> && Arch >= 800);
+            cuda::std::is_same_v<Element, __half> || cuda::std::is_same_v<Element, __half2> ||
+            cuda::std::is_same_v<Element, __nv_bfloat16> || cuda::std::is_same_v<Element, __nv_bfloat162>);
+        static_assert(!cuda::std::is_same_v<Element, __nv_bfloat16> || Arch >= 800, "bfloat16 requires at least sm_80");
     };
 
     template<int MaxVectorWidth>
@@ -158,6 +159,7 @@ namespace flashmoe
     };
     template<int MaxVectorWidth>
     struct RedAdd<800, __nv_bfloat162, MaxVectorWidth> {
+        // TODO extend to bf162x2
         using VectorWidth = cute::Int<1>;
         template<typename T>
         requires(cuda::std::is_same_v<typename T::value_type, __nv_bfloat162>)

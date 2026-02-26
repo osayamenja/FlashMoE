@@ -1,60 +1,79 @@
-# FlashDMoE: Fast Distributed MoE in a Single Kernel
+# FlashMoE: Fast Distributed MoE in a Single Kernel [NeurIPS '25]
 
-⚡ A high-performance GPU kernel for MoE workloads  
-🚧 Under active research
+Completely fused distributed MoE providing high-performance single- and multi-node EP inference.
+
+> 🚧 We are largely stable but still under active research, so please raise issues for any observed bugs.
 
 ---
 
 ## 🗞️ News
 
-- **Sept 18, 2025** — **FlashDMoE** will appear at NeurIPS'25 (main track)! 
-- **June 5, 2025** — ⚡️Introducing **FlashDMoE**, a fused GPU kernel for distributed MoE execution.  
+- **Feb 2026** — **FlashMoE** v0.1.0 is out! 
+- **Sept 18, 2025** — **FlashMoE** will appear at NeurIPS'25 (main track)! 
+- **June 5, 2025** — ⚡️Introducing **FlashMoE** 
+
+---
+# 🚀 QuickStart
+
+## Requirements
+(1) CUDA toolkit (2) ninja (`sudo apt install ninja-build`) (3) CMake
+
+### Install cuBLASDx
+- Download from [here](https://developer.nvidia.com/cublasdx-downloads) and save in `<your_directory>`, e.g `~/.local`.
+- export `MATHDX_ROOT=<your_directory>/nvidia-<...>/mathdx/yy.mm/`
+
+### Install NVSHMEM
+- Install as directed [here](https://developer.nvidia.com/nvshmem-downloads).
+- export `NVSHMEM_LIB_HOME=/usr/lib/x86_64-linux-gnu/nvshmem/<12 or 13>`. Note you should confirm that this directory exists!
+
+> 👉 Tip: add `MATHDX_ROOT=...` and `NVSHMEM_LIB_HOME=...` to `.bashrc`
+
+## Use Python API
+- pip install
+- call gate.forward, then moe.forward
+- torchrun
+## Use C++ API
+- cpm
+- include header file
+- call forward
+- mpirun
 
 ---
 
 ## 🧠 Overview
 
-**FlashMoE**, Flash for short, is a high-throughput, portable GPU kernel that fuses the following **Distributed Mixture-of-Experts (DMoE)** operations:
-- Gate
+**FlashMoE** is a high-throughput, portable, correct GPU kernel that fuses the following **Distributed Mixture-of-Experts (DMoE)** operations:
 - MoE Dispatch
-- Expert FFN (GEMM),
+- Expert computation (Gated MLP or conventional MLP)
 - MoE Combine
 
-...into a *single, tile-pipelined, persistent kernel*.
+...into a *single, tile-pipelined, persistent kernel*. 
 
-It is written entirely in **pure CUDA**, with no host-device roundtrips, and is part of the **Kleos** runtime.
+It is written from scratch entirely in **pure CUDA C++**, leaning heavily on 
+[cubLASDx](https://docs.nvidia.com/cuda/cublasdx/) and [NVSHMEM](https://developer.nvidia.com/nvshmem), 
+for compute and communication, respectively.
 
 ### 🏎️ Portability
 
-Out-of-the box, Flash supports 
-- $\geq$ SM70 GPUs
-- RDMA (EFA, libfabric, ibverbs, Slingshot) and NVLink.
-- TF32 (peak performance) 
-- FP16/BF16 (functionality is complete *but* achieving peak performance is still a work in progress)
+we support 
+- $\geq$ SM70 GPUs. Boosting compute performance for Hopper and Blackwell is on the roadmap.
+- NVLink and RDMA (EFA, IBGDA, libfabric as NVSHMEM [supports](https://docs.nvidia.com/nvshmem/release-notes-install-guide/install-guide/abstract.html#hardware-requirements)).
+- FP16, BF16, FP32 (TF32), FP64.
 
----
-
-## 🚨 Problem: Why This Kernel?
-
-Conventional CPU-driven Distributed MoE execution suffers from:
-- Kernel launch overhead,
-- Network latency due to bulk-synchronous `AllToAll`,
-- Straggler effects
-- Payload inefficiency (padding) due to rigid communication or compute interfaces,
-- Lack of task locality
-
-FlashDMoE addresses this by:
-- Performing dispatch, expert compute, and combine **entirely on the GPU**,
-- Pipelining across fine-grained tiles,
-- Overlapping communication and computation within a fused kernel.
+### ✅ Roadmap
+- [ ] Improve MMA for Hopper (WGMMA) and Blackwell (UTCMMA).
+- [ ] FP8
+- [ ] Research on improvements
+- [ ] AMD support
 
 ---
 
 ## 📊 Performance Results
-We compare against [COMET](https://github.com/bytedance/flux) (MLSys '25), [FasterMoE](https://github.com/laekov/fastmoe) (PPoPP '22), [Megatron-CUTLASS, and Megatron-TE](https://github.com/NVIDIA/Megatron-LM/tree/f32b2731acddfb9fe9a91198b27d947286d9d629/megatron/core/transformer/moe).
+We compare against [COMET](https://github.com/bytedance/flux) (MLSys '25), [Megatron-LM](https://github.com/NVIDIA/Megatron-LM), and 
+[Triton-Distributed](https://github.com/ByteDance-Seed/Triton-distributed).
 <div align="center">
-  <img src="plots/sm_util.png" alt="Figure 1" width="500"/>
-  <p><em>GPU SM Utilization</em></p>
+  <img src="plots/tensor_core_idle_time.png" alt="Figure 1" width="500"/>
+  <p><em>Tensor Core Utilization</em></p>
 </div>
 
 | Weak Scaling | Overlap Efficiency |
@@ -68,105 +87,30 @@ We compare against [COMET](https://github.com/bytedance/flux) (MLSys '25), [Fast
 | <img src="plots/scaling_tokens.png" width="400"/> | <img src="plots/scaling_tokens_8.png" width="400"/> |
 
 Compared to SOTA baselines, Flash: 
-1. increases GPU utilization by up to **9x**, 
+1. increases Tensor core uptime by up to **69%**, 
 2. reduces E2E layer latency by up to **6x**, 
 3. attains **4x** better weak scaling efficiency
 
 ---
 
-# Run
-## Requirements
-- Install CPM as [so](https://github.com/cpm-cmake/CPM.cmake?tab=readme-ov-file#adding-cpm). Make sure to create the `cmake` directory as they recommend.
-- Install CMake.
-- Install [Boost C++ libraries](https://packages.debian.org/stable/libboost-all-dev)
-  ```bash
-  sudo apt-get install -y libboost-all-dev
-  ```
-- (Optional but recommended) Install ninja
+## Run Benchmark (C++)
+- Install NVSHMEM and cuBLASDx.
+- 
 
-### Building NVSHMEM
-For peak performance, (see [here](https://www.nvidia.com/en-us/on-demand/session/gtc24-s61339/)) we *highly* recommend building NVSHMEM from scratch and setting `-DNVSHMEM_ENABLE_ALL_DEVICE_INLINING=1`. The prepackaged deb binary available [here](https://docs.nvidia.com/nvshmem/release-notes-install-guide/install-guide/nvshmem-install-proc.html) does not have that variable set.
-- For multi-node: install these software dependencies [here](https://docs.nvidia.com/nvshmem/release-notes-install-guide/install-guide/abstract.html#software-requirements)
-- Go to the NVSHMEM Download page and get the `Open Source Packages`.
-- Decompress the file appropriately
-- `cd nvshmem && mkdir build && cd build`
-- `export NVHSMEM_PREFIX=<to the installation directory>`
-- For multi-node: Set other appropriate transport environment variables from [here](https://docs.nvidia.com/nvshmem/release-notes-install-guide/install-guide/nvshmem-install-proc.html#other-distributions)
-- To fix a build bug: `export CUDAFLAGS='-fpermissive' CXXFLAGS='-fpermissive'`
-- Run `cmake -S.. -B. -DNVSHMEM_ENABLE_ALL_DEVICE_INLINING=1 -Wno-dev`
-- Run `make -j install`
-
-## 📦 Installation
-You can install FlashMoE from source using pip:
-```bash
-git clone https://github.com/osayamenja/FlashMoE.git
-cd FlashMoE
-pip install -e . --no-build-isolation
-```
-
-> 💡 Note: FlashMoE requires a CUDA-capable GPU and an NVSHMEM installation.
-> Ensure that `CUDA_HOME` and `NVSHMEM_HOME` are correctly set before installation.
-
-If dependencies such as `cutlass` or `cccl` are missing, the setup script will attempt to download or guide you through installation.
-
-## ⚙️ Configuration
-FlashMoE uses compile-time configuration for key parameters (e.g., `expert_top_k`, `num_experts`, `sequence_len`).
-
-Before (re)building, edit the configuration file:
-```bash
-vim csrc/kleos_config.json
-```
-Then reinstall:
-```bash
-pip install -e . --no-build-isolation
-```
-
-## 🚀 Usage
-Once installed, you can import and run FlashMoE directly in Python:
-```py
-import flashmoe
-
-# Run on a single GPU
-flashmoe.run_moe()
-
-# Run distributed (multi-GPU)
-flashmoe.run_moe(n_processes=4)
-```
-
-## (Optional) Build from CMake and Run
-1. cd `csrc`
-2. mkdir `cmake-build-release` && cd `cmake-build-release`
-3. Configure `kleos_config.json` as needed.
-4. Run `cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_MAKE_PROGRAM=<path to ninja> -Wno-dev -G Ninja -S .. -B .`
-5. Run `cmake --build . --target csrc -j`
-> 💡 Note: Any changes to `kleos_config.json` require repeating steps 4–5. This exposes compile-time parameters as *static* constants, dramatically reducing build times (~1 hour → ~1 min) and enabling compiler optimizations. See *Why static constants help* below for details.
-6. Execute
-
-Single Node
-```bash
-nvshmrun -n <number of processes> -ppn <processes per node> ./csrc
-```
-
-Multi node (SLURM)
-```bash
-srun -n <number of processes> ./csrc
-```
-
-<details> <summary>Why static constants help</summary>
-This intermediate stage is a compilation and performance optimization, as it exposes those parameters in the json file as _static_ constants within the application. Doing so reduces build times by about 60x (1 hour → ~1 min) as it allows for sidestepping exhaustive template instantiations, given the template parameters are known a priori. On the other hand, static constants allows for (1) loop unrolling, which we heavily adopt, (2) optimized mathematical operations, modular arithmetic for example, (3) code path elimination via `if constexpr` and (4) compile-time computations for address calculations which present recurrently in tensor indexing. We leverage all of these and some more additional compile-time optimizations in Flash.
-</details>
 
 ## IDEs
-Alternatively, the codebase integrates well with CLion, which automates the build and run processes. 
-Just open the project at `csrc` and CLion will automatically detect the `CMakeLists.txt` file.
+The codebase integrates well with CLion, just open the project at `csrc`.
 
 ---
 
+## Contributions
+We welcome them! Submit a PR!
+
 # 📖 Citation
-If you use any part of FlashDMoE in your research, please cite:
+If you can, please cite as below:
 ```
-@misc{aimuyo2025flashdmoe,
-      title={FlashDMoE: Fast Distributed MoE in a Single Kernel}, 
+@misc{aimuyo2025flashmoe,
+      title={FlashMoE: Fast Distributed MoE in a Single Kernel}, 
       author={Osayamen Jonathan Aimuyo and Byungsoo Oh and Rachee Singh},
       year={2025},
       eprint={2506.04667},
@@ -175,8 +119,3 @@ If you use any part of FlashDMoE in your research, please cite:
       url={https://arxiv.org/abs/2506.04667}, 
 }
 ```
-
-
-## ⚖️ License
-
-This project is licensed under the BSD 3-Clause License. See [`LICENSE`](./LICENSE) for full terms.
