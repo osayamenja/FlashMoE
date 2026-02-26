@@ -36,6 +36,10 @@ namespace flashmoe
 
 namespace flashmoe::gate
 {
+  enum class ReturnLogits {
+    yes,
+    no
+  };
   template <SoftMaxOptimizationLevel level = SoftMaxOptimizationLevel::none>
   __device__ __forceinline__
   float fexp(const float& x) {
@@ -70,7 +74,8 @@ namespace flashmoe::gate
   template <
     GateReductionLevel g,
     typename TileGEMM,
-    SoftMaxOptimizationLevel sro
+    SoftMaxOptimizationLevel sro,
+    ReturnLogits r
   >
   struct GateMainloop {
     static_assert(g == GateReductionLevel::multiBlock);
@@ -98,8 +103,7 @@ namespace flashmoe::gate
       constexpr auto bK = cute::get<2>(typename TileGEMM::TileShape{});
       const auto tokenIds = make_tensor(cute::make_gmem_ptr(_tokenIds),
                                         cute::make_layout(cute::make_shape(E, roundEC), cute::LayoutRight{}));
-      // assert(S % bM == 0)
-      const auto tilesM = S / bM;
+      const auto tilesM = cute::ceil_div(S, bM);
       // assert(E % bN == 0)
       const auto tilesN = E / bN;
       // assert(H % bK == 0)
@@ -165,7 +169,8 @@ namespace flashmoe::gate
       static_assert(cuda::std::numeric_limits<SoftType>::has_infinity);
       auto mI = -cuda::std::numeric_limits<SoftType>::infinity();
       // Begin Ring softmax
-      if (threads == bM || threadIdx.x < bM) {
+      const auto predicate = cute::min(S, bM);
+      if (threadIdx.x < predicate) {
         #pragma unroll
         for (int i = 0; i < vbN; ++i) {
           // smem -> rmem in blocked format
@@ -235,12 +240,14 @@ namespace flashmoe::gate
       __syncthreads();
       // Ring Softmax is complete
       // smem -> gmem
-      auto gC = tile::getC<bM, bN, TileGEMM::CArr::value>(routing, S, E,
+      if constexpr (r == ReturnLogits::yes) {
+        auto gC = tile::getC<bM, bN, TileGEMM::CArr::value>(routing, S, E,
                                                           cute::select<0, 1>(tileCoord));
-      const auto tsC = cublasdx::make_tensor(
-        static_cast<ElementC*>(gateScratch), TileGEMM::BLAS::get_layout_smem_c());
-      static_assert(cute::is_compatible<decltype(gC.layout()), decltype(tsC.layout())>::value);
-      cublasdx::copy<TileGEMM::BLAS, ElementAlignment<ElementC, bN>>(tsC, gC);
+        const auto tsC = cublasdx::make_tensor(
+          static_cast<ElementC*>(gateScratch), TileGEMM::BLAS::get_layout_smem_c());
+        static_assert(cute::is_compatible<decltype(gC.layout()), decltype(tsC.layout())>::value);
+        cublasdx::copy<TileGEMM::BLAS, ElementAlignment<ElementC, bN>>(tsC, gC);
+      }
       int rTK[bN];
       #pragma unroll
       for (int i = 0; i < bN; ++i) {
@@ -253,7 +260,7 @@ namespace flashmoe::gate
       auto lSV = sV;
       auto lSIdx = sIdx;
       // Now do online top-k mask
-      if (threads == bM || threadIdx.x < bM) {
+      if (threadIdx.x < predicate) {
         bool shouldSweep = true;
         for (int i = 0; i < k; ++i) {
           // needed as we alternate between two buffers
@@ -374,9 +381,10 @@ namespace flashmoe::gate
   // Special, nice case where N == BLOCK_N
   template <
     typename TileGEMM,
-    SoftMaxOptimizationLevel sro
+    SoftMaxOptimizationLevel sro,
+    ReturnLogits r
   >
-  struct GateMainloop<GateReductionLevel::singleBlock, TileGEMM, sro> {
+  struct GateMainloop<GateReductionLevel::singleBlock, TileGEMM, sro, r> {
     template <
       typename Element,
       typename ElementC
@@ -400,7 +408,7 @@ namespace flashmoe::gate
       constexpr auto bK = cute::get<2>(typename TileGEMM::TileShape{});
       const auto tokenIds = make_tensor(cute::make_gmem_ptr(_tokenIds),
                                         cute::make_layout(cute::make_shape(E, roundEC), cute::LayoutRight{}));
-      const auto tilesM = S / bM;
+      const auto tilesM = cute::ceil_div(S, bM);
       constexpr int tilesN = 1;
       const auto tilesK = H / bK;
       const auto tileCoord = tile::idx2Coord(tilesM, tilesN, tileIdx);
@@ -441,7 +449,8 @@ namespace flashmoe::gate
       // TODO relax this
       static_assert(threads >= bM);
       SoftType reginald[bN];
-      if (threads == bM || threadIdx.x < bM) {
+      const auto predicate = cute::min(S, bM);
+      if (threadIdx.x < predicate) {
         #pragma unroll
         for (int i = 0; i < vbN; ++i) {
           // smem -> rmem in blocked format
@@ -478,13 +487,15 @@ namespace flashmoe::gate
         }
       }
       __syncthreads();
-      // smem -> gmem
-      auto gC = tile::getC<bM, bN, TileGEMM::CArr::value>(routing, S, E,
-                                                          cute::select<0, 1>(tileCoord));
-      const auto tsC = cublasdx::make_tensor(
-        static_cast<ElementC*>(gateScratch), TileGEMM::BLAS::get_layout_smem_c());
-      static_assert(cute::is_compatible<decltype(gC.layout()), decltype(tsC.layout())>::value);
-      cublasdx::copy<TileGEMM::BLAS, ElementAlignment<ElementC, bN>>(tsC, gC);
+      if constexpr (r == ReturnLogits::yes) {
+        // smem -> gmem
+        auto gC = tile::getC<bM, bN, TileGEMM::CArr::value>(routing, S, E,
+                                                            cute::select<0, 1>(tileCoord));
+        const auto tsC = cublasdx::make_tensor(
+          static_cast<ElementC*>(gateScratch), TileGEMM::BLAS::get_layout_smem_c());
+        static_assert(cute::is_compatible<decltype(gC.layout()), decltype(tsC.layout())>::value);
+        cublasdx::copy<TileGEMM::BLAS, ElementAlignment<ElementC, bN>>(tsC, gC);
+      }
       int rTK[bN];
       #pragma unroll
       for (int i = 0; i < bN; ++i) {
@@ -493,7 +504,7 @@ namespace flashmoe::gate
       // sum of the combine weights per token
       auto mCw = static_cast<SoftType>(0.f);
       // Now do online top-k mask
-      if (threads == bM || threadIdx.x < bM) {
+      if (threadIdx.x < predicate) {
         for (int i = 0; i < k; ++i) {
           auto sV = -cuda::std::numeric_limits<SoftType>::infinity();
           int sIdx = 0;
@@ -559,6 +570,7 @@ namespace flashmoe::gate
     typename TileGEMM,
     GateReductionLevel grl = GateReductionLevel::singleBlock,
     SoftMaxOptimizationLevel sro = SoftMaxOptimizationLevel::none,
+    ReturnLogits r = ReturnLogits::yes,
     typename Element,
     typename ElementR
   >
@@ -580,8 +592,8 @@ namespace flashmoe::gate
     constexpr int bM = cute::get<0>(TileShape{});
     constexpr int bN = cute::get<1>(TileShape{});
 
-    GateMainloop<grl, TileGEMM, sro> gateMainLoop{};
-    const auto nT = S / bM * (E / bN);
+    GateMainloop<grl, TileGEMM, sro, r> gateMainLoop{};
+    const auto nT = cute::ceil_div(S, bM) * (E / bN);
     for (int i = static_cast<int>(blockIdx.x); i < nT; i += blocks) {
       if constexpr (grl == GateReductionLevel::singleBlock) {
         gateMainLoop(workspace, tokens, _gateWeights, _routing, i,
@@ -600,6 +612,7 @@ namespace flashmoe::gate
         int threads,
         GateReductionLevel grl = GateReductionLevel::singleBlock,
         SoftMaxOptimizationLevel sro = SoftMaxOptimizationLevel::none,
+        ReturnLogits r = ReturnLogits::yes,
         typename AccumType = float,
         typename Element,
         typename ElementR
@@ -624,7 +637,7 @@ namespace flashmoe::gate
     using TileGEMM = tile::CollectiveMainloop<bM, bN, bK, Arch, Element, AccumType, threads, pipeStages>;
     extern __shared__ __align__(TileGEMM::GeneralAlignment::value) cuda::std::byte gateWorkspace[];
     const auto roundEC = cute::ceil_div(EC, bM) * bM;
-    gate::forward<TileGEMM, grl, sro>(gateWorkspace, tokens, _gateWeights, _routing, tokenIds, expertCounts,
+    gate::forward<TileGEMM, grl, sro, r>(gateWorkspace, tokens, _gateWeights, _routing, tokenIds, expertCounts,
         S, H, E, k, EC, roundEC, static_cast<int>(gridDim.x), eCGuards, rSp, rTp);
   }
 }

@@ -14,6 +14,7 @@
 
 #include "../include/flashmoe/bootstrap.cuh"
 #include "../include/flashmoe/moe.cuh"
+#include "../include/flashmoe/gate.cuh"
 
 #include "common.cuh"
 
@@ -294,7 +295,8 @@ template<
   int bN1, int bK1, int pSK1,
   flashmoe::CombineMode cm,
   flashmoe::Activation act,
-  flashmoe::MLPMatmulType mt
+  flashmoe::MLPMatmulType mt,
+  flashmoe::GateReductionLevel grl, int bNGate
 >
 void kickstart(const size_t& S, const size_t& H, const size_t& I, const size_t& E, const size_t& EC, const size_t& k,
   const uint warmup, const uint runs, const float& rtol, const float& atol) {
@@ -386,12 +388,38 @@ void kickstart(const size_t& S, const size_t& H, const size_t& I, const size_t& 
   const auto dispatchBlocks = flashmoe::moe::dispatchSuperBlockSize(E) * E;
   const uint blocks = cute::max(cute::min(cute::max(processorBlocks, dispatchBlocks) + 1, bps * num_sms), 2);
 
+  // [S, H] x [H, E] -> [S, E]
+  constexpr auto sro = flashmoe::SoftMaxOptimizationLevel::none;
+  constexpr auto rl = flashmoe::gate::ReturnLogits::no;
+  using GateTile = cute::Shape<cute::Int<bM>, cute::Int<bNGate>, cute::Int<bK0>, cute::Int<pSK0>>;
+  auto gateKernel = flashmoe::gate::forwardKernel<GateTile, Arch, threads, grl, sro, rl, AccumType, Element, Element>;
+  constexpr auto gateShared = cutlass::round_up(cute::max(sizeof(Element) * bK0 * pSK0 * (bM + bNGate),
+    sizeof(flashmoe::gate::SoftType) * bM * bNGate), flashmoe::MAX_ALIGNMENT);
+  if (gateShared > maxSharedMemory) {
+    const auto errmsg = std::string("Required shared memory for gate Kernel ").append(std::to_string(kernelSz))
+    .append(" exceeds hardware limits: ").append(std::to_string(maxSharedMemory))
+    .append(" Reduce tile shapes or input sizes.");
+    throw std::runtime_error(errmsg);
+  }
+  constexpr int gateThreads = cute::max(flashmoe::tile::suggest_thread_count<bM, bNGate, bK0, Arch, Element, AccumType>(), bM);
+  CHECK_CUDA(cudaFuncSetAttribute(gateKernel, cudaFuncAttributeMaxDynamicSharedMemorySize, gateShared));
+  int gbps = 0;
+  CHECK_CUDA(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&gbps, gateKernel, gateThreads, gateShared));
+  const int gateBlocks = cute::min(cute::ceil_div(S, bM) * cute::ceil_div(E, bNGate),gbps * NUM_SMS);
+  if (E > blocks * bNGate) {
+    throw std::invalid_argument("E is too big!");
+  }
+
   constexpr float minv = -1.0f;
   constexpr float maxv = 1.0f;
   std::random_device rd;
   Element* tokens = nullptr;
   CHECK_CUDA(cudaMallocAsync(&tokens, sizeof(Element) * S * H, stream));
-  randUniform<Arch>(tokens, static_cast<size_t>(S) * H, rd(), minv, maxv, stream);
+  randUniform<Arch>(tokens, cute::max(S, static_cast<size_t>(bM)) * H, rd(), minv, maxv, stream);
+
+  Element* gateWeights = nullptr;
+  CHECK_CUDA(cudaMallocAsync(&gateWeights, sizeof(Element) * H * E, stream));
+  randUniform<Arch>(gateWeights, static_cast<size_t>(H) * E, rd(), minv, maxv, stream);
 
   Seeds seeds{};
   if (epRank == 0) {
@@ -405,9 +433,9 @@ void kickstart(const size_t& S, const size_t& H, const size_t& I, const size_t& 
     seeds.beta = rd();
   }
   if (world > 1) {
-    // Rank 0 will generate a random seed and propagate to every rank
+    // Rank 0 will generate all seeds and propagate to every rank
     // the weights need to be uniform across all ranks as each rank will do an independent check
-    // NVSHMEM init would have initialized MPI already
+    // NVSHMEM init should have initialized MPI already
     int isMPIInitialized = 0;
     MPI_Initialized(&isMPIInitialized);
     if (!isMPIInitialized) {
@@ -487,6 +515,7 @@ void kickstart(const size_t& S, const size_t& H, const size_t& I, const size_t& 
   for (int i = 0; i < world; ++i) {
     epRankToGlobalRank[i] = i;
   }
+  auto gateCtx = flashmoe::initializeGate(bNGate, E, S, stream);
   auto moeContext = flashmoe::initialize(args, Arch,expertToEpRank.data(), epRankToGlobalRank.data(), stream);
 
   size_t expertBase = static_cast<size_t>(epRank) * numLocalExperts;
@@ -511,16 +540,11 @@ void kickstart(const size_t& S, const size_t& H, const size_t& I, const size_t& 
     S, H, I, E, k, EC, Arch, mt, isGated ? swishAlpha : 1.f, isGated ? swishBeta : 1.f
   };
 
-  const auto ids_counts = generate_token_ids_and_expert_counts(
-    static_cast<int>(S), static_cast<int>(E), static_cast<int>(EC), roundEC, static_cast<int>(k), 0.f, 0.001f);
-  auto counts = std::get<0>(ids_counts);
-  auto indices = std::get<1>(ids_counts);
-  using CT = decltype(counts)::value_type;
-  using IT = decltype(indices)::value_type;
-  CHECK_CUDA(cudaMemcpyAsync(expertCounts, counts.data(), sizeof(CT) * counts.size(),
-    cudaMemcpyHostToDevice, stream));
-  CHECK_CUDA(cudaMemcpyAsync(moeContext.tokenIndices, indices.data(), sizeof(IT) * indices.size(),
-    cudaMemcpyHostToDevice, stream));
+  // run fused gate to populate tokenIndices and expertCounts
+  Element* routing = nullptr;
+  flashmoe::gate::forwardKernel<GateTile, Arch, gateThreads, grl, sro, rl, AccumType>
+  <<<gateBlocks, gateThreads, gateShared, stream>>>(tokens, gateWeights, routing,
+    expertCounts, S, H, E, k, EC, moeContext.tokenIndices, gateCtx.ecGuards, gateCtx.ssp, gateCtx.rtp);
   auto flashMK = [&](const flashmoe::Topology topology, const uint& k_runs) {
     if (topology == flashmoe::Topology::NVLINK_ONLY) {
       for (int i = 0; i < k_runs; ++i) {
@@ -583,8 +607,10 @@ void kickstart(const size_t& S, const size_t& H, const size_t& I, const size_t& 
   }
 
   // finalize
+  flashmoe::finalizeGate(gateCtx, stream);
   flashmoe::finalize(moeContext, stream);
   cudaFreeAsync(tokens, stream);
+  cudaFreeAsync(gateWeights, stream);
   cudaFreeAsync(expertUpWeights, stream);
   if constexpr (mt == flashmoe::MLPMatmulType::gated) {
     cudaFreeAsync(expertUpV, stream);
@@ -635,7 +661,7 @@ float parse_f32(const char* s, const char* name) {
   }
 }
 
-//./testFlashMoE <S> <H> <I> <E> <k> <warmup> <runs> <rtol> <atol> <EC>
+//./testFlashMoE_generated <S> <H> <I> <E> <k> <warmup> <runs> <rtol> <atol> <EC>
 __host__
 void drive(const int argc, char** argv) {
   size_t S = 8192; //  number of tokens per rank
@@ -696,20 +722,65 @@ void drive(const int argc, char** argv) {
   constexpr auto pS = arch >= 800 ? 2 : 1; // Hopper 3
   constexpr auto bM = cuda::std::is_same_v<Element, double> ? 64 : 128; // hopper, >= 4096 -> 256
   static_assert(bM >= 1);
-  // if (S % bM != 0) {
-  //   const auto errmsg = std::string("S must be a multiple of ").append(std::to_string(bM));
-  //     throw std::invalid_argument(errmsg);
-  // }
-  if (S < 1) {
+  if (S < 1 || (S > bM && S % bM != 0)) {
     throw std::invalid_argument("S is invalid");
   }
-  if (k > 1) {
-    kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, pS, flashmoe::CombineMode::plural, act, mt>
-    (S, H, I, E, EC, k, warmup, runs, rtol, atol);
+  if (E > 32 && E % 32 != 0) {
+    throw std::invalid_argument("E is invalid for this benchmark");
   }
-  else {
-    kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, pS, flashmoe::CombineMode::single, act, mt>
-    (S, H, I, E, EC, k, warmup, runs, rtol, atol);
+  switch (E) {
+    // Any E, where E % world == 0 holds, is supported, we restrict to 8 here to minimize compilation times.
+    case 8: {
+      if (k > 1) {
+        kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, pS, flashmoe::CombineMode::plural, act, mt,
+        flashmoe::GateReductionLevel::singleBlock, 8>
+        (S, H, I, E, EC, k, warmup, runs, rtol, atol);
+      }
+      else {
+        kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, pS, flashmoe::CombineMode::single, act, mt,
+        flashmoe::GateReductionLevel::singleBlock, 8>
+        (S, H, I, E, EC, k, warmup, runs, rtol, atol);
+      }
+    }
+      break;
+    case 16: {
+      if (k > 1) {
+        kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, pS, flashmoe::CombineMode::plural, act, mt,
+        flashmoe::GateReductionLevel::singleBlock, 16>
+        (S, H, I, E, EC, k, warmup, runs, rtol, atol);
+      }
+      else {
+        kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, pS, flashmoe::CombineMode::single, act, mt,
+        flashmoe::GateReductionLevel::singleBlock, 16>
+        (S, H, I, E, EC, k, warmup, runs, rtol, atol);
+      }
+    }
+      break;
+    case 32: {
+      if (k > 1) {
+        kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, pS, flashmoe::CombineMode::plural, act, mt,
+        flashmoe::GateReductionLevel::singleBlock, 32>
+        (S, H, I, E, EC, k, warmup, runs, rtol, atol);
+      }
+      else {
+        kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, pS, flashmoe::CombineMode::single, act, mt,
+        flashmoe::GateReductionLevel::singleBlock, 32>
+        (S, H, I, E, EC, k, warmup, runs, rtol, atol);
+      }
+    }
+    break;
+    default: {
+      if (k > 1) {
+        kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, pS, flashmoe::CombineMode::plural, act, mt,
+        flashmoe::GateReductionLevel::multiBlock, 32>
+        (S, H, I, E, EC, k, warmup, runs, rtol, atol);
+      }
+      else {
+        kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, pS, flashmoe::CombineMode::single, act, mt,
+        flashmoe::GateReductionLevel::multiBlock, 32>
+        (S, H, I, E, EC, k, warmup, runs, rtol, atol);
+      }
+    }
   }
 }
 int main(const int argc, char** argv) {

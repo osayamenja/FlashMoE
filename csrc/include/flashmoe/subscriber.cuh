@@ -245,7 +245,7 @@ namespace flashmoe::subscriber
       const auto warpId = args.tIdx / WARP_SIZE;
       for (int i = 0; i < stageLength; ++i) {
         // note we do not need to check sense bits here because it is guaranteed that
-        // every mailbox covered he will always be updated per epoch by every process in the world.
+        // every mailbox covered here will always be updated per epoch by every process in the world.
         const auto vSIdx = i / bSw;
         const auto vIdx = i % bSw;
         const auto flagIdx = warpId + i * sNW;

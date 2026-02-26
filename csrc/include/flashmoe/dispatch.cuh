@@ -107,8 +107,7 @@ namespace flashmoe
         symHeap.advance<0, 0>(lI.peer, lI.expertLocalIdx): lI.remoteSHeap +
         symHeap.advanceOffset<0, 1>(epRank, lI.expertLocalIdx));
       if (routedTokens) {
-        const auto partition = routedTokens / superBlockSize +
-          (lBid < routedTokens % superBlockSize);
+        const auto partition = routedTokens / superBlockSize + (lBid < routedTokens % superBlockSize);
         const auto trips = partition / batch;
         for (int i = 0; i < trips; ++i) {
           #pragma unroll
