@@ -324,10 +324,9 @@ namespace flashmoe::scheduler
              unsigned int* __restrict__ const& rQ, // shared
              unsigned int* __restrict__ const& sQ, // global
              TQSignal* __restrict__ const& pDB) {
-    //  global
     static_assert(sizeof(TQSignal) == sizeof(uint64_t) && alignof(TQSignal) == alignof(uint64_t));
     // Assumptions are below, will assert them host-side
-    // RMEM_STATE_PER_THREAD * schedulerCount >= processors
+    // PROCESSOR_STATE_SIZE * schedulerCount >= processors
     uint scheduled = 0U;
     constexpr auto schedulerCount = SCHEDULER_COUNT; // number of scheduler threads
     static_assert(subscribers % schedulerCount == 0);

@@ -47,11 +47,11 @@ namespace flashmoe
     // tokens and tokensId are at least 32-byte aligned.
     // we require superblocks to be equally sized
     const auto numSuperBlocks = blocks / superBlockSize;
-    const int superBlockIdx = blockIdx.x / superBlockSize;
+    const int superBlockIdx = static_cast<int>(blockIdx.x) / superBlockSize;
     if (superBlockIdx >= numSuperBlocks) {
       return;
     }
-    const int lBid = blockIdx.x % superBlockSize;
+    const int lBid = static_cast<int>(blockIdx.x) % superBlockSize;
     const bool isLeader = !lBid && !threadIdx.x;
     /// Populate Data Structures
     size_t offset = 0;
@@ -112,7 +112,7 @@ namespace flashmoe
         for (int i = 0; i < trips; ++i) {
           #pragma unroll
           for (int j = 0; j < batch; ++j) {
-            // intentionally redundant copies here to avoid any completion points (CTA barriers) within this loop
+            // intentionally redundant copies here to avoid any memory completion points (CTA barriers) within this loop
             const auto v = tokenIds(expertIdx, lBid + (j + i * batch) * superBlockSize);
             // unpack
             rTID[j] = v.tokenIdx;

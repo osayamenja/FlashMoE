@@ -318,12 +318,13 @@ void kickstart(const size_t& S, const size_t& H, const size_t& I, const size_t& 
   int num_sms = 0;
   CHECK_CUDA(cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, devId));
 
-  const auto world = nvshmem_n_pes(); // this is not a requirement
-  const auto epRank = nvshmem_my_pe(); // this is not a requirement
+  const auto world = nvshmem_n_pes();
+  const auto epRank = nvshmem_my_pe();
   if (epRank == 0) {
     printf("GPU, Arch, EP Rank, dtype, S, H, I, E, k, EC, bM, bN0, bK0, bN1, bK1, threads, blocks/SM, SMs, blocks, rtol, atol, "
            "error(%%), warmup, runs, workspace_bytes(MiB), "
            "FlashMoE_Time(ms)\n");
+    fflush(stdout); // ensures the header shows up first, especially relevant in large world size runs.
   }
   nvshmem_sync_all(); // this is needed to force initialization of NVSHMEM state.
 

@@ -77,7 +77,6 @@ namespace flashmoe::os
              const int& E, const int& I,
              const uint& processors) {
     // assert(processors >= dispatchBlocks)
-    // no funny business
     const auto ecTilesM = cute::ceil_div(EC, bM);
     const auto ecSignalCount = ecTilesM * tilesN1;
     const auto ssfC = E * ecSignalCount;
@@ -149,7 +148,7 @@ namespace flashmoe::os
     auto* __restrict__ eCs = reinterpret_cast<int*>(scratch);
     if (!threadIdx.x) {
       // Expert computation expectant tasks
-      // unknown a priori
+      // actual amount unknown a priori, so we use upper bound and self-correct at runtime
       *taskBound = ctx.nLx * ctx.world * ecTilesM * (tilesN0 + tilesN1);
     }
     for (uint i = threadIdx.x; i < E; i += threads) {
@@ -157,7 +156,7 @@ namespace flashmoe::os
     }
     __syncthreads();
     // Combine tasks
-    // known a priori
+    // actual amount known a priori
     for (uint i = threadIdx.x; i < E; i += threads) {
       const auto eCount = cute::min(eCs[i], EC);
       const auto eCt = cute::ceil_div(eCount, bM);
@@ -182,7 +181,7 @@ namespace flashmoe::os
           const auto expertCount = cute::min(eCs[expertIdx], EC);
           const auto actualTiles = cute::ceil_div(expertCount, bM);
           if ((isRemote && tileColIdx > 0) || tileRowIdx >= actualTiles) {
-            bitset.set(j);
+            bitset.set(j); // mask away this signal
           }
           else {
             bitset.clear(j);

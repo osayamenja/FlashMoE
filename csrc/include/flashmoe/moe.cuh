@@ -24,7 +24,7 @@ namespace flashmoe::moe
     int arch, //  GPU Architecture, Volta - Blackwell (700 - 1200), See cuBLASDx docs
     int _threads, // see tile::suggest_thread_count
     CombineMode cm, // plural, if k > 1; single otherwise
-    MLPMatmulType mt,
+    MLPMatmulType mt, // Gated MLP or Vanilla FFN
     typename GEMM0Tile, // cute::Shape<bM,bN,bK,pipeStages>
     typename GEMM1Tile // cute::Shape<bM,bN,bK,pipeStages>
   >
