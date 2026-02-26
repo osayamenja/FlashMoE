@@ -218,14 +218,14 @@ namespace flashmoe
         const size_t secondaryTQL = secondaryTQLength(args.epWorld, args.numLocalExperts, ecTilesM, tilesN1);
         CHECK_CUDA(cudaMallocAsync(&tQ, sizeof(Task) * (tQLength + secondaryTQL), stream));
         Task* pTq = tQ + tQLength;
-        if (tQLength + secondaryTQL > cuda::std::numeric_limits<uint>::max()) {
-            throw std::runtime_error("Task Queue length > UINT32_MAX. Not an error: need to migrate to uint64");
+        if (tQLength + secondaryTQL >= cuda::std::numeric_limits<uint>::max()) {
+            throw std::runtime_error("Task Queue length should be < UINT32_MAX. Not an error: need to migrate to uint64");
         }
         const size_t gRQIdxMax = (args.numLocalExperts * args.epWorld * ecTilesM * (tilesN0 + tilesN1)) +
             (cute::ceil_div(roundEC, args.bM) * tilesN1) + (cute::ceil_div(processors, scheduler::SCHEDULER_COUNT));
         if (gRQIdxMax >= cuda::std::numeric_limits<uint>::max()) {
             // catches overflow in scheduler. See circularIdx function
-            throw std::runtime_error("gRQIdxMax >= UINT32_MAX. Not an error: need to migrate to uint64");
+            throw std::runtime_error("gRQIdxMax should be < UINT32_MAX. Not an error: need to migrate to uint64");
         }
         checkAlignment(tQ);
         checkAlignment(pTq);
