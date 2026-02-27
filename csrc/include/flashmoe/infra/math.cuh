@@ -5,14 +5,14 @@
 #ifndef FLASHMOE_MATH_CUH
 #define FLASHMOE_MATH_CUH
 #include <cuda/cmath>
+#include "constants.cuh"
 namespace flashmoe
 {
   // Also applies to shared memory banks
   template <typename Element>
   __device__ __forceinline__
   constexpr auto rTCL(uint const& len) {
-    constexpr size_t lineBytes = 128;
-    return cuda::round_up(len * sizeof(Element), lineBytes);
+    return cuda::round_up(len * sizeof(Element), SMEM_BANKS_TOTAL_BYTE_WIDTH);
   }
 }
 #endif //FLASHMOE_MATH_CUH

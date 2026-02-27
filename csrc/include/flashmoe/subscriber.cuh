@@ -588,7 +588,6 @@ namespace flashmoe::subscriber
                                                 sigPayload.senseBit, args.stateNumber,
                                                 sigPayload.stateNumber);
             if (expected) {
-              //sigPayload.dump(expertIdx, flagIdx / nRows);
               sBS.set(bIdx);
               senseBitSet.flip(bIdx);
               const auto tokenIdx = sigPayload.batchIdx * bM;

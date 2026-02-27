@@ -12,6 +12,7 @@ namespace flashmoe
     constexpr int MAX_ACCESS_ALIGNMENT = 16;
 #endif
     constexpr int WARP_SIZE = 32;
+    constexpr unsigned long SMEM_BANKS_TOTAL_BYTE_WIDTH = 4 * 32;
 }
 
 namespace flashmoe::scheduler

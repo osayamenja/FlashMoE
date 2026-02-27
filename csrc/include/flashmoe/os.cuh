@@ -43,7 +43,8 @@ namespace flashmoe::os
     bytes += rTCL<PLI>(world);
     bytes += rTCL<ELI>(E);
     bytes += rTCL<LXI>(nLx);
-    const auto fSbSL = rTCL<BitSet>(nSI<sNW>(nLx * world)); //firstStageBitSetLength
+    const auto fSbSL = cuda::round_up(nSI<sNW>(nLx * world),
+      static_cast<uint>(SMEM_BANKS_TOTAL_BYTE_WIDTH / sizeof(BitSet)));
     const auto bScL = nSI<subscriberCount>(ssfC);
     const auto bSSI = fSbSL + bScL;
     bytes += rTCL<BitSet>(bSSI);
@@ -101,7 +102,9 @@ namespace flashmoe::os
     offset += rTCL<LXI>(nLx);
     auto* __restrict__ subVisitedSet = reinterpret_cast<BitSet*>(workspace + offset);
     const auto xfSbSL = nSI<sNW>(nLx * world); //firstStageBitSetLength
-    const auto fSbSL = rTCL<BitSet>(xfSbSL);
+    // pad this bitset array to eliminate bank conflicts for accesses to the adjacent array
+    const auto fSbSL = cuda::round_up(xfSbSL,
+      static_cast<uint>(SMEM_BANKS_TOTAL_BYTE_WIDTH / sizeof(BitSet)));
     const auto bScL = nSI<subscriberCount>(ssfC);
     const auto bSSI = fSbSL + bScL;
     offset += rTCL<BitSet>(bSSI);
