@@ -11,6 +11,7 @@
 #include <stdexcept>
 
 #include <mpi.h>
+#include <nvml.h>
 
 #include "../include/flashmoe/bootstrap.cuh"
 #include "../include/flashmoe/moe.cuh"
@@ -175,7 +176,7 @@ __global__ void combineReference( const __grid_constant__ int S,
   }
 }
 // single GPU E2E MoE
-// It's execution is deterministic
+// Its execution is deterministic
 template<
   typename Config, flashmoe::MLPMatmulType mt, int GEMM0SharedSize, int GEMM1SharedSize,
   typename Activation, typename AccumType, typename Element
@@ -274,6 +275,123 @@ struct Seeds {
   SeedType beta;
 };
 
+namespace gpu_bw
+{
+  enum class FabricKind : int {
+    UNKNOWN = 0,
+    PCIE = 1,
+    NVLINK = 2,
+  };
+
+  struct FabricBW {
+    FabricKind kind;
+    double gbs_unidirectional; // "GB/s" decimal
+
+    __host__ __forceinline__
+    std::string toString() const {
+      switch (kind) {
+      case FabricKind::PCIE:
+        return std::string("PCIE_") + std::to_string(static_cast<uint>(gbs_unidirectional));
+        case FabricKind::NVLINK:
+        return std::string("NVLINK_") + std::to_string(static_cast<uint>(gbs_unidirectional));
+        default:
+        return "UNKNOWN";
+      }
+    }
+  };
+
+  // Thread-safe best-effort NVML init.
+  __host__
+  bool nvml_init_best_effort() {
+    return (nvmlInit() == NVML_SUCCESS);
+  }
+
+  // Approx PCIe per-lane uni-directional throughput (GB/s), decimal.
+  // (Common “rule of thumb” values; sustained will be lower.)
+  __host__
+  constexpr double pcie_gbs_per_lane(const unsigned int& gen) {
+    switch (gen) {
+    case 1: return 0.250; // Gen1 x1 ~0.25 GB/s
+    case 2: return 0.500; // Gen2 x1 ~0.5  GB/s
+    case 3: return 0.985; // Gen3 x1 ~0.985 GB/s
+    case 4: return 1.969; // Gen4 x1 ~1.969 GB/s
+    case 5: return 3.938; // Gen5 x1 ~3.938 GB/s
+    case 6: return 7.56; // Gen5 x1 ~3.938 GB/s
+    default: return 0.0;
+    }
+  }
+
+  // Coarse NVLink per-link uni-directional bandwidth (GB/s).
+  // Note: This is intentionally "coarse-grained". For many modern parts,
+  // NVLink per direction is often treated as ~25 GB/s per link.
+  // Adjust here if you want to encode a different model.
+  __host__
+  constexpr double nvlink_gbs_per_link_per_dir(const unsigned int& nvlink_version) {
+    switch (nvlink_version) {
+    case 1: return 20.0;
+    case 2: return 25.0;
+    case 3: return 25.0;
+    case 4: return 25.0;
+    case 5: return 50.0;
+    default: return 0.0;
+    }
+  }
+
+  __host__
+  FabricBW gpu_drive_bandwidth_gbs(const int& device_index) {
+    if (!nvml_init_best_effort()) return {FabricKind::UNKNOWN, 0.0};
+
+    nvmlDevice_t dev{};
+    if (nvmlDeviceGetHandleByIndex(device_index, &dev) != NVML_SUCCESS)
+      return {FabricKind::UNKNOWN, 0.0};
+
+    // ---- Try NVLink first: count active links and sum per-link BW ----
+    double nvlink_total = 0.0;
+    bool any_nvlink = false;
+
+    for (unsigned int link = 0; link < NVML_NVLINK_MAX_LINKS; ++link) {
+      nvmlEnableState_t st = NVML_FEATURE_DISABLED;
+      if (nvmlDeviceGetNvLinkState(dev, link, &st) != NVML_SUCCESS) continue;
+      if (st != NVML_FEATURE_ENABLED) continue;
+
+      unsigned int ver = 0;
+      if (nvmlDeviceGetNvLinkVersion(dev, link, &ver) != NVML_SUCCESS) continue;
+
+      const double per_link = nvlink_gbs_per_link_per_dir(ver);
+      if (per_link <= 0.0) continue;
+
+      any_nvlink = true;
+      nvlink_total += per_link; // per direction
+    }
+
+    if (any_nvlink && nvlink_total > 0.0) {
+      return {FabricKind::NVLINK, nvlink_total};
+    }
+
+    // ---- Fall back to PCIe: use current (or max) gen/width ----
+    unsigned int gen = 0, width = 0;
+
+    if (nvmlDeviceGetCurrPcieLinkGeneration(dev, &gen) != NVML_SUCCESS ||
+      nvmlDeviceGetCurrPcieLinkWidth(dev, &width) != NVML_SUCCESS ||
+      gen == 0 || width == 0) {
+      // fall back to max if current isn't available
+      gen = 0;
+      width = 0;
+      if (nvmlDeviceGetMaxPcieLinkGeneration(dev, &gen) != NVML_SUCCESS ||
+        nvmlDeviceGetMaxPcieLinkWidth(dev, &width) != NVML_SUCCESS ||
+        gen == 0 || width == 0) {
+        return {FabricKind::UNKNOWN, 0.0};
+      }
+    }
+
+    const double per_lane = pcie_gbs_per_lane(gen);
+    if (per_lane <= 0.0) return {FabricKind::UNKNOWN, 0.0};
+
+    nvmlShutdown();
+    return {FabricKind::PCIE, per_lane * static_cast<double>(width)};
+  }
+}
+
 template <typename Element>
 consteval const char* element_string() {
   static_assert(
@@ -288,6 +406,13 @@ consteval const char* element_string() {
   else if constexpr (cuda::std::is_same_v<Element, __half>) return "fp16";
   else return "bf16";
 }
+
+template <flashmoe::MLPMatmulType mt>
+consteval const char* mt_string() {
+  if constexpr (mt == flashmoe::MLPMatmulType::gated) return "Gated";
+  else return "Vanilla";
+}
+
 template<
   typename Element, typename AccumType,
   int Arch,
@@ -306,6 +431,7 @@ void kickstart(const size_t& S, const size_t& H, const size_t& I, const size_t& 
   CHECK_CUDA(cudaSetDevice(devId));
   cudaStream_t stream;
   CHECK_CUDA(cudaStreamCreate(&stream));
+  const auto gbw = gpu_bw::gpu_drive_bandwidth_gbs(devId);
 
   int archMajor = 0;
   CHECK_CUDA(cudaDeviceGetAttribute(&archMajor,cudaDevAttrComputeCapabilityMajor, devId));
@@ -321,9 +447,9 @@ void kickstart(const size_t& S, const size_t& H, const size_t& I, const size_t& 
   const auto world = nvshmem_n_pes();
   const auto epRank = nvshmem_my_pe();
   if (epRank == 0) {
-    printf("GPU, Arch, EP Rank, dtype, S, H, I, E, k, EC, bM, bN0, bK0, bN1, bK1, threads, blocks/SM, SMs, blocks, rtol, atol, "
-           "error(%%), warmup, runs, workspace_bytes(MiB), "
-           "FlashMoE_Time(ms)\n");
+    printf("rank, dtype, S, H, I, E, k, FlashMoE_Time(ms), error(%%), EC, GPU, SM, IntraTopo(GB/s), Topology,"
+           " MLPType, bM, bN0, bK0, bN1, bK1, threads, blocks/SM, SMs, blocks, rtol, atol, "
+           "warmup, runs, workspace(MiB)\n");
     fflush(stdout); // ensures the header shows up first, especially relevant in large world size runs.
   }
   nvshmem_sync_all(); // this is needed to force initialization of NVSHMEM state.
@@ -600,11 +726,11 @@ void kickstart(const size_t& S, const size_t& H, const size_t& I, const size_t& 
     const float m_time_ms = m_ms / static_cast<float>(runs);
     constexpr auto es = element_string<Element>();
     cudaDeviceProp prop{};
-    CHECK_CUDA(cudaGetDeviceProperties(&prop, 0)); // Get properties for device i
+    CHECK_CUDA(cudaGetDeviceProperties(&prop, devId)); // Get properties for current rank
     const auto sms = "sm_" + std::to_string(Arch / 10);
-    printf("%s, %s, %d, %s, %lu, %lu, %lu, %lu, %lu, %lu, %d, %d, %d, %d, %d, %d, %d, %d, %d, %.1e, %.1e, %f, %d, %d, %.4lf, %f\n",
-           prop.name, sms.c_str(), epRank, es, S, H, I, E, k, EC, bM, bN0, bK0, bN1, bK1, threads, bps, num_sms, blocks, rtol, atol, ep,
-           warmup, runs, workspaceBytesMiB, m_time_ms);
+    printf("%d, %s, %lu, %lu, %lu, %lu, %lu, %f, %lf, %lu, %s, %s, %s, %s, %s, %d, %d, %d, %d, %d, %d, %d, %d, %d, %.1e, %.1e, %d, %d, %lf\n",
+           epRank, es, S, H, I, E, k, m_time_ms, ep, EC, prop.name, sms.c_str(), gbw.toString().c_str(), kernelTopo == flashmoe::Topology::MIXED ? "MultiNode" : "SingleNode",
+           mt_string<mt>(), bM, bN0, bK0, bN1, bK1, threads, bps, num_sms, blocks, rtol, atol, warmup, runs, workspaceBytesMiB);
   }
 
   // finalize
@@ -670,7 +796,7 @@ void drive(const int argc, char** argv) {
   size_t I = 2048; // FFN intermediate dimension
   size_t E = 32; // number of experts
   size_t k = 2; // topK
-  // expert capacity at a peer granularity. EC ∈ {1,...,ceil(S/E)*k,...,S}
+  // expert capacity per expert per peer. EC ∈ {1,...,ceil(S/E)*k,...,S}
   size_t EC = cute::ceil_div(S, E) * k;
   uint warmup = 128;
   uint runs = 128;
@@ -720,8 +846,8 @@ void drive(const int argc, char** argv) {
   if (I <= bK1 || I % bK1 != 0 || I < bN0 || I % bN0 != 0) {
     throw std::invalid_argument("I is invalid");
   }
-  constexpr auto pS = arch >= 800 ? 2 : 1; // Hopper 3
-  constexpr auto bM = cuda::std::is_same_v<Element, double> ? 64 : 128; // hopper, >= 4096 -> 256
+  constexpr auto pS = arch >= 900 ? 3 : arch >= 800 ? 2 : 1; // Hopper 3
+  constexpr auto bM = cuda::std::is_same_v<Element, double> ? 64 : 128; // hopper, S >= 4096 -> bM = 256
   static_assert(bM >= 1);
   if (S < 1 || (S > bM && S % bM != 0)) {
     throw std::invalid_argument("S is invalid");
