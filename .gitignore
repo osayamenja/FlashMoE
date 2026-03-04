@@ -2,6 +2,8 @@
 *.iml
 .DS_Store
 __pycache__/
+*.lock
+*egg-info/
 
 # csrc
 csrc/cmake-build-*

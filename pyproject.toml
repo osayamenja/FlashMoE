@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flashmoe"
+version = "0.1.0"
+description = "Completely Fused Distributed MoE"
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.setuptools]
+package-dir = {"" = "flashmoe"}
+
+[tool.setuptools.package-data]
+# IMPORTANT: include the CMake project + headers in the package
+toy = [
+  "csrc/CMakeLists.txt",
+  "csrc/include/*.cuh"
+]

@@ -13,9 +13,7 @@
 #include <mpi.h>
 #include <nvml.h>
 
-#include "../include/flashmoe/bootstrap.cuh"
-#include "../include/flashmoe/moe.cuh"
-#include "../include/flashmoe/gate.cuh"
+#include "../include/flashmoe/flashmoe.cuh"
 
 #include "common.cuh"
 
@@ -736,22 +734,22 @@ void kickstart(const size_t& S, const size_t& H, const size_t& I, const size_t& 
   // finalize
   flashmoe::finalizeGate(gateCtx, stream);
   flashmoe::finalize(moeContext, stream);
-  cudaFreeAsync(tokens, stream);
-  cudaFreeAsync(gateWeights, stream);
-  cudaFreeAsync(expertUpWeights, stream);
+  CHECK_CUDA(cudaFreeAsync(tokens, stream));
+  CHECK_CUDA(cudaFreeAsync(gateWeights, stream));
+  CHECK_CUDA(cudaFreeAsync(expertUpWeights, stream));
   if constexpr (mt == flashmoe::MLPMatmulType::gated) {
     cudaFreeAsync(expertUpV, stream);
     cudaFreeAsync(biasUpV, stream);
   }
-  cudaFreeAsync(expertDownWeights, stream);
-  cudaFreeAsync(biasUp, stream);
-  cudaFreeAsync(biasDown, stream);
-  cudaFreeAsync(expertCounts, stream);
-  cudaFreeAsync(moeOut, stream);
-  cudaFreeAsync(referenceInput, stream);
-  cudaFreeAsync(referenceInterim0, stream);
-  cudaFreeAsync(referenceInterim1, stream);
-  cudaFreeAsync(referenceOut, stream);
+  CHECK_CUDA(cudaFreeAsync(expertDownWeights, stream));
+  CHECK_CUDA(cudaFreeAsync(biasUp, stream));
+  CHECK_CUDA(cudaFreeAsync(biasDown, stream));
+  CHECK_CUDA(cudaFreeAsync(expertCounts, stream));
+  CHECK_CUDA(cudaFreeAsync(moeOut, stream));
+  CHECK_CUDA(cudaFreeAsync(referenceInput, stream));
+  CHECK_CUDA(cudaFreeAsync(referenceInterim0, stream));
+  CHECK_CUDA(cudaFreeAsync(referenceInterim1, stream));
+  CHECK_CUDA(cudaFreeAsync(referenceOut, stream));
   CHECK_CUDA(cudaPeekAtLastError());
   CHECK_CUDA(cudaStreamSynchronize(stream));
   cudaEventDestroy(start);cudaEventDestroy(stop);
@@ -910,6 +908,12 @@ void drive(const int argc, char** argv) {
     }
   }
 }
+
+struct KernelInfo {
+  flashmoe::Context const ctx;
+  const int blocks;
+  const int sharedSize;
+};
 int main(const int argc, char** argv) {
   drive(argc, argv);
 }

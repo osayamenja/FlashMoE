@@ -5,9 +5,15 @@
 // place to experiment
 #include "debug.cuh"
 
+struct Foo {
+  int a;
+  int b;
+};
 int main() {
-  CHECK_CUDA(cudaSetDevice(0));
-  cudaDeviceProp prop{};
-  CHECK_CUDA(cudaGetDeviceProperties(&prop, 0)); // Get properties for device i
-  printf("Device name: %s\n", prop.name);
+  constexpr Foo foo{6, 7};
+  const auto p = new Foo(foo);
+  p->a += 1;
+  auto q = *p;
+  printf("a is %d\n", q.a);
+  delete p;
 }

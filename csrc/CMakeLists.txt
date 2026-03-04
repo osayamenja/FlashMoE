@@ -23,29 +23,42 @@ endif ()
 project(flashmoe CUDA CXX)
 
 # flags
-set(FLASHMOE_CUDA_CXX_FLAGS "${FLASHMOE_CUDA_CXX_FLAGS} -Wall -Wextra")
-set(FLASHMOE_CUDA_CXX_FLAGS "${FLASHMOE_CUDA_CXX_FLAGS} -fno-strict-aliasing")
-if(NOT ${CMAKE_SYSTEM_PROCESSOR} MATCHES "^aarch64")
-    set(FLASHMOE_CUDA_CXX_FLAGS "${FLASHMOE_CUDA_CXX_FLAGS} -m64")
-endif ()
-set(FLASHMOE_CUDA_CXX_FLAGS "${FLASHMOE_CUDA_CXX_FLAGS} -Wno-unknown-pragmas -Wnull-dereference -Wnarrowing")
-set(FLASHMOE_CUDA_CXX_FLAGS "${FLASHMOE_CUDA_CXX_FLAGS} -Wno-switch -Wduplicated-branches -Wformat=2")
-set(FLASHMOE_CUDA_CXX_FLAGS "${FLASHMOE_CUDA_CXX_FLAGS} -Wno-unused-but-set-parameter")
-set(FLASHMOE_CUDA_CXX_FLAGS "${FLASHMOE_CUDA_CXX_FLAGS} -Wno-sign-compare")
+add_library(flashmoe_warnings INTERFACE)
+
+target_compile_options(flashmoe_warnings INTERFACE
+        $<$<COMPILE_LANGUAGE:CXX>:
+        -Wall -Wextra
+        -fno-strict-aliasing
+        -Wno-unknown-pragmas
+        -Wnull-dereference
+        -Wnarrowing
+        -Wno-switch
+        -Wduplicated-branches
+        -Wformat=2
+        -Wno-unused-but-set-parameter
+        -Wno-sign-compare
+        >
+
+        $<$<COMPILE_LANGUAGE:CUDA>:
+        -Xcompiler=-Wall,-Wextra
+        -Xcompiler=-fno-strict-aliasing
+        -Xcompiler=-Wno-unknown-pragmas,-Wnull-dereference,-Wnarrowing
+        -Xcompiler=-Wno-switch,-Wduplicated-branches,-Wformat=2
+        -Xcompiler=-Wno-unused-but-set-parameter
+        -Xcudafe --display_error_number
+        -Xcompiler=-Wno-sign-compare
+        >
+)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${FLASHMOE_CUDA_CXX_FLAGS}")
 
 set(CUDA_HOST_COMPILER ${CMAKE_CXX_COMPILER})
 set(CMAKE_CUDA_ARCHITECTURES "native")
 set(CMAKE_CUDA_STANDARD 20)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_EXTENSIONS OFF)
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xfatbin -compress-all") # Compress all fatbins
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcudafe --display_error_number") # Show error/warning numbers
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler \"${FLASHMOE_CUDA_CXX_FLAGS}\"")
 
 # Query number of SMs
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
@@ -78,7 +91,7 @@ CPMAddPackage(
 CPMAddPackage(
         NAME CUTLASS
         GITHUB_REPOSITORY nvidia/cutlass
-        GIT_TAG main
+        GIT_TAG v4.4.1
         DOWNLOAD_ONLY TRUE
         OPTIONS
         "CUTLASS_NVCC_ARCHS=${ARCH_TAG}"
@@ -167,6 +180,7 @@ function(flash_target_common tgt)
 endfunction()
 function(flash_target_lto tgt)
     target_link_libraries(${tgt} PRIVATE CUDA::cudart CUDA::cuda_driver CUDA::nvml atomic)
+    target_link_libraries(${tgt} PRIVATE flashmoe_warnings)
     if(NVTX3_ADDED)
         target_link_libraries(${tgt} PRIVATE nvtx3-cpp)
     endif ()
@@ -191,7 +205,7 @@ function(flash_target_lto tgt)
             $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CXX>>:-O0;-g>
             $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CXX>>:-O3>
             $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:-O3>
-            $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:-Xptxas -v>
+            $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:-Xptxas -v; -Xcudafe --display_error_number>
             $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:SHELL:-gencode=arch=compute_${ARCH_TAG},code=lto_${ARCH_TAG}>
     )
     target_link_options(${tgt} PRIVATE

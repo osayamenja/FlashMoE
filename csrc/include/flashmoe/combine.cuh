@@ -55,7 +55,6 @@ namespace flashmoe
     const auto gC = tile::get<bM, bN, cArr>(tokens, bM, H, tileCoord);
     static_assert(cute::is_compatible<decltype(gC.layout()), decltype(sC.layout())>::value);
 
-    #pragma unroll
     for (int i = threadIdx.x; i < bM; i += threads) {
       stIds[i] = tokenIndices[i];
     }
