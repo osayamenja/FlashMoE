@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, Osayamen Jonathan Aimuyo
+ * Copyright (c) 2026, Osayamen Jonathan Aimuyo
  * All rights reserved.
  *
  * This file is part of the Flashmoe Project and is licensed under the BSD 3-Clause License.
@@ -10,7 +10,6 @@
 #define FLASHMOE_MOE_CUH
 
 #include "infra/activation.cuh"
-#include "infra/telemetry.cuh"
 
 #include "context.cuh"
 #include "dispatch.cuh"
@@ -142,11 +141,12 @@ namespace flashmoe::moe
         kArgs.E, kArgs.I, processors);
       return;
     }
+    const auto stateNumber = ctx.stateNumbers[blockIdx.x];
     if (blockIdx.x < dispatchBlocks) {
       // dispatch
       dispatch<topo, Config::Threads::value, bM, bN0>(kArgs.H, kArgs.E, symHeap, kArgs.EC, roundEC,
         ctx.epRank, ctx.world, superBlockSize, dispatchBlocks, tokens, ctx.signals, kArgs.expertCounts,
-        ctx.tokenIndices, ctx.dispatchSync, ctx.pel, flashWorkspace, ctx.stateNumber);
+        ctx.tokenIndices, ctx.dispatchSync, ctx.pel, flashWorkspace, stateNumber);
     }
     // processor;
     const auto pA = processor::ProcessorArgs{
@@ -180,7 +180,12 @@ namespace flashmoe::moe
     (flashWorkspace, kArgs.S, kArgs.H, kArgs.I, kArgs.E, roundEC, ecTilesM * kArgs.E, tilesN0, tilesN1,
       expertUp, expertUpV,  biasUp, biasUpV,
       static_cast<AccumType>(kArgs.swishAlpha), static_cast<AccumType>(kArgs.swishBeta),
-      expertDown, biasDown, ctx.tokenIndices, moeOut, producerBM, ctx.stateNumber, symHeap, pA);
+      expertDown, biasDown, ctx.tokenIndices, moeOut, producerBM, stateNumber, symHeap, pA);
+    __syncthreads();
+    if (!threadIdx.x) {
+      // for the next epoch
+      ctx.stateNumbers[blockIdx.x] = sbs::next(stateNumber);
+    }
   }
 
   template <
@@ -189,15 +194,11 @@ namespace flashmoe::moe
     Activation a
   >
   __host__ __forceinline__
-  void forwardHost(const KernelArgs& kArgs, Context& ctx, const uint& sharedSize, cudaStream_t stream) {
-#if defined(FLASHMOE_NVTX)
-    const flashmoeRange range{"FlashMoE::forward, stateNumber: " + std::to_string(ctx.stateNumber)};
-#endif
+  void forwardHost(const KernelArgs& kArgs, const Context& ctx, const uint& sharedSize, cudaStream_t stream) {
     if constexpr (Config::CM::value == CombineMode::plural) {
       cudaMemsetAsync(kArgs.moeOut, 0, sizeof(typename Config::DType) * kArgs.S * static_cast<size_t>(kArgs.H), stream);
     }
     forward<Config, a, topo><<<ctx.blocks, Config::Threads::value, sharedSize, stream>>>(kArgs, ctx);
-    ctx.stateNumber = sbs::next(ctx.stateNumber);
   }
 }
 #endif //FLASHMOE_MOE_CUH

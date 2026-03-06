@@ -11,10 +11,11 @@
 #include <tuple>
 #include <random>
 
+#include <cuda_runtime.h>
 #include <cublasdx.hpp>
 #include <curanddx.hpp>
 #include <matx.h>
-#include <cuda_runtime.h>
+#include <nvml.h>
 
 #include "../include/flashmoe/infra/packed.cuh"
 
@@ -325,6 +326,138 @@ void printMetadata(const std::vector<int>& counts, const std::vector<flashmoe::T
                                       cute::make_shape(E, roundEC), cute::LayoutRight{}));
   print_tensor(t2);
   std::free(p);
+}
+
+namespace gpu_bw
+{
+  enum class FabricKind : int {
+    UNKNOWN = 0,
+    PCIE = 1,
+    NVLINK = 2,
+  };
+
+  struct FabricBW {
+    FabricKind kind;
+    double gbs_unidirectional; // "GB/s" decimal
+
+    __host__ __forceinline__
+    std::string toString() const {
+      switch (kind) {
+      case FabricKind::PCIE:
+        return std::string("PCIE_") + std::to_string(static_cast<uint>(gbs_unidirectional));
+        case FabricKind::NVLINK:
+        return std::string("NVLINK_") + std::to_string(static_cast<uint>(gbs_unidirectional));
+        default:
+        return "UNKNOWN";
+      }
+    }
+  };
+
+  // Thread-safe best-effort NVML init.
+  __host__
+  bool nvml_init_best_effort() {
+    return (nvmlInit() == NVML_SUCCESS);
+  }
+
+  // Approx PCIe per-lane uni-directional throughput (GB/s), decimal.
+  // (Common “rule of thumb” values; sustained will be lower.)
+  __host__
+  constexpr double pcie_gbs_per_lane(const unsigned int& gen) {
+    switch (gen) {
+    case 1: return 0.250; // Gen1 x1 ~0.25 GB/s
+    case 2: return 0.500; // Gen2 x1 ~0.5  GB/s
+    case 3: return 0.985; // Gen3 x1 ~0.985 GB/s
+    case 4: return 1.969; // Gen4 x1 ~1.969 GB/s
+    case 5: return 3.938; // Gen5 x1 ~3.938 GB/s
+    case 6: return 7.56; // Gen5 x1 ~3.938 GB/s
+    default: return 0.0;
+    }
+  }
+
+  // Coarse NVLink per-link uni-directional bandwidth (GB/s).
+  // Note: This is intentionally "coarse-grained". For many modern parts,
+  // NVLink per direction is often treated as ~25 GB/s per link.
+  // Adjust here if you want to encode a different model.
+  __host__
+  constexpr double nvlink_gbs_per_link_per_dir(const unsigned int& nvlink_version) {
+    switch (nvlink_version) {
+    case 1: return 20.0;
+    case 2: return 25.0;
+    case 3: return 25.0;
+    case 4: return 25.0;
+    case 5: return 50.0;
+    default: return 0.0;
+    }
+  }
+
+  __host__
+  FabricBW gpu_drive_bandwidth_gbs(const int& device_index) {
+    if (!nvml_init_best_effort()) return {FabricKind::UNKNOWN, 0.0};
+
+    nvmlDevice_t dev{};
+    if (nvmlDeviceGetHandleByIndex(device_index, &dev) != NVML_SUCCESS)
+      return {FabricKind::UNKNOWN, 0.0};
+
+    // ---- Try NVLink first: count active links and sum per-link BW ----
+    double nvlink_total = 0.0;
+    bool any_nvlink = false;
+
+    for (unsigned int link = 0; link < NVML_NVLINK_MAX_LINKS; ++link) {
+      nvmlEnableState_t st = NVML_FEATURE_DISABLED;
+      if (nvmlDeviceGetNvLinkState(dev, link, &st) != NVML_SUCCESS) continue;
+      if (st != NVML_FEATURE_ENABLED) continue;
+
+      unsigned int ver = 0;
+      if (nvmlDeviceGetNvLinkVersion(dev, link, &ver) != NVML_SUCCESS) continue;
+
+      const double per_link = nvlink_gbs_per_link_per_dir(ver);
+      if (per_link <= 0.0) continue;
+
+      any_nvlink = true;
+      nvlink_total += per_link; // per direction
+    }
+
+    if (any_nvlink && nvlink_total > 0.0) {
+      return {FabricKind::NVLINK, nvlink_total};
+    }
+
+    // ---- Fall back to PCIe: use current (or max) gen/width ----
+    unsigned int gen = 0, width = 0;
+
+    if (nvmlDeviceGetCurrPcieLinkGeneration(dev, &gen) != NVML_SUCCESS ||
+      nvmlDeviceGetCurrPcieLinkWidth(dev, &width) != NVML_SUCCESS ||
+      gen == 0 || width == 0) {
+      // fall back to max if current isn't available
+      gen = 0;
+      width = 0;
+      if (nvmlDeviceGetMaxPcieLinkGeneration(dev, &gen) != NVML_SUCCESS ||
+        nvmlDeviceGetMaxPcieLinkWidth(dev, &width) != NVML_SUCCESS ||
+        gen == 0 || width == 0) {
+        return {FabricKind::UNKNOWN, 0.0};
+      }
+    }
+
+    const double per_lane = pcie_gbs_per_lane(gen);
+    if (per_lane <= 0.0) return {FabricKind::UNKNOWN, 0.0};
+
+    nvmlShutdown();
+    return {FabricKind::PCIE, per_lane * static_cast<double>(width)};
+  }
+}
+
+template <typename Element>
+consteval const char* element_string() {
+  static_assert(
+    cuda::std::is_same_v<Element, __half> ||
+    cuda::std::is_same_v<Element, __nv_bfloat16> ||
+    cuda::std::is_same_v<Element, float> ||
+    cuda::std::is_same_v<Element, double>,
+    "Unsupported Element type"
+  );
+  if constexpr (cuda::std::is_same_v<Element, double>) return "fp64";
+  else if constexpr (cuda::std::is_same_v<Element, float>) return "fp32";
+  else if constexpr (cuda::std::is_same_v<Element, __half>) return "fp16";
+  else return "bf16";
 }
 
 template <typename Element>

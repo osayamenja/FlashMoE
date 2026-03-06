@@ -77,6 +77,7 @@ namespace flashmoe::os
              const int& dispatchBlocks,
              const int& E, const int& I,
              const uint& processors) {
+    const auto stateNumber = ctx.stateNumbers[blockIdx.x];
     // assert(processors >= dispatchBlocks)
     const auto ecTilesM = cute::ceil_div(EC, bM);
     const auto ecSignalCount = ecTilesM * tilesN1;
@@ -250,13 +251,17 @@ namespace flashmoe::os
       subscriber::Args args{
         ctx.signals, ctx.tQ, ctx.GEMM0Staging, senseBitset, subVisitedSet, interrupt, tQHeads,
         pL, lX, eL, status, taskBound, ctx.world, ctx.nLx, static_cast<uint>(ctx.nLx * ctx.world),
-        ctx.epRank, ecTilesM * bM, E, I, tIdx, tilesN0, tilesN1, ecTilesM, ctx.stateNumber
+        ctx.epRank, ecTilesM * bM, E, I, tIdx, tilesN0, tilesN1, ecTilesM, stateNumber
       };
       subscriber::start<topo, subscriberCount, bM, ElementC>(symHeap, args, fSbSL);
     }
     __syncthreads();
     for (uint i = threadIdx.x; i < bScL; i += threads) {
       ctx.consumerCombineBitMap[i] = senseBitset[i];
+    }
+    if (!threadIdx.x) {
+      // advance for next epoch
+      ctx.stateNumbers[blockIdx.x] = sbs::next(stateNumber);
     }
   }
 }

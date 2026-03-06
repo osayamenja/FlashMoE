@@ -288,6 +288,11 @@ namespace flashmoe {
     static_assert(ReadySignal::observed == 0);
     CHECK_CUDA(cudaMemsetAsync(statusQ, 0, sizeof(uint) * processors, stream));
 
+    uint8_t* stateNumbers = nullptr;
+    CHECK_CUDA(cudaMallocAsync(&stateNumbers, sizeof(uint8_t) * args.blocks, stream));
+    static_assert(SignalConstants::sequenceStart == 0x01);
+    CHECK_CUDA(cudaMemsetAsync(stateNumbers, 0x01, sizeof(uint8_t) * args.blocks, stream));
+
     CHECK_CUDA(cudaPeekAtLastError());
     expertParallelBookkeeping(expertToEpRank, epRankToGlobalRank, args.epWorld, args.myPE,
                               args.numExperts, args.numLocalExperts, sHeap, signals, pel, pli, eli, lxi, stream);
@@ -308,6 +313,7 @@ namespace flashmoe {
       .tileSync = tileSync,
       .statusQueue = statusQ,
       .tokenIndices = tps,
+      .stateNumbers = stateNumbers,
       .processors_v = cuda::fast_mod_div(processors),
       .blocks = args.blocks,
       .S = args.sequenceLength,
@@ -323,8 +329,7 @@ namespace flashmoe {
       .epRank = args.epRank,
       .myPE = args.myPE,
       .initialized = true,
-      .topo = args.topo,
-      .stateNumber = SignalConstants::sequenceStart
+      .topo = args.topo
     };
   }
 
@@ -360,6 +365,7 @@ namespace flashmoe {
     bytes += sizeof(uint) * args.epWorld * args.numLocalExperts * ecTilesM;
     bytes += sizeof(uint) * args.epWorld * args.numLocalExperts * ecTilesM;
     bytes += sizeof(uint) * processors;
+    bytes += sizeof(uint8_t) * args.blocks;
     return bytes;
   }
 
