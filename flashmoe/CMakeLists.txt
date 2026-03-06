@@ -42,7 +42,7 @@ find_package(CUDAToolkit REQUIRED)
 set(FLASHMOE_KERNELS_SOURCE "" CACHE PATH "Path to flashmoe kernels source tree (optional)")
 
 if (FLASHMOE_KERNELS_SOURCE)
-  set(flashmoe_kernels_SOURCE_DIR ${FLASHMOE_KERNELS_SOURCE})
+  set(FLASHMOE_SOURCE_DIR ${FLASHMOE_KERNELS_SOURCE})
 endif()
 
 if (NOT DEFINED GENERATED_SRC)
@@ -63,7 +63,7 @@ if(ARCH GREATER_EQUAL 90)
 endif()
 
 # ---- CPM ----
-include(${CSRC_DIR}/cmake/CPM.cmake)
+include(${FLASHMOE_SOURCE_DIR}/cmake/CPM.cmake)
 
 #pybind11
 set(PYBIND11_FINDPYTHON ON)

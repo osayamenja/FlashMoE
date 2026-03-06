@@ -31,7 +31,7 @@ def _source_fingerprint() -> str:
     # MVP: just version string; production: hash headers/sources
     return "v010"
 
-def get_compiled(s: int, h: int, i: int, arch: int):
+def _get_compiled(s: int, h: int, i: int, arch: int):
     cache = _cache_dir()
     cache.mkdir(parents=True, exist_ok=True)
 
@@ -57,6 +57,7 @@ def get_compiled(s: int, h: int, i: int, arch: int):
 #include <cstdint>
 #include <stdexcept>
 #include <vector>
+#include <nvshmem.h>
 
 // #include "flashmoe/flashmoe.cuh"
 
@@ -131,7 +132,7 @@ PYBIND11_MODULE($mod_name, m) {
     csrc_dir = ROOT / "csrc"
 
     subprocess.run([
-        "cmake", "-S", str(CMAKE_SOURCE_DIR), "-B", str(bdir),
+        "cmake", "-S", str(CMAKE_SOURCE_DIR), "-B", str(bdir), "-G", "Ninja",
         f"-DGENERATED_SRC={generated}",
         f"-DFLASHMOE_KERNELS_SOURCE={csrc_dir}",
         f"-DTARGET_MODULE_NAME={mod_name}",
