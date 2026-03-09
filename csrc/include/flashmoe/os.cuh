@@ -67,6 +67,7 @@ namespace flashmoe::os
     int subscriberCount,
     int threads,
     int bM,
+    int pss,
     typename ElementC
   >
   __device__ __forceinline__
@@ -243,7 +244,7 @@ namespace flashmoe::os
       auto* __restrict__ gtQHeads = ctx.gTqHeads;
       auto* __restrict__ sQ = ctx.statusQueue;
       auto* pDB = ctx.tqs;
-      scheduler::start<subscriberCount>(interruptScratch, schedulerBitSet, processors, ctx.processors_v, tilesN1,
+      scheduler::start<subscriberCount, pss>(interruptScratch, schedulerBitSet, processors, ctx.processors_v, tilesN1,
       sO, gtQCl, interrupt, tQHeads, gtQHeads, taskBound, rQ, sQ, pDB);
     }
     else {

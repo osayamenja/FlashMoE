@@ -1,4 +1,5 @@
 from math import ceil
+
 from cuda.bindings import runtime as cudart
 import flashmoe
 
@@ -13,7 +14,12 @@ if __name__ == "__main__":
     rank_map = []
     # initialize NVSHMEM
 
+    world = 1
+    my_pe = 0
+    ep_rank = 0
+    ep_world = world
     device_id = 0
+    num_local_experts = num_experts
     err, = cudart.cudaSetDevice(device_id)
     if err != cudart.cudaError_t.cudaSuccess:
         raise RuntimeError(err)
@@ -25,15 +31,19 @@ if __name__ == "__main__":
     arch = flashmoe.util.get_arch(device_id)
     print("Arch is", arch)
 
-    arg = flashmoe.InitializeArgs(tokens_per_rank=tokens_per_rank,
-                                  token_dim=token_dim,
-                                  ffn_size=ffn_size,
-                                  num_experts=num_experts,
-                                  top_k=k,
-                                  expert_map=expert_map,
-                                  rank_map=rank_map,
-                                  gpu_arch=arch,
-                                  stream_ptr=int(stream))
+    arg = flashmoe.InitArgs(tokens_per_rank=tokens_per_rank,
+                            token_dim=token_dim,
+                            ffn_size=ffn_size,
+                            num_experts=num_experts,
+                            top_k=k,
+                            expert_map=expert_map, # which epRank holds which experts
+                            rank_map=rank_map, # map from epRank to universal rank
+                            gpu_arch=arch,
+                            ep_world=world,
+                            ep_rank=ep_rank,
+                            my_pe=my_pe,
+                            num_local_experts=num_local_experts,
+                            stream_ptr=int(stream))
     flashmoe.initialize(arg)
     err, = cudart.cudaStreamDestroy(stream)
     assert err == cudart.cudaError_t.cudaSuccess

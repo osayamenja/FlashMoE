@@ -49,6 +49,7 @@ namespace flashmoe {
     const uint bK1;
     const uint threads;
     const uint blocks; //CTAs
+    const uint smemSize;
     const uint16_t epRank;
     const uint16_t epWorld;
     const uint16_t myPE; // NVSHMEM PE
@@ -56,15 +57,15 @@ namespace flashmoe {
     const uint16_t numLocalExperts;
     const Topology topo;
 
-    MoEArgs(const size_t &eb, const uint &S, const uint &H, const uint &I, const size_t &_EC,
+    MoEArgs(const size_t &eb, const uint &S, const uint &H, const uint &I, const size_t &ec,
             const uint &bm, const uint &bn0, const uint &bn1, const uint &bk0, const uint bk1,
-            const uint &_threads, const uint &ctas, const uint16_t &ep_rank, const uint16_t &ep_world,
+            const uint &_threads, const uint &ctas, const uint& sharedSize, const uint16_t &ep_rank, const uint16_t &ep_world,
             const uint16_t &mype, const uint16_t &experts,
             const uint16_t &nlx, const Topology &topo_) : elementBytes(eb), sequenceLength(S),
-                                                          EC(_EC),
+                                                          EC(ec),
                                                           tokenDim(H), ffnIntermediateSize(I), bM(bm), bN0(bn0),
                                                           bN1(bn1), bK0(bk0), bK1(bk1),
-                                                          threads(_threads), blocks(ctas), epRank(ep_rank),
+                                                          threads(_threads), blocks(ctas), smemSize(sharedSize), epRank(ep_rank),
                                                           epWorld(ep_world), myPE(mype), numExperts(experts),
                                                           numLocalExperts(nlx), topo(topo_) {
     }
@@ -75,7 +76,7 @@ namespace flashmoe {
   }
 
   __host__ __forceinline__
-  void expertParallelBookkeeping(const uint *__restrict__ const&expertToEpRank,
+  void expertParallelBookkeeping(const int *__restrict__ const&expertToEpRank,
                                  const int *__restrict__ const&epRankToGlobalRank, const uint &epWorld,
                                  const int &myPE, const uint &E, const uint &nLx,
                                  cuda::std::byte *const&sHeap, uint64_t *const&signals,
@@ -153,7 +154,7 @@ namespace flashmoe {
   }
 
   __host__ __forceinline__
-  Context initialize(const MoEArgs &args, const int &arch, const uint *__restrict__ const& expertToEpRank,
+  Context initialize(const MoEArgs &args, const int &arch, const int *__restrict__ const& expertToEpRank,
                      const int *__restrict__ const&epRankToGlobalRank, cudaStream_t stream) {
 #if defined(FLASHMOE_NVTX) && FLASHMOE_NVTX
     const flashmoeRange range{"FlashMoE::initialize"};
@@ -316,6 +317,7 @@ namespace flashmoe {
       .stateNumbers = stateNumbers,
       .processors_v = cuda::fast_mod_div(processors),
       .blocks = args.blocks,
+      .smemSize = args.smemSize,
       .S = args.sequenceLength,
       .H = args.tokenDim,
       .I = args.ffnIntermediateSize,
@@ -328,7 +330,6 @@ namespace flashmoe {
       .world = args.epWorld,
       .epRank = args.epRank,
       .myPE = args.myPE,
-      .initialized = true,
       .topo = args.topo
     };
   }
@@ -411,26 +412,24 @@ namespace flashmoe {
 #if defined(FLASHMOE_NVTX) && FLASHMOE_NVTX
     const flashmoeRange range{"FlashMoE::finalize"};
 #endif
-    if (ctx.initialized) {
-      // free workspace memory
-      CHECK_CUDA(cudaFreeAsync(ctx.tQ, stream));
-      CHECK_CUDA(cudaFreeAsync(ctx.GEMM0Staging, stream));
-      CHECK_CUDA(cudaFreeAsync(ctx.pel, stream));
-      CHECK_CUDA(cudaFreeAsync(ctx.pli, stream));
-      CHECK_CUDA(cudaFreeAsync(ctx.eli, stream));
-      CHECK_CUDA(cudaFreeAsync(ctx.lxi, stream));
-      CHECK_CUDA(cudaFreeAsync(ctx.consumerCombineBitMap, stream));
-      CHECK_CUDA(cudaFreeAsync(ctx.producerCombineBitMap, stream));
-      CHECK_CUDA(cudaFreeAsync(ctx.tokenIndices, stream));
-      CHECK_CUDA(cudaFreeAsync(ctx.tqs, stream));
-      CHECK_CUDA(cudaFreeAsync(ctx.dispatchSync, stream));
-      CHECK_CUDA(cudaFreeAsync(ctx.gTqHeads, stream));
-      CHECK_CUDA(cudaFreeAsync(ctx.tileSync, stream));
-      CHECK_CUDA(cudaFreeAsync(ctx.statusQueue, stream));
-      CHECK_CUDA(cudaStreamSynchronize(stream));
-      nvshmem_free(ctx.symHeap);
-      nvshmem_free(ctx.signals);
-    }
+    // free workspace memory
+    CHECK_CUDA(cudaFreeAsync(ctx.tQ, stream));
+    CHECK_CUDA(cudaFreeAsync(ctx.GEMM0Staging, stream));
+    CHECK_CUDA(cudaFreeAsync(ctx.pel, stream));
+    CHECK_CUDA(cudaFreeAsync(ctx.pli, stream));
+    CHECK_CUDA(cudaFreeAsync(ctx.eli, stream));
+    CHECK_CUDA(cudaFreeAsync(ctx.lxi, stream));
+    CHECK_CUDA(cudaFreeAsync(ctx.consumerCombineBitMap, stream));
+    CHECK_CUDA(cudaFreeAsync(ctx.producerCombineBitMap, stream));
+    CHECK_CUDA(cudaFreeAsync(ctx.tokenIndices, stream));
+    CHECK_CUDA(cudaFreeAsync(ctx.tqs, stream));
+    CHECK_CUDA(cudaFreeAsync(ctx.dispatchSync, stream));
+    CHECK_CUDA(cudaFreeAsync(ctx.gTqHeads, stream));
+    CHECK_CUDA(cudaFreeAsync(ctx.tileSync, stream));
+    CHECK_CUDA(cudaFreeAsync(ctx.statusQueue, stream));
+    CHECK_CUDA(cudaStreamSynchronize(stream));
+    nvshmem_free(ctx.symHeap);
+    nvshmem_free(ctx.signals);
     CHECK_CUDA(cudaPeekAtLastError());
   }
 }

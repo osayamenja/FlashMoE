@@ -9,6 +9,28 @@
 
 namespace flashmoe
 {
+  template<int t>
+  struct DataType {
+    static_assert(t >= 0 && t < 4, "Invalid datatype constant");
+  };
+
+  template<>
+  struct DataType<0> {
+    using Type = __nv_bfloat16;
+  };
+  template<>
+  struct DataType<1> {
+    using Type = __half;
+  };
+  template<>
+  struct DataType<2> {
+    using Type = float;
+  };
+  template<>
+  struct DataType<3> {
+    using Type = double;
+  };
+
   template <typename T, typename S>
   struct Converter {
     __device__ auto operator()(const S& x) const {

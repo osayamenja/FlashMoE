@@ -3,6 +3,58 @@ import os, sys, hashlib, subprocess, importlib.util
 from pathlib import Path
 from string import Template
 
+class InitArgs:
+    from typing import Sequence
+    tokens_per_rank: int
+    token_dim: int
+    ffn_size: int
+    num_experts: int
+    top_k: int
+    expert_map: Sequence[int]
+    rank_map: Sequence[int]
+    gpu_arch: int
+    ep_world: int
+    ep_rank: int
+    my_pe: int
+    num_local_experts: int
+    stream_ptr: int
+    expert_peer_capacity: int
+
+    def __init__(self,
+                 tokens_per_rank: int,
+                 token_dim: int,
+                 ffn_size: int,
+                 num_experts: int,
+                 top_k: int,
+                 expert_map: Sequence[int],
+                 rank_map: Sequence[int],
+                 gpu_arch: int,
+                 ep_world: int,
+                 ep_rank: int,
+                 my_pe: int,
+                 num_local_experts: int,
+                 stream_ptr: int,
+                 expert_peer_capacity: int = -1) -> None:
+        from math import ceil
+        assert gpu_arch >= 700
+        self.tokens_per_rank = tokens_per_rank
+        self.token_dim = token_dim
+        self.ffn_size = ffn_size
+        self.num_experts = num_experts
+        self.top_k = top_k
+        self.expert_map = expert_map
+        self.rank_map = rank_map
+        self.gpu_arch = gpu_arch
+        self.ep_world = ep_world
+        self.ep_rank = ep_rank
+        self.my_pe = my_pe
+        self.num_local_experts = num_local_experts
+        self.stream_ptr = stream_ptr
+        if expert_peer_capacity < 0:
+            self.expert_peer_capacity = ceil(float(tokens_per_rank) / num_experts) * top_k
+        else:
+            self.expert_peer_capacity = expert_peer_capacity
+
 # Base case
 ROOT = Path(__file__).resolve().parent.parent
 CSRC_INCLUDE = ROOT / "csrc" / "include"
@@ -16,8 +68,8 @@ if not CSRC_INCLUDE.exists():
 def _cache_dir() -> Path:
     return Path(os.environ.get("FLASHMOE_CACHE_DIR", str(Path.home() / ".cache" / "flashmoe_jit")))
 
-def _module_name(s: int, h: int, i: int, arch: int) -> str:
-    return f"moe_s{s}_h{h}_i{i}_sm{arch}"
+def _module_name(arg: InitArgs) -> str:
+    return f"flashmoe_s{arg.tokens_per_rank}_h{arg.token_dim}_i{arg.ffn_size}_e{arg.num_experts}_k{arg.top_k}_sm{arg.gpu_arch}"
 
 def _load_ext(mod_name: str, so_path: Path):
     spec = importlib.util.spec_from_file_location(mod_name, so_path)
@@ -28,14 +80,13 @@ def _load_ext(mod_name: str, so_path: Path):
     return mod
 
 def _source_fingerprint() -> str:
-    # MVP: just version string; production: hash headers/sources
     return "v010"
 
-def _get_compiled(s: int, h: int, i: int, arch: int):
+def _get_compiled(arg: InitArgs):
     cache = _cache_dir()
     cache.mkdir(parents=True, exist_ok=True)
 
-    mod_name = _module_name(s, h, i, arch)
+    mod_name = _module_name(arg)
     fp = _source_fingerprint()
 
     key = hashlib.sha256(f"{mod_name}|py{sys.version_info[:2]}|{fp}".encode()).hexdigest()[:16]
@@ -63,7 +114,7 @@ def _get_compiled(s: int, h: int, i: int, arch: int):
 
 namespace py = pybind11;
 
-static void py_initialize(int EC,
+static void moe_initialize(const size_t&
                                  const std::vector<int>& expertToEpRank,
                                  const std::vector<int>& epRankToGlobalRank,
                                  std::uintptr_t stream_ptr) {
@@ -93,6 +144,10 @@ static void py_initialize(int EC,
     );*/
 }
 
+static void gate_initialize() {
+    
+}
+
 static void py_forward(py::capsule ctx_cap, int top_k, std::uintptr_t stream_ptr) {
     /*cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
     auto* ctx = reinterpret_cast<Context*>(ctx_cap.get_pointer("moe.Context"));
@@ -107,7 +162,7 @@ static void py_forward(py::capsule ctx_cap, int top_k, std::uintptr_t stream_ptr
 }
 
 PYBIND11_MODULE($mod_name, m) {
-    m.def("initialize", &py_initialize,
+    m.def("moe_initialize", &moe_initialize,
           py::arg("EC"),
           py::arg("expertToEpRank"),
           py::arg("epRankToGlobalRank"),
@@ -120,10 +175,10 @@ PYBIND11_MODULE($mod_name, m) {
 """)
 
     generated.write_text(src.substitute(
-        arch=arch,
-        s=s,
-        h=h,
-        i=i,
+        arch=arg.gpu_arch,
+        s=arg.tokens_per_rank,
+        h=arg.token_dim,
+        i=arg.ffn_size,
         mod_name=mod_name,
     ))
 
@@ -136,10 +191,10 @@ PYBIND11_MODULE($mod_name, m) {
         f"-DGENERATED_SRC={generated}",
         f"-DFLASHMOE_KERNELS_SOURCE={csrc_dir}",
         f"-DTARGET_MODULE_NAME={mod_name}",
-        f"-DCMAKE_CUDA_ARCHITECTURES={arch}",
+        f"-DCMAKE_CUDA_ARCHITECTURES={arg.gpu_arch}",
         f"-DCPM_SOURCE_CACHE={Path.home()/'.cache'/'cpm'}",
         f"-DCMAKE_BUILD_TYPE=Release",
-        f"-DARCH={arch}"
+        f"-DARCH={arg.gpu_arch}"
     ], check=True)
 
     subprocess.run(["cmake", "--build", str(bdir), "--parallel"], check=True)

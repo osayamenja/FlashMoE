@@ -57,6 +57,10 @@ if (NOT DEFINED ARCH)
   message(FATAL_ERROR "Need -DARCH")
 endif()
 
+if(${ARCH} LESS 700)
+  message(FATAL_ERROR "Unsupported ARCH")
+endif()
+
 set(ARCH_TAG "${ARCH}")
 if(ARCH GREATER_EQUAL 90)
     string(APPEND ARCH_TAG "a") # accelerated arch-specific instruction set
@@ -119,7 +123,9 @@ target_compile_options(${TARGET_MODULE_NAME} PRIVATE
 )
 
 target_link_libraries(${TARGET_MODULE_NAME} PRIVATE CUDA::cudart flashmoe_warnings)
-
+target_compile_definitions(${TARGET_MODULE_NAME} PRIVATE
+            FLASHMOE_ARCH=${ARCH}
+)
 set_target_properties(nvshmem::nvshmem_host PROPERTIES
         IMPORTED_LOCATION_RELEASE "$ENV{NVSHMEM_LIB_HOME}/libnvshmem_host.so.3"
 )

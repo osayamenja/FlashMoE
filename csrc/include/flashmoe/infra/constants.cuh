@@ -18,7 +18,7 @@ namespace flashmoe
 namespace flashmoe::scheduler
 {
     constexpr int SCHEDULER_COUNT = WARP_SIZE; // warp_size
-    // register state sizes
+    // upper bounds for register state sizes
 #if defined(FLASHMOE_ARCH)
     #if FLASHMOE_ARCH >= 1000
         constexpr int PROCESSOR_STATE_SIZE = 10;
@@ -28,9 +28,9 @@ namespace flashmoe::scheduler
         constexpr int PROCESSOR_STATE_SIZE = 8;
     #endif
 #else
-    constexpr int PROCESSOR_STATE_SIZE = 10; // 8 is recommended
+    constexpr int PROCESSOR_STATE_SIZE = 8; // 8 is recommended
 #endif
-    static_assert(PROCESSOR_STATE_SIZE <= 64);
+    static_assert(PROCESSOR_STATE_SIZE <= 16);
     constexpr int MAX_PROCESSORS = WARP_SIZE * PROCESSOR_STATE_SIZE; // can be relaxed but with slower perf
     constexpr int WORK_SET_SIZE = 4;
     constexpr int QUEUE_STATE_SIZE = 2;

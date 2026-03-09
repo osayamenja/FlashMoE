@@ -74,6 +74,7 @@ namespace flashmoe {
     uint8_t* const stateNumbers = nullptr; // [processCTAs]
     const cuda::fast_mod_div<uint> processors_v;
     const uint blocks = 0;
+    const uint smemSize = 0;
     const uint S = 0; //  max number of tokens for this rank
     const uint H = 0; // max hidden dimension or model dim
     const uint I = 0; //  max FFN intermediate size
@@ -86,9 +87,7 @@ namespace flashmoe {
     const uint16_t world = 0;
     const uint16_t epRank = 0;
     const uint16_t myPE = 0;
-    const bool initialized = false;
     const Topology topo = Topology::MIXED;
-    static_assert(alignof(cuda::fast_mod_div<uint>) <= 8);
   };
 
   struct GateContext {

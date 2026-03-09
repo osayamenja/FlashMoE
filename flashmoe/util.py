@@ -10,3 +10,8 @@ def get_arch(device=0):
     )
     assert err == cudart.cudaError_t.cudaSuccess
     return (int(major) * 10) + int(minor)
+
+def init_nvshmem():
+    import nvshmem.core as nvshmem
+    
+    pass

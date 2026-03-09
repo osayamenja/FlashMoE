@@ -29,7 +29,7 @@ namespace flashmoe::subscriber
     uint64_t* const flags; // symmetric global
     Task* const tQ; // global
     cuda::std::byte* const GEMM0Staging;
-    BitSet* const senseBitSets; // shared, read from
+    BitSet* const senseBitSets; // shared
     BitSet* const visitedSet; // shared
     uint* interrupt; // shared
     unsigned int* const tQHead; // shared

@@ -13,8 +13,8 @@ dependencies = []
 package-dir = {"" = "flashmoe"}
 
 [tool.setuptools.package-data]
-# IMPORTANT: include the CMake project + headers in the package
-toy = [
-  "csrc/CMakeLists.txt",
-  "csrc/include/*.cuh"
+# IMPORTANT: include the headers in the package
+flashmoe = [
+  "csrc/cmake/CPM.cmake",
+  "csrc/include/flashmoe/*"
 ]

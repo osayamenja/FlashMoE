@@ -36,6 +36,7 @@ namespace flashmoe
 
 namespace flashmoe::gate
 {
+  constexpr int BLOCK_N_CAP = 32;
   enum class ReturnLogits {
     yes,
     no

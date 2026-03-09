@@ -243,10 +243,20 @@ add_executable(testGEMM
 )
 flash_target_common(testGEMM)
 
+set(PYBIND11_FINDPYTHON ON)
+CPMAddPackage(
+        NAME pybind11
+        GITHUB_REPOSITORY pybind/pybind11
+        VERSION 3.0.1
+        DOWNLOAD_ONLY TRUE
+)
 add_executable(playground
         tests/playground.cu
 )
 flash_target_common(playground)
+find_package(Python3 COMPONENTS Development)
+target_include_directories(playground PRIVATE "${pybind11_SOURCE_DIR}/include" ${Python3_INCLUDE_DIRS})
+target_link_libraries(playground PRIVATE nvshmem::nvshmem_host nvshmem::nvshmem_device)
 
 add_executable(testGate
         tests/gate.cu
