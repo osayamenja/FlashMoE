@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,14 +7,18 @@ name = "flashmoe"
 version = "0.1.0"
 description = "Completely Fused Distributed MoE"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+  "cuda-core>=0.5.0",
+]
 
 [tool.setuptools]
-package-dir = {"" = "flashmoe"}
+packages = ["flashmoe"]
 
 [tool.setuptools.package-data]
 # IMPORTANT: include the headers in the package
 flashmoe = [
-  "csrc/cmake/CPM.cmake",
-  "csrc/include/flashmoe/*"
+  "csrc/cmake/*.cmake",
+  "csrc/include/**/*.h",
+  "csrc/include/**/*.hpp",
+  "csrc/include/**/*.cuh",
 ]

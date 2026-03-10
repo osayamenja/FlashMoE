@@ -97,9 +97,6 @@ CPMAddPackage(
 #NVSHMEM
 find_package(NVSHMEM REQUIRED)
 
-# cuBLASDx
-find_package(mathdx REQUIRED COMPONENTS cublasdx CONFIG)
-
 if(NOT pybind11_ADDED)
     message(FATAL_ERROR "pybind11 not found")
 endif()
@@ -130,6 +127,8 @@ set_target_properties(nvshmem::nvshmem_host PROPERTIES
         IMPORTED_LOCATION_RELEASE "$ENV{NVSHMEM_LIB_HOME}/libnvshmem_host.so.3"
 )
 target_link_libraries(${TARGET_MODULE_NAME} PRIVATE nvshmem::nvshmem_host nvshmem::nvshmem_device)
+# cuBLASDx
+find_package(mathdx REQUIRED COMPONENTS cublasdx CONFIG)
 target_link_libraries(${TARGET_MODULE_NAME} PRIVATE mathdx::cublasdx)
 if(CCCL_ADDED)
         target_link_libraries(${TARGET_MODULE_NAME} PRIVATE CCCL::CCCL)

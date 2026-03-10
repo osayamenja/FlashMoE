@@ -1,6 +1,4 @@
-from math import ceil
-
-from cuda.bindings import runtime as cudart
+import cuda.core as cuda
 import flashmoe
 
 if __name__ == "__main__":
@@ -9,41 +7,24 @@ if __name__ == "__main__":
     ffn_size = 32
     num_experts = 16
     k = 2
-    ec = ceil(float(tokens_per_rank) / num_experts) * k
-    expert_map = []
-    rank_map = []
-    # initialize NVSHMEM
 
-    world = 1
-    my_pe = 0
-    ep_rank = 0
-    ep_world = world
     device_id = 0
-    num_local_experts = num_experts
-    err, = cudart.cudaSetDevice(device_id)
-    if err != cudart.cudaError_t.cudaSuccess:
-        raise RuntimeError(err)
+    dev = cuda.Device(device_id)
+    dev.set_current()
+    stream = dev.create_stream()
+    arch = dev.arch * 10
 
-    err, stream = cudart.cudaStreamCreate()
-    if err != cudart.cudaError_t.cudaSuccess:
-        raise RuntimeError(err)
-
-    arch = flashmoe.util.get_arch(device_id)
     print("Arch is", arch)
 
-    arg = flashmoe.InitArgs(tokens_per_rank=tokens_per_rank,
+    arg = flashmoe.InitArgs(data_type=flashmoe.DataType.BF16,
+                            mlp_type=flashmoe.MLPType.GATED,
+                            act_type=flashmoe.ActivationType.SILU,
+                            tokens_per_rank=tokens_per_rank,
                             token_dim=token_dim,
                             ffn_size=ffn_size,
                             num_experts=num_experts,
                             top_k=k,
-                            expert_map=expert_map, # which epRank holds which experts
-                            rank_map=rank_map, # map from epRank to universal rank
                             gpu_arch=arch,
-                            ep_world=world,
-                            ep_rank=ep_rank,
-                            my_pe=my_pe,
-                            num_local_experts=num_local_experts,
                             stream_ptr=int(stream))
     flashmoe.initialize(arg)
-    err, = cudart.cudaStreamDestroy(stream)
-    assert err == cudart.cudaError_t.cudaSuccess
+    stream.close()

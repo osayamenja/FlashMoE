@@ -1,18 +1,57 @@
 from __future__ import annotations
-import os, sys, hashlib, subprocess, importlib.util
+
 from pathlib import Path
-from string import Template
+from enum import IntEnum
+
+class ContextHandle:
+    __slots__ = ("_mod", "_ctx")
+
+    def __init__(self, mod, ctx):
+        self._mod = mod
+        self._ctx = ctx
+
+    @property
+    def context(self):
+        return self._ctx
+
+    @property
+    def mod(self):
+        return self._mod
+
+class Topology(IntEnum):
+    NVLINK_ONLY = 0
+    MIXED = 1
+
+class MLPType(IntEnum):
+    GATED = 0
+    VANILLA = 1
+
+class DataType(IntEnum):
+    BF16 = 0
+    FP16 = 1
+    FP32 = 2
+    FP64 = 3
+
+class ActivationType(IntEnum):
+    IDENTITY = 0
+    SILU = 1
+    GELU = 2
+    RELU = 3 # as many as CUTLASS supports
 
 class InitArgs:
-    from typing import Sequence
+    from typing import List
+    data_type: DataType
     tokens_per_rank: int
     token_dim: int
     ffn_size: int
     num_experts: int
     top_k: int
-    expert_map: Sequence[int]
-    rank_map: Sequence[int]
+    expert_map: List[int]
+    rank_map: List[int]
     gpu_arch: int
+    topo: Topology
+    mlp_type: MLPType
+    act_type: ActivationType
     ep_world: int
     ep_rank: int
     my_pe: int
@@ -21,22 +60,27 @@ class InitArgs:
     expert_peer_capacity: int
 
     def __init__(self,
+                 data_type: DataType,
                  tokens_per_rank: int,
                  token_dim: int,
                  ffn_size: int,
                  num_experts: int,
                  top_k: int,
-                 expert_map: Sequence[int],
-                 rank_map: Sequence[int],
                  gpu_arch: int,
-                 ep_world: int,
-                 ep_rank: int,
-                 my_pe: int,
-                 num_local_experts: int,
+                 mlp_type: MLPType,
+                 act_type: ActivationType,
                  stream_ptr: int,
-                 expert_peer_capacity: int = -1) -> None:
+                 *,
+                 ep_world: int = None,
+                 num_local_experts: int = None,
+                 ep_rank: int = None,
+                 my_pe: int = None,
+                 expert_map: List[int] = None,
+                 rank_map: List[int] = None,
+                 expert_peer_capacity: int = None) -> None:
         from math import ceil
         assert gpu_arch >= 700
+        self.data_type = data_type
         self.tokens_per_rank = tokens_per_rank
         self.token_dim = token_dim
         self.ffn_size = ffn_size
@@ -45,33 +89,35 @@ class InitArgs:
         self.expert_map = expert_map
         self.rank_map = rank_map
         self.gpu_arch = gpu_arch
+        self.mlp_type = mlp_type
+        self.act_type = act_type
         self.ep_world = ep_world
         self.ep_rank = ep_rank
         self.my_pe = my_pe
         self.num_local_experts = num_local_experts
         self.stream_ptr = stream_ptr
-        if expert_peer_capacity < 0:
+        if expert_peer_capacity is None:
             self.expert_peer_capacity = ceil(float(tokens_per_rank) / num_experts) * top_k
         else:
             self.expert_peer_capacity = expert_peer_capacity
 
-# Base case
-ROOT = Path(__file__).resolve().parent.parent
-CSRC_INCLUDE = ROOT / "csrc" / "include"
-CMAKE_SOURCE_DIR = ROOT / "flashmoe"  # because root CMakeLists.txt lives here
+def _verify_dirs() -> None:
+    from pathlib import Path
+    # Base case
+    root = Path(__file__).resolve().parent.parent
+    csrc_include = root / "csrc" / "include"
+    cmake_source_dir = root / "flashmoe"  # because root CMakeLists.txt lives here
 
-if not (CMAKE_SOURCE_DIR / "CMakeLists.txt").exists():
-    raise RuntimeError("JIT CMakeLists.txt not found at package root")
-if not CSRC_INCLUDE.exists():
-    raise RuntimeError(f"Missing include dir: {CSRC_INCLUDE}")
+    if not (cmake_source_dir / "CMakeLists.txt").exists():
+        raise RuntimeError("JIT CMakeLists.txt not found at package root")
+    if not csrc_include.exists():
+        raise RuntimeError(f"Missing include dir: {csrc_include}")
 
-def _cache_dir() -> Path:
-    return Path(os.environ.get("FLASHMOE_CACHE_DIR", str(Path.home() / ".cache" / "flashmoe_jit")))
-
-def _module_name(arg: InitArgs) -> str:
-    return f"flashmoe_s{arg.tokens_per_rank}_h{arg.token_dim}_i{arg.ffn_size}_e{arg.num_experts}_k{arg.top_k}_sm{arg.gpu_arch}"
+def _module_name(arg: InitArgs, mod_prefix: str) -> str:
+    return f"{mod_prefix}_s{arg.tokens_per_rank}_h{arg.token_dim}_i{arg.ffn_size}_e{arg.num_experts}_k{arg.top_k}_sm{arg.gpu_arch}"
 
 def _load_ext(mod_name: str, so_path: Path):
+    import importlib.util
     spec = importlib.util.spec_from_file_location(mod_name, so_path)
     if spec is None or spec.loader is None:
         raise ImportError(f"Could not load {mod_name} from {so_path}")
@@ -82,11 +128,12 @@ def _load_ext(mod_name: str, so_path: Path):
 def _source_fingerprint() -> str:
     return "v010"
 
-def _get_compiled(arg: InitArgs):
-    cache = _cache_dir()
+def _get_compiled(arg: InitArgs, src: str, mod_prefix:str, mod_name: str):
+    import os, sys, hashlib, subprocess
+    _verify_dirs()
+    cache = Path(os.environ.get("FLASHMOE_CACHE_DIR", str(Path.home() / ".cache" / "flashmoe_jit")))
     cache.mkdir(parents=True, exist_ok=True)
 
-    mod_name = _module_name(arg)
     fp = _source_fingerprint()
 
     key = hashlib.sha256(f"{mod_name}|py{sys.version_info[:2]}|{fp}".encode()).hexdigest()[:16]
@@ -100,94 +147,17 @@ def _get_compiled(arg: InitArgs):
     gen_dir = build_root / "gen"
     gen_dir.mkdir(exist_ok=True)
 
-    generated = gen_dir / "bindings.cu"
-    src = Template(r"""
-#include <pybind11/pybind11.h>
-#include <pybind11/stl.h>
-#include <cuda_runtime.h>
-#include <cstdint>
-#include <stdexcept>
-#include <vector>
-#include <nvshmem.h>
-
-// #include "flashmoe/flashmoe.cuh"
-
-namespace py = pybind11;
-
-static void moe_initialize(const size_t&
-                                 const std::vector<int>& expertToEpRank,
-                                 const std::vector<int>& epRankToGlobalRank,
-                                 std::uintptr_t stream_ptr) {
-    printf("Hello from inside initialize(sm_%d)\n", $arch);
-    /*cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
-
-    constexpr int S = $s;
-    constexpr int H = $h;
-    constexpr int I = $i;
-    constexpr int arch = $arch;
-
-    Context ctx = initialize_templated<S, H, I>(
-        EC,
-        expertToEpRank.data(), (int)expertToEpRank.size(),
-        epRankToGlobalRank.data(), (int)epRankToGlobalRank.size(),
-        stream
-    );
-
-    auto* heap_ctx = new Context(ctx);
-    return py::capsule(heap_ctx, "moe.Context",
-        [](PyObject* cap) {
-            void* p = PyCapsule_GetPointer(cap, "moe.Context");
-            auto* c = reinterpret_cast<Context*>(p);
-            // TODO: destroy/free GPU/NVSHMEM allocations
-            delete c;
-        }
-    );*/
-}
-
-static void gate_initialize() {
-    
-}
-
-static void py_forward(py::capsule ctx_cap, int top_k, std::uintptr_t stream_ptr) {
-    /*cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
-    auto* ctx = reinterpret_cast<Context*>(ctx_cap.get_pointer("moe.Context"));
-
-    constexpr int S = $s;
-    constexpr int H = $h;
-    constexpr int I = $i;
-    
-    // build MoE compile-time config here
-
-    forward_templated<S, H, I>(ctx, top_k, stream);*/
-}
-
-PYBIND11_MODULE($mod_name, m) {
-    m.def("moe_initialize", &moe_initialize,
-          py::arg("EC"),
-          py::arg("expertToEpRank"),
-          py::arg("epRankToGlobalRank"),
-          py::arg("stream_ptr"));
-    m.def("forward", &py_forward,
-          py::arg("context"),
-          py::arg("top_k"),
-          py::arg("stream_ptr"));
-}
-""")
-
-    generated.write_text(src.substitute(
-        arch=arg.gpu_arch,
-        s=arg.tokens_per_rank,
-        h=arg.token_dim,
-        i=arg.ffn_size,
-        mod_name=mod_name,
-    ))
+    generated = gen_dir / "{}_bindings.cu".format(mod_prefix)
+    generated.write_text(src)
 
     bdir = build_root / "build"
     bdir.mkdir(exist_ok=True)
-    csrc_dir = ROOT / "csrc"
+    root = Path(__file__).resolve().parent.parent
+    csrc_dir = root / "csrc"
+    cmake_source_dir = root / "flashmoe"  # because root CMakeLists.txt lives here
 
     subprocess.run([
-        "cmake", "-S", str(CMAKE_SOURCE_DIR), "-B", str(bdir), "-G", "Ninja",
+        "cmake", "-S", str(cmake_source_dir), "-B", str(bdir), "-G", "Ninja",
         f"-DGENERATED_SRC={generated}",
         f"-DFLASHMOE_KERNELS_SOURCE={csrc_dir}",
         f"-DTARGET_MODULE_NAME={mod_name}",

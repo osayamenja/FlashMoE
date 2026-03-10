@@ -1,19 +1,17 @@
-//
-// Created by osayamen on 12/22/25.
-//
+from string import Template
 
-// place to experiment
-
+flashmoe_bindings = Template(r"""
 #include <cstdint>
 #include <stdexcept>
+
+#include <cuda_runtime.h>
+
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
-#include <cuda_runtime.h>
 #include <vector>
 
-#include "../include/flashmoe/bootstrap.cuh"
-#include "../include/flashmoe/moe.cuh"
-#include "../include/flashmoe/gate.cuh"
+#include <flashmoe/bootstrap.cuh>
+#include <flashmoe/moe.cuh>
 
 #include <cstdio>
 #if !defined(CHECK_CUDA)
@@ -30,17 +28,18 @@ do {                                                         \
     }                                                        \
 } while (0)
 #endif
+
 namespace py = pybind11;
 
-constexpr int S = 128; // jit value
-constexpr int H = 2048; // jit value
-constexpr int I = 2048; // jit value
-constexpr int Arch = 800; // jit value
-constexpr int topK = 2; // jit value
-constexpr auto topo = flashmoe::defineTopology<0>(); // jit value
-constexpr auto mt = flashmoe::defineMLPType<0>(); // jit value
-using Element = flashmoe::DataType<0>::Type; // jit value
-constexpr auto act = flashmoe::defineAct<0>(); // jit value
+constexpr int S = $s; // jit value
+constexpr int H = $h; // jit value
+constexpr int I = $i; // jit value
+constexpr int Arch = $arch; // jit value
+constexpr int topK = $tk; // jit value
+constexpr auto topo = flashmoe::defineTopology<$topo>(); // jit value
+constexpr auto mt = flashmoe::defineMLPType<$mt>(); // jit value
+using Element = flashmoe::DataType<$dt>::Type; // jit value
+constexpr auto act = flashmoe::defineAct<$act>(); // jit value
 using AccumType = cuda::std::conditional_t<cuda::std::is_same_v<Element, double>, double, float>;
 constexpr auto cm = topK > 1 ? flashmoe::CombineMode::plural : flashmoe::CombineMode::single;
 
@@ -66,14 +65,14 @@ using Config = flashmoe::moe::MoEConfig<Element, Arch, threads, cm, mt, GEMM0Til
 static std::uintptr_t moe_initialize(const size_t& numExperts, const size_t& EC,
   const int& epWorld, const int& myPE, const int& epRank, const int& devId, const int& nLx,
   const std::vector<int>& expertToEpRank, const std::vector<int> &epRankToGlobalRank,
-  const std::uintptr_t stream_ptr) {
+  const std::uintptr_t& stream_ptr) {
+  auto stream = reinterpret_cast<cudaStream_t>(stream_ptr);
   if (expertToEpRank.size() != numExperts) {
     throw std::invalid_argument("expert map size should be == # of experts");
   }
   if (epRankToGlobalRank.size() != epWorld) {
     throw std::invalid_argument("rank map size should be == epWorld");
   }
-  auto stream = reinterpret_cast<cudaStream_t>(stream_ptr);
 
   auto kernel = flashmoe::moe::forward<Config, act, topo>;
   const auto smemSize = flashmoe::moe::kernelSMEM<Config>(numExperts, EC, epWorld, nLx, H / bN1);
@@ -111,11 +110,11 @@ static void moe_forward(const std::uintptr_t& raw_ctx,
   const uint& S, const uint& H, const uint& I, const uint& E, const uint& k, const uint& EC,
   const std::uintptr_t& tokens,
   const std::uintptr_t& expertCounts,
-  const std::uintptr_t localExpertUpWeights,
+  const std::uintptr_t& localExpertUpWeights,
   const std::uintptr_t& localExpertUpVWeights,
-  const std::uintptr_t localBiasUp,
+  const std::uintptr_t& localBiasUp,
   const std::uintptr_t& localBiasUpV,
-  const std::uintptr_t localExpertDownWeights,
+  const std::uintptr_t& localExpertDownWeights,
   const std::uintptr_t& localBiasDown,
   const std::uintptr_t& moeOut,
   const float& swishAlpha, const float& swishBeta,
@@ -141,7 +140,7 @@ static void moe_forward(const std::uintptr_t& raw_ctx,
   flashmoe::moe::forwardHost<Config, topo, act>(kArgs, *ctx, stream);
 }
 
-void moe_finalize(const std::uintptr_t& raw_ctx, const std::uintptr_t stream_ptr) {
+void moe_finalize(const std::uintptr_t& raw_ctx, const std::uintptr_t& stream_ptr) {
   const auto* ctx = reinterpret_cast<flashmoe::Context*>(raw_ctx);
   auto stream = reinterpret_cast<cudaStream_t>(stream_ptr);
   if (!ctx) return;
@@ -174,17 +173,15 @@ PYBIND11_MODULE($mod_name, m) {
     py::arg("raw_ctx"),
     py::arg("stream_ptr"));
 }
+""")
 
-struct Foo {
-  int a;
-  int b;
-};
+gate_bindings = Template("""
+#include <cstdint>
+#include <cuda_runtime.h>
 
-int main() {
-  constexpr Foo foo{6, 7};
-  const auto p = new Foo(foo);
-  p->a += 1;
-  auto q = *p;
-  printf("a is %d\n", q.a);
-  delete p;
-}
+#include <pybind11/pybind11.h>
+
+#include <flashmoe/bootstrap.cuh>
+#include <flashmoe/gate.cuh>
+
+""")

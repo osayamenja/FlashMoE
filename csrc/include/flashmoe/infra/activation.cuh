@@ -20,9 +20,9 @@ namespace flashmoe {
     static_assert(a >= 0 && a < 4);
     switch (a) {
       case 0: return Activation::identity;
-      case 1: return Activation::relu;
+      case 1: return Activation::silu;
       case 2: return Activation::gelu;
-      case 3: return Activation::silu;
+      case 3: return Activation::relu;
       default: return Activation::identity;
     }
   }
