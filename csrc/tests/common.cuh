@@ -167,7 +167,7 @@ __host__ __forceinline__
 void randUniform(Element* __restrict__ const& out,
                  const size_t& n, const size_t& seed, const float& minv,
                  const float& maxv, cudaStream_t stream) {
-  constexpr uint threads = 128;
+  constexpr uint threads = 256;
   const auto blocks = static_cast<uint>(cute::ceil_div(n, threads * 4));
   if (n % 4 == 0) {
     generateRandUniform<Arch, true, addJitter><<<blocks, threads, 0, stream>>>(out, n, seed, minv, maxv);

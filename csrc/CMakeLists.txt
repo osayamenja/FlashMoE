@@ -247,7 +247,7 @@ set(PYBIND11_FINDPYTHON ON)
 CPMAddPackage(
         NAME pybind11
         GITHUB_REPOSITORY pybind/pybind11
-        VERSION 3.0.1
+        VERSION 3.0.2
         DOWNLOAD_ONLY TRUE
 )
 add_executable(playground

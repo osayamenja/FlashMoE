@@ -70,6 +70,11 @@ namespace flashmoe::gate
   template <int threads>
   using BlockScan = cub::BlockScan<int, threads, cub::BLOCK_SCAN_WARP_SCANS>;
   using SoftType = float;
+  template<int bM, int bN, int bK, int pSK, typename Element>
+  constexpr auto kernelSMEM() {
+    return cutlass::round_up(cute::max(sizeof(Element) * bK * pSK * (bM + bN),
+    sizeof(flashmoe::gate::SoftType) * bM * bN), flashmoe::MAX_ALIGNMENT);
+  }
 
   /// Fused GEMM, softmax, topKMask, assuming blocks >= tiles.N
   template <

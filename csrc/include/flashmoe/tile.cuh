@@ -7,6 +7,82 @@
 #include <cublasdx.hpp>
 #include <cutlass/numeric_conversion.h>
 
+namespace flashmoe::heuristics {
+  template<int M, int Arch>
+  consteval int getTileM() {
+    static_assert(M > 0 && (M == 1 || M % 2 == 0)); // allows for decode lengths, where M is typically small
+    constexpr int cap = (Arch >= 900 && M >= 4096) ? 256 : 128;
+
+    for (constexpr int t : {128, 96, 64, 48, 32, 24, 16, 8}) {
+      if (t <= cap && t <= M && (M % t == 0)) {
+        return t;
+      }
+    }
+    return M < 128 ? M : 1;
+  }
+  template<int M, int Arch>
+  consteval int getMoETileM() {
+    if constexpr (Arch >= 900 && M >= 4096) {
+      return cute::max(cute::min(M, 256), 16);
+    }
+    return cute::max(cute::min(M, 128), 16);
+  }
+  template<int N, typename Element>
+  consteval int getTileN() {
+    static_assert(N > 0 && N % 8 == 0);
+    constexpr int cap = (sizeof(Element) <= 2) ? 128 : 64;
+
+    for (constexpr int t : {128, 96, 64, 48, 32, 24, 16, 8}) {
+      if (t <= cap && t <= N && (N % t == 0)) {
+        return t;
+      }
+    }
+    return 8;
+  }
+  template<int N, int cap>
+  consteval int getGateTileN() {
+    static_assert(N > 0 && N % 8 == 0);
+
+    for (constexpr int t : {128, 96, 64, 48, 32, 24, 16, 8}) {
+      if (t <= cap && t <= N && (N % t == 0)) {
+        return t;
+      }
+    }
+    return 8;
+  }
+
+  template<int K, typename Element>
+  consteval int getGateTileK() {
+    static_assert(K > 0 && K % 16 == 0);
+    constexpr int cap = cuda::std::is_same_v<Element, double> ? 32 : 64;
+    for (constexpr int t : {128, 96, 64, 48, 32, 24, 16}) {
+      if (t <= cap && t <= K && (K % t == 0)) {
+        return t;
+      }
+    }
+    return 16;
+  }
+
+  template<int K, int cap>
+  consteval int getTileK() {
+    static_assert(K > 0 && K % 16 == 0);
+    for (constexpr int t : {128, 96, 64, 48, 32, 24, 16}) {
+      if (t <= cap && t <= K && (K % t == 0)) {
+        return t;
+      }
+    }
+    return 16;
+  }
+
+  template<int K, int bK, int Arch>
+  consteval int getPipeStages() {
+    static_assert(K % bK == 0);
+    constexpr int cap = (Arch>= 900 ? 3 : Arch >= 800 ? 2 : 1);
+    constexpr int stages = K / bK;
+    return stages >= cap ? cap : stages;
+  }
+}
+
 namespace flashmoe
 {
   template<int t>

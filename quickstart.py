@@ -8,15 +8,19 @@ if __name__ == "__main__":
     num_experts = 16
     k = 2
 
-    device_id = 0
+    # setup device ordinals
+    device_id = flashmoe.get_local_rank()
     dev = cuda.Device(device_id)
     dev.set_current()
     stream = dev.create_stream()
+    stream_ptr = int(stream.handle)
     arch = dev.arch * 10
 
     print("Arch is", arch)
 
-    arg = flashmoe.InitArgs(data_type=flashmoe.DataType.BF16,
+    # call initialize
+    handle = flashmoe.initialize(
+        flashmoe.InitArgs(data_type=flashmoe.DataType.BF16,
                             mlp_type=flashmoe.MLPType.GATED,
                             act_type=flashmoe.ActivationType.SILU,
                             tokens_per_rank=tokens_per_rank,
@@ -25,6 +29,14 @@ if __name__ == "__main__":
                             num_experts=num_experts,
                             top_k=k,
                             gpu_arch=arch,
-                            stream_ptr=int(stream))
-    flashmoe.initialize(arg)
+                            stream_ptr=stream_ptr)
+    )
+    # construct kernel arguments
+    args = flashmoe.OpArgs(mt=flashmoe.MLPType.GATED)
+    # call forward
+    flashmoe.forward(handle, args, stream_ptr)
+    # print output tensor or compare with torch
+    # call finalize
+    flashmoe.finalize(handle, stream_ptr)
+    stream.sync() # <- ensures the stream stays alive till work completion.
     stream.close()

@@ -1,10 +1,10 @@
 # communication backend
+import os
+import cuda.core as cuda
 import nvshmem.core as nvshmem
 IS_INITIALIZED = False
 
-def _get_local_rank() -> int:
-    import os
-    import cuda.core as cuda
+def get_local_rank() -> int:
     if has_package("torch"):
         return int(os.environ['LOCAL_RANK'])
     elif has_package("mpi4py"):
@@ -30,7 +30,7 @@ def initialize() -> None:
             import mpi4py.MPI as MPI
             import cuda.core as cuda
             initialized = True
-            dev = cuda.Device(_get_local_rank())
+            dev = cuda.Device(get_local_rank())
             dev.set_current()
             nvshmem.init(device=dev, mpi_comm=MPI.COMM_WORLD, initializer_method="mpi")
         if not initialized:

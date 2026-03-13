@@ -426,7 +426,7 @@ void kickstart(const Options& opts) {
   CHECK_CUDA(cudaFuncSetAttribute(gateKernel, cudaFuncAttributeMaxDynamicSharedMemorySize, gateShared));
   int gbps = 0;
   CHECK_CUDA(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&gbps, gateKernel, gateThreads, gateShared));
-  const int gateBlocks = cute::min(cute::ceil_div(opts.S, bM) * cute::ceil_div(opts.E, bNGate),gbps * NUM_SMS);
+  const int gateBlocks = cute::min(cute::ceil_div(opts.S, bM) * cute::ceil_div(opts.E, bNGate),gbps * num_sms);
   if (opts.E > gateBlocks * bNGate) {
     throw std::invalid_argument("E is too big!");
   }
@@ -559,7 +559,7 @@ void kickstart(const Options& opts) {
     reinterpret_cast<const cuda::std::byte*>(localExpertDownWeights),
     reinterpret_cast<const cuda::std::byte*>(localBiasDown),
     expertCounts, reinterpret_cast<cuda::std::byte*>(moeOut),
-    opts.S, opts.H, opts.I, opts.E, opts.k, opts.EC, Arch, mt, isGated ? swishAlpha : 1.f, isGated ? swishBeta : 1.f
+    opts.S, opts.H, opts.I, opts.E, opts.EC, Arch, mt, isGated ? swishAlpha : 1.f, isGated ? swishBeta : 1.f
   };
 
   // run fused gate to populate tokenIndices and expertCounts

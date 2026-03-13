@@ -94,6 +94,7 @@ namespace flashmoe {
     int *const ecGuards = nullptr; // [E]
     SoftmaxStatePacked *const ssp = nullptr; // [S, tiles(E)]
     RingTopKPayload *const rtp = nullptr; // [2, S, tiles(E)]
+    uint blocks = 0;
   };
 }
 #endif //FLASHMOE_CONTEXT_CUH
