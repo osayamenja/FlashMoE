@@ -142,7 +142,11 @@ static void moe_forward(const std::uintptr_t& raw_ctx,
   flashmoe::moe::forwardHost<Config, topo, act>(kArgs, *ctx, stream);
 }
 
-void moe_finalize(const std::uintptr_t& raw_ctx, const std::uintptr_t& stream_ptr) {
+static std::uintptr_t get_token_indices(const std::uintptr_t& raw_ctx) {
+  return reinterpret_cast<std::uintptr_t>(reinterpret_cast<flashmoe::Context*>(raw_ctx)->tokenIndices);
+}
+
+static void moe_finalize(const std::uintptr_t& raw_ctx, const std::uintptr_t& stream_ptr) {
   const auto* ctx = reinterpret_cast<flashmoe::Context*>(raw_ctx);
   auto stream = reinterpret_cast<cudaStream_t>(stream_ptr);
   if (!ctx) return;
@@ -176,6 +180,8 @@ PYBIND11_MODULE($mod_name, m) {
     py::arg("swish_alpha"), 
     py::arg("swish_beta"),
     py::arg("stream_ptr"));
+  m.def("get_tIdx", &get_token_indices,
+    py::arg("raw_ctx"));
   m.def("finalize", &moe_finalize,
     py::arg("raw_ctx"),
     py::arg("stream_ptr"));
@@ -282,7 +288,7 @@ static void gate_forward(const std::uintptr_t& raw_ctx,
     tokenIndices, ctx->ecGuards, ctx->ssp, ctx->rtp);
 }
 
-void gate_finalize(const std::uintptr_t& raw_ctx, const std::uintptr_t stream_ptr) {
+static void gate_finalize(const std::uintptr_t& raw_ctx, const std::uintptr_t stream_ptr) {
   const auto* ctx = reinterpret_cast<flashmoe::GateContext*>(raw_ctx);
   auto stream = reinterpret_cast<cudaStream_t>(stream_ptr);
   if (!ctx) return;

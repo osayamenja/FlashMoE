@@ -103,7 +103,7 @@ static void gate_forward(const std::uintptr_t& raw_ctx,
     tokenIndices, ctx->ecGuards, ctx->ssp, ctx->rtp);
 }
 
-void gate_finalize(const std::uintptr_t& raw_ctx, const std::uintptr_t stream_ptr) {
+static void gate_finalize(const std::uintptr_t& raw_ctx, const std::uintptr_t stream_ptr) {
   const auto* ctx = reinterpret_cast<flashmoe::GateContext*>(raw_ctx);
   auto stream = reinterpret_cast<cudaStream_t>(stream_ptr);
   if (!ctx) return;
@@ -111,7 +111,13 @@ void gate_finalize(const std::uintptr_t& raw_ctx, const std::uintptr_t stream_pt
   delete ctx;
 }
 
+static std::uintptr_t get_token_indices(const std::uintptr_t& raw_ctx) {
+  return reinterpret_cast<std::uintptr_t>(reinterpret_cast<flashmoe::Context*>(raw_ctx)->tokenIndices);
+}
+
 PYBIND11_MODULE($mod_name, m) {
+  m.def("get_tIdx", &get_token_indices,
+    py::arg("raw_ctx"));
   m.def("initialize", &gate_initialize,
     py::arg("device_id"),
     py::arg("stream_ptr"));

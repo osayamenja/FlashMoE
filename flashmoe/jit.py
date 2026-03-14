@@ -52,6 +52,7 @@ class InitArgs:
     topo: Topology
     mlp_type: MLPType
     act_type: ActivationType
+    device_id: int
     ep_world: int
     ep_rank: int
     my_pe: int
@@ -70,6 +71,7 @@ class InitArgs:
                  mlp_type: MLPType,
                  act_type: ActivationType,
                  stream_ptr: int,
+                 device_id: int,
                  *,
                  ep_world: int = None,
                  num_local_experts: int = None,
@@ -91,6 +93,7 @@ class InitArgs:
         self.gpu_arch = gpu_arch
         self.mlp_type = mlp_type
         self.act_type = act_type
+        self.device_id=device_id
         self.ep_world = ep_world
         self.ep_rank = ep_rank
         self.my_pe = my_pe

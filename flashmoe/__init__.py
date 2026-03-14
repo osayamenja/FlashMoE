@@ -47,10 +47,21 @@ def initialize(arg: InitArgs) -> ContextHandle:
         dt=arg.data_type
     )
     mod = _get_compiled(arg, src, mod_prefix, mod_name)
-    ctx = mod.initialize()
+    ctx = mod.initialize(
+        num_experts=arg.num_experts,
+        expert_peer_capacity=arg.expert_peer_capacity,
+        ep_world=arg.ep_world,
+        my_pe=arg.my_pe,
+        ep_rank=arg.ep_rank,
+        local_rank=arg.device_id,
+        num_local_experts=arg.num_local_experts,
+        expert_map=arg.expert_map,
+        rank_map=arg.rank_map,
+        stream_ptr=arg.stream_ptr
+    )
     return ContextHandle(mod, ctx)
 
-class OpArgs:
+class MoEForwardArgs:
     # integers below are for addresses to the underlying contiguous memory of the corresponding tensor
     tokens : int # [S, H]
     expert_counts: int # [E]
@@ -63,7 +74,7 @@ class OpArgs:
     moe_out: int # [S, H]
     swish_alpha: float = 1.0
     swish_beta: float = 1.0
-    stream: int
+    stream_ptr: int
     def __init__(self,
                  mt: MLPType,
                  tokens: int,
@@ -73,7 +84,7 @@ class OpArgs:
                  local_expert_down: int,
                  local_bias_down: int,
                  moe_out: int,
-                 stream: int,
+                 stream_ptr: int,
                  *,
                  swish_alpha: float = 1.0,
                  swish_beta: float = 1.0,
@@ -91,11 +102,11 @@ class OpArgs:
         self.local_bias_up_v = local_bias_up_v
         self.local_bias_down = local_bias_down
         self.moe_out = moe_out
-        self.stream = stream
+        self.stream_ptr = stream_ptr
         self.swish_alpha = swish_alpha
         self.swish_beta = swish_beta
 
-def forward(handle: ContextHandle, args: OpArgs, stream_ptr: int) -> None:
+def forward(handle: ContextHandle, args: MoEForwardArgs) -> None:
     handle.mod.forward(handle.context,
                        tokens=args.tokens,
                        expert_counts=args.expert_counts,
@@ -108,7 +119,7 @@ def forward(handle: ContextHandle, args: OpArgs, stream_ptr: int) -> None:
                        moe_out=args.moe_out,
                        swish_alpha=args.swish_alpha,
                        swish_beta=args.swish_beta,
-                       stream_ptr=stream_ptr)
+                       stream_ptr=args.stream_ptr)
 
 def finalize(handle: ContextHandle, stream_ptr: int) -> None:
     handle.mod.finalize(handle.context, stream_ptr)
