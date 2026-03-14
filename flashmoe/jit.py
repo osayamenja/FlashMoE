@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from enum import IntEnum
 
+from .cb import get_rank
+
 class ContextHandle:
     __slots__ = ("_mod", "_ctx")
 
@@ -111,11 +113,6 @@ def _verify_dirs() -> None:
     if not (root / "CMakeLists.txt").exists():
         raise RuntimeError("JIT CMakeLists.txt not found at package root")
 
-def _module_name(arg: InitArgs, mod_prefix: str) -> str:
-    return (f"{mod_prefix}_s{arg.tokens_per_rank}_h{arg.token_dim}_i{arg.ffn_size}"
-            f"_e{arg.num_experts}_ec{arg.expert_peer_capacity}_k{arg.top_k}"
-            f"_topo{arg.topo}_mt{arg.mlp_type}_dt{arg.data_type}_act{arg.act_type}_sm{arg.gpu_arch}")
-
 def _load_ext(mod_name: str, so_path: Path):
     import importlib.util
     spec = importlib.util.spec_from_file_location(mod_name, so_path)
@@ -130,67 +127,128 @@ def _source_fingerprint() -> str:
     import hashlib
 
     root = Path(__file__).resolve().parent.parent
+    include_dir = root / "csrc" / "include"
+
     h = hashlib.sha256()
     h.update(b"flashmoe-jit-v1")
 
-    paths = [
-        root / "flashmoe" / "CMakeLists.txt",
-        root / "flashmoe" / "jit.py",
-    ]
+    files = sorted(include_dir.glob("**/*.cuh"))
 
-    csrc = root / "csrc"
-    if csrc.exists():
-        for pattern in ("**/*.h", "**/*.hpp", "**/*.cuh", "**/*.cu", "**/*.cpp", "**/*.cmake"):
-            paths.extend(p for p in csrc.glob(pattern) if p.is_file())
-
-    for path in sorted(set(paths)):
+    for path in files:
         h.update(str(path.relative_to(root)).encode())
         h.update(path.read_bytes())
 
     return h.hexdigest()[:16]
 
-def _get_compiled(arg: InitArgs, src: str, mod_prefix:str, mod_name: str):
-    import os, sys, hashlib, subprocess
+
+def _get_compiled(arg: InitArgs, src: str, mod_prefix: str, mod_name: str):
+    import os
+    import sys
+    import time
+    import socket
+    import shutil
+    import hashlib
+    import subprocess
+    from pathlib import Path
+
     _verify_dirs()
+
     cache = Path(os.environ.get("FLASHMOE_CACHE_DIR", str(Path.home() / ".cache" / "flashmoe_jit")))
     cache.mkdir(parents=True, exist_ok=True)
 
-    fp = _source_fingerprint()
+    key = hashlib.sha256(f"{mod_name}|py{sys.version_info[:2]}|{src}".encode()).hexdigest()[:16]
 
-    key = hashlib.sha256(f"{mod_name}|py{sys.version_info[:2]}|{fp}".encode()).hexdigest()[:16]
     build_root = cache / f"{mod_name}_{key}"
-    so_path = build_root / (mod_name + ".so")
+    build_root.mkdir(parents=True, exist_ok=True)
 
+    so_path = build_root / f"{mod_name}.so"
+    lock_path = build_root / ".build.lock"
+
+    # Fast path
     if so_path.exists():
         return _load_ext(mod_name, so_path)
 
-    build_root.mkdir(parents=True, exist_ok=True)
-    gen_dir = build_root / "gen"
-    gen_dir.mkdir(exist_ok=True)
+    # Process-unique tag for temp dirs
+    host = socket.gethostname()
+    pid = os.getpid()
+    rank = get_rank()
+    uniq = f"{host}_rank{rank}_pid{pid}"
 
-    generated = gen_dir / "{}_bindings.cu".format(mod_prefix)
+    gen_dir = build_root / f"gen_{uniq}"
+    bdir = build_root / f"build_{uniq}"
+    gen_dir.mkdir(exist_ok=True)
+    bdir.mkdir(exist_ok=True)
+
+    generated = gen_dir / f"{mod_prefix}_bindings.cu"
     generated.write_text(src)
 
-    bdir = build_root / "build"
-    bdir.mkdir(exist_ok=True)
     root = Path(__file__).resolve().parent.parent
     csrc_dir = root / "csrc"
     cmake_source_dir = root / "flashmoe"  # because root CMakeLists.txt lives here
 
-    subprocess.run([
-        "cmake", "-S", str(cmake_source_dir), "-B", str(bdir), "-G", "Ninja",
-        f"-DGENERATED_SRC={generated}",
-        f"-DFLASHMOE_KERNELS_SOURCE={csrc_dir}",
-        f"-DTARGET_MODULE_NAME={mod_name}",
-        f"-DCMAKE_CUDA_ARCHITECTURES={arg.gpu_arch // 10}",
-        f"-DCPM_SOURCE_CACHE={Path.home()/'.cache'/'cpm'}",
-        f"-DCMAKE_BUILD_TYPE=Release",
-        f"-DARCH={arg.gpu_arch}"
-    ], check=True)
+    def _try_acquire_lock() -> bool:
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            with os.fdopen(fd, "w") as f:
+                f.write(f"host={host}\npid={pid}\nrank={rank}\ntime={time.time()}\n")
+            return True
+        except FileExistsError:
+            return False
 
-    subprocess.run(["cmake", "--build", str(bdir), "--parallel"], check=True)
+    def _release_lock() -> None:
+        try:
+            lock_path.unlink()
+        except FileNotFoundError:
+            pass
 
-    built = next(bdir.glob(mod_name + "*.so"))
-    built.replace(so_path)
+    def _wait_for_artifact(timeout_s: float = 1800.0, poll_s: float = 0.1):
+        start = time.time()
+        while True:
+            if so_path.exists():
+                return _load_ext(mod_name, so_path)
+
+            if time.time() - start > timeout_s:
+                raise TimeoutError(
+                    f"Timed out waiting for JIT artifact {so_path} while another process was building it."
+                )
+
+            time.sleep(poll_s)
+
+    # Try to become the builder
+    have_lock = _try_acquire_lock()
+
+    if not have_lock:
+        # Another process is building. Wait for the final .so to appear.
+        return _wait_for_artifact()
+
+    try:
+        # Double-check after lock acquisition in case another process finished just before us
+        if so_path.exists():
+            return _load_ext(mod_name, so_path)
+
+        subprocess.run([
+            "cmake", "-S", str(cmake_source_dir), "-B", str(bdir), "-G", "Ninja",
+            f"-DGENERATED_SRC={generated}",
+            f"-DFLASHMOE_KERNELS_SOURCE={csrc_dir}",
+            f"-DTARGET_MODULE_NAME={mod_name}",
+            f"-DCMAKE_CUDA_ARCHITECTURES={arg.gpu_arch // 10}",
+            f"-DCPM_SOURCE_CACHE={Path.home() / '.cache' / 'cpm'}",
+            "-DCMAKE_BUILD_TYPE=Release",
+            f"-DARCH={arg.gpu_arch // 10}"
+        ], check=True)
+
+        subprocess.run([
+            "cmake", "--build", str(bdir), "--parallel"
+        ], check=True)
+
+        built = next(bdir.glob(mod_name + "*.so"))
+
+        # Copy into a temp path in build_root, then atomically replace final path
+        tmp_so = build_root / f".{mod_name}.{uniq}.tmp.so"
+        shutil.copy2(built, tmp_so)
+        tmp_so.replace(so_path)
+
+    finally:
+        _release_lock()
 
     return _load_ext(mod_name, so_path)

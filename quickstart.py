@@ -1,21 +1,23 @@
-import cuda.core as cuda
+import cuda.core.experimental as cuda
 
+import argparse
+import nvtx
 import torch
 
 import flashmoe
 from flashmoe.router import RouterForwardArgs
-
 
 def run_fused_moe_forward(tokens_per_rank: int, token_dim: int, ffn_size: int,
                           num_experts: int, k: int, device_id: int, use_torch_init: bool=False) -> None:
     if use_torch_init:
         import torch.distributed as dist, os
         world_size = torch.cuda.device_count()
+        assert os.environ.get("LOCAL_RANK") is not None, "need to launch with torchrun if set with torch_init=True"
         local_rank = int(os.environ['LOCAL_RANK'])
         torch.cuda.set_device(local_rank)
         device = torch.device("cuda", local_rank)
         dist.init_process_group(
-            backend="cpu:gloo",
+            backend="cpu:gloo,cuda:nccl",
             rank=local_rank,
             world_size=world_size,
             device_id=device
@@ -25,9 +27,7 @@ def run_fused_moe_forward(tokens_per_rank: int, token_dim: int, ffn_size: int,
     dev.set_current()
     stream = dev.create_stream()
     stream_ptr = int(stream.handle)
-    arch = dev.arch * 10
-
-    print("Arch is", arch)
+    arch = int(dev.arch) * 10
 
     mlp_type = flashmoe.MLPType.GATED
     data_type = flashmoe.DataType.BF16
@@ -45,8 +45,8 @@ def run_fused_moe_forward(tokens_per_rank: int, token_dim: int, ffn_size: int,
                                   stream_ptr=stream_ptr,
                                   device_id=device_id)
     # call initialize
-    router_handle = flashmoe.router.initialize(init_args)
     flash_handle = flashmoe.initialize(init_args)
+    router_handle = flashmoe.router.initialize(init_args)
     # construct forward arguments
     tokens = (torch.empty((tokens_per_rank, token_dim), device=device_id, dtype=t_dtype)
               .uniform_(-1.0, 1.0).contiguous())
@@ -80,17 +80,30 @@ def run_fused_moe_forward(tokens_per_rank: int, token_dim: int, ffn_size: int,
               .uniform_(-1.0, 1.0).contiguous())
     rfa = RouterForwardArgs(tokens=tokens.data_ptr(), weights=router_weights.data_ptr(),
                             expert_counts=expert_counts.data_ptr(), stream_ptr=stream_ptr)
-    #flashmoe.router.forward(router_handle, flash_handle, rfa)
+    dev.sync()
+    with nvtx.annotate("flash::router", color="green"):
+        flashmoe.router.forward(router_handle, flash_handle, rfa)
     # call forward of FlashMoE
-    # flashmoe.forward(flash_handle, args)
+    flashmoe.forward(flash_handle, args)
+    flashmoe.forward(flash_handle, args)
+    flashmoe.forward(flash_handle, args)
+    flashmoe.forward(flash_handle, args)
+    flashmoe.forward(flash_handle, args)
     stream.sync()  # <- ensures the stream is not prematurely garbage collected
 
     # call finalize
     flashmoe.finalize(flash_handle, stream_ptr)
     flashmoe.router.finalize(router_handle, stream_ptr)
     stream.close()
+    if use_torch_init:
+        import torch.distributed as dist
+        dist.destroy_process_group()
 
-if __name__ == "__main__":
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--torch-init", action="store_true")
+    args = parser.parse_args()
+
     # LLama4-Scout-17B-16E shapes
     tokens_per_rank_ = 256
     token_dim_ = 5120
@@ -99,4 +112,7 @@ if __name__ == "__main__":
     k_ = 1
     device_id_ = flashmoe.get_local_rank()
     # call kernel
-    run_fused_moe_forward(tokens_per_rank_, token_dim_, ffn_size_, num_experts_, k_, device_id_)
+    run_fused_moe_forward(tokens_per_rank_, token_dim_, ffn_size_, num_experts_, k_, device_id_, args.torch_init)
+
+if __name__ == "__main__":
+    main()

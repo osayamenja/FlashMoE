@@ -1,37 +1,26 @@
 # communication backend
-import os
-import cuda.core as cuda
-import nvshmem.core as nvshmem
-
-from flashmoe import Topology
-
 IS_INITIALIZED = False
 
 def get_local_rank() -> int:
-    if has_package("torch") and os.environ['LOCAL_RANK'] is not None:
-        return int(os.environ['LOCAL_RANK'])
+    import os
+    if has_package("torch") and os.environ.get("LOCAL_RANK") is not None:
+        return int(os.environ.get("LOCAL_RANK"))
     elif has_package("mpi4py"):
         import mpi4py.MPI as MPI
-        return MPI.COMM_WORLD.Get_rank() % cuda.system.get_num_devices()
+        import cuda.core.experimental as cuda
+        return MPI.COMM_WORLD.Get_rank() % cuda.system.num_devices
     else:
         raise RuntimeError("At least one of {torch, mpi4py} must be available")
-
-def detect_topo():
-    assert IS_INITIALIZED
-    if nvshmem.team_n_pes(nvshmem.Teams.TEAM_SHARED_INDEX) == nvshmem.n_pes():
-        return Topology.NVLINK_ONLY
-    else:
-        return Topology.MIXED
 
 def has_package(name: str):
     import importlib.util
     return importlib.util.find_spec(name) is not None
 
 def initialize() -> None:
-    import cuda.core as cuda
+    import cuda.core.experimental as cuda
+    import nvshmem.core as nvshmem
     if nvshmem.init_status() != nvshmem.InitStatus.STATUS_IS_INITIALIZED:
         global IS_INITIALIZED
-        IS_INITIALIZED = True
         initialized = False
         dev = cuda.Device(get_local_rank())
         dev.set_current()
@@ -57,15 +46,18 @@ def initialize() -> None:
             import mpi4py.MPI as MPI
             nvshmem.init(device=dev, mpi_comm=MPI.COMM_WORLD, initializer_method="mpi")
             initialized = True
+        IS_INITIALIZED = initialized
         if not initialized:
             raise RuntimeError("At least one of {torch, mpi4py} must be initialized")
         pass
 
 def get_rank() -> int:
     assert IS_INITIALIZED
+    import nvshmem.core as nvshmem
     return nvshmem.my_pe()
 
 def get_world_size() -> int:
     assert IS_INITIALIZED
+    import nvshmem.core as nvshmem
     return nvshmem.n_pes()
 

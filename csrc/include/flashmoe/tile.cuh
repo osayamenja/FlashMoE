@@ -13,7 +13,7 @@ namespace flashmoe::heuristics {
     static_assert(M > 0 && (M == 1 || M % 2 == 0)); // allows for decode lengths, where M is typically small
     constexpr int cap = (Arch >= 900 && M >= 4096) ? 256 : 128;
 
-    for (constexpr int t : {128, 96, 64, 48, 32, 24, 16, 8}) {
+    for (const int t : {128, 96, 64, 48, 32, 24, 16, 8}) {
       if (t <= cap && t <= M && (M % t == 0)) {
         return t;
       }
@@ -32,7 +32,7 @@ namespace flashmoe::heuristics {
     static_assert(N > 0 && N % 8 == 0);
     constexpr int cap = (sizeof(Element) <= 2) ? 128 : 64;
 
-    for (constexpr int t : {128, 96, 64, 48, 32, 24, 16, 8}) {
+    for (const int t : {128, 96, 64, 48, 32, 24, 16, 8}) {
       if (t <= cap && t <= N && (N % t == 0)) {
         return t;
       }
@@ -43,7 +43,7 @@ namespace flashmoe::heuristics {
   consteval int getGateTileN() {
     static_assert(N > 0 && N % 8 == 0);
 
-    for (constexpr int t : {128, 96, 64, 48, 32, 24, 16, 8}) {
+    for (const int t : {128, 96, 64, 48, 32, 24, 16, 8}) {
       if (t <= cap && t <= N && (N % t == 0)) {
         return t;
       }
@@ -55,7 +55,7 @@ namespace flashmoe::heuristics {
   consteval int getGateTileK() {
     static_assert(K > 0 && K % 16 == 0);
     constexpr int cap = cuda::std::is_same_v<Element, double> ? 32 : 64;
-    for (constexpr int t : {128, 96, 64, 48, 32, 24, 16}) {
+    for (const int t : {128, 96, 64, 48, 32, 24, 16}) {
       if (t <= cap && t <= K && (K % t == 0)) {
         return t;
       }
@@ -66,7 +66,7 @@ namespace flashmoe::heuristics {
   template<int K, int cap>
   consteval int getTileK() {
     static_assert(K > 0 && K % 16 == 0);
-    for (constexpr int t : {128, 96, 64, 48, 32, 24, 16}) {
+    for (const int t : {128, 96, 64, 48, 32, 24, 16}) {
       if (t <= cap && t <= K && (K % t == 0)) {
         return t;
       }

@@ -1,4 +1,4 @@
-from .jit import ContextHandle, InitArgs, _module_name, _get_compiled
+from .jit import ContextHandle, InitArgs, _get_compiled
 
 class RouterInitArgs:
     device_id: int
@@ -11,7 +11,9 @@ class RouterInitArgs:
 def initialize(arg: InitArgs, return_logits: bool = False):
     from .bindings import gate_bindings
     mod_prefix = "flashmoe_router"
-    mod_name = _module_name(arg, mod_prefix)
+    mod_name = (f"{mod_prefix}_s{arg.tokens_per_rank}_h{arg.token_dim}"
+            f"_e{arg.num_experts}_ec{arg.expert_peer_capacity}_k{arg.top_k}"
+            f"_rl{int(return_logits)}_arch{arg.gpu_arch}")
     src = gate_bindings.substitute(
         s=arg.tokens_per_rank,
         h=arg.token_dim,
@@ -19,7 +21,7 @@ def initialize(arg: InitArgs, return_logits: bool = False):
         top_k=arg.top_k,
         ec=arg.expert_peer_capacity,
         arch=arg.gpu_arch,
-        return_logits=return_logits,
+        return_logits=int(return_logits),
         dt=arg.data_type,
         mod_name=mod_name
     )

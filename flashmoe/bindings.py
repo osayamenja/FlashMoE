@@ -47,7 +47,7 @@ constexpr auto cm = topK > 1 ? flashmoe::CombineMode::plural : flashmoe::Combine
 
 // tile shapes
 constexpr auto bM = flashmoe::heuristics::getMoETileM<S, Arch>();
-constexpr auto tkCap = cuda::std::is_same_v<Element, double> ? 32 : (mt == MLPMatmulType::vanilla ? 64 : (Arch >= 900 ? 64 : 32));
+constexpr auto tkCap = cuda::std::is_same_v<Element, double> ? 32 : (mt == flashmoe::MLPMatmulType::vanilla ? 64 : (Arch >= 900 ? 64 : 32));
 constexpr auto bK0 = flashmoe::heuristics::getTileK<H, tkCap>();
 constexpr auto bK1 = flashmoe::heuristics::getTileK<I, tkCap>();
 constexpr auto bN0 = flashmoe::heuristics::getTileN<I, Element>();

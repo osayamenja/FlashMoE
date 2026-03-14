@@ -1,14 +1,13 @@
 from . import router
-from . import util
 from .jit import InitArgs, ContextHandle, Topology, MLPType, ActivationType, DataType
-from .cb import get_local_rank, detect_topo
+from .cb import get_local_rank, IS_INITIALIZED
 
 def initialize(arg: InitArgs) -> ContextHandle:
-    from .jit import _get_compiled, _module_name
+    from .jit import _get_compiled
     from .bindings import flashmoe_bindings
     from . import cb
     import nvshmem.core as nvshmem
-    import cuda.core as cuda
+    import cuda.core.experimental as cuda
     assert arg.ep_rank is None or ((arg.rank_map is not None)
         and (arg.ep_world is not None) and (arg.expert_map is not None)
         and (arg.num_local_experts is not None)
@@ -31,10 +30,19 @@ def initialize(arg: InitArgs) -> ContextHandle:
         for i in range(arg.ep_world):
             arg.rank_map.append(i)
     nvshmem.sync_all(stream=cuda.Stream.from_handle(arg.stream_ptr)) # <- needed to eagerly initialize state before detecting topology
+    def detect_topo():
+        assert nvshmem.init_status() == nvshmem.InitStatus.STATUS_IS_INITIALIZED
+        if nvshmem.team_n_pes(nvshmem.Teams.TEAM_SHARED) == nvshmem.n_pes():
+            return Topology.NVLINK_ONLY
+        else:
+            return Topology.MIXED
     arg.topo = detect_topo()
 
     mod_prefix = "flashmoe_moe"
-    mod_name = _module_name(arg, mod_prefix)
+    mod_name = (f"{mod_prefix}_s{arg.tokens_per_rank}_h{arg.token_dim}_i{arg.ffn_size}"
+            f"_e{arg.num_experts}_ec{arg.expert_peer_capacity}_k{arg.top_k}"
+            f"_topo{arg.topo}_mt{arg.mlp_type}_dt{arg.data_type}_act{arg.act_type}_arch{arg.gpu_arch}")
+
     src = flashmoe_bindings.substitute(
         arch=arg.gpu_arch,
         s=arg.tokens_per_rank,
