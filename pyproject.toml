@@ -17,8 +17,5 @@ packages = ["flashmoe"]
 [tool.setuptools.package-data]
 # IMPORTANT: include the headers in the package
 flashmoe = [
-  "csrc/cmake/*.cmake",
-  "csrc/include/**/*.h",
-  "csrc/include/**/*.hpp",
-  "csrc/include/**/*.cuh",
+  "CMakeLists.txt",
 ]

@@ -72,6 +72,7 @@ class InitArgs:
                  act_type: ActivationType,
                  stream_ptr: int,
                  device_id: int,
+                 topo: Topology,
                  *,
                  ep_world: int = None,
                  num_local_experts: int = None,
@@ -82,6 +83,7 @@ class InitArgs:
                  expert_peer_capacity: int = None) -> None:
         from math import ceil
         assert gpu_arch >= 700
+        self.topo = topo
         self.data_type = data_type
         self.tokens_per_rank = tokens_per_rank
         self.token_dim = token_dim
@@ -106,18 +108,15 @@ class InitArgs:
 
 def _verify_dirs() -> None:
     from pathlib import Path
-    # Base case
-    root = Path(__file__).resolve().parent.parent
-    csrc_include = root / "csrc" / "include"
-    cmake_source_dir = root / "flashmoe"  # because root CMakeLists.txt lives here
+    root = Path(__file__).resolve().parent
 
-    if not (cmake_source_dir / "CMakeLists.txt").exists():
+    if not (root / "CMakeLists.txt").exists():
         raise RuntimeError("JIT CMakeLists.txt not found at package root")
-    if not csrc_include.exists():
-        raise RuntimeError(f"Missing include dir: {csrc_include}")
 
 def _module_name(arg: InitArgs, mod_prefix: str) -> str:
-    return f"{mod_prefix}_s{arg.tokens_per_rank}_h{arg.token_dim}_i{arg.ffn_size}_e{arg.num_experts}_k{arg.top_k}_sm{arg.gpu_arch}"
+    return (f"{mod_prefix}_s{arg.tokens_per_rank}_h{arg.token_dim}_i{arg.ffn_size}"
+            f"_e{arg.num_experts}_ec{arg.expert_peer_capacity}_k{arg.top_k}"
+            f"_topo{arg.topo}_mt{arg.mlp_type}_dt{arg.data_type}_act{arg.act_type}_sm{arg.gpu_arch}")
 
 def _load_ext(mod_name: str, so_path: Path):
     import importlib.util
@@ -164,7 +163,7 @@ def _get_compiled(arg: InitArgs, src: str, mod_prefix:str, mod_name: str):
         f"-DGENERATED_SRC={generated}",
         f"-DFLASHMOE_KERNELS_SOURCE={csrc_dir}",
         f"-DTARGET_MODULE_NAME={mod_name}",
-        f"-DCMAKE_CUDA_ARCHITECTURES={arg.gpu_arch}",
+        f"-DCMAKE_CUDA_ARCHITECTURES={arg.gpu_arch // 10}",
         f"-DCPM_SOURCE_CACHE={Path.home()/'.cache'/'cpm'}",
         f"-DCMAKE_BUILD_TYPE=Release",
         f"-DARCH={arg.gpu_arch}"

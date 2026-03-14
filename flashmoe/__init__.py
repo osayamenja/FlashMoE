@@ -1,8 +1,7 @@
 from . import router
 from . import util
 from .jit import InitArgs, ContextHandle, Topology, MLPType, ActivationType, DataType
-from .cb import get_local_rank
-__all__ = ["initialize", "forward", "finalize", "router", "util"]
+from .cb import get_local_rank, detect_topo
 
 def initialize(arg: InitArgs) -> ContextHandle:
     from .jit import _get_compiled, _module_name

@@ -43,14 +43,15 @@ def run_fused_moe_forward(tokens_per_rank: int, token_dim: int, ffn_size: int,
                                   top_k=k,
                                   gpu_arch=arch,
                                   stream_ptr=stream_ptr,
-                                  device_id=device_id)
+                                  device_id=device_id,
+                                  topo=flashmoe.detect_topo())
     # call initialize
     router_handle = flashmoe.router.initialize(init_args)
     flash_handle = flashmoe.initialize(init_args)
     # construct forward arguments
     tokens = (torch.empty((tokens_per_rank, token_dim), device=device_id, dtype=t_dtype)
               .uniform_(-1.0, 1.0).contiguous())
-    expert_counts = torch.zeros(num_experts, device=device_id, dtype=t_dtype).contiguous()
+    expert_counts = torch.zeros(num_experts, device=device_id, dtype=torch.int32).contiguous()
     local_expert_up = torch.empty((init_args.num_local_experts, ffn_size, token_dim),
                                   device=device_id, dtype=t_dtype).uniform_(-1.0, 1.0).contiguous()
     local_expert_up_v = torch.empty((init_args.num_local_experts, ffn_size, token_dim),
@@ -87,6 +88,7 @@ def run_fused_moe_forward(tokens_per_rank: int, token_dim: int, ffn_size: int,
 
     # call finalize
     flashmoe.finalize(flash_handle, stream_ptr)
+    flashmoe.router.finalize(router_handle, stream_ptr)
     stream.close()
 
 if __name__ == "__main__":

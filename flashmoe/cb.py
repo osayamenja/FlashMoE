@@ -2,6 +2,9 @@
 import os
 import cuda.core as cuda
 import nvshmem.core as nvshmem
+
+from flashmoe import Topology
+
 IS_INITIALIZED = False
 
 def get_local_rank() -> int:
@@ -12,6 +15,13 @@ def get_local_rank() -> int:
         return MPI.COMM_WORLD.Get_rank() % cuda.system.get_num_devices()
     else:
         raise RuntimeError("At least one of {torch, mpi4py} must be available")
+
+def detect_topo():
+    assert IS_INITIALIZED
+    if nvshmem.team_n_pes(nvshmem.Teams.TEAM_SHARED_INDEX) == nvshmem.n_pes():
+        return Topology.NVLINK_ONLY
+    else:
+        return Topology.MIXED
 
 def has_package(name: str):
     import importlib.util
