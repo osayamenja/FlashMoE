@@ -43,8 +43,7 @@ def run_fused_moe_forward(tokens_per_rank: int, token_dim: int, ffn_size: int,
                                   top_k=k,
                                   gpu_arch=arch,
                                   stream_ptr=stream_ptr,
-                                  device_id=device_id,
-                                  topo=flashmoe.detect_topo())
+                                  device_id=device_id)
     # call initialize
     router_handle = flashmoe.router.initialize(init_args)
     flash_handle = flashmoe.initialize(init_args)

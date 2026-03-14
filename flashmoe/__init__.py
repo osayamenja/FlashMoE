@@ -7,6 +7,8 @@ def initialize(arg: InitArgs) -> ContextHandle:
     from .jit import _get_compiled, _module_name
     from .bindings import flashmoe_bindings
     from . import cb
+    import nvshmem.core as nvshmem
+    import cuda.core as cuda
     assert arg.ep_rank is None or ((arg.rank_map is not None)
         and (arg.ep_world is not None) and (arg.expert_map is not None)
         and (arg.num_local_experts is not None)
@@ -28,6 +30,8 @@ def initialize(arg: InitArgs) -> ContextHandle:
         arg.rank_map = []
         for i in range(arg.ep_world):
             arg.rank_map.append(i)
+    nvshmem.sync_all(stream=cuda.Stream.from_handle(arg.stream_ptr)) # <- needed to eagerly initialize state before detecting topology
+    arg.topo = detect_topo()
 
     mod_prefix = "flashmoe_moe"
     mod_name = _module_name(arg, mod_prefix)

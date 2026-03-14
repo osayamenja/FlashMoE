@@ -8,7 +8,7 @@ from flashmoe import Topology
 IS_INITIALIZED = False
 
 def get_local_rank() -> int:
-    if has_package("torch"):
+    if has_package("torch") and os.environ['LOCAL_RANK'] is not None:
         return int(os.environ['LOCAL_RANK'])
     elif has_package("mpi4py"):
         import mpi4py.MPI as MPI

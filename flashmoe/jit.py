@@ -49,7 +49,7 @@ class InitArgs:
     expert_map: List[int]
     rank_map: List[int]
     gpu_arch: int
-    topo: Topology
+    topo: Topology = Topology.MIXED
     mlp_type: MLPType
     act_type: ActivationType
     device_id: int
@@ -72,7 +72,6 @@ class InitArgs:
                  act_type: ActivationType,
                  stream_ptr: int,
                  device_id: int,
-                 topo: Topology,
                  *,
                  ep_world: int = None,
                  num_local_experts: int = None,
@@ -83,7 +82,6 @@ class InitArgs:
                  expert_peer_capacity: int = None) -> None:
         from math import ceil
         assert gpu_arch >= 700
-        self.topo = topo
         self.data_type = data_type
         self.tokens_per_rank = tokens_per_rank
         self.token_dim = token_dim
@@ -128,7 +126,28 @@ def _load_ext(mod_name: str, so_path: Path):
     return mod
 
 def _source_fingerprint() -> str:
-    return "v010"
+    from pathlib import Path
+    import hashlib
+
+    root = Path(__file__).resolve().parent.parent
+    h = hashlib.sha256()
+    h.update(b"flashmoe-jit-v1")
+
+    paths = [
+        root / "flashmoe" / "CMakeLists.txt",
+        root / "flashmoe" / "jit.py",
+    ]
+
+    csrc = root / "csrc"
+    if csrc.exists():
+        for pattern in ("**/*.h", "**/*.hpp", "**/*.cuh", "**/*.cu", "**/*.cpp", "**/*.cmake"):
+            paths.extend(p for p in csrc.glob(pattern) if p.is_file())
+
+    for path in sorted(set(paths)):
+        h.update(str(path.relative_to(root)).encode())
+        h.update(path.read_bytes())
+
+    return h.hexdigest()[:16]
 
 def _get_compiled(arg: InitArgs, src: str, mod_prefix:str, mod_name: str):
     import os, sys, hashlib, subprocess
