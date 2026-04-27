@@ -192,7 +192,7 @@ namespace flashmoe::processor
     __syncthreads();
     // shared memory to global memory
     constexpr int nRows = sizeof(Task) / sizeof(uint4);
-    const uint numElems = tasks * nRows; // TODO <- store this in constant mmeotue
+    const uint numElems = tasks * nRows; // TODO <- store this in constant memory
     // project TaskQ as a [tasks, nRows] matrix of 128B elements
     auto gT = cute::make_tensor(cute::make_gmem_ptr(reinterpret_cast<uint4*>(tQ)),
                                 cute::make_layout(cute::make_shape(tasks, nRows), cute::LayoutRight{}));

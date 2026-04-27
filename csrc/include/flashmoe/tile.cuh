@@ -13,24 +13,31 @@
 namespace flashmoe::heuristics {
   template<int M, int Arch>
   consteval int getTileM() {
-    static_assert(M > 0 && (M == 1 || M % 2 == 0)); // allows for decode lengths, where M is typically small
+    static_assert(M >= 16);
     constexpr int cap = (Arch >= 900 && M >= 4096) ? 256 : 128;
 
-    for (const int t : {128, 96, 64, 48, 32, 24, 16, 8}) {
+    for (const int t : {128, 96, 64, 48, 32, 16}) {
       if (t <= cap && t <= M && (M % t == 0)) {
         return t;
       }
     }
-    return M < 128 ? M : 1;
+    return 16;
   }
   template<int M, int Arch>
   consteval int getMoETileM() {
-    // not a requirement for M to be a multiple of 2; however, I have observed absurd codegen for "unfriendly" shapes.
-    // "Absurd" here refers to register spilling.
     if constexpr (Arch >= 900 && M >= 4096 && M % 2 == 0) {
-      return cute::max(cute::min(M, 256), 16);
+      return 256;
     }
-    return cute::max(cute::min(M, 128), 16);
+    if (M >= 128) {
+      return 128;
+    }
+    if (M >= 64 && M < 128) {
+      return 64;
+    }
+    if (M >= 32 && M < 64) {
+      return 32;
+    }
+    return 16;
   }
   template<int N, typename Element>
   consteval int getTileN() {

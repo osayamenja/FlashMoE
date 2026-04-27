@@ -15,7 +15,6 @@ namespace flashmoe {
   struct RawType {
     using type = T;
   };
-  // below are needed to satisy fy
   template<>
   struct RawType<__half> {
     using type = __half_raw;

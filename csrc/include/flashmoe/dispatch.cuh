@@ -166,13 +166,23 @@ namespace flashmoe
         }
         __syncthreads();
         if (!threadIdx.x) {
-          cuda::atomic_ref<uint, cuda::thread_scope_device> dS{*(dispatchSync + expertIdx)};
-          if (dS.fetch_add(1, cuda::memory_order_acq_rel) + 1 == superBlockSize) {
-            // acq_rel above allows us to safely do the below.
-            // We assume this counter is used _once_ (this function)
-            // per kernel because we defer grid-wide synchronization to kernel teardown.
-            dS.store(0, cuda::memory_order_relaxed);
-            // I am in the last block, let's finalize this transfer.
+          bool shouldNotify = false;
+          if (superBlockSize > 1) {
+            // last block notifies
+            cuda::atomic_ref<uint, cuda::thread_scope_device> dS{*(dispatchSync + expertIdx)};
+            shouldNotify = dS.fetch_add(1, cuda::memory_order_acq_rel) + 1 == superBlockSize;
+            if (shouldNotify) {
+              // acq_rel above allows us to safely do the below.
+              // We assume this counter is used _once_ (this function)
+              // per kernel because we defer grid-wide synchronization to kernel teardown.
+              dS.store(0, cuda::memory_order_relaxed);
+            }
+          }
+          else {
+            shouldNotify = true;
+          }
+          if (shouldNotify) {
+            // let's finalize this transfer.
             const auto sigPayload = SignalPayload<PacketStage::initial>{
               routedTokens,
               lI.pTTt,
