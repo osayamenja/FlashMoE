@@ -303,13 +303,15 @@ This work would not have been possible without the critical building blocks they
 # 📖 Citation
 If you can, please cite as below:
 ```bibtex
-@misc{aimuyo2025flashmoe,
-      title={FlashMoE: Fast Distributed MoE in a Single Kernel}, 
-      author={Osayamen Jonathan Aimuyo and Byungsoo Oh and Rachee Singh},
-      year={2025},
-      eprint={2506.04667},
-      archivePrefix={arXiv},
-      primaryClass={cs.DC},
-      url={https://arxiv.org/abs/2506.04667}, 
+@inproceedings{NEURIPS2025_918d938b,
+ author = {Aimuyo, Osayamen and Oh, Byungsoo and Singh, Rachee},
+ booktitle = {Advances in Neural Information Processing Systems},
+ editor = {D. Belgrave and C. Zhang and H. Lin and R. Pascanu and P. Koniusz and M. Ghassemi and N. Chen},
+ pages = {100676--100699},
+ publisher = {Curran Associates, Inc.},
+ title = {FlashMoE: Fast Distributed MoE in a Single Kernel},
+ url = {https://proceedings.neurips.cc/paper_files/paper/2025/file/918d938bd209e5b56072777366f8a211-Paper-Conference.pdf},
+ volume = {38},
+ year = {2025}
 }
 ```
