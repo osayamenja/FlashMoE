@@ -93,6 +93,7 @@ We support
 - C++20
 - ninja (`sudo apt install ninja-build`)
 - CMake (>= 3.28)
+- [MathDX](https://docs.nvidia.com/cuda/mathdx/) (>= 25.12.0)
 
 ### Hardware Requirements
 - GPU architecture of at least SM 70. 
