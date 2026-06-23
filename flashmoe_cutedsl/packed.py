@@ -61,7 +61,33 @@ def expert_mlp_batched(
     act_type: ActivationType,
     swish_alpha: float = 1.0,
     swish_beta: float = 1.0,
+    use_cutedsl_mlp: bool = False,
 ):
+    if use_cutedsl_mlp and expert_in.is_cuda:
+        if mlp_type != MLPType.GATED:
+            raise NotImplementedError("CuTe DSL MLP currently implements the gated FlashMoE path")
+        if act_type != ActivationType.SILU:
+            raise NotImplementedError("CuTe DSL gated MLP currently implements SiLU activation")
+        import torch
+        from .kernels import gated_up, linear_down
+
+        hidden = torch.empty(
+            (*expert_in.shape[:2], weights.local_expert_up.shape[1]),
+            device=expert_in.device,
+            dtype=expert_in.dtype,
+        )
+        out = torch.empty_like(expert_in)
+        gated_up(
+            expert_in,
+            weights,
+            hidden,
+            act_type=int(act_type),
+            swish_alpha=swish_alpha,
+            swish_beta=swish_beta,
+        )
+        linear_down(hidden, weights, out)
+        return out
+
     hidden = expert_in.bmm(weights.local_expert_up.transpose(1, 2))
     hidden = hidden + weights.local_bias_up[:, None, :]
 
@@ -93,6 +119,7 @@ def local_packed_forward(
     expert_in=None,
     use_cutedsl_gather: bool = False,
     use_cutedsl_combine: bool = False,
+    use_cutedsl_mlp: bool = False,
 ):
     if use_cutedsl_gather and tokens.is_cuda:
         try:
@@ -116,14 +143,27 @@ def local_packed_forward(
     elif not use_cutedsl_gather:
         gather_tokens_torch(tokens, routing, output=expert_in)
 
-    expert_out = expert_mlp_batched(
-        expert_in,
-        weights,
-        mlp_type=mlp_type,
-        act_type=act_type,
-        swish_alpha=swish_alpha,
-        swish_beta=swish_beta,
-    )
+    try:
+        expert_out = expert_mlp_batched(
+            expert_in,
+            weights,
+            mlp_type=mlp_type,
+            act_type=act_type,
+            swish_alpha=swish_alpha,
+            swish_beta=swish_beta,
+            use_cutedsl_mlp=use_cutedsl_mlp,
+        )
+    except Exception:
+        if os.environ.get("FLASHMOE_CUTEDSL_STRICT", "0") == "1":
+            raise
+        expert_out = expert_mlp_batched(
+            expert_in,
+            weights,
+            mlp_type=mlp_type,
+            act_type=act_type,
+            swish_alpha=swish_alpha,
+            swish_beta=swish_beta,
+        )
     if use_cutedsl_combine and top_k == 1 and expert_out.is_cuda:
         try:
             from .kernels import combine_top1

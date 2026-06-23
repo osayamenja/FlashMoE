@@ -7,7 +7,7 @@ import torch
 import flashmoe_cutedsl as flashdmoe
 
 
-def build_case(args, *, use_packed: bool, use_cutedsl_gather: bool, use_cutedsl_combine: bool = False):
+def build_case(args, *, use_packed: bool, use_cutedsl_gather: bool, use_cutedsl_combine: bool = False, use_cutedsl_mlp: bool = False):
     init_args = flashdmoe.InitArgs(
         data_type=flashdmoe.DataType.BF16 if args.dtype == "bf16" else flashdmoe.DataType.FP16,
         tokens_per_rank=args.tokens,
@@ -29,6 +29,7 @@ def build_case(args, *, use_packed: bool, use_cutedsl_gather: bool, use_cutedsl_
         use_packed=use_packed,
         use_cutedsl_gather=use_cutedsl_gather,
         use_cutedsl_combine=use_cutedsl_combine,
+        use_cutedsl_mlp=use_cutedsl_mlp,
     )
 
 
@@ -79,6 +80,7 @@ def main():
     parser.add_argument("--no-gated", dest="gated", action="store_false")
     parser.add_argument("--cutedsl-gather", action="store_true")
     parser.add_argument("--cutedsl-combine", action="store_true")
+    parser.add_argument("--cutedsl-mlp", action="store_true")
     parser.add_argument("--cuda-graph", action="store_true")
     args = parser.parse_args()
 
@@ -110,6 +112,7 @@ def main():
         use_packed=True,
         use_cutedsl_gather=args.cutedsl_gather,
         use_cutedsl_combine=args.cutedsl_combine,
+        use_cutedsl_mlp=args.cutedsl_mlp,
     )
     scalar = build_case(args, use_packed=False, use_cutedsl_gather=False)
     routing = packed.route(tokens, router)

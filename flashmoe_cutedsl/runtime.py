@@ -60,6 +60,7 @@ class FlashDMoEPort:
         use_cutedsl_combine: bool | None = None,
         use_packed: bool = True,
         use_cutedsl_gather: bool | None = None,
+        use_cutedsl_mlp: bool | None = None,
     ):
         self.args = args
         self.use_nvshmem = use_nvshmem
@@ -73,6 +74,11 @@ class FlashDMoEPort:
             os.environ.get("FLASHMOE_CUTEDSL_COMBINE", "0") == "1"
             if use_cutedsl_combine is None
             else use_cutedsl_combine
+        )
+        self.use_cutedsl_mlp = (
+            os.environ.get("FLASHMOE_CUTEDSL_MLP", "0") == "1"
+            if use_cutedsl_mlp is None
+            else use_cutedsl_mlp
         )
         self._state: _SymmetricState | None = None
         self._local_expert_in: Any | None = None
@@ -228,6 +234,7 @@ class FlashDMoEPort:
                     expert_in=expert_in,
                     use_cutedsl_gather=self.use_cutedsl_gather,
                     use_cutedsl_combine=self.use_cutedsl_combine,
+                    use_cutedsl_mlp=self.use_cutedsl_mlp,
                 )
             return local_reference_forward(
                 args.tokens,
@@ -398,6 +405,7 @@ class FlashDMoEPort:
             act_type=self.args.act_type,
             swish_alpha=swish_alpha,
             swish_beta=swish_beta,
+            use_cutedsl_mlp=self.use_cutedsl_mlp,
         ).reshape(world, nlocal, cap, self.args.token_dim)
 
         for src_rank in range(world):
@@ -500,6 +508,7 @@ def initialize(
     use_cutedsl_combine: bool | None = None,
     use_packed: bool = True,
     use_cutedsl_gather: bool | None = None,
+    use_cutedsl_mlp: bool | None = None,
 ) -> FlashDMoEPort:
     return FlashDMoEPort(
         args,
@@ -507,6 +516,7 @@ def initialize(
         use_cutedsl_combine=use_cutedsl_combine,
         use_packed=use_packed,
         use_cutedsl_gather=use_cutedsl_gather,
+        use_cutedsl_mlp=use_cutedsl_mlp,
     )
 
 
