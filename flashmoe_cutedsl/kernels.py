@@ -115,6 +115,24 @@ def _define_kernels():
             if row < count:
                 expert_out[expert, slot, col] = acc.to(expert_out.element_type)
 
+    @cute.kernel
+    def _silu_product_kernel(
+        gate_in: cute.Tensor,
+        value_in: cute.Tensor,
+        output: cute.Tensor,
+        total: cutlass.Int32,
+        swish_alpha: cutlass.Float32,
+        swish_beta: cutlass.Float32,
+    ):
+        tidx, _, _ = cute.arch.thread_idx()
+        bidx, _, _ = cute.arch.block_idx()
+        bdim, _, _ = cute.arch.block_dim()
+        elem = bidx * bdim + tidx
+        if elem < total:
+            x = swish_beta * cutlass.Float32(gate_in[elem])
+            gate = swish_alpha * (x / (cutlass.Float32(1.0) + cute.exp(-x, fastmath=True)))
+            output[elem] = (gate * cutlass.Float32(value_in[elem])).to(output.element_type)
+
     @cute.jit
     def _launch_gather_tokens(tokens: cute.Tensor, token_ids: cute.Tensor, expert_in: cute.Tensor, total: cutlass.Int32, hidden: cutlass.Int32, capacity: cutlass.Int32, block: cutlass.Constexpr[int]):
         grid_x = cute.ceil_div(total, block)
@@ -200,7 +218,23 @@ def _define_kernels():
             block=(block, 1, 1),
         )
 
-    return _launch_gather_tokens, _launch_combine_top1, _launch_gated_up, _launch_linear_down
+    @cute.jit
+    def _launch_silu_product(
+        gate_in: cute.Tensor,
+        value_in: cute.Tensor,
+        output: cute.Tensor,
+        total: cutlass.Int32,
+        swish_alpha: cutlass.Float32,
+        swish_beta: cutlass.Float32,
+        block: cutlass.Constexpr[int],
+    ):
+        grid_x = cute.ceil_div(total, block)
+        _silu_product_kernel(gate_in, value_in, output, total, swish_alpha, swish_beta).launch(
+            grid=(grid_x, 1, 1),
+            block=(block, 1, 1),
+        )
+
+    return _launch_gather_tokens, _launch_combine_top1, _launch_gated_up, _launch_linear_down, _launch_silu_product
 
 
 @lru_cache(maxsize=1)
@@ -220,6 +254,11 @@ def _gated_up_launcher():
 @lru_cache(maxsize=1)
 def _linear_down_launcher():
     return _define_kernels()[3]
+
+
+@lru_cache(maxsize=1)
+def _silu_product_launcher():
+    return _define_kernels()[4]
 
 
 def gather_tokens(tokens, token_ids, expert_in, *, stream=None, block: int = 256) -> None:
@@ -332,5 +371,21 @@ def linear_down(hidden_in, weights, expert_out, *, stream=None, block: int = 256
         cutlass.Int32(hidden),
         cutlass.Int32(int(ffn)),
         cutlass.Int32(int(capacity)),
+        block,
+    )
+
+
+def silu_product(gate_in, value_in, output, *, swish_alpha: float = 1.0, swish_beta: float = 1.0, stream=None, block: int = 256) -> None:
+    """CuTe DSL elementwise ``silu(gate_in * beta) * value_in``."""
+    cutlass, _, from_dlpack = _imports()
+    if gate_in.shape != value_in.shape or gate_in.shape != output.shape:
+        raise ValueError("gate_in, value_in, and output must have the same shape")
+    _silu_product_launcher()(
+        from_dlpack(gate_in),
+        from_dlpack(value_in),
+        from_dlpack(output),
+        cutlass.Int32(int(output.numel())),
+        cutlass.Float32(float(swish_alpha)),
+        cutlass.Float32(float(swish_beta)),
         block,
     )

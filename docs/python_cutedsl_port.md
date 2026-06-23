@@ -15,14 +15,14 @@ keeps the same dataflow but moves scheduling to Python:
 5. Owner PEs put results back to origin PEs, which combine by `index_copy_` or
    `index_add_`.
 
-CuTe DSL hooks live in `flashmoe_cutedsl/kernels.py`.  The implemented kernels
-are the expert-major token gather, fused gated up/value projection, down
-projection, and top-1 combine scatter.  Enable them with
+CuTe DSL hooks live in `flashmoe_cutedsl/kernels.py` and
+`flashmoe_cutedsl/ampere_tensorop_gemm.py`.  The implemented kernels are the
+expert-major token gather, Ampere/Ada tensor-core expert GEMMs, fused SiLU
+product, scalar debug MLP kernels, and top-1 combine scatter.  Enable them with
 `FLASHMOE_CUTEDSL_GATHER=1`, `FLASHMOE_CUTEDSL_MLP=1`,
 `FLASHMOE_CUTEDSL_COMBINE=1`, or the matching `initialize(...)` keyword
-arguments.  The first expert MLP kernel is intentionally scalar-per-output for
-validation; the next optimization step is replacing those loops with CuTe
-MMA/tensor-core tiling.
+arguments.  Set `FLASHMOE_CUTEDSL_SCALAR_MLP=1` only to force the original
+scalar debug MLP path.
 
 The default fast path packs routed tokens into `[experts, capacity, hidden]` and
 uses batched tensor-core GEMMs for expert compute.  Disable it with
@@ -55,5 +55,5 @@ python examples/benchmark_cutedsl_port.py --tokens 1024 --hidden 5120 --ffn 8192
 To force the expert compute itself through Python/CuTe DSL kernels:
 
 ```bash
-FLASHMOE_CUTEDSL_STRICT=1 python examples/benchmark_cutedsl_port.py --tokens 256 --hidden 1024 --ffn 2048 --experts 8 --top-k 1 --cutedsl-gather --cutedsl-mlp --cutedsl-combine
+FLASHMOE_CUTEDSL_STRICT=1 python examples/benchmark_cutedsl_port.py --tokens 1024 --hidden 5120 --ffn 8192 --experts 16 --top-k 1 --cutedsl-gather --cutedsl-mlp --cutedsl-combine --cuda-graph
 ```

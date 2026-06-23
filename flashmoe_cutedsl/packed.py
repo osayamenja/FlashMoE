@@ -69,24 +69,69 @@ def expert_mlp_batched(
         if act_type != ActivationType.SILU:
             raise NotImplementedError("CuTe DSL gated MLP currently implements SiLU activation")
         import torch
-        from .kernels import gated_up, linear_down
+        import cutlass
+        from .ampere_tensorop_gemm import batched_tensorop_gemm
+        from .kernels import gated_up, linear_down, silu_product
 
-        hidden = torch.empty(
-            (*expert_in.shape[:2], weights.local_expert_up.shape[1]),
-            device=expert_in.device,
-            dtype=expert_in.dtype,
+        if os.environ.get("FLASHMOE_CUTEDSL_SCALAR_MLP", "0") == "1":
+            hidden = torch.empty(
+                (*expert_in.shape[:2], weights.local_expert_up.shape[1]),
+                device=expert_in.device,
+                dtype=expert_in.dtype,
+            )
+            out = torch.empty_like(expert_in)
+            gated_up(
+                expert_in,
+                weights,
+                hidden,
+                act_type=int(act_type),
+                swish_alpha=swish_alpha,
+                swish_beta=swish_beta,
+            )
+            linear_down(hidden, weights, out)
+            return out
+
+        if expert_in.dtype == torch.bfloat16:
+            cutlass_dtype = cutlass.BFloat16
+        elif expert_in.dtype == torch.float16:
+            cutlass_dtype = cutlass.Float16
+        else:
+            raise NotImplementedError("CuTe tensor-op MLP currently supports bf16/fp16")
+
+        experts, capacity, _ = expert_in.shape
+        ffn = int(weights.local_expert_up.shape[1])
+        token_dim = int(expert_in.shape[2])
+        up = torch.empty((experts, capacity, ffn), device=expert_in.device, dtype=expert_in.dtype)
+        up_v = torch.empty_like(up)
+        hidden = torch.empty_like(up)
+        out = torch.empty((experts, capacity, token_dim), device=expert_in.device, dtype=expert_in.dtype)
+
+        a = expert_in.permute(1, 2, 0)
+        batched_tensorop_gemm(
+            a,
+            weights.local_expert_up.permute(1, 2, 0),
+            up.permute(1, 2, 0),
+            ab_dtype=cutlass_dtype,
+            c_dtype=cutlass_dtype,
         )
-        out = torch.empty_like(expert_in)
-        gated_up(
-            expert_in,
-            weights,
-            hidden,
-            act_type=int(act_type),
-            swish_alpha=swish_alpha,
-            swish_beta=swish_beta,
+        batched_tensorop_gemm(
+            a,
+            weights.local_expert_up_v.permute(1, 2, 0),
+            up_v.permute(1, 2, 0),
+            ab_dtype=cutlass_dtype,
+            c_dtype=cutlass_dtype,
         )
-        linear_down(hidden, weights, out)
-        return out
+        up = up + weights.local_bias_up[:, None, :]
+        up_v = up_v + weights.local_bias_up_v[:, None, :]
+        silu_product(up, up_v, hidden, swish_alpha=swish_alpha, swish_beta=swish_beta)
+        batched_tensorop_gemm(
+            hidden.permute(1, 2, 0),
+            weights.local_expert_down.permute(1, 2, 0),
+            out.permute(1, 2, 0),
+            ab_dtype=cutlass_dtype,
+            c_dtype=cutlass_dtype,
+        )
+        return out + weights.local_bias_down[:, None, :]
 
     hidden = expert_in.bmm(weights.local_expert_up.transpose(1, 2))
     hidden = hidden + weights.local_bias_up[:, None, :]
