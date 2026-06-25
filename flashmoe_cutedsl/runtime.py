@@ -277,13 +277,13 @@ class FlashDMoEPort:
         nvshmem.put(dst, src.contiguous(), remote_pe=self.rank_map[remote_ep_rank], stream=backend.torch_stream(stream))
 
     def _dispatch(self, tokens, routing: RoutingResult, state: _SymmetricState, stream: Any | None) -> None:
-        import torch
-
         cap = self.args.expert_peer_capacity
+        expert_counts_cpu = routing.expert_counts.cpu()
+        clamped_counts = routing.expert_counts.clamp(max=cap)
         for expert_idx, owner_rank in enumerate(self.expert_map):
-            count = min(int(routing.expert_counts[expert_idx].item()), cap)
+            count = min(int(expert_counts_cpu[expert_idx]), cap)
             local_idx = self.global_to_local[expert_idx]
-            count_tensor = torch.tensor([count], device=tokens.device, dtype=torch.int32)
+            count_tensor = clamped_counts[expert_idx : expert_idx + 1]
 
             dst_count = state.dispatch_counts[self.ep_rank, local_idx : local_idx + 1]
             self._put_or_copy(dst_count, count_tensor, remote_ep_rank=owner_rank, stream=stream)
@@ -321,14 +321,13 @@ class FlashDMoEPort:
         swish_beta: float,
         stream: Any | None,
     ) -> None:
-        import torch
-
         cap = self.args.expert_peer_capacity
-        device = state.dispatch_tokens.device
+        dispatch_counts_cpu = state.dispatch_counts.cpu()
+        clamped_dispatch_counts = state.dispatch_counts.clamp(max=cap)
         for src_rank in range(self.ep_world):
             for local_idx in range(self.num_local_experts):
-                count = min(int(state.dispatch_counts[src_rank, local_idx].item()), cap)
-                count_tensor = torch.tensor([count], device=device, dtype=torch.int32)
+                count = min(int(dispatch_counts_cpu[src_rank, local_idx]), cap)
+                count_tensor = clamped_dispatch_counts[src_rank, local_idx : local_idx + 1]
                 self._put_or_copy(
                     state.return_counts[self.ep_rank, local_idx : local_idx + 1],
                     count_tensor,
@@ -410,6 +409,7 @@ class FlashDMoEPort:
 
         for src_rank in range(world):
             counts = state.dispatch_counts[src_rank, :].contiguous()
+            counts_cpu = counts.cpu()
             self._put_or_copy(
                 state.return_counts[self.ep_rank, :],
                 counts,
@@ -417,7 +417,7 @@ class FlashDMoEPort:
                 stream=stream,
             )
             for local_idx in range(nlocal):
-                count = min(int(counts[local_idx].item()), cap)
+                count = min(int(counts_cpu[local_idx]), cap)
                 if count == 0:
                     continue
                 self._put_or_copy(
@@ -449,10 +449,11 @@ class FlashDMoEPort:
             try:
                 from .kernels import combine_top1
 
+                return_counts_cpu = state.return_counts.cpu()
                 for owner_rank in range(self.ep_world):
                     for local_idx in range(self.num_local_experts):
                         count = min(
-                            int(state.return_counts[owner_rank, local_idx].item()),
+                            int(return_counts_cpu[owner_rank, local_idx]),
                             self.args.expert_peer_capacity,
                         )
                         if count:
@@ -467,9 +468,10 @@ class FlashDMoEPort:
                 if os.environ.get("FLASHMOE_CUTEDSL_STRICT", "0") == "1":
                     raise
 
+        return_counts_cpu = state.return_counts.cpu()
         for owner_rank in range(self.ep_world):
             for local_idx in range(self.num_local_experts):
-                count = min(int(state.return_counts[owner_rank, local_idx].item()), self.args.expert_peer_capacity)
+                count = min(int(return_counts_cpu[owner_rank, local_idx]), self.args.expert_peer_capacity)
                 if count == 0:
                     continue
                 ids = state.return_ids[owner_rank, local_idx, :count].long()

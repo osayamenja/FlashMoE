@@ -75,11 +75,10 @@ def initialize(device_id: int | None = None) -> None:
         if dist.is_available() and dist.is_initialized():
             rank = dist.get_rank()
             world = dist.get_world_size()
-            unique_id = nvshmem.get_unique_id(empty=True)
             payload = [nvshmem.get_unique_id() if rank == 0 else None]
             dist.broadcast_object_list(payload, src=0)
             dist.barrier()
-            unique_id = payload[0] if rank != 0 else payload[0]
+            unique_id = payload[0]
             nvshmem.init(
                 device=dev,
                 uid=unique_id,

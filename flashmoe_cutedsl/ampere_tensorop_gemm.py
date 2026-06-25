@@ -35,6 +35,7 @@ import cutlass
 import cutlass.cute as cute
 import cutlass.torch as cutlass_torch
 import cutlass.utils as utils
+import torch
 
 """
 A dense GEMM (C = A * B) example for the NVIDIA Ampere architecture using CUTE DSL.
@@ -864,6 +865,7 @@ def batched_tensorop_gemm(a, b, c, *, ab_dtype, c_dtype, acc_dtype=cutlass.Float
     mC = to_gemm_tensor(c, leading_dim=1, compact_mode=1, dtype_width=c_dtype.width)
     gemm = _tensorop_gemm(ab_dtype, c_dtype, acc_dtype)
     key = (
+        torch.cuda.current_device(),
         tuple(a.shape),
         tuple(a.stride()),
         tuple(b.shape),

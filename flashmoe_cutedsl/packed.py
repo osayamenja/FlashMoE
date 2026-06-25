@@ -121,8 +121,8 @@ def expert_mlp_batched(
             ab_dtype=cutlass_dtype,
             c_dtype=cutlass_dtype,
         )
-        up = up + weights.local_bias_up[:, None, :]
-        up_v = up_v + weights.local_bias_up_v[:, None, :]
+        up.add_(weights.local_bias_up[:, None, :])
+        up_v.add_(weights.local_bias_up_v[:, None, :])
         silu_product(up, up_v, hidden, swish_alpha=swish_alpha, swish_beta=swish_beta)
         batched_tensorop_gemm(
             hidden.permute(1, 2, 0),
@@ -131,7 +131,8 @@ def expert_mlp_batched(
             ab_dtype=cutlass_dtype,
             c_dtype=cutlass_dtype,
         )
-        return out + weights.local_bias_down[:, None, :]
+        out.add_(weights.local_bias_down[:, None, :])
+        return out
 
     hidden = expert_in.bmm(weights.local_expert_up.transpose(1, 2))
     hidden = hidden + weights.local_bias_up[:, None, :]
