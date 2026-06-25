@@ -21,13 +21,14 @@ dependencies = [
 [project.optional-dependencies]
 cu12 = ["nvshmem4py-cu12"]
 cu13 = ["nvshmem4py-cu13"]
+cutedsl = ["nvidia-cutlass-dsl"]
 
 [project.urls]
 Homepage = "https://github.com/osayamenja/FlashMoE"
 Repository = "https://github.com/osayamenja/FlashMoE"
 
 [tool.setuptools]
-packages = ["flashmoe"]
+packages = ["flashmoe", "flashmoe_cutedsl"]
 
 [tool.setuptools.package-data]
 flashmoe = [
