@@ -201,7 +201,7 @@ namespace flashmoe::moe
     const auto stateNumber = ctx.stateNumbers[blockIdx.x];
     if (blockIdx.x < dispatchBlocks) {
       // dispatch
-      dispatch<topo, Config::Threads::value, bM, bN0>(kArgs.H, kArgs.E, symHeap, kArgs.EC, roundEC,
+      dispatch<topo, Config::Arch::value, Config::Threads::value, bM, bN0>(kArgs.H, kArgs.E, symHeap, kArgs.EC, roundEC,
         ctx.epRank, ctx.world, superBlockSize, dispatchBlocks, tokens, ctx.signals, kArgs.expertCounts,
         ctx.tokenIndices, ctx.dispatchSync, ctx.pel, flashWorkspace, stateNumber);
     }

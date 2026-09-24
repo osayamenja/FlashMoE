@@ -24,6 +24,7 @@ namespace flashmoe
   // MoE tokens dispatch
   template <
     Topology topo,
+    int arch,
     int threads, // not necessarily required, but may help perf a little?
     int bM, // for GEMM0
     int bN, // for GEMM0
@@ -122,12 +123,7 @@ namespace flashmoe
             rTID[j] = v.tokenIdx;
           }
           // Communicate these tokens
-          // TODO For SM 90 and above, optimize the below using _TMA + warp splitting_
-          // Assume a CTA of 4 warps needs to copy 8 tokens
-          // Currently, _all warps_ in the CTA cooperate to copy each token, thus taking #tokens = 8 iterations
-          // With warp splitting, each warp uses TMA to copy a single token (GMEM->SMEM->GMEM)
-          // so that, for this example, it would take # tokens / # warps == 2 iterations.
-          // Technically, a single thread could issue the TMA call but a warp is preferred to sidestep divergence
+          // On SM 90 and above, split the batch across warps so token copies progress concurrently.
           #pragma unroll
           for (int j = 0; j < batch; ++j) {
             const auto tokenIdx = rTID[j];
@@ -135,9 +131,19 @@ namespace flashmoe
             auto* __restrict__ localPH = peerHeap + intraIdx * vH;
             const auto* __restrict__ aP = vTokens + tokenIdx * vH;
             // coalesced vectorized copy
-            for (int k = static_cast<int>(threadIdx.x); k < vH; k += threads) {
-              const auto v = cuda::ptx::ld_nc_L1_no_allocate_L2_256B(cuda::ptx::space_global, aP + k);
-              cuda::ptx::st(cuda::ptx::space_global, localPH + k, v);
+            if constexpr (arch >= 900) {
+              if (static_cast<int>(threadIdx.x) / WARP_SIZE == j % (threads / WARP_SIZE)) {
+                for (int k = static_cast<int>(threadIdx.x) % WARP_SIZE; k < vH; k += WARP_SIZE) {
+                  const auto v = cuda::ptx::ld_nc_L1_no_allocate_L2_256B(cuda::ptx::space_global, aP + k);
+                  cuda::ptx::st(cuda::ptx::space_global, localPH + k, v);
+                }
+              }
+            }
+            else {
+              for (int k = static_cast<int>(threadIdx.x); k < vH; k += threads) {
+                const auto v = cuda::ptx::ld_nc_L1_no_allocate_L2_256B(cuda::ptx::space_global, aP + k);
+                cuda::ptx::st(cuda::ptx::space_global, localPH + k, v);
+              }
             }
           }
         }
@@ -157,9 +163,19 @@ namespace flashmoe
               const auto intraIdx = lBid + (j + trips * batch) * superBlockSize;
               auto* __restrict__ localPH = peerHeap + intraIdx * vH;
               const auto* __restrict__ aP = vTokens + tokenIdx * vH;
-              for (int k = static_cast<int>(threadIdx.x); k < vH; k += threads) {
-                const auto v = cuda::ptx::ld_nc_L1_no_allocate_L2_256B(cuda::ptx::space_global, aP + k);
-                cuda::ptx::st(cuda::ptx::space_global, localPH + k, v);
+              if constexpr (arch >= 900) {
+                if (static_cast<int>(threadIdx.x) / WARP_SIZE == j % (threads / WARP_SIZE)) {
+                  for (int k = static_cast<int>(threadIdx.x) % WARP_SIZE; k < vH; k += WARP_SIZE) {
+                    const auto v = cuda::ptx::ld_nc_L1_no_allocate_L2_256B(cuda::ptx::space_global, aP + k);
+                    cuda::ptx::st(cuda::ptx::space_global, localPH + k, v);
+                  }
+                }
+              }
+              else {
+                for (int k = static_cast<int>(threadIdx.x); k < vH; k += threads) {
+                  const auto v = cuda::ptx::ld_nc_L1_no_allocate_L2_256B(cuda::ptx::space_global, aP + k);
+                  cuda::ptx::st(cuda::ptx::space_global, localPH + k, v);
+                }
               }
             }
           }
