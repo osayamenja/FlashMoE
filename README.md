@@ -11,6 +11,7 @@ and work seamlessly with CUDA graphs. See paper [here](https://arxiv.org/abs/250
 4. [QuickStart](#-python-quickstart)
 5. [Performance Results](#-performance-results)
 6. [Running Benchmarks](#run-benchmark-c)
+7. [Profiling the fused kernel](#profiling-the-fused-kernel)
 
 ## Problem: MoE Bottlenecks in Inference
 
@@ -256,10 +257,10 @@ Single RTX 5090, gated SiLU MLP, latency of one MoE layer in ms (`testFlashMoE` 
 
 | Model (H, I, E, k) | Tokens | BF16 | MXFP8 | Speedup |
 |---|---|---|---|---|
-| Llama4-Scout (5120, 8192, 16, 1) | 8192 | 12.50 | 4.38 | 2.86x |
-| Mixtral-8x7B (4096, 14336, 8, 2) | 8192 | 34.43 | 12.20 | 2.82x |
-| DeepSeek-V2-Lite (2048, 1408, 64, 6) | 4096 | 3.28 | 1.49 | 2.20x |
-| Qwen3-30B-A3B (2048, 768, 128, 8) | 4096 | 3.00 | 1.59 | 1.89x |
+| Llama4-Scout (5120, 8192, 16, 1) | 8192 | 12.42 | 4.35 | 2.86x |
+| Mixtral-8x7B (4096, 14336, 8, 2) | 8192 | 34.80 | 12.11 | 2.87x |
+| DeepSeek-V2-Lite (2048, 1408, 64, 6) | 4096 | 2.86 | 1.07 | 2.66x |
+| Qwen3-30B-A3B (2048, 768, 128, 8) | 4096 | 2.32 | 0.83 | 2.81x |
 
 On random data, the MXFP8 output deviates from the BF16 output by about 6% (relative Frobenius norm).
 The kernel itself matches a reference that applies the same quantization with FP32 GEMMs.
@@ -339,14 +340,15 @@ Single RTX 5090, gated SiLU MLP, latency of one MoE layer in ms
 
 | Model (H, I, E, k) | Tokens | BF16 | MXFP8 | MXFP4 | NVFP4 | MXFP4 / NVFP4 vs. BF16 | MXFP4 / NVFP4 vs. MXFP8 |
 |---|---|---|---|---|---|---|---|
-| Llama4-Scout (5120, 8192, 16, 1) | 8192 | 12.65 | 4.54 | 2.33 | 2.47 | 5.43x / 5.13x | 1.95x / 1.84x |
-| Mixtral-8x7B (4096, 14336, 8, 2) | 8192 | 35.52 | 13.14 | 6.36 | 6.87 | 5.59x / 5.17x | 2.07x / 1.91x |
-| DeepSeek-V2-Lite (2048, 1408, 64, 6) | 4096 | 3.33 | 1.50 | 1.11 | 1.22 | 3.01x / 2.74x | 1.35x / 1.23x |
-| Qwen3-30B-A3B (2048, 768, 128, 8) | 4096 | 3.01 | 1.59 | 1.38 | 1.50 | 2.18x / 2.01x | 1.15x / 1.07x |
+| Llama4-Scout (5120, 8192, 16, 1) | 8192 | 12.42 | 4.35 | 2.08 | 2.20 | 5.97x / 5.64x | 2.09x / 1.97x |
+| Mixtral-8x7B (4096, 14336, 8, 2) | 8192 | 34.80 | 12.11 | 5.58 | 5.91 | 6.24x / 5.89x | 2.17x / 2.05x |
+| DeepSeek-V2-Lite (2048, 1408, 64, 6) | 4096 | 2.86 | 1.07 | 0.55 | 0.58 | 5.19x / 4.91x | 1.95x / 1.84x |
+| Qwen3-30B-A3B (2048, 768, 128, 8) | 4096 | 2.32 | 0.83 | 0.44 | 0.47 | 5.23x / 4.97x | 1.86x / 1.77x |
 
-The two large models gain about 1.8-2.1x over MXFP8. The smaller models gain less (1.07-1.35x), and the GEMMs are not the
-only cost there.
-BF16 and MXFP8 were measured again together with the FP4 columns, so they differ from the MXFP8 table above by up to 8%.
+All four models gain 1.8-2.2x over MXFP8. The models with many small experts (DeepSeek-V2-Lite, Qwen3-30B-A3B) are the
+hardest case for a fused kernel: their tiles are short, so the scheduling and signaling inside the kernel matter as much
+as the GEMMs, see [Profiling the fused kernel](#profiling-the-fused-kernel).
+All columns of both tables were measured in one session.
 
 The kernels match a reference that applies the same quantization and runs FP32 GEMMs: at most 0.17% of the output
 elements are outside `isclose` (rtol 8e-2, atol 8e-3), the `error(%)` column of the tests.
@@ -377,6 +379,39 @@ by up to about 20% between runs, is further behind (0.54x).
 - SM120/SM121 only, with BF16 tokens, biases and output. H and I must be multiples of 128, and bM = 128.
 - NVFP4 activations use the static scales above, which must be calibrated.
 - Tested on a single GPU. The RDMA path, which `nvshmem_putmem`s the scale factors before the signaled data put, is compile-checked only.
+
+## Profiling the fused kernel
+The layer is one persistent kernel, so a profiler sees a single long launch. To see what the CTAs do inside it,
+the `testFlashMoE*` targets can record a timeline of the dispatch, the scheduler, the subscribers and every task of
+every processor:
+```shell
+cmake -DFLASHMOE_TRACE=ON ... && cmake --build . --target testFlashMoEMXFP4   # the tracer is compiled out by default
+FLASHMOE_TRACE_DIR=/tmp/trace ./testFlashMoEMXFP4 4096 2048 768 128 8        # one extra, traced launch after the timed ones
+python3 ../tests/trace_summary.py /tmp/trace/trace_mxfp4_S4096_H2048_I768_E128_k8.json [--chrome timeline.json]
+```
+The timestamps are `%globaltimer` (32 ns steps on SM120), the records are 16 B each, in a buffer per CTA, and the file
+format is described in `csrc/include/flashmoe/infra/trace.cuh`. The summary has the length of the kernel, the time to
+the first GEMM, the count, duration and fraction of the main loop of every task type, how busy the processors are, how
+long a processor waits for a task, and how fast the scheduler hands them out. `--chrome` writes a timeline for
+`chrome://tracing` or Perfetto. Excerpt, MXFP4, Qwen3-30B-A3B shapes, one RTX 5090:
+```
+kernel span 504.64 us, tasks executed 5632 (GEMM0 1536, GEMM1 4096, combine 0), 11.16 tasks/us
+start-up chain (us): firstDispatchEnd 32.93, lastDispatchEnd 75.46, firstGEMM0 40.10, firstGEMM1 119.26
+  type      count     first      last     p50     p95    mean     sum us mainloop%  epi p50 fetch p50
+  GEMM0      1536     40.10    354.11   28.64   34.50   29.88    45893.9      86.0     4.10      0.61
+  GEMM1      4096    119.26    504.10    6.05    6.78    6.14    25158.3      86.2     0.80      0.58
+processors: busy 83.9%, dispatch 5.0%, task fetch 4.1%, idle wait for a doorbell 5.7%
+```
+The traced launch is a single run, and a hook can change how the compiler schedules the code around it, so take timings
+from the build without the tracer.
+The traces showed that on models with short expert tiles, the control path of the kernel limited the speed, not the
+GEMMs: the scheduler warp spent 81% of the kernel handing tasks to the processors, with a full memory fence per task.
+It now fences once per scheduling round, the GEMM1 tiles of tokens that stay on the device add into the output directly
+instead of through combine tasks, and the quantizing dispatch keeps many tokens in flight per CTA instead of one.
+Together that makes the layer 3.1x faster in MXFP4 on the Qwen3-30B-A3B shapes (1.38 ms to 0.44 ms) and 2.0x on
+DeepSeek-V2-Lite (1.12 ms to 0.55 ms); NVFP4 gains the same, MXFP8 1.4-2.0x and BF16 1.1-1.3x on these two models.
+The models with large experts (Llama4-Scout, Mixtral-8x7B) are bound by the GEMMs and gain about 1.1x in FP4 and 1.0x in
+MXFP8 and BF16.
 
 ---
 
