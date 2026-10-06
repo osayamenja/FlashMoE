@@ -299,3 +299,9 @@ add_executable(gemmMXFP8
 )
 flash_target_common(gemmMXFP8)
 target_link_libraries(gemmMXFP8 PRIVATE CUDA::cublasLt)
+
+add_executable(gemmFP4
+        tests/gemmFP4.cu
+)
+flash_target_common(gemmFP4)
+target_link_libraries(gemmFP4 PRIVATE CUDA::cublasLt)
