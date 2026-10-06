@@ -1,5 +1,6 @@
 from . import router
-from .jit import InitArgs, ContextHandle, Topology, MLPType, ActivationType, DataType, ForwardArgs
+from .jit import InitArgs, ContextHandle, Topology, MLPType, ActivationType, DataType, ForwardArgs, QuantType
+from . import quant
 from .cb import get_local_rank
 from . import reference
 
@@ -45,7 +46,8 @@ def initialize(arg: InitArgs) -> ContextHandle:
     mod_prefix = "flashmoe_moe"
     mod_name = (f"{mod_prefix}_s{arg.tokens_per_rank}_h{arg.token_dim}_i{arg.ffn_size}"
             f"_e{arg.num_experts}_ec{arg.expert_peer_capacity}_k{arg.top_k}"
-            f"_topo{arg.topo}_mt{arg.mlp_type}_dt{arg.data_type}_act{arg.act_type}_arch{arg.gpu_arch}")
+            f"_topo{arg.topo}_mt{arg.mlp_type}_dt{arg.data_type}_act{arg.act_type}_arch{arg.gpu_arch}"
+            f"_q{arg.quant}")
 
     src = flashmoe_bindings.substitute(
         arch=arg.gpu_arch,
@@ -59,7 +61,8 @@ def initialize(arg: InitArgs) -> ContextHandle:
         topo=arg.topo,
         mt=arg.mlp_type,
         act=arg.act_type,
-        dt=arg.data_type
+        dt=arg.data_type,
+        quant=int(arg.quant)
     )
     mod = _get_compiled(arg, src, mod_prefix, mod_name)
     ctx = mod.initialize(
@@ -89,7 +92,15 @@ def forward(handle: ContextHandle, args: ForwardArgs) -> None:
                        moe_out=args.moe_out,
                        swish_alpha=args.swish_alpha,
                        swish_beta=args.swish_beta,
-                       stream_ptr=args.stream_ptr)
+                       stream_ptr=args.stream_ptr,
+                       local_expert_up_sf=args.local_expert_up_sf,
+                       local_expert_up_v_sf=args.local_expert_up_v_sf,
+                       local_expert_down_sf=args.local_expert_down_sf,
+                       local_expert_up_gs=args.local_expert_up_gs,
+                       local_expert_up_v_gs=args.local_expert_up_v_gs,
+                       local_expert_down_gs=args.local_expert_down_gs,
+                       input_scale=args.input_scale,
+                       interim_scale=args.interim_scale)
 
 def finalize(handle: ContextHandle, stream_ptr: int) -> None:
     handle.mod.finalize(handle.context, stream_ptr)

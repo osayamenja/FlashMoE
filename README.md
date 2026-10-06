@@ -84,9 +84,9 @@ It leverages:
 ### 🏎️ Portability
 
 We support 
-- SM70 and above GPUs. Boosting compute performance for Hopper and Blackwell is on the roadmap.
+- SM70 and above GPUs, including consumer Blackwell (SM120/SM121: RTX 50 series, RTX PRO 6000 Blackwell, DGX Spark). Boosting compute performance for Hopper and Blackwell is on the roadmap.
 - NVLink and multi-node RDMA (EFA, IBGDA, libfabric as NVSHMEM [supports](https://docs.nvidia.com/nvshmem/release-notes-install-guide/install-guide/abstract.html#hardware-requirements)).
-- FP16, BF16, FP32 (TF32) and FP64. FP8 and even lower precision types are on the roadmap (we welcome contributions!)
+- FP16, BF16, FP32 (TF32) and FP64, plus block-scaled [MXFP8, MXFP4 and NVFP4](#quantization-sm120sm121) on SM120/SM121. Other low-precision paths (FP8 and FP4 on Hopper and SM100) are on the roadmap (we welcome contributions!)
 
 ## Requirements
 - CUDA toolkit
@@ -218,11 +218,172 @@ and include the header file like below. See `csrc/tests/flashmoe.cu` for more us
 ```cpp
 #include <flashmoe/flashmoe.cuh>
 ```
+
+## Quantization (SM120/SM121)
+On RTX 50 series, RTX PRO 6000 Blackwell and DGX Spark GPUs, the expert GEMMs can run block-scaled, in
+[MXFP8](#mxfp8), [MXFP4 or NVFP4](#fp4-sm120sm121): quantized weights and activations with one scale per 16 or 32
+elements along K, FP32 accumulation.
+The GEMMs use the block-scaled tensor core instructions of these GPUs (`mma.sync ... .block_scale`),
+which, unlike BF16 with FP32 accumulation (about 230 TFLOPS on an RTX 5090), run at full rate:
+the nominal dense peak is about 1014 TFLOPS for MXFP8 and about 2029 TFLOPS for FP4.
+All formats share the data path:
+- Tokens are quantized as they are dispatched, so a dispatched token takes fewer bytes. Scale factors included, a token of
+  H elements takes 2H bytes in BF16, about H + H/32 in MXFP8, H/2 + H/32 in MXFP4 and H/2 + H/16 in NVFP4,
+  i.e., 1.9x, 3.8x and 3.6x fewer bytes (arithmetic on the sizes, not a measured speedup).
+- The GEMM0 epilogue quantizes the activations for GEMM1.
+- GEMM1 writes BF16, so combine and the output are unchanged.
+- Tokens, biases and the output stay BF16. H and I must be multiples of 128.
+
+### MXFP8
+E4M3 weights and activations with one UE8M0 scale per 32 elements along K
+(`kind::mxf8f6f4.block_scale`).
+Quantize the expert weights once with `flashmoe.quant.quantize_mxfp8`.
+Block FP8 checkpoints (128x128 scales, e.g. DeepSeek-V3) can be converted with `flashmoe.quant.blockfp8_to_mxfp8`.
+```python
+init_args = flashmoe.InitArgs(..., data_type=flashmoe.DataType.BF16, quant=flashmoe.QuantType.MXFP8)
+up_q, up_sf = flashmoe.quant.quantize_mxfp8(local_expert_up)          # [num_local_experts, I, H]
+up_v_q, up_v_sf = flashmoe.quant.quantize_mxfp8(local_expert_up_v)    # [num_local_experts, I, H]
+down_q, down_sf = flashmoe.quant.quantize_mxfp8(local_expert_down)    # [num_local_experts, H, I]
+args = flashmoe.ForwardArgs(...,
+                            local_expert_up=up_q.data_ptr(), local_expert_up_sf=up_sf.data_ptr(),
+                            local_expert_up_v=up_v_q.data_ptr(), local_expert_up_v_sf=up_v_sf.data_ptr(),
+                            local_expert_down=down_q.data_ptr(), local_expert_down_sf=down_sf.data_ptr())
+```
+`quickstart.py --quant mxfp8` (or `--fp8`) is a complete example. In C++, set `QuantRecipe::mxfp8` in `moe::MoEConfig`, and see
+`csrc/tests/flashmoe.cu` (target `testFlashMoEFP8`) and `csrc/tests/gemmMXFP8.cu`.
+
+Single RTX 5090, gated SiLU MLP, latency of one MoE layer in ms (`testFlashMoE` vs. `testFlashMoEFP8`):
+
+| Model (H, I, E, k) | Tokens | BF16 | MXFP8 | Speedup |
+|---|---|---|---|---|
+| Llama4-Scout (5120, 8192, 16, 1) | 8192 | 12.50 | 4.38 | 2.86x |
+| Mixtral-8x7B (4096, 14336, 8, 2) | 8192 | 34.43 | 12.20 | 2.82x |
+| DeepSeek-V2-Lite (2048, 1408, 64, 6) | 4096 | 3.28 | 1.49 | 2.20x |
+| Qwen3-30B-A3B (2048, 768, 128, 8) | 4096 | 3.00 | 1.59 | 1.89x |
+
+On random data, the MXFP8 output deviates from the BF16 output by about 6% (relative Frobenius norm).
+The kernel itself matches a reference that applies the same quantization with FP32 GEMMs.
+
+### FP4 (SM120/SM121)
+The FP4 tensor core instruction (`mma.sync ... kind::mxf4nvf4.block_scale`, m16n8k64) has twice the nominal peak rate of
+the MXFP8 one, and FP4 weights and tokens take about half the bytes of MXFP8 (scale factors included).
+Two formats share one tile GEMM, one data path and one set of tests.
+Both store E2M1 elements, two per byte along K (the even element in the low nibble), rounded to nearest even:
+
+| | MXFP4 | NVFP4 |
+|---|---|---|
+| Scale per block | UE8M0 (a power of two) per 32 elements along K | UE4M3 per 16 elements along K |
+| Block scale | `2^ceil(log2(amax / 6))`, blocks never saturate | `e4m3(amax_block / (6 * gs))` |
+| Tensor scale | none | one FP32 `gs = amax / (6 * 448)` per expert weight matrix |
+| Activation scales | dynamic, per block | dynamic per block, plus two static per-layer scales |
+| Python | `QuantType.MXFP4`, `quantize_mxfp4` | `QuantType.NVFP4`, `quantize_nvfp4` |
+| C++ | `QuantRecipe::mxfp4` | `QuantRecipe::nvfp4` |
+
+A dequantized NVFP4 element is `e2m1 * float(sf) * gs`.
+NVFP4 has smaller blocks and non-power-of-two scales, MXFP4 needs no calibration.
+Quantizing a random matrix gives a relative Frobenius error of 9.5% (NVFP4) and 11.5% (MXFP4) for Gaussian data,
+and 10.2% and 9.9% for data uniform in [-1, 1].
+
+Quantize the expert weights once with `flashmoe.quant.quantize_mxfp4` or `flashmoe.quant.quantize_nvfp4`.
+`quantize_mxfp4` returns `(q, sf)` like `quantize_mxfp8` (`q` is `uint8 [num_local_experts, N, K / 2]`),
+`quantize_nvfp4` returns `(q, sf, gs)` with `gs` a float32 tensor `[num_local_experts]`, the tensor scale of each expert matrix.
+```python
+init_args = flashmoe.InitArgs(..., data_type=flashmoe.DataType.BF16, quant=flashmoe.QuantType.NVFP4)  # or MXFP4
+up_q, up_sf, up_gs = flashmoe.quant.quantize_nvfp4(local_expert_up)          # [num_local_experts, I, H]
+up_v_q, up_v_sf, up_v_gs = flashmoe.quant.quantize_nvfp4(local_expert_up_v)  # [num_local_experts, I, H]
+down_q, down_sf, down_gs = flashmoe.quant.quantize_nvfp4(local_expert_down)  # [num_local_experts, H, I]
+args = flashmoe.ForwardArgs(...,
+    local_expert_up=up_q.data_ptr(), local_expert_up_sf=up_sf.data_ptr(), local_expert_up_gs=up_gs.data_ptr(),
+    local_expert_up_v=up_v_q.data_ptr(), local_expert_up_v_sf=up_v_sf.data_ptr(), local_expert_up_v_gs=up_v_gs.data_ptr(),
+    local_expert_down=down_q.data_ptr(), local_expert_down_sf=down_sf.data_ptr(), local_expert_down_gs=down_gs.data_ptr(),
+    input_scale=input_scale, interim_scale=interim_scale)
+```
+For MXFP4, pass only the `*_sf` pointers: it has no `*_gs`, `input_scale` and `interim_scale`.
+
+**NVFP4 activation scales.**
+The fused kernel cannot reduce a tensor-wide amax at run time, so NVFP4 activations use two static per-layer scales
+that you calibrate once on representative data (NVFP4 checkpoints do the same, e.g., ModelOpt stores a static
+`input_scale` per layer):
+`input_scale` for the dispatched tokens and `interim_scale` for the output of GEMM0 (the input of GEMM1),
+both `flashmoe.quant.nvfp4_scale(amax)` (= `amax / (6 * 448)`).
+```python
+# x: calibration tokens [S, H], expert_up, expert_up_v: unquantized weights [E, I, H], biases [E, I]
+input_scale = flashmoe.quant.nvfp4_scale(x.abs().max()).item()
+y_amax = 0.0
+for e in range(num_experts):  # y: output of GEMM0 for the tokens x, ideally only those routed to expert e
+    y = swish_alpha * torch.nn.functional.silu(swish_beta * (x @ expert_up[e].T + bias_up[e])) \
+        * (x @ expert_up_v[e].T + bias_up_v[e])
+    y_amax = max(y_amax, y.abs().max().item())
+interim_scale = flashmoe.quant.nvfp4_scale(y_amax).item()
+```
+A scale that is too small clips (block scales saturate at 448), a scale that is too large only costs some resolution,
+so take the maximum over the calibration set.
+Data with a very wide dynamic range is better served by MXFP4: with one tensor scale, NVFP4 blocks far below the
+tensor's amax flush to zero.
+With expert parallelism, use the same scales on every rank: the dispatch quantizes with the sender's `input_scale`.
+
+`quickstart.py --quant mxfp4` and `--quant nvfp4` are complete examples (`nvfp4` calibrates both scales on its own data,
+as above, using all tokens against every expert as an upper bound). They print the relative Frobenius error of the
+output against the unquantized BF16 reference.
+In C++, set `QuantRecipe::mxfp4` or `QuantRecipe::nvfp4` in `moe::MoEConfig`;
+for NVFP4, `moe::KernelArgs` also takes the tensor scales `expert_up_gs`, `expert_up_v_gs`, `expert_down_gs`
+and the static scales `input_scale`, `interim_scale`.
+See `csrc/tests/flashmoe.cu` (targets `testFlashMoEMXFP4` and `testFlashMoENVFP4`, which take the same arguments as `testFlashMoE`)
+and `csrc/tests/gemmFP4.cu` (target `gemmFP4`: `--check` tests the quantizer, the scale factor layout against CUTLASS and the tile GEMM
+against FP32 references, with cuBLASLt NVFP4 on the same data as a cross-check; `--bench` compares the tile GEMM with the
+MXFP8 tile and with cuBLASLt).
+The tile GEMM is `FP4Mainloop` in `csrc/include/flashmoe/tile_sm120_fp4.cuh`, the quantizer is `csrc/include/flashmoe/infra/fp4.cuh`.
+
+Single RTX 5090, gated SiLU MLP, latency of one MoE layer in ms
+(`testFlashMoE`, `testFlashMoEFP8`, `testFlashMoEMXFP4`, `testFlashMoENVFP4`):
+
+| Model (H, I, E, k) | Tokens | BF16 | MXFP8 | MXFP4 | NVFP4 | MXFP4 / NVFP4 vs. BF16 | MXFP4 / NVFP4 vs. MXFP8 |
+|---|---|---|---|---|---|---|---|
+| Llama4-Scout (5120, 8192, 16, 1) | 8192 | 12.65 | 4.54 | 2.33 | 2.47 | 5.43x / 5.13x | 1.95x / 1.84x |
+| Mixtral-8x7B (4096, 14336, 8, 2) | 8192 | 35.52 | 13.14 | 6.36 | 6.87 | 5.59x / 5.17x | 2.07x / 1.91x |
+| DeepSeek-V2-Lite (2048, 1408, 64, 6) | 4096 | 3.33 | 1.50 | 1.11 | 1.22 | 3.01x / 2.74x | 1.35x / 1.23x |
+| Qwen3-30B-A3B (2048, 768, 128, 8) | 4096 | 3.01 | 1.59 | 1.38 | 1.50 | 2.18x / 2.01x | 1.15x / 1.07x |
+
+The two large models gain about 1.8-2.1x over MXFP8. The smaller models gain less (1.07-1.35x), and the GEMMs are not the
+only cost there.
+BF16 and MXFP8 were measured again together with the FP4 columns, so they differ from the MXFP8 table above by up to 8%.
+
+The kernels match a reference that applies the same quantization and runs FP32 GEMMs: at most 0.17% of the output
+elements are outside `isclose` (rtol 8e-2, atol 8e-3), the `error(%)` column of the tests.
+Against BF16 the picture is different. On uniform random data, the output of the whole layer deviates from the BF16
+output by about 26% (MXFP4) and 25% (NVFP4), against about 6% for MXFP8
+(relative Frobenius norm, as reported by the tests for the quantized reference and by `quickstart.py` for the kernel
+output; it depends on the random data of a run).
+The tokens, both weight matrices of the MLP and the output of GEMM0 are all quantized to 4 bits, and a single quantized
+matrix already deviates by about 10% (see above), so with four quantization steps in a row on random data, FP4 is far
+less accurate than MXFP8.
+The accuracy on real models is not evaluated here, check it on yours; NVFP4 activations additionally depend on the
+calibrated static scales.
+
+The tile GEMM (`gemmFP4 --bench`, TFLOPS on an RTX 5090). Our columns include the epilogue; the gated shape is the fused GEMM0,
+counted as 4MNK flops and compared with two cuBLASLt GEMMs; cuBLASLt is the GEMM alone and has no MXFP4 algorithm on SM120:
+
+| M x N x K | MXFP8 | MXFP4 | NVFP4 | cuBLASLt NVFP4 | cuBLASLt MXFP8 |
+|---|---|---|---|---|---|
+| 8192 x 8192 x 8192 | 524-528 | 1120 | 1050 | 1282 | 653 (603 in the NVFP4 run) |
+| 8192 x 8192 x 5120, gated | 541-543 | 1191 | 1170 | 1147 | 580 (578 in the NVFP4 run) |
+| 4096 x 2048 x 768 | 288-315 (noisy) | 484 | 395 | 735 | 420-458 |
+
+The FP4 tile is about 2x the MXFP8 tile at large sizes, and on the gated shape NVFP4 matches cuBLASLt;
+at 8192^3 it reaches 0.82x of cuBLASLt NVFP4, and the small shape, which is only 6 k-tiles deep and whose timing varies
+by up to about 20% between runs, is further behind (0.54x).
+
+**Limits.**
+- SM120/SM121 only, with BF16 tokens, biases and output. H and I must be multiples of 128, and bM = 128.
+- NVFP4 activations use the static scales above, which must be calibrated.
+- Tested on a single GPU. The RDMA path, which `nvshmem_putmem`s the scale factors before the signaled data put, is compile-checked only.
+
 ---
 
 ### ✅ Roadmap
 - [ ] Improve MMA for Hopper (WGMMA) and Blackwell (UTCMMA).
-- [ ] FP8
+- [x] FP8: MXFP8 on SM120/SM121 (Hopper and SM100 to follow)
+- [x] FP4: MXFP4 and NVFP4 on SM120/SM121 (SM100 to follow)
 - [ ] Shared experts
 - [ ] AMD support
 - [ ] Backward pass
@@ -283,6 +444,8 @@ cmake --build . --target testFlashMoE --parallel
 export NVSHMEM_BOOTSTRAP=MPI
 mpirun -n <world> ./testFlashMoE <num tokens per rank> <token dim> <ffn dim> <num experts total> <top k>
 ```
+`testFlashMoEFP8`, `testFlashMoEMXFP4` and `testFlashMoENVFP4` take the same arguments and run the MXFP8, MXFP4 and NVFP4 paths
+(SM120/SM121; so far tested on a single GPU).
 
 
 ## IDEs

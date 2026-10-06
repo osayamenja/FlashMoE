@@ -11,10 +11,45 @@
 #include <cutlass/numeric_conversion.h>
 
 namespace flashmoe::heuristics {
+  // cuBLASDx only accepts non-generic SM modifiers for SM 900, 1000, 1030 and 1100.
+  // sm_12x (RTX 50 series, RTX PRO 6000 Blackwell, DGX Spark) has to use the generic one.
+  template<int Arch>
+  consteval cublasdx::sm_modifier getSMModifier() {
+    return (Arch == 900 || Arch == 1000 || Arch == 1030 || Arch == 1100) ?
+      cublasdx::sm_modifier::arch_specific : cublasdx::sm_modifier::generic;
+  }
+  // Maximum opt-in dynamic shared memory per thread block in bytes, i.e., cudaDevAttrMaxSharedMemoryPerBlockOptin.
+  template<int Arch>
+  consteval int maxSharedMemoryPerBlock() {
+    static_assert(Arch >= 700);
+    if constexpr (Arch >= 1200) {
+      return 101376; // 99 KB: sm_120 and sm_121 (RTX 50 series, RTX PRO 6000 Blackwell, DGX Spark)
+    }
+    else if constexpr (Arch >= 900) {
+      return 232448; // 227 KB: sm_90, sm_100, sm_103 and sm_110
+    }
+    else if constexpr (Arch >= 860) {
+      return 101376; // 99 KB: sm_86, sm_87 and sm_89
+    }
+    else if constexpr (Arch >= 800) {
+      return 166912; // 163 KB: sm_80
+    }
+    else if constexpr (Arch >= 750) {
+      return 65536; // 64 KB: sm_75
+    }
+    else {
+      return 98304; // 96 KB: sm_70
+    }
+  }
+  // 256-row tiles need around 208 KB of shared memory in the gated GEMM0 (3-stage pipeline, 2-byte elements)
+  template<int Arch>
+  consteval bool hasLargeSharedMemory() {
+    return maxSharedMemoryPerBlock<Arch>() >= 192 * 1024;
+  }
   template<int M, int Arch>
   consteval int getTileM() {
     static_assert(M >= 16);
-    constexpr int cap = (Arch >= 900 && M >= 4096) ? 256 : 128;
+    constexpr int cap = (hasLargeSharedMemory<Arch>() && M >= 4096) ? 256 : 128;
 
     for (const int t : {128, 96, 64, 48, 32, 16}) {
       if (t <= cap && t <= M && (M % t == 0)) {
@@ -25,7 +60,7 @@ namespace flashmoe::heuristics {
   }
   template<int M, int Arch>
   consteval int getMoETileM() {
-    if constexpr (Arch >= 900 && M >= 4096 && M % 2 == 0) {
+    if constexpr (hasLargeSharedMemory<Arch>() && M >= 4096 && M % 2 == 0) {
       return 256;
     }
     if (M >= 128) {
@@ -86,10 +121,30 @@ namespace flashmoe::heuristics {
     return 16;
   }
 
-  template<int K, int bK, int Arch>
+  // Deepest pipeline supported by the architecture.
+  // If the tile shape is given (bM, bN > 0), the depth is reduced until the mainloop's shared memory fits
+  // the per-block limit. The footprint follows moe::kernelSMEM: max(stages, epilogue tile) + extraBytes.
+  template<int bK, int Arch, int bM = 0, int bN = 0, int elementBytes = 2, int extraBytes = 0>
+  consteval int getMaxPipeStages() {
+    int stages = (Arch >= 900 ? 3 : Arch >= 800 ? 2 : 1);
+    if constexpr (bM > 0 && bN > 0) {
+      constexpr int budget = maxSharedMemoryPerBlock<Arch>();
+      constexpr int epilogue = elementBytes * bM * bN;
+      while (stages > 1) {
+        const int mainloop = elementBytes * bK * stages * (bM + bN);
+        if ((mainloop > epilogue ? mainloop : epilogue) + extraBytes <= budget) {
+          break;
+        }
+        --stages;
+      }
+    }
+    return stages;
+  }
+  // Pipeline depth bounded by the number of k-tiles and by getMaxPipeStages.
+  template<int K, int bK, int Arch, int bM = 0, int bN = 0, int elementBytes = 2, int extraBytes = 0>
   consteval int getPipeStages() {
     static_assert(K % bK == 0);
-    constexpr int cap = (Arch>= 900 ? 3 : Arch >= 800 ? 2 : 1);
+    constexpr int cap = getMaxPipeStages<bK, Arch, bM, bN, elementBytes, extraBytes>();
     constexpr int stages = K / bK;
     return stages >= cap ? cap : stages;
   }
@@ -331,7 +386,7 @@ namespace flashmoe::tile
       cublasdx::Alignment<aAlignment, bAlignment, cAlignment>() +
       cublasdx::StaticBlockDim() +
       cublasdx::EnableInputStreaming() +
-      cublasdx::SM<Arch, Arch >= 900 ? cublasdx::sm_modifier::arch_specific : cublasdx::sm_modifier::generic>());
+      cublasdx::SM<Arch, heuristics::getSMModifier<Arch>()>());
     return GhostBLAS::max_threads_per_block;
   }
 
@@ -371,7 +426,7 @@ namespace flashmoe::tile
         cublasdx::BlockDim<threads>() +
         cublasdx::StaticBlockDim() +
         cublasdx::EnableInputStreaming() +
-        cublasdx::SM<Arch, Arch >= 900 ? cublasdx::sm_modifier::arch_specific : cublasdx::sm_modifier::generic>()),
+        cublasdx::SM<Arch, heuristics::getSMModifier<Arch>()>()),
       decltype(
         cublasdx::Size<bM, bN, bK>() +
         cublasdx::Precision<TranslatedElement, TranslatedElement, MMA_C>() +
@@ -382,7 +437,7 @@ namespace flashmoe::tile
         cublasdx::Alignment<aAlignment, bAlignment, cAlignment>() +
         cublasdx::BlockDim<threads>() +
         cublasdx::StaticBlockDim() +
-        cublasdx::SM<Arch, Arch >= 900 ? cublasdx::sm_modifier::arch_specific : cublasdx::sm_modifier::generic>())>;
+        cublasdx::SM<Arch, heuristics::getSMModifier<Arch>()>())>;
     using TileArch = cute::Int<Arch>;
     using Threads = cute::Int<threads>;
     using TileShape = cute::Shape<cute::Int<bM>, cute::Int<bN>, cute::Int<bK>>;
