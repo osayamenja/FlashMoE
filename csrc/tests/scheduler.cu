@@ -39,7 +39,7 @@ __device__ void run_producer(
   const uint32_t &q) {
   uint32_t cursor = 0;
   uint32_t interrupt = 0;
-  cuda::atomic_ref<uint32_t, cuda::thread_scope_block> inr{*(interrupts + q)};
+  cuda::atomic_ref<uint32_t, cuda::thread_scope_block> inr{*(interrupts + q / flashmoe::WARP_SIZE)};
   cuda::atomic_ref<uint32_t, cuda::thread_scope_block> tqh{*(tQHeads + q)};
   // producers will only produce one task but will wait until interrupt before terminating.
   // this confirms that the scheduler did interrupt them.
@@ -146,7 +146,7 @@ template<int threads = 128>
 __global__ void testSchedulerE2E(
   const __grid_constant__ cuda::fast_mod_div<uint> divisor,
   MockTask *__restrict__ taskQueue, // length = N + M*tN   (or whatever your scheduler uses)
-  uint32_t *__restrict__ statusQueue, // length = P, init Observed(0)
+  uint32_t *__restrict__ statusQueue, // length = MAX_PROCESSORS (padded), init Observed(0)
   flashmoe::TQSignal *__restrict__ tqSignalQ, // length = P, init {0,0}
   uint32_t *__restrict__ gTQHeads, // length = M, init 0
   const uint32_t tN) {
@@ -263,7 +263,7 @@ void kickstart(const int argc, char **argv) {
   const auto totalTasks = num_primary_tasks + num_spawned_tasks;
   const int consumers = blocks - 1;
   const cuda::fast_mod_div<uint> divisor(consumers);
-  if (consumers > flashmoe::scheduler::SCHEDULER_COUNT * flashmoe::scheduler::MAX_PROCESSORS) {
+  if (consumers > flashmoe::scheduler::MAX_PROCESSORS) {
     throw std::invalid_argument(std::string("blocks - 1 must be <= ")
       .append(std::to_string(flashmoe::scheduler::MAX_PROCESSORS)));
   }
@@ -273,10 +273,12 @@ void kickstart(const int argc, char **argv) {
   cudaStreamCreate(&stream);
 
   cudaMallocAsync(&taskQ, sizeof(MockTask) * totalTasks, stream);
-  cudaMallocAsync(&statusQueue, sizeof(uint32_t) * consumers, stream);
+  // the scheduler scans MAX_PROCESSORS status slots without a bounds check;
+  // the padding is never marked ready
+  cudaMallocAsync(&statusQueue, sizeof(uint32_t) * flashmoe::scheduler::MAX_PROCESSORS, stream);
   static_assert(flashmoe::ReadySignal::observed == 0);
   cudaMemsetAsync(statusQueue, flashmoe::ReadySignal::observed,
-                  sizeof(uint32_t) * consumers, stream);
+                  sizeof(uint32_t) * flashmoe::scheduler::MAX_PROCESSORS, stream);
   cudaMallocAsync(&tQHeads, sizeof(uint32_t) * producers, stream);
   cudaMemsetAsync(tQHeads, 0, sizeof(uint32_t) * producers, stream);
   cudaMallocAsync(&tqs, sizeof(flashmoe::TQSignal) * consumers, stream);

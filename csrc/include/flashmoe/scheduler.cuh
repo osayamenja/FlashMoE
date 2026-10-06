@@ -34,6 +34,11 @@ namespace flashmoe::scheduler
   }
   using WarpScan = cub::WarpScan<uint>;
 
+  /// Signals processors via their doorbells.
+  /// The doorbell stores are relaxed: the caller (schedulerLoop) executes one acq_rel device-scope fence
+  /// before it schedules, which makes the tasks it observed visible to the processors that observe a doorbell.
+  /// A release fence followed by relaxed stores is a release pattern for each of those stores (PTX memory model),
+  /// i.e., equivalent to one st.release per doorbell, but costs one fence instead of one per store.
   template <
     DQType dqt = DQType::stride,
     int nQ = 0
@@ -58,7 +63,7 @@ namespace flashmoe::scheduler
         auto* __restrict__ pdbAddr = reinterpret_cast<uint64_t*>(pDB + wSet[l]);
         cuda::atomic_ref<uint64_t, cuda::thread_scope_device> pdb{*pdbAddr};
         sig.encodeSig(DQ::next<dqt, nQ>(qIdx, k * wSet.size() + l));
-        pdb.store(cuda::std::bit_cast<uint64_t>(sig), cuda::memory_order_release);
+        pdb.store(cuda::std::bit_cast<uint64_t>(sig), cuda::memory_order_relaxed);
       }
     }
     // Residual scheduling
@@ -75,7 +80,7 @@ namespace flashmoe::scheduler
         auto* __restrict__ pdbAddr = reinterpret_cast<uint64_t*>(pDB + wSet[l]);
         cuda::atomic_ref<uint64_t, cuda::thread_scope_device> pdb{*pdbAddr};
         sig.encodeSig(DQ::next<dqt, nQ>(qIdx, cSetB * wSet.size() + l));
-        pdb.store(cuda::std::bit_cast<uint64_t>(sig), cuda::memory_order_release);
+        pdb.store(cuda::std::bit_cast<uint64_t>(sig), cuda::memory_order_relaxed);
       }
     }
     FLASHMOE_TRACE_BATCH(tBatch, dqt == DQType::stride, qIdx, canSchedule);
@@ -91,7 +96,6 @@ namespace flashmoe::scheduler
     requires (schedulerCount == SCHEDULER_COUNT && isRegisterV<TQState>)
   __device__ __forceinline__
   void schedulerLoop(TQState& tqState,
-                     const uint& processors,
                      const cuda::fast_mod_div<uint>& processors_v,
                      const unsigned int& tilesN1,
                      const unsigned int& tQOffset,
@@ -110,6 +114,12 @@ namespace flashmoe::scheduler
     __syncwarp();
     WarpScan(wSt).InclusiveSum(lTt, queueSlot, taskTally);
     queueSlot -= lTt;
+    if (taskTally) {
+      // The one fence per scheduling round (taskTally is warp-uniform), in place of a release per doorbell store:
+      // it acquires the queue heads (and tails) this thread observed before the call, and releases the tasks behind
+      // them to the processors that observe the relaxed doorbell stores of schedule().
+      cuda::atomic_thread_fence(cuda::memory_order_acq_rel, cuda::thread_scope_device);
+    }
     auto prefixTaskSum = 0U;
     while (taskTally) {
       // Find processors if we are not currently aware of any
@@ -117,15 +127,13 @@ namespace flashmoe::scheduler
         cutlass::Array<uint, processor_state_size> sQState{};
         // sweep sQ to identify ready processes
         uint lPt = 0U; // local processor tally
+        // sQ is padded to MAX_PROCESSORS and the padding is never marked ready, so there is no bounds check here:
+        // the exchanges are independent and issue back-to-back, i.e., one global round trip per sweep.
         #pragma unroll
         for (int j = 0; j < sQState.size(); ++j) {
-          const auto idx = j * schedulerCount + threadIdx.x;
-          if (idx < processors) {
-            const auto readiness = atomicExch(sQ + (j * schedulerCount + threadIdx.x),
-                                              observed) == ready;
-            lPt += readiness;
-            sQState[j] = readiness;
-          }
+          const auto readiness = atomicExch(sQ + (j * schedulerCount + threadIdx.x), observed) == ready;
+          lPt += readiness;
+          sQState[j] = readiness;
         }
         uint startIdx;
         // Aggregate tally across the warp
@@ -137,10 +145,9 @@ namespace flashmoe::scheduler
         const auto qSIdx = gRQIdx + prefixTaskSum;
         #pragma unroll
         for (uint j = 0; j < sQState.size(); ++j) {
-          const auto idx = j * schedulerCount + threadIdx.x;
-          if (idx < processors && sQState[j]) {
+          if (sQState[j]) {
             // write ready process pid to rQ
-            rQ[circularIdx((qSIdx + startIdx++), processors_v)] = idx;
+            rQ[circularIdx((qSIdx + startIdx++), processors_v)] = j * schedulerCount + threadIdx.x;
           }
         }
         if (processorTally) {
@@ -216,6 +223,8 @@ namespace flashmoe::scheduler
            const uint& processorTally) {
     __shared__ WarpScan::TempStorage wSt;
     cutlass::Array<uint, processor_state_size> sQState{};
+    // Unlike the global sQ, the shared memory arrays scratch and rQ are not padded to MAX_PROCESSORS,
+    // so the bounds checks on `processors` below have to stay.
     /// read through the ready queue first
     constexpr auto sig = TQSignal{0U, 1U}; // set interrupt to 1
     const auto tS = processorTally / schedulerCount + (threadIdx.x < processorTally % schedulerCount);
@@ -237,7 +246,8 @@ namespace flashmoe::scheduler
         const auto pid = sQState[i];
         auto* __restrict__ db_p = reinterpret_cast<uint64_t*>(pDB + pid);
         cuda::atomic_ref<uint64_t, cuda::thread_scope_device> pdb{*db_p};
-        pdb.store(cuda::std::bit_cast<uint64_t>(sig), cuda::memory_order_release);
+        // relaxed suffices: a processor does not read any task after it observes an interrupt
+        pdb.store(cuda::std::bit_cast<uint64_t>(sig), cuda::memory_order_relaxed);
         scratch[pid] = 0U;
       }
     }
@@ -300,7 +310,7 @@ namespace flashmoe::scheduler
             remaining -= 1;
             auto* __restrict__ db_p = reinterpret_cast<uint64_t*>(pDB + pid);
             cuda::atomic_ref<uint64_t, cuda::thread_scope_device> pdb{*db_p};
-            pdb.store(cuda::std::bit_cast<uint64_t>(sig), cuda::memory_order_release);
+            pdb.store(cuda::std::bit_cast<uint64_t>(sig), cuda::memory_order_relaxed);
           }
         }
       }
@@ -388,7 +398,7 @@ namespace flashmoe::scheduler
         }
         bitSet[threadIdx.x] = sBS;
         // schedule observed tasks
-        schedulerLoop<processor_state_size, subscribers, sL, schedulerCount>(tqState, processors, processors_v, tilesN1, sO, 0, lTt,
+        schedulerLoop<processor_state_size, subscribers, sL, schedulerCount>(tqState, processors_v, tilesN1, sO, 0, lTt,
         processorTally, gRQIdx, scheduled, sQ, rQ, pDB, true);
 
         for (uint i = 1; i < dT; ++i) {
@@ -413,7 +423,7 @@ namespace flashmoe::scheduler
           }
           bitSet[sBIdx] = sBS;
           // schedule observed tasks
-          schedulerLoop<processor_state_size, subscribers, sL, schedulerCount>(tqState, processors, processors_v, tilesN1, sO, i * dQL,
+          schedulerLoop<processor_state_size, subscribers, sL, schedulerCount>(tqState, processors_v, tilesN1, sO, i * dQL,
           lTt, processorTally, gRQIdx, scheduled, sQ, rQ, pDB);
         }
       }
@@ -441,7 +451,7 @@ namespace flashmoe::scheduler
         bitSet[sBIdx] = sBS;
       }
       // schedule observed tasks
-      schedulerLoop<processor_state_size, subscribers, sL, schedulerCount>(tqState, processors, processors_v, tilesN1, sO, dQL * dT,
+      schedulerLoop<processor_state_size, subscribers, sL, schedulerCount>(tqState, processors_v, tilesN1, sO, dQL * dT,
       lTt, processorTally, gRQIdx, scheduled, sQ, rQ, pDB, dT == 0);
 
       if (!threadIdx.x) {

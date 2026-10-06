@@ -369,9 +369,11 @@ namespace flashmoe {
     CHECK_CUDA(cudaMemsetAsync(tileSync, 0, sizeof(uint) * gtqHeadsLength, stream));
 
     uint *statusQ = nullptr;
-    CHECK_CUDA(cudaMallocAsync(&statusQ, sizeof(uint) * processors, stream));
+    // padded to scheduler::MAX_PROCESSORS for the scheduler's branch-free readiness scan:
+    // the slots beyond the processors are never marked ready.
+    CHECK_CUDA(cudaMallocAsync(&statusQ, sizeof(uint) * scheduler::MAX_PROCESSORS, stream));
     static_assert(ReadySignal::observed == 0);
-    CHECK_CUDA(cudaMemsetAsync(statusQ, 0, sizeof(uint) * processors, stream));
+    CHECK_CUDA(cudaMemsetAsync(statusQ, 0, sizeof(uint) * scheduler::MAX_PROCESSORS, stream));
 
     uint8_t* stateNumbers = nullptr;
     CHECK_CUDA(cudaMallocAsync(&stateNumbers, sizeof(uint8_t) * args.blocks, stream));
@@ -462,7 +464,7 @@ namespace flashmoe {
     bytes += sizeof(uint) * args.numExperts;
     bytes += sizeof(uint) * args.epWorld * args.numLocalExperts * ecTilesM;
     bytes += sizeof(uint) * args.epWorld * args.numLocalExperts * ecTilesM;
-    bytes += sizeof(uint) * processors;
+    bytes += sizeof(uint) * scheduler::MAX_PROCESSORS;
     bytes += sizeof(uint8_t) * args.blocks;
     return bytes;
   }
