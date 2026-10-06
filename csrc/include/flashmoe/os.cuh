@@ -64,7 +64,8 @@ namespace flashmoe::os
     int threads,
     int bM,
     int pss,
-    typename StagingElement // element type of GEMM0Staging
+    typename StagingElement, // element type of GEMM0Staging
+    bool fuseLocalCombine // the combine of the experts of this device is fused into their GEMM1, see fusesLocalCombine
   >
   __device__ __forceinline__
   void start(cuda::std::byte* __restrict__ const& workspace, const int* __restrict__ expertCounts,
@@ -159,9 +160,12 @@ namespace flashmoe::os
     // Combine tasks
     // actual amount known a priori
     for (uint i = threadIdx.x; i < E; i += threads) {
-      const auto eCount = cute::min(eCs[i], EC);
-      const auto eCt = cute::ceil_div(eCount, bM);
-      atomicAdd_block(taskBound, eCt * tilesN1);
+      // the combine of the experts of this device is fused into their GEMM1, see processor::start
+      if (!fuseLocalCombine || eL[i].epRank != ctx.epRank) {
+        const auto eCount = cute::min(eCs[i], EC);
+        const auto eCt = cute::ceil_div(eCount, bM);
+        atomicAdd_block(taskBound, eCt * tilesN1);
+      }
     }
     if (threadIdx.x < subscriberCount) {
       const auto nRows = ecTilesM * E;
@@ -181,8 +185,9 @@ namespace flashmoe::os
           const auto tileColIdx = flagIdx / nRows;
           const auto expertCount = cute::min(eCs[expertIdx], EC);
           const auto actualTiles = cute::ceil_div(expertCount, bM);
-          if ((isRemote && tileColIdx > 0) || tileRowIdx >= actualTiles) {
-            bitset.set(j); // mask away this signal
+          if ((isRemote && tileColIdx > 0) || tileRowIdx >= actualTiles ||
+            (fuseLocalCombine && eL[expertIdx].epRank == ctx.epRank)) {
+            bitset.set(j); // mask away this signal, the combine of a local expert is fused into its GEMM1
           }
           else {
             bitset.clear(j);

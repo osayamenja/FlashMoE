@@ -337,6 +337,8 @@ namespace flashmoe::subscriber
 
           Ingredients ingredients{};
           ingredients.localExpertIdx = myLocalExIdx;
+          // global expert index, inherited by the GEMM1 tasks: the GEMM1 of a local task combines its tile
+          ingredients.expertIdx = lXI.expertIndex;
           ingredients.taskType = TaskType::GEMM0;
           ingredients.peerIdx = pLI.pe;
           // pad here for compatibility

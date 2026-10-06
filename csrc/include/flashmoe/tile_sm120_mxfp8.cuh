@@ -9,8 +9,9 @@
 //  - MXFP8Mainloop: one CTA computes one bM x bN output tile (gated: two bM x bN tiles, A is read once) with
 //    256 threads = 8 warps (4 along M x 2 along N), cp.async multistage pipeline, ldmatrix fragments from swizzled
 //    shared memory and scale factors (SF) straight out of the canonical 128x4 layout, see infra/mx.cuh.
-//  - epilogues that work on the accumulator fragments: BF16 output, MXFP8 output (the A operand of the next GEMM)
-//    and the fused gated variant.
+//  - epilogues that work on the accumulator fragments: BF16 output, BF16 output fused with the combine (the tile rows
+//    go straight to the output rows of their tokens), MXFP8 output (the A operand of the next GEMM) and the fused gated
+//    variant.
 //
 // thrfrgSFA / thrfrgSFB / partitionFragmentSFA / partitionFragmentSFB / getLayoutSFATV / getLayoutSFBTV in
 // namespace detail are adapted from cutlass/gemm/collective/sm120_blockscaled_mma_tma.hpp, CUTLASS 4.4.1:
@@ -52,6 +53,8 @@
 #include <cute/atom/mma_traits_sm90_gmma.hpp>
 
 #include "infra/mx.cuh"
+#include "infra/packed.cuh" // TPS
+#include "infra/rvt.cuh" // RedAdd
 
 namespace flashmoe::tile::sm120 {
   namespace detail {
@@ -174,6 +177,78 @@ namespace flashmoe::tile::sm120 {
 
     template <typename Element>
     concept EpilogueElement = cuda::std::is_same_v<Element, __nv_bfloat16> || cuda::std::is_same_v<Element, __half>;
+
+    // ------------------------------------------------------------------------------------------------------------
+    // element helpers of the combine epilogues (GEMM1 of a local task, see epilogueCombine)
+    // ------------------------------------------------------------------------------------------------------------
+
+    /// The 4-byte aligned pair of ElementC values at p as a 32-bit word (the first one in the low half)
+    __device__ __forceinline__
+    uint32_t loadWord(const __nv_bfloat16* __restrict__ const& p) {
+      return *reinterpret_cast<const uint32_t*>(p);
+    }
+
+    __device__ __forceinline__
+    uint32_t loadWord(const __half* __restrict__ const& p) {
+      return *reinterpret_cast<const uint32_t*>(p);
+    }
+
+    __device__ __forceinline__
+    float2 unpackPair(const __nv_bfloat16*, const uint32_t& w) {
+      return __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(&w));
+    }
+
+    __device__ __forceinline__
+    float2 unpackPair(const __half*, const uint32_t& w) {
+      return __half22float2(*reinterpret_cast<const __half2*>(&w));
+    }
+
+    /// The pair w scaled by the routing probability p and rounded to ElementC, the arithmetic of combine() in
+    /// combine.cuh: pair -> float2, float2 multiply (__fmul2_rn from sm_100 on) with {p, p}, float2 -> pair, RN.
+    template <typename ElementC>
+    __device__ __forceinline__
+    uint32_t scalePair(const ElementC* tag, const uint32_t& w, const float& p) {
+      const float2 x = unpackPair(tag, w);
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+      const float2 y = __fmul2_rn(x, make_float2(p, p));
+#else
+      const float2 y = make_float2(x.x * p, x.y * p);
+#endif
+      return packPair(tag, y.x, y.y);
+    }
+
+    /// red.global.add.noftz.v4.bf16x2 (f16x2) of 8 ElementC values, the 4 words w, to p (16 B aligned), the vector
+    /// reduction of combine() (RedAdd<900, ElementC2, 4>)
+    __device__ __forceinline__
+    void redAdd8(__nv_bfloat16* __restrict__ const& p, const uint32_t (&w)[4]) {
+      cutlass::AlignedArray<__nv_bfloat162, 4, 16> v;
+      #pragma unroll
+      for (int a = 0; a < 4; ++a) {
+        v[a] = *reinterpret_cast<const __nv_bfloat162*>(&w[a]);
+      }
+      constexpr RedAdd<900, __nv_bfloat162, 4> op{};
+      op(reinterpret_cast<__nv_bfloat162*>(p), v);
+    }
+
+    __device__ __forceinline__
+    void redAdd8(__half* __restrict__ const& p, const uint32_t (&w)[4]) {
+      cutlass::AlignedArray<__half2, 4, 16> v;
+      #pragma unroll
+      for (int a = 0; a < 4; ++a) {
+        v[a] = *reinterpret_cast<const __half2*>(&w[a]);
+      }
+      constexpr RedAdd<900, __half2, 4> op{};
+      op(reinterpret_cast<__half2*>(p), v);
+    }
+
+    /// What the combine epilogue needs from global memory, loaded into registers before the mainloop so that the loads
+    /// are not on the critical path of the epilogue: the token index and routing probability of each of the rows of a
+    /// thread, and the bias pairs of its columns (as 32-bit words, 0 is a pair of zeros in both formats)
+    template <int rows, int cols>
+    struct CombineRegs {
+      TPS tps[rows];
+      uint32_t bias[cols];
+    };
 
     /// x * sigmoid(x) = x / (1 + 2^(-x log2(e))) with the hardware ex2 / rcp approximations (a few ulp), instead of
     /// cutlass::epilogue::thread::SiLu<float>, which calls the full precision exp and division.
@@ -396,6 +471,89 @@ namespace flashmoe::tile::sm120 {
             }
             detail::quadTranspose(w);
             *reinterpret_cast<uint4*>(rowOut + 64 * jb) = make_uint4(w[0], w[1], w[2], w[3]);
+          }
+        }
+      }
+    }
+
+    /// Registers of epilogueCombine: for each of the 2 * MMA_M rows of the thread (row 16 * (warp % 4) + lane / 4 +
+    /// 8 h + 64 i of the tile) the token index and routing probability, for each of its MMA_N column pairs the bias
+    using CombineRegs = detail::CombineRegs<2 * MMA_M, MMA_N>;
+
+    /// Loads the registers of epilogueCombine before the mainloop. tokenIds: the TPS of the bM rows of the tile, only
+    /// the first tileSize are valid (the others are not read). bias: [N] or nullptr.
+    template <typename ElementC, typename TileCoord>
+      requires(!gated && detail::EpilogueElement<ElementC> && cute::rank_v<TileCoord> == 3)
+    __device__ __forceinline__
+    static CombineRegs prefetchCombine(const TPS* __restrict__ const& tokenIds,
+                                       const ElementC* __restrict__ const& bias,
+                                       const uint& tileSize, const TileCoord& tileCoord) {
+      const auto origin = threadOrigin();
+      const int n0 = cute::get<1>(tileCoord) * bN + origin.col;
+      CombineRegs regs;
+      #pragma unroll
+      for (int i = 0; i < MMA_M; ++i) {
+        #pragma unroll
+        for (int h = 0; h < 2; ++h) {
+          const int row = origin.row + 64 * i + 8 * h;
+          regs.tps[2 * i + h] = row < static_cast<int>(tileSize) ? tokenIds[row] : TPS{0U, 0.f};
+        }
+      }
+      #pragma unroll
+      for (int j = 0; j < MMA_N; ++j) {
+        regs.bias[j] = bias == nullptr ? 0U : detail::loadWord(bias + n0 + colOffset(j));
+      }
+      return regs;
+    }
+
+    /// The combine fused into the epilogue of GEMM1: the rows of the tile go to the output rows of their tokens,
+    /// out[S, N] (row-major) row tokenIds[row].tokenIdx. With v = ElementC(act(acc + bias)) as in epilogueBF16:
+    ///  - plural (top k > 1): out += ElementC(float(v) * probability), a vector reduction (red.global.add.v4.bf16x2),
+    ///    the same rounding steps as GEMM1 into the heap followed by combine() (the order of the additions is not
+    ///    deterministic);
+    ///  - single (top k = 1): out = v, 16 B stores.
+    /// Only the rows < tileSize are written. All threads execute the quad transposes, the stores are predicated.
+    template <bool plural, typename Act, typename ElementC, typename TileCoord>
+      requires(!gated && detail::EpilogueElement<ElementC> && cute::rank_v<TileCoord> == 3)
+    __device__ __forceinline__
+    static void epilogueCombine(const Accumulator& acc, ElementC* __restrict__ const& out, const CombineRegs& regs,
+                                const uint& tileSize, const int& N, const TileCoord& tileCoord) {
+      const auto origin = threadOrigin();
+      const int n0 = cute::get<1>(tileCoord) * bN;
+      float2 bv[MMA_N];
+      #pragma unroll
+      for (int j = 0; j < MMA_N; ++j) {
+        bv[j] = detail::unpackPair(out, regs.bias[j]);
+      }
+      #pragma unroll
+      for (int i = 0; i < MMA_M; ++i) {
+        #pragma unroll
+        for (int h = 0; h < 2; ++h) {
+          const bool live = origin.row + 64 * i + 8 * h < static_cast<int>(tileSize);
+          const TPS t = regs.tps[2 * i + h];
+          ElementC* const rowOut = out + static_cast<size_t>(t.tokenIdx) * N + n0 + origin.vcol;
+          #pragma unroll
+          for (int jb = 0; jb < MMA_N / 4; ++jb) {
+            uint32_t w[4];
+            #pragma unroll
+            for (int a = 0; a < 4; ++a) {
+              w[a] = detail::packPair(out,
+                                      detail::activate<Act>(acc(accIdx(0, h, i, 4 * jb + a)) + bv[4 * jb + a].x),
+                                      detail::activate<Act>(acc(accIdx(1, h, i, 4 * jb + a)) + bv[4 * jb + a].y));
+            }
+            detail::quadTranspose(w);
+            if (live) {
+              if constexpr (plural) {
+                #pragma unroll
+                for (int a = 0; a < 4; ++a) {
+                  w[a] = detail::scalePair(out, w[a], t.probability);
+                }
+                detail::redAdd8(rowOut + 64 * jb, w);
+              }
+              else {
+                *reinterpret_cast<uint4*>(rowOut + 64 * jb) = make_uint4(w[0], w[1], w[2], w[3]);
+              }
+            }
           }
         }
       }

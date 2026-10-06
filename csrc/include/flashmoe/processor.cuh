@@ -24,10 +24,25 @@
 
 namespace flashmoe::processor
 {
+  // GEMM1 of a task whose tokens stay on this device (the combine is fused into the epilogue, see fGET and
+  // processor::start): the tile goes to the output rows of its tokens instead of the symmetric heap
+  template <typename ElementC>
+  struct LocalCombine {
+    ElementC* moeOutput = nullptr; // [S, H]
+    const TPS* tokenIds = nullptr; // [bM] of the tile, nullptr: the tile is not fused
+    int S = 0;
+    uint tileSize = 0;
+  };
+
   // fused GEMM, epilogue and data transfer
+  // fuseCombine == true (GEMM1): if lc.tokenIds != nullptr, the epilogue is the combine of the tile instead of the
+  // store to c, which is then unused
   template <
     typename TileGEMM,
     typename Activation,
+    bool fuseCombine = false,
+    CombineMode cm = CombineMode::single,
+    int threads = 0,
     typename Element,
     typename ElementC
   >
@@ -37,12 +52,29 @@ namespace flashmoe::processor
             const Element* __restrict__ const& b,
             ElementC* __restrict__ const& c,
             const ElementC* __restrict__ const& bias,
-            const int& M, const int& N, const int& K, const int& tileIdx) {
+            const int& M, const int& N, const int& K, const int& tileIdx,
+            [[maybe_unused]] const LocalCombine<ElementC>& lc = {}) {
     using BLAS = TileGEMM::BLAS;
     auto accumulator = BLAS::suggest_accumulator();
     using BM = cute::Int<cublasdx::size_of<BLAS>::m>;
     using BN = cute::Int<cublasdx::size_of<BLAS>::n>;
     const auto tileCoord = tile::idx2Coord(M / BM{}, N / BN{}, tileIdx);
+    // gmem -> rmem: prefetch the token indices and routing probabilities of the tile, before the mainloop
+    static_assert(!fuseCombine || threads > 0);
+    constexpr int bM = BM::value;
+    constexpr int idsPerThread = fuseCombine ? (bM + threads - 1) / (threads > 0 ? threads : 1) : 1;
+    TPS ids[idsPerThread] = {};
+    if constexpr (fuseCombine) {
+      if (lc.tokenIds != nullptr) {
+        #pragma unroll
+        for (int i = 0; i < idsPerThread; ++i) {
+          const uint row = threadIdx.x + i * threads;
+          if (row < lc.tileSize) {
+            ids[i] = lc.tokenIds[row];
+          }
+        }
+      }
+    }
     // compute Tile
     constexpr TileGEMM tileMainloop{};
     tileMainloop(workspace, a, b, accumulator, M, N, K, tileCoord);
@@ -67,6 +99,28 @@ namespace flashmoe::processor
     // rmem -> smem
     auto sC = cublasdx::make_tensor(static_cast<ElementC*>(workspace), BLAS::suggest_layout_smem_c());
     __syncthreads();
+    if constexpr (fuseCombine) {
+      if (lc.tokenIds != nullptr) {
+        // rmem -> smem as a row-major tile, which is the layout combineScatter reads
+        constexpr int bN = BN::value;
+        using RowMajor = cute::Layout<cute::Shape<cute::Int<bM>, cute::Int<bN>>, cute::Stride<cute::Int<bN>, cute::_1>>;
+        auto sRow = cute::make_tensor(cute::make_smem_ptr(static_cast<ElementC*>(workspace)), RowMajor{});
+        cublasdx::copy_fragment<cublasdx::alignment_of<BLAS>::c>(d_frag, sRow, accumulator);
+        auto* __restrict__ stIds = combineIds<bM>();
+        #pragma unroll
+        for (int i = 0; i < idsPerThread; ++i) {
+          const int row = static_cast<int>(threadIdx.x) + i * threads;
+          if (row < bM) {
+            stIds[row] = ids[i];
+          }
+        }
+        __syncthreads();
+        // smem -> HBM: scale by the probabilities and accumulate (plural) or copy (single) to the token rows
+        combineScatter<bM, bN, TileGEMM::TileArch::value, threads, cm>(lc.S, N, workspace, stIds, lc.moeOutput,
+          lc.tileSize, cute::make_coord(cute::_0{}, cute::get<1>(tileCoord)));
+        return;
+      }
+    }
     cublasdx::copy_fragment<cublasdx::alignment_of<BLAS>::c>(d_frag, sC, accumulator);
     __syncthreads();
     // smem -> gmem
@@ -268,6 +322,7 @@ namespace flashmoe::processor
              Element* __restrict__ const& moeOutput,
              const PBM& producerBitMap,
              const uint8_t& stateNumber,
+             const int& epRank, // expert parallel rank of this device
              const Heap& symHeap, const ProcessorArgs& pA, const QuantArgs& mxA = {}) {
     static_assert(sizeof(Task) % sizeof(uint4) == 0 && alignof(Task) % alignof(uint4) == 0);
     static_assert(cuda::std::is_trivially_copyable_v<Task>);
@@ -470,8 +525,19 @@ namespace flashmoe::processor
         }
         break;
         case TaskType::GEMM1: {
+          // The tokens of a task of this device's own peer stay here: their GEMM1 epilogue is the combine, it writes
+          // (single) or adds (plural) straight into moeOutput. So there is no write to the symmetric heap, no flag
+          // (no system scope release) and no combine task, see os::start. The packets of any other peer take the
+          // path below: bf16 tile to the heap of the peer, flag, combine task on the peer.
+          // localPeerIdx is the EP rank of the peer (pe() is the NVSHMEM PE, a different number in general)
+          constexpr bool fuseLocal = fusesLocalCombine<TileGEMM1::TileArch::value>();
+          const bool isLocal = fuseLocal && static_cast<int>(task.localPeerIdx()) == epRank;
+          constexpr int bM1 = cute::get<0>(typename TileGEMM1::TileShape{});
+          // tokenIndices has shape [E, roundEC]: the tile rows are those of the combine task of the tile
+          const auto* __restrict__ tokenIds = tokenIndices +
+            (static_cast<size_t>(task.expertIdx()) * roundEC + static_cast<size_t>(task.tileIdx / tilesN1) * bM1);
           if constexpr (recipe == QuantRecipe::mxfp8) {
-            // block-scaled GEMM1 with a bf16 output, so combine is unchanged
+            // block-scaled GEMM1 with a bf16 output: the tile goes to the heap for a combine task or is combined here
             constexpr int bM = cute::get<0>(typename TileGEMM1::TileShape{});
             constexpr int bN = cute::get<1>(typename TileGEMM1::TileShape{});
             using MXGEMM1 = tile::sm120::MXFP8GEMM1<bM, bN, threads>;
@@ -489,12 +555,24 @@ namespace flashmoe::processor
             const auto tileCoord = tile::idx2Coord(task.M() / bM, H / bN, task.tileIdx);
             constexpr MXGEMM1 mainloop{};
             auto acc = MXGEMM1::makeAccumulator();
+            // local: token indices, probabilities and bias into registers, the loads overlap with the mainloop
+            typename MXGEMM1::CombineRegs pf{};
+            if (isLocal) {
+              pf = MXGEMM1::prefetchCombine(tokenIds, biasP, task.tileSize(), tileCoord);
+            }
             mainloop(workspace, aP, sfaP, bP, sfbP, acc, task.M(), H, I, tileCoord);
             FLASHMOE_TRACE_EVENT_T0(procMainDone, 0, 0);
-            MXGEMM1::template epilogueBF16<cublasdx::identity>(acc, cP, biasP, task.M(), H, tileCoord);
+            if (isLocal) {
+              MXGEMM1::template epilogueCombine<combineMode == CombineMode::plural, cublasdx::identity>(acc,
+                moeOutput, pf, task.tileSize(), H, tileCoord);
+            }
+            else {
+              MXGEMM1::template epilogueBF16<cublasdx::identity>(acc, cP, biasP, task.M(), H, tileCoord);
+            }
           }
           else if constexpr (isFP4(recipe)) {
-            // block-scaled FP4 GEMM1 with a bf16 output, so combine is unchanged
+            // block-scaled FP4 GEMM1 with a bf16 output: the tile goes to the heap for a combine task or is combined
+            // here
             constexpr int bM = cute::get<0>(typename TileGEMM1::TileShape{});
             constexpr int bN = cute::get<1>(typename TileGEMM1::TileShape{});
             constexpr int sfVec = quantSFVecSize(recipe);
@@ -518,16 +596,36 @@ namespace flashmoe::processor
             const auto tileCoord = tile::idx2Coord(task.M() / bM, H / bN, task.tileIdx);
             constexpr FPGEMM1 mainloop{};
             auto acc = FPGEMM1::makeAccumulator();
+            // local: token indices, probabilities and bias into registers, the loads overlap with the mainloop
+            typename FPGEMM1::CombineRegs pf{};
+            if (isLocal) {
+              pf = FPGEMM1::prefetchCombine(tokenIds, biasP, task.tileSize(), tileCoord);
+            }
             mainloop(workspace, aP, sfaP, bP, sfbP, acc, task.M(), H, I, tileCoord);
             FLASHMOE_TRACE_EVENT_T0(procMainDone, 0, 0);
-            FPGEMM1::template epilogueBF16<cublasdx::identity>(acc, cP, biasP, alpha, task.M(), H, tileCoord);
+            if (isLocal) {
+              FPGEMM1::template epilogueCombine<combineMode == CombineMode::plural, cublasdx::identity>(acc,
+                moeOutput, pf, alpha, task.tileSize(), H, tileCoord);
+            }
+            else {
+              FPGEMM1::template epilogueBF16<cublasdx::identity>(acc, cP, biasP, alpha, task.M(), H, tileCoord);
+            }
           }
           else {
             const auto* aP = reinterpret_cast<const Element*>(task.aData);
             const auto* bP = expertDownWeights + expertWeightSize * task.localExpertIdx();
             auto* __restrict__ cP = reinterpret_cast<Element*>(task.cData[1]);
             const auto* __restrict__ biasP = biasDown + static_cast<size_t>(H) * task.localExpertIdx();
-            fGET<TileGEMM1, cublasdx::identity>(workspace, aP, bP, cP, biasP, task.M(), H, I, task.tileIdx);
+            // local: the epilogue is combineScatter of the tile, which is made of the token indices, probabilities
+            // loaded before the mainloop
+            fGET<TileGEMM1, cublasdx::identity, fuseLocal, combineMode, threads>(workspace, aP, bP, cP, biasP,
+              task.M(), H, I, task.tileIdx,
+              LocalCombine<Element>{moeOutput, isLocal ? tokenIds : nullptr, S, task.tileSize()});
+          }
+          if (isLocal) {
+            // done: the tile has been combined into moeOutput. The next task of this block starts with a barrier,
+            // which also orders this epilogue before whatever reuses the workspace
+            break;
           }
           __syncthreads();
           if (!threadIdx.x) {

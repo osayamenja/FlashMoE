@@ -23,43 +23,36 @@ namespace flashmoe
 #endif
   }
 
-  // MoE combine at tile granularity
+  /// Token indices and routing probabilities of the rows of a tile that is scattered to the output, in shared memory.
+  /// A single buffer per bM is shared by every caller: combine() and the GEMM1 epilogues that fuse it.
+  template <int bM>
+  __device__ __forceinline__
+  TPS* combineIds() {
+    __shared__ TPS stIds[bM];
+    return stIds;
+  }
+
+  /// Scatter of a tile in shared memory to the output rows of its tokens, the second half of combine():
+  /// the row-major [bM, bN] tile at workspace goes to moeOutput[stIds[row].tokenIdx], either as is (single, top k = 1)
+  /// or scaled by stIds[row].probability and added (plural). Only the first tileSize rows are written.
+  /// The caller makes the tile and stIds visible to the block with a barrier.
   template <
     int bM,
     int bN,
     int Arch,
     int threads,
     CombineMode c,
-    cublasdx::arrangement cArr = cublasdx::row_major,
     typename Element,
     typename TileCoord
   >
   __device__ __forceinline__
-  void combine(const int& S, const int& H,
-               void* __restrict__ const& workspace,
-               const TPS* __restrict__ const& tokenIndices, // [bM]
-               Element* __restrict__ const& moeOutput, // [S, H] in local HBM
-               const Element* __restrict__ const& tokens, // [bM, H] in local HBM
-               const uint& tileSize, const TileCoord& tileCoord) {
+  void combineScatter(const int& S, const int& H,
+                      const void* __restrict__ const& workspace, // [bM, bN] row-major tile, shared memory
+                      const TPS* __restrict__ const& stIds, // [bM], shared memory
+                      Element* __restrict__ const& moeOutput, // [S, H] in local HBM
+                      const uint& tileSize, const TileCoord& tileCoord) {
     static_assert(cute::rank_v<TileCoord> == 2);
     static_assert(decltype(cute::get<0>(tileCoord))::value == 0);
-    static_assert(cArr == cublasdx::row_major);
-    __shared__ TPS stIds[bM];
-    using SCS = cuda::std::conditional_t<cArr == cublasdx::row_major, cute::Stride<cute::Int<bN>, cute::_1>,
-                                         cute::Stride<cute::_1, cute::Int<bM>>>;
-    using SCL = cute::Layout<cute::Shape<cute::Int<bM>, cute::Int<bN>>, SCS>;
-    auto sC = cute::make_tensor(cute::make_smem_ptr(static_cast<Element*>(workspace)),
-                                SCL{});
-    const auto gC = tile::get<bM, bN, cArr>(tokens, bM, H, tileCoord);
-    static_assert(cute::is_compatible<decltype(gC.layout()), decltype(sC.layout())>::value);
-
-    for (int i = threadIdx.x; i < bM; i += threads) {
-      stIds[i] = tokenIndices[i];
-    }
-    // copy processed tile from gmem -> smem
-    cublasdx::copy<threads, ElementAlignment<Element, bN>>(threadIdx.x, gC, sC);
-    cublasdx::copy_wait();
-    __syncthreads();
     if constexpr (c == CombineMode::single) {
       using VTD = VectorTypeDescriptor<typename RawType<Element>::type, ElementAlignment<Element, bN>>;
       using VT = VTD::VectorType;
@@ -258,6 +251,46 @@ namespace flashmoe
         }
       }
     }
+  }
+
+  // MoE combine at tile granularity
+  template <
+    int bM,
+    int bN,
+    int Arch,
+    int threads,
+    CombineMode c,
+    cublasdx::arrangement cArr = cublasdx::row_major,
+    typename Element,
+    typename TileCoord
+  >
+  __device__ __forceinline__
+  void combine(const int& S, const int& H,
+               void* __restrict__ const& workspace,
+               const TPS* __restrict__ const& tokenIndices, // [bM]
+               Element* __restrict__ const& moeOutput, // [S, H] in local HBM
+               const Element* __restrict__ const& tokens, // [bM, H] in local HBM
+               const uint& tileSize, const TileCoord& tileCoord) {
+    static_assert(cute::rank_v<TileCoord> == 2);
+    static_assert(decltype(cute::get<0>(tileCoord))::value == 0);
+    static_assert(cArr == cublasdx::row_major);
+    auto* __restrict__ stIds = combineIds<bM>();
+    using SCS = cuda::std::conditional_t<cArr == cublasdx::row_major, cute::Stride<cute::Int<bN>, cute::_1>,
+                                         cute::Stride<cute::_1, cute::Int<bM>>>;
+    using SCL = cute::Layout<cute::Shape<cute::Int<bM>, cute::Int<bN>>, SCS>;
+    auto sC = cute::make_tensor(cute::make_smem_ptr(static_cast<Element*>(workspace)),
+                                SCL{});
+    const auto gC = tile::get<bM, bN, cArr>(tokens, bM, H, tileCoord);
+    static_assert(cute::is_compatible<decltype(gC.layout()), decltype(sC.layout())>::value);
+
+    for (int i = threadIdx.x; i < bM; i += threads) {
+      stIds[i] = tokenIndices[i];
+    }
+    // copy processed tile from gmem -> smem
+    cublasdx::copy<threads, ElementAlignment<Element, bN>>(threadIdx.x, gC, sC);
+    cublasdx::copy_wait();
+    __syncthreads();
+    combineScatter<bM, bN, Arch, threads, c>(S, H, workspace, stIds, moeOutput, tileSize, tileCoord);
   }
 }
 #endif //FLASHMOE_COMBINE_CUH

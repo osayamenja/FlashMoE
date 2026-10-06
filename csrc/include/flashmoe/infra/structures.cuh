@@ -51,6 +51,20 @@ namespace flashmoe
         return r == QuantRecipe::nvfp4 ? 16 : (r == QuantRecipe::none ? 0 : 32);
     }
 
+    /// The combine of the tokens that a device sends to its own experts is fused into the GEMM1 epilogue: the tiles are
+    /// added to the output directly, with no write to the symmetric heap, no flag and no combine task (see
+    /// processor::start and os::start). It has been measured on SM120/SM121 only: other architectures keep the separate
+    /// combine tasks. Define FLASHMOE_FUSE_LOCAL_COMBINE as 1 (0) to switch the fusion on (off) for every architecture.
+    template <int arch>
+    __host__ __device__ __forceinline__
+    constexpr bool fusesLocalCombine() {
+#if defined(FLASHMOE_FUSE_LOCAL_COMBINE)
+        return FLASHMOE_FUSE_LOCAL_COMBINE != 0;
+#else
+        return arch >= 1200;
+#endif
+    }
+
     /// Packet Encoding Lookup info, retrievable in a single memory lookup
     /// Key is global expert index
     struct __align__(16) PEL {

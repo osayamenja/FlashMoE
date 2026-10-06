@@ -283,7 +283,8 @@ namespace flashmoe::moe
       // call OS
       constexpr auto subscriberCount = threads - scheduler::SCHEDULER_COUNT;
       static_assert(subscriberCount > 0 && subscriberCount % WARP_SIZE == 0);
-      os::start<topo, subscriberCount, threads, bM, Config::PSS::value, typename Config::StagingType>(flashWorkspace,
+      os::start<topo, subscriberCount, threads, bM, Config::PSS::value, typename Config::StagingType,
+        fusesLocalCombine<arch>()>(flashWorkspace,
         kArgs.expertCounts, symHeap, ctx, kArgs.EC,kArgs.I / bN0, kArgs.H / bN1, dispatchBlocks,
         kArgs.E, kArgs.I, processors);
       FLASHMOE_TRACE_END(ctx);
@@ -338,7 +339,8 @@ namespace flashmoe::moe
     (flashWorkspace, kArgs.S, kArgs.H, kArgs.I, roundEC, kArgs.flagColStride, tilesN0, tilesN1,
       expertUp, expertUpV,  biasUp, biasUpV,
       static_cast<AccumType>(kArgs.swishAlpha), static_cast<AccumType>(kArgs.swishBeta),
-      expertDown, biasDown, ctx.tokenIndices, moeOut, producerBM, stateNumber, symHeap, pA, mxA);
+      expertDown, biasDown, ctx.tokenIndices, moeOut, producerBM, stateNumber, static_cast<int>(ctx.epRank), symHeap, pA,
+      mxA);
     __syncthreads();
     FLASHMOE_TRACE_END(ctx);
     if (!threadIdx.x) {
