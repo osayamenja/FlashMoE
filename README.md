@@ -84,7 +84,7 @@ It leverages:
 ### 🏎️ Portability
 
 We support 
-- SM70 and above GPUs. Boosting compute performance for Hopper and Blackwell is on the roadmap.
+- SM70 and above GPUs, including consumer Blackwell (SM120/SM121: RTX 50 series, RTX PRO 6000 Blackwell, DGX Spark). Boosting compute performance for Hopper and Blackwell is on the roadmap.
 - NVLink and multi-node RDMA (EFA, IBGDA, libfabric as NVSHMEM [supports](https://docs.nvidia.com/nvshmem/release-notes-install-guide/install-guide/abstract.html#hardware-requirements)).
 - FP16, BF16, FP32 (TF32) and FP64. FP8 and even lower precision types are on the roadmap (we welcome contributions!)
 

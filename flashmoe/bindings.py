@@ -52,8 +52,9 @@ constexpr auto bK0 = flashmoe::heuristics::getTileK<H, tkCap>();
 constexpr auto bK1 = flashmoe::heuristics::getTileK<I, tkCap>();
 constexpr auto bN0 = flashmoe::heuristics::getTileN<I, Element>();
 constexpr auto bN1 = flashmoe::heuristics::getTileN<H, Element>();
-constexpr auto pSK0 = flashmoe::heuristics::getPipeStages<H, bK0, Arch>();
-constexpr auto pSK1 = flashmoe::heuristics::getPipeStages<I, bK1, Arch>();
+constexpr auto gateCacheBytes = mt == flashmoe::MLPMatmulType::gated ? sizeof(Element) * bM * bN0 : 0;
+constexpr auto pSK0 = flashmoe::heuristics::getPipeStages<H, bK0, Arch, bM, bN0, sizeof(Element), gateCacheBytes>();
+constexpr auto pSK1 = flashmoe::heuristics::getPipeStages<I, bK1, Arch, bM, bN1, sizeof(Element)>();
 
 constexpr auto threadsGEMM0 = flashmoe::tile::suggest_thread_count<bM, bN0, bK0, Arch, Element, AccumType>();
 constexpr auto threadsGEMM1 = flashmoe::tile::suggest_thread_count<bM, bN1, bK1, Arch, Element, AccumType>();
@@ -519,8 +520,9 @@ constexpr auto bK0 = flashmoe::heuristics::getTileK<H, tkCap>();
 constexpr auto bK1 = flashmoe::heuristics::getTileK<I, tkCap>();
 constexpr auto bN0 = flashmoe::heuristics::getTileN<I, Element>();
 constexpr auto bN1 = flashmoe::heuristics::getTileN<H, Element>();
-constexpr auto pSK0 = flashmoe::heuristics::getPipeStages<H, bK0, Arch>();
-constexpr auto pSK1 = flashmoe::heuristics::getPipeStages<I, bK1, Arch>();
+constexpr auto gateCacheBytes = mt == flashmoe::MLPMatmulType::gated ? sizeof(Element) * bM * bN0 : 0;
+constexpr auto pSK0 = flashmoe::heuristics::getPipeStages<H, bK0, Arch, bM, bN0, sizeof(Element), gateCacheBytes>();
+constexpr auto pSK1 = flashmoe::heuristics::getPipeStages<I, bK1, Arch, bM, bN1, sizeof(Element)>();
 constexpr auto roundEC = cute::ceil_div(EC, bM) * bM;
 
 constexpr auto threadsGEMM0 = flashmoe::tile::suggest_thread_count<bM, bN0, bK0, Arch, Element, AccumType>();
