@@ -38,6 +38,12 @@ class QuantType(IntEnum):
     # E4M3 weights and activations with one UE8M0 scale per 32 elements along K (sm_120/sm_121),
     # tokens, bias and output stay in data_type (BF16). See flashmoe.quant.quantize_mxfp8.
     MXFP8 = 1
+    # E2M1 weights and activations with one UE8M0 scale per 32 elements along K (sm_120/sm_121),
+    # tokens, bias and output stay in data_type (BF16). See flashmoe.quant.quantize_mxfp4.
+    MXFP4 = 2
+    # E2M1 weights and activations with one UE4M3 scale per 16 elements along K and one FP32 scale per tensor
+    # (sm_120/sm_121), tokens, bias and output stay in data_type (BF16). See flashmoe.quant.quantize_nvfp4.
+    NVFP4 = 3
 
 class ActivationType(IntEnum):
     IDENTITY = 0
@@ -59,11 +65,21 @@ class ForwardArgs:
     swish_alpha: float = 1.0
     swish_beta: float = 1.0
     stream_ptr: int
-    # QuantType.MXFP8 only: the expert weights above are e4m3 and these are their scale factors,
-    # as returned by flashmoe.quant.quantize_mxfp8
+    # Block-scaled QuantTypes only: the expert weights above are quantized (e4m3 for MXFP8, e2m1 for MXFP4 and NVFP4)
+    # and these are their scale factors, as returned by flashmoe.quant.quantize_mxfp8 / quantize_mxfp4 /
+    # quantize_nvfp4
     local_expert_up_sf: int = 0
     local_expert_up_v_sf: int = 0
     local_expert_down_sf: int = 0
+    # QuantType.NVFP4 only: float32 global decode scale of each expert's weight matrix, [num_local_experts] each,
+    # as returned by flashmoe.quant.quantize_nvfp4
+    local_expert_up_gs: int = 0
+    local_expert_up_v_gs: int = 0
+    local_expert_down_gs: int = 0
+    # QuantType.NVFP4 only: static per-layer global decode scales of the dispatched tokens (input_scale) and of the
+    # output of the first GEMM (interim_scale), calibrated offline, see flashmoe.quant.nvfp4_scale
+    input_scale: float = 1.0
+    interim_scale: float = 1.0
     def __init__(self,
                  mt: MLPType,
                  tokens: int,
@@ -81,13 +97,23 @@ class ForwardArgs:
                  local_bias_up_v: int = None,
                  local_expert_up_sf: int = 0,
                  local_expert_up_v_sf: int = 0,
-                 local_expert_down_sf: int = 0):
+                 local_expert_down_sf: int = 0,
+                 local_expert_up_gs: int = 0,
+                 local_expert_up_v_gs: int = 0,
+                 local_expert_down_gs: int = 0,
+                 input_scale: float = 1.0,
+                 interim_scale: float = 1.0):
         # if GatedMLP, then mlp weights should be specified
         assert not mt == MLPType.GATED or local_expert_up_v is not None
         assert not mt == MLPType.GATED or local_bias_up_v is not None
         self.local_expert_up_sf = local_expert_up_sf
         self.local_expert_up_v_sf = local_expert_up_v_sf
         self.local_expert_down_sf = local_expert_down_sf
+        self.local_expert_up_gs = local_expert_up_gs
+        self.local_expert_up_v_gs = local_expert_up_v_gs
+        self.local_expert_down_gs = local_expert_down_gs
+        self.input_scale = input_scale
+        self.interim_scale = interim_scale
         self.tokens = tokens
         self.expert_counts = expert_counts
         self.local_expert_up = local_expert_up
@@ -147,7 +173,7 @@ class InitArgs:
                  quant: QuantType = QuantType.NONE) -> None:
         from math import ceil
         assert gpu_arch >= 700
-        # the block-scaled MXFP8 path is implemented for sm_120 / sm_121 with bf16 activations
+        # the block-scaled MXFP8, MXFP4 and NVFP4 paths are implemented for sm_120 / sm_121 with bf16 activations
         assert quant == QuantType.NONE or (1200 <= gpu_arch < 1300 and data_type == DataType.BF16)
         self.quant = quant
         self.data_type = data_type

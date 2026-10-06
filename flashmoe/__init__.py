@@ -95,7 +95,12 @@ def forward(handle: ContextHandle, args: ForwardArgs) -> None:
                        stream_ptr=args.stream_ptr,
                        local_expert_up_sf=args.local_expert_up_sf,
                        local_expert_up_v_sf=args.local_expert_up_v_sf,
-                       local_expert_down_sf=args.local_expert_down_sf)
+                       local_expert_down_sf=args.local_expert_down_sf,
+                       local_expert_up_gs=args.local_expert_up_gs,
+                       local_expert_up_v_gs=args.local_expert_up_v_gs,
+                       local_expert_down_gs=args.local_expert_down_gs,
+                       input_scale=args.input_scale,
+                       interim_scale=args.interim_scale)
 
 def finalize(handle: ContextHandle, stream_ptr: int) -> None:
     handle.mod.finalize(handle.context, stream_ptr)

@@ -22,6 +22,66 @@ def get_shared_seed(rank_: int, device_id: int, use_torch: bool) -> int:
         shared_seed = comm.bcast(shared_seed, root=0)
         return shared_seed
 
+QUANT_TYPES = {
+    "none": flashmoe.QuantType.NONE,
+    "mxfp8": flashmoe.QuantType.MXFP8,
+    "mxfp4": flashmoe.QuantType.MXFP4,
+    "nvfp4": flashmoe.QuantType.NVFP4,
+}
+
+def allreduce_max(value: float, device_id: int, use_torch: bool) -> float:
+    """Maximum of a scalar over all ranks."""
+    if flashmoe.cb.get_world_size() == 1:
+        return value
+    if use_torch:
+        import torch.distributed as dist
+        value_tensor = torch.tensor([value], dtype=torch.float32, device=f"cuda:{device_id}")
+        dist.all_reduce(value_tensor, op=dist.ReduceOp.MAX)
+        return float(value_tensor.item())
+    else:
+        from mpi4py import MPI
+        return MPI.COMM_WORLD.allreduce(value, op=MPI.MAX)
+
+def quantize_experts(quant: flashmoe.QuantType, w: torch.Tensor):
+    """Quantizes K-major expert weights [num_local_experts, N, K] with flashmoe.quant, one expert at a time to bound
+    the temporary memory of the torch quantizers (the result is the same as quantizing them at once).
+    Returns (q, sf) for MXFP8 and MXFP4, and (q, sf, gs) for NVFP4, where gs [num_local_experts] float32 is the
+    global decode scale of each expert's matrix."""
+    quantizer = {flashmoe.QuantType.MXFP8: flashmoe.quant.quantize_mxfp8,
+                 flashmoe.QuantType.MXFP4: flashmoe.quant.quantize_mxfp4,
+                 flashmoe.QuantType.NVFP4: flashmoe.quant.quantize_nvfp4}[quant]
+    parts = [quantizer(w[e:e + 1]) for e in range(w.shape[0])]
+    return tuple(torch.cat(p) for p in zip(*parts))
+
+def calibrate_nvfp4_scales(tokens: torch.Tensor,
+                           expert_up: torch.Tensor,
+                           expert_up_v: torch.Tensor,
+                           bias_up: torch.Tensor,
+                           bias_up_v: torch.Tensor,
+                           swish_alpha: float,
+                           swish_beta: float,
+                           device_id: int,
+                           use_torch: bool):
+    """Static per-layer NVFP4 decode scales of the two activations: input_scale of the dispatched tokens x and
+    interim_scale of the output of GEMM0, y = swish_alpha * silu(swish_beta * (x @ Wg^T + bg)) * (x @ Wu^T + bu)
+    with Wg = expert_up and Wu = expert_up_v, which the kernel quantizes as the input of GEMM1. The fused kernel
+    cannot reduce a tensor-wide amax at run time, so, as for ModelOpt, vLLM and FlashInfer checkpoints, these
+    scales are calibrated once offline: nvfp4_scale(amax) = amax / (6 * 448).
+    The amax of y is taken in torch from the unquantized weights over all tokens against every expert, an upper
+    bound of the routed (token, expert) pairs (the routing is not exposed as a tensor). A larger scale costs
+    nothing, a smaller one would clip: block scales saturate at 448. The dispatch quantizes with the sender's
+    input_scale, so the scales are the maximum over all ranks."""
+    x_amax = tokens.abs().amax().float()
+    y_amax = torch.zeros((), dtype=torch.float32, device=tokens.device)
+    for e in range(expert_up.shape[0]):
+        g = (tokens @ expert_up[e].t()).float() + bias_up[e].float()
+        u = (tokens @ expert_up_v[e].t()).float() + bias_up_v[e].float()
+        y = swish_alpha * torch.nn.functional.silu(swish_beta * g) * u
+        y_amax = torch.maximum(y_amax, y.abs().amax())
+    input_scale = flashmoe.quant.nvfp4_scale(allreduce_max(float(x_amax.item()), device_id, use_torch))
+    interim_scale = flashmoe.quant.nvfp4_scale(allreduce_max(float(y_amax.item()), device_id, use_torch))
+    return float(input_scale.item()), float(interim_scale.item())
+
 def run_fused_moe_forward_w_correctness_check(tokens_per_rank: int,
                                               token_dim: int,
                                               ffn_size: int,
@@ -29,7 +89,7 @@ def run_fused_moe_forward_w_correctness_check(tokens_per_rank: int,
                                               k: int,
                                               device_id: int,
                                               use_torch_init: bool=False,
-                                              fp8: bool=False) -> None:
+                                              quant: flashmoe.QuantType=flashmoe.QuantType.NONE) -> None:
     if use_torch_init:
         import torch.distributed as dist, os
         world_size = int(os.environ.get("WORLD_SIZE"))
@@ -65,7 +125,7 @@ def run_fused_moe_forward_w_correctness_check(tokens_per_rank: int,
                                   gpu_arch=arch,
                                   stream_ptr=stream_ptr,
                                   device_id=device_id,
-                                  quant=flashmoe.QuantType.MXFP8 if fp8 else flashmoe.QuantType.NONE)
+                                  quant=quant)
     # call initialize
     flash_handle = flashmoe.initialize(init_args)
     router_handle = flashmoe.router.initialize(init_args)
@@ -115,14 +175,28 @@ def run_fused_moe_forward_w_correctness_check(tokens_per_rank: int,
     local_bias_down = bias_down[
         rank * chunk_size: (rank + 1) * chunk_size
     ].contiguous()
-    sf = {}
-    if fp8:
-        # MXFP8: e4m3 expert weights and their block scales
-        local_expert_up, sf["local_expert_up_sf"] = flashmoe.quant.quantize_mxfp8(local_expert_up)
-        local_expert_up_v, sf["local_expert_up_v_sf"] = flashmoe.quant.quantize_mxfp8(local_expert_up_v)
-        local_expert_down, sf["local_expert_down_sf"] = flashmoe.quant.quantize_mxfp8(local_expert_down)
-        scales = list(sf.values())
-        sf = {name: t.data_ptr() for name, t in sf.items()}
+    swish_alpha, swish_beta = 1.0, 1.0
+    quant_args = {}
+    quant_tensors = []  # ForwardArgs holds raw device pointers only: keep the quantized scales alive
+    if quant != flashmoe.QuantType.NONE:
+        # quantized expert weights (e4m3 for MXFP8, e2m1 for MXFP4 and NVFP4) and their block scales
+        # (NVFP4: plus the float32 global decode scale of each expert's matrix)
+        local_expert_up, *up_aux = quantize_experts(quant, local_expert_up)
+        local_expert_up_v, *up_v_aux = quantize_experts(quant, local_expert_up_v)
+        local_expert_down, *down_aux = quantize_experts(quant, local_expert_down)
+        for name, aux in (("up", up_aux), ("up_v", up_v_aux), ("down", down_aux)):
+            quant_args[f"local_expert_{name}_sf"] = aux[0].data_ptr()
+            if quant == flashmoe.QuantType.NVFP4:
+                quant_args[f"local_expert_{name}_gs"] = aux[1].data_ptr()
+            quant_tensors += aux
+        if quant == flashmoe.QuantType.NVFP4:
+            # static per-layer scales of the activations, calibrated once from the data
+            quant_args["input_scale"], quant_args["interim_scale"] = calibrate_nvfp4_scales(
+                tokens, expert_up, expert_up_v, bias_up, bias_up_v, swish_alpha, swish_beta, device_id,
+                use_torch_init)
+            if rank == 0:
+                print("NVFP4 static scales: input_scale={:.6g}, interim_scale={:.6g}".format(
+                    quant_args["input_scale"], quant_args["interim_scale"]))
     args = flashmoe.ForwardArgs(
         mt=flashmoe.MLPType.GATED,
         tokens=tokens.data_ptr(),
@@ -135,7 +209,9 @@ def run_fused_moe_forward_w_correctness_check(tokens_per_rank: int,
         local_bias_down=local_bias_down.data_ptr(),
         moe_out=moe_out.data_ptr(),
         stream_ptr=stream_ptr,
-        **sf
+        swish_alpha=swish_alpha,
+        swish_beta=swish_beta,
+        **quant_args
     )
     rfa = flashmoe.router.RouterForwardArgs(tokens=tokens.data_ptr(),
                                             weights=router_weights.data_ptr(),
@@ -169,8 +245,8 @@ def run_fused_moe_forward_w_correctness_check(tokens_per_rank: int,
     # compare fused kernel and reference
     match_count = (torch.isclose(moe_out, ref_out, rtol=8e-2, atol=8e-3)).sum().item()
     error_p = 1.0 - (match_count / (tokens_per_rank * token_dim))
-    if fp8:
-        # against the unquantized reference, the MXFP8 quantization error dominates: report it instead
+    if quant != flashmoe.QuantType.NONE:
+        # against the unquantized reference, the quantization error dominates: report it instead
         rel_frob = (moe_out.float() - ref_out.float()).norm() / ref_out.float().norm()
         print("{}, {:.4f}%, relative Frobenius error vs {}: {:.2f}%".format(rank, error_p, data_type.name,
                                                                          100 * rel_frob.item()))
@@ -318,8 +394,16 @@ def run_fused_moe_forward(tokens_per_rank: int,
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--torch-init", action="store_true")
-    parser.add_argument("--fp8", action="store_true", help="MXFP8 expert weights and activations (sm_120/sm_121)")
+    parser.add_argument("--quant", choices=list(QUANT_TYPES), default="none",
+                        help="block-scaled expert weights and activations (sm_120/sm_121, BF16 tokens): "
+                             "MXFP8 (e4m3, ue8m0 per 32), MXFP4 (e2m1, ue8m0 per 32) or "
+                             "NVFP4 (e2m1, ue4m3 per 16 + an FP32 tensor scale)")
+    parser.add_argument("--fp8", action="store_true", help="alias for --quant mxfp8")
     args = parser.parse_args()
+    if args.fp8:
+        if args.quant not in ("none", "mxfp8"):
+            parser.error("--fp8 is an alias for --quant mxfp8 and conflicts with --quant {}".format(args.quant))
+        args.quant = "mxfp8"
 
     # LLama4-Scout-17B-16E shapes
     tokens_per_rank_ = 1024
@@ -330,7 +414,7 @@ def main():
     device_id_ = flashmoe.get_local_rank()
     # call kernel
     run_fused_moe_forward_w_correctness_check(tokens_per_rank_, token_dim_, ffn_size_, num_experts_, k_, device_id_,
-                                              args.torch_init, args.fp8)
+                                              args.torch_init, QUANT_TYPES[args.quant])
 
 if __name__ == "__main__":
     main()
