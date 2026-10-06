@@ -10,6 +10,7 @@
 #define FLASHMOE_SUBSCRIBER_CUH
 #include <cuda/atomic>
 #include <nvshmem.h>
+#include <cute/numeric/numeric_types.hpp>
 
 #include "infra/atomics.cuh"
 #include "infra/bitset.cuh"
@@ -98,7 +99,8 @@ namespace flashmoe::subscriber
   }
 
   /// Decodes a single packet from the initial stage
-  /// StagingElement is the element type of GEMM0Staging, i.e., of the GEMM0 output, which is E4M3 for MXFP8
+  /// StagingElement is the element type of GEMM0Staging, i.e., of the GEMM0 output, which is E4M3 for MXFP8 and
+  /// E2M1 for MXFP4 and NVFP4
   template <
     int subscriberCount,
     PacketStage s,
@@ -125,8 +127,10 @@ namespace flashmoe::subscriber
       const auto sO = args.ecTilesM * (peer * args.nLx + ingredients.localExpertIdx);
       cuda::std::array<cuda::std::byte*, GEMMs> taskResults{};
       // Staging buffer for results of GEMM0
-      // [roundEC, I] per (peer, expert); its MXFP8 scale factors are in Context::GEMM0StagingSF
-      const size_t stagingOffset = static_cast<size_t>(args.roundEC) * args.I * sizeof(StagingElement) *
+      // [roundEC, I] per (peer, expert); its block scale factors are in Context::GEMM0StagingSF
+      // Bytes of one slot: the bit count is multiplied first, since a 4-bit element is half a byte.
+      const size_t stagingOffset = (static_cast<size_t>(args.roundEC) * args.I *
+          static_cast<size_t>(cute::sizeof_bits_v<StagingElement>)) / 8 *
         static_cast<size_t>(peer * args.nLx + ingredients.localExpertIdx);
       taskResults[0] = args.GEMM0Staging + stagingOffset;
       // Egress packet buffer

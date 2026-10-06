@@ -27,7 +27,9 @@ namespace flashmoe::moe
     typename GEMM0Tile, // cute::Shape<bM,bN,bK,pipeStages>
     typename GEMM1Tile, // cute::Shape<bM,bN,bK,pipeStages>
     int processor_state_size = scheduler::PROCESSOR_STATE_SIZE, // ceil(#CTAS / WARP_SIZE)
-    QuantRecipe qr = QuantRecipe::none // mxfp8: E4M3 weights and activations, bias, output and Element stay bf16
+    // mxfp8: E4M3 weights and activations; mxfp4, nvfp4: E2M1 weights and activations.
+    // Bias, output and Element stay bf16
+    QuantRecipe qr = QuantRecipe::none
   >
   struct MoEConfig {
     static_assert(cute::is_tuple_v<GEMM0Tile> && cute::rank_v<GEMM0Tile> == 4);
@@ -35,8 +37,8 @@ namespace flashmoe::moe
     static_assert(cute::is_tuple_v<GEMM1Tile> && cute::rank_v<GEMM1Tile> == 4);
     using G1TS = GEMM1Tile;
     static_assert(cute::get<0>(GEMM0Tile{}) == cute::get<0>(GEMM1Tile{}));
-    static_assert(qr == QuantRecipe::none || (cuda::std::is_same_v<Element, __nv_bfloat16> &&
-      cute::get<0>(GEMM0Tile{}) == mx::SF_ROW_TILE), "MXFP8 requires bf16 activations and bM == 128");
+    static_assert(!isBlockScaled(qr) || (cuda::std::is_same_v<Element, __nv_bfloat16> &&
+      cute::get<0>(GEMM0Tile{}) == mx::SF_ROW_TILE), "Block-scaled recipes require bf16 activations and bM == 128");
     using Arch = cute::Int<arch>;
     using Threads = cute::Int<_threads>;
     using CM = cute::C<cm>;
@@ -44,7 +46,10 @@ namespace flashmoe::moe
     using QR = cute::C<qr>;
     using DType = Element;
     // element type of GEMM0Staging, i.e., of the GEMM0 output and the GEMM1 input
-    using StagingType = cuda::std::conditional_t<qr == QuantRecipe::mxfp8, __nv_fp8_e4m3, Element>;
+    using StagingType = cuda::std::conditional_t<qr == QuantRecipe::mxfp8, __nv_fp8_e4m3,
+      cuda::std::conditional_t<isFP4(qr), cutlass::float_e2m1_t, Element>>;
+    // GEMM0Staging is sized in bits, see bootstrap::initialize and the subscriber
+    static_assert(!isBlockScaled(qr) || cute::sizeof_bits_v<StagingType> == quantElementBits(qr));
     using AccumType = cuda::std::conditional_t<cuda::std::is_same_v<Element, double>, double, float>;
     using PSS = cute::Int<processor_state_size>;
   };
@@ -59,6 +64,15 @@ namespace flashmoe::moe
     const auto alignment = supports32 ? 32 : 16;
     if (p == nullptr || !cuda::is_aligned(p, alignment)) {
       printf("Pointer is not %d-byte aligned\n", alignment);
+      cuda::std::terminate();
+    }
+  }
+
+  /// For arrays that only need their natural alignment, e.g., the FP32 per-expert scales
+  __host__ __forceinline__
+  auto checkAlignmentBytes(const void *const&p, const size_t& alignment) {
+    if (p == nullptr || !cuda::is_aligned(p, alignment)) {
+      printf("Pointer is not %zu-byte aligned\n", alignment);
       cuda::std::terminate();
     }
   }
@@ -83,10 +97,14 @@ namespace flashmoe::moe
     using Element = Config::DType;
 
     constexpr int bM = bM0;
-    // MXFP8: the block-scaled mainloops have their own pipelines, see processor::start
+    // Block-scaled recipes: the mainloops have their own pipelines, see processor::start
     constexpr size_t GEMM0Sz = [] {
       if constexpr (Config::QR::value == QuantRecipe::mxfp8) {
         return static_cast<size_t>(tile::sm120::MXFP8GEMM0<bM, bN0, threads, mt == MLPMatmulType::gated>::sharedSize);
+      }
+      else if constexpr (isFP4(Config::QR::value)) {
+        return static_cast<size_t>(tile::sm120::FP4GEMM0<Config::QR::value, bM, bN0, threads,
+          mt == MLPMatmulType::gated>::sharedSize);
       }
       else {
         return static_cast<size_t>(cutlass::round_up(cute::max(sizeof(Element) * bK0 * pSK0 * (bM + bN0),
@@ -97,6 +115,9 @@ namespace flashmoe::moe
     constexpr size_t GEMM1Sz = [] {
       if constexpr (Config::QR::value == QuantRecipe::mxfp8) {
         return static_cast<size_t>(tile::sm120::MXFP8GEMM1<bM, bN1, threads>::sharedSize);
+      }
+      else if constexpr (isFP4(Config::QR::value)) {
+        return static_cast<size_t>(tile::sm120::FP4GEMM1<Config::QR::value, bM, bN1, threads>::sharedSize);
       }
       else {
         return static_cast<size_t>(cutlass::round_up(cute::max(sizeof(Element) * bK1 * pSK1 * (bM + bN1),
@@ -130,14 +151,19 @@ namespace flashmoe::moe
       const int& arch, const MLPMatmulType& m, const int& bM, const float& swishAlpha, const float& swishBeta,
       const bool check = true,
       const cuda::std::byte* const& expert_up_sf = nullptr, const cuda::std::byte* const& expert_up_v_sf = nullptr,
-      const cuda::std::byte* const& expert_down_sf = nullptr)
+      const cuda::std::byte* const& expert_down_sf = nullptr,
+      const float* const& expert_up_gs = nullptr, const float* const& expert_up_v_gs = nullptr,
+      const float* const& expert_down_gs = nullptr,
+      const float& input_scale = 1.f, const float& interim_scale = 1.f)
       : tokens(tokens),
         expertUpWeights(expert_up_weights),
         expertUpVWeights(expert_up_v_weights),
         expertUpSF(expert_up_sf), expertUpVSF(expert_up_v_sf),
+        expertUpGS(expert_up_gs), expertUpVGS(expert_up_v_gs),
         biasUp(bias_up), biasUpV(bias_up_v),
         expertDownWeights(expert_down_weights),
         expertDownSF(expert_down_sf),
+        expertDownGS(expert_down_gs),
         biasDown(bias_down),
         expertCounts(expert_counts),
         moeOut(moe_out),
@@ -147,7 +173,8 @@ namespace flashmoe::moe
         E(static_cast<uint>(e)),
         EC(static_cast<uint>(ec)),
         flagColStride(cute::ceil_div(EC, bM) * E),
-        swishAlpha(swishAlpha), swishBeta(swishBeta) {
+        swishAlpha(swishAlpha), swishBeta(swishBeta),
+        inputScale(input_scale), interimScale(interim_scale) {
       if (check) {
         const auto supports32 = arch >= 1000;
         checkAlignment(tokens, supports32);
@@ -157,13 +184,21 @@ namespace flashmoe::moe
           checkAlignment(bias_up_v);
         }
         checkAlignment(expert_down_weights);
-        // MXFP8: the weights are e4m3 and these are their scale factors
+        // Block-scaled recipes: the weights are quantized and these are their scale factors
         if (expert_up_sf != nullptr) {
           checkAlignment(expert_up_sf);
           if (m == MLPMatmulType::gated) {
             checkAlignment(expert_up_v_sf);
           }
           checkAlignment(expert_down_sf);
+        }
+        // nvfp4: per-expert FP32 decode scales of the weights
+        if (expert_up_gs != nullptr) {
+          checkAlignmentBytes(expert_up_gs, alignof(float));
+          if (m == MLPMatmulType::gated) {
+            checkAlignmentBytes(expert_up_v_gs, alignof(float));
+          }
+          checkAlignmentBytes(expert_down_gs, alignof(float));
         }
         checkAlignment(bias_up);
         checkAlignment(bias_down);
@@ -173,17 +208,24 @@ namespace flashmoe::moe
     }
 
     const cuda::std::byte* const tokens; // [S, H]
-    // MXFP8: the weights are e4m3 (1 byte per element), with the same shapes. Each [N, K] weight matrix is K-major,
-    // i.e., row-major with N rows, and has one UE8M0 scale per 32 consecutive K elements, stored in the
-    // canonical layout of a [N, K / 32] matrix (mx::sfOffset) right after one another.
+    // Block-scaled recipes: the weights are quantized, with the same shapes: e4m3 (1 byte per element) for mxfp8,
+    // e2m1 (2 elements per byte, the even K element in the low nibble) for mxfp4 and nvfp4.
+    // Each [N, K] weight matrix is K-major, i.e., row-major with N rows, and has one scale per sfVec (quantSFVecSize)
+    // consecutive K elements: UE8M0 per 32 (mxfp8, mxfp4) or UE4M3 per 16 (nvfp4), stored in the canonical layout of a
+    // [N, K / sfVec] matrix (mx::sfOffset) right after one another.
     const cuda::std::byte* const expertUpWeights; // [num_local_experts, H, I]
     const cuda::std::byte* const expertUpVWeights; // [num_local_experts, H, I]
-    const cuda::std::byte* const expertUpSF; // MXFP8: [num_local_experts, mx::sfBytes(I, H / 32)]
-    const cuda::std::byte* const expertUpVSF; // MXFP8: [num_local_experts, mx::sfBytes(I, H / 32)]
+    const cuda::std::byte* const expertUpSF; // [num_local_experts, mx::sfBytes(I, H / sfVec)]
+    const cuda::std::byte* const expertUpVSF; // [num_local_experts, mx::sfBytes(I, H / sfVec)]
+    // nvfp4 only: FP32 decode scale of each expert's weight matrix: a dequantized element is
+    // e2m1 * float(scale factor) * gs
+    const float* const expertUpGS; // [num_local_experts]
+    const float* const expertUpVGS; // [num_local_experts]
     const cuda::std::byte* const biasUp; // [num_local_experts, I]
     const cuda::std::byte* const biasUpV; // [num_local_experts, I]
     const cuda::std::byte* const expertDownWeights; // [num_local_experts, I, H]
-    const cuda::std::byte* const expertDownSF; // MXFP8: [num_local_experts, mx::sfBytes(H, I / 32)]
+    const cuda::std::byte* const expertDownSF; // [num_local_experts, mx::sfBytes(H, I / sfVec)]
+    const float* const expertDownGS; // nvfp4 only: [num_local_experts]
     const cuda::std::byte* const biasDown; // [num_local_experts, H]
     const int* const expertCounts; // [E]
     cuda::std::byte* const moeOut; //  [S, H]
@@ -195,6 +237,10 @@ namespace flashmoe::moe
     const uint flagColStride; // ceil(EC / bM) * E
     const float swishAlpha = 1.f;
     const float swishBeta = 1.f;
+    // nvfp4 only: static per-layer decode scales of the activations, i.e., a dequantized element is
+    // e2m1 * float(scale factor) * inputScale (dispatched tokens) or * interimScale (GEMM0 output)
+    const float inputScale = 1.f;
+    const float interimScale = 1.f;
   };
 
   template <
@@ -225,7 +271,8 @@ namespace flashmoe::moe
     constexpr auto recipe = Config::QR::value;
     const auto symHeap = Heap{
       ctx.symHeap, ctx.nLx, roundEC, kArgs.H, sizeof(DataType),
-      recipe == QuantRecipe::mxfp8 ? ctx.symHeapSFOffset : 0
+      isBlockScaled(recipe) ? ctx.symHeapSFOffset : 0,
+      isBlockScaled(recipe) ? quantSFVecSize(recipe) : mx::BLOCK_SIZE
     };
     const auto processors = gridDim.x - 1;
     const auto dispatchProcessors = cute::max((processors * 3) / 4, 1); // 75%
@@ -245,7 +292,8 @@ namespace flashmoe::moe
       // dispatch
       dispatch<topo, Config::Threads::value, bM, bN0, recipe>(kArgs.H, kArgs.E, symHeap, kArgs.EC, roundEC,
         ctx.epRank, ctx.world, superBlockSize, dispatchBlocks, tokens, ctx.signals, kArgs.expertCounts,
-        ctx.tokenIndices, ctx.dispatchSync, ctx.pel, flashWorkspace, stateNumber);
+        ctx.tokenIndices, ctx.dispatchSync, ctx.pel, flashWorkspace, stateNumber,
+        recipe == QuantRecipe::nvfp4 ? fp4::nvfp4EncodeScale(kArgs.inputScale) : 1.f);
     }
     const auto pA = processor::ProcessorArgs{
       ctx.statusQueue + blockIdx.x,
@@ -274,12 +322,14 @@ namespace flashmoe::moe
     const auto* __restrict__ expertDown = reinterpret_cast<const DataType*>(kArgs.expertDownWeights);
     const auto* __restrict__ biasDown = reinterpret_cast<const DataType*>(kArgs.biasDown);
     auto* __restrict__ moeOut = reinterpret_cast<DataType*>(kArgs.moeOut);
-    const auto mxA = processor::MXFP8Args{
+    const auto mxA = processor::QuantArgs{
       reinterpret_cast<const uint8_t*>(kArgs.expertUpSF),
       reinterpret_cast<const uint8_t*>(kArgs.expertUpVSF),
       reinterpret_cast<const uint8_t*>(kArgs.expertDownSF),
       reinterpret_cast<uint8_t*>(ctx.GEMM0StagingSF),
-      ctx.nLx
+      ctx.nLx,
+      kArgs.expertUpGS, kArgs.expertUpVGS, kArgs.expertDownGS,
+      kArgs.inputScale, kArgs.interimScale
     };
     // processor
     processor::start<Config::MT::value, topo, threads, Config::CM::value, TileGEMM0, TileGEMM1, GEMM0Act, recipe>

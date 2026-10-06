@@ -18,6 +18,7 @@
 #include "infra/task.cuh"
 #include "tile.cuh" // cublasdx and tileGEMM
 #include "tile_sm120_mxfp8.cuh" // block-scaled MXFP8 tile GEMM
+#include "tile_sm120_fp4.cuh" // block-scaled MXFP4 / NVFP4 tile GEMM
 #include "infra/tq.cuh"
 
 namespace flashmoe::processor
@@ -213,13 +214,22 @@ namespace flashmoe::processor
     }
   }
 
-  // MXFP8 only: scale factors of the e4m3 expert weights and of GEMM0Staging, see moe::KernelArgs and Context
-  struct MXFP8Args {
-    const uint8_t* upSF = nullptr; // [num_local_experts, mx::sfBytes(I, H / 32)]
-    const uint8_t* upVSF = nullptr; // [num_local_experts, mx::sfBytes(I, H / 32)]
-    const uint8_t* downSF = nullptr; // [num_local_experts, mx::sfBytes(H, I / 32)]
-    uint8_t* stagingSF = nullptr; // [world, num_local_experts, mx::sfBytes(roundEC, I / 32)]
+  // Block-scaled recipes only: scale factors of the quantized expert weights and of GEMM0Staging, and for nvfp4 the
+  // per-tensor scales, see moe::KernelArgs and Context
+  struct QuantArgs {
+    // sfVec is the number of K elements per scale factor: 32 (mxfp8, mxfp4) or 16 (nvfp4)
+    const uint8_t* upSF = nullptr; // [num_local_experts, mx::sfBytes(I, H / sfVec)]
+    const uint8_t* upVSF = nullptr; // [num_local_experts, mx::sfBytes(I, H / sfVec)]
+    const uint8_t* downSF = nullptr; // [num_local_experts, mx::sfBytes(H, I / sfVec)]
+    uint8_t* stagingSF = nullptr; // [world, num_local_experts, mx::sfBytes(roundEC, I / sfVec)]
     uint nLx = 0; // number of local experts
+    // nvfp4 only: FP32 decode scales of the weights, one per local expert
+    const float* upGS = nullptr; // [num_local_experts]
+    const float* upVGS = nullptr; // [num_local_experts]
+    const float* downGS = nullptr; // [num_local_experts]
+    // nvfp4 only: static decode scale of the dispatched tokens and of the GEMM0 output
+    float inputScale = 1.f;
+    float interimScale = 1.f;
   };
 
   template <
@@ -255,7 +265,7 @@ namespace flashmoe::processor
              Element* __restrict__ const& moeOutput,
              const PBM& producerBitMap,
              const uint8_t& stateNumber,
-             const Heap& symHeap, const ProcessorArgs& pA, const MXFP8Args& mxA = {}) {
+             const Heap& symHeap, const ProcessorArgs& pA, const QuantArgs& mxA = {}) {
     static_assert(sizeof(Task) % sizeof(uint4) == 0 && alignof(Task) % alignof(uint4) == 0);
     static_assert(cuda::std::is_trivially_copyable_v<Task>);
     __shared__ Task currentTask;
@@ -273,6 +283,8 @@ namespace flashmoe::processor
     using SQT = cuda::std::underlying_type_t<flashmoe::ReadySignal>;
     constexpr auto taskWidth = sizeof(Task) / sizeof(uint4);
     const size_t expertWeightSize = static_cast<size_t>(I) * H;
+    // bytes of one expert's weight matrix: E2M1 (mxfp4, nvfp4) packs two elements per byte
+    [[maybe_unused]] const size_t expertWeightBytes = expertWeightSize * quantElementBits(recipe) / 8;
     static_assert(taskWidth > 0 && taskWidth < WARP_SIZE);
     while (!tqs.interrupt) {
       if (threadIdx.x / WARP_SIZE == 0) {
@@ -352,6 +364,58 @@ namespace flashmoe::processor
               MXGEMM0::template epilogueMXFP8<Activation>(acc, cP, sfcP, biasP, task.M(), I, tileCoord);
             }
           }
+          else if constexpr (isFP4(recipe)) {
+            // block-scaled FP4 GEMM0, the epilogue quantizes the result into the E2M1 A operand of GEMM1
+            constexpr int bM = cute::get<0>(typename TileGEMM0::TileShape{});
+            constexpr int bN = cute::get<1>(typename TileGEMM0::TileShape{});
+            constexpr bool isGated = mt == MLPMatmulType::gated;
+            constexpr int sfVec = quantSFVecSize(recipe);
+            using FPGEMM0 = tile::sm120::FP4GEMM0<recipe, bM, bN, threads, isGated>;
+            const auto expert = task.localExpertIdx();
+            const auto slot = static_cast<size_t>(task.localPeerIdx()) * mxA.nLx + expert;
+            // A: dispatched E2M1 tokens with an H / 2-byte row pitch and their scale factors
+            const auto* __restrict__ aP = reinterpret_cast<const uint8_t*>(task.aData);
+            const auto* __restrict__ sfaP = reinterpret_cast<const uint8_t*>(
+              symHeap.advanceSF<0, 1>(task.localPeerIdx(), expert));
+            // B: E2M1 weights, [I, H / 2 bytes] (K-major) per expert
+            const size_t sfUpBytes = mx::sfBytes(I, H / sfVec);
+            const auto* __restrict__ bP = reinterpret_cast<const uint8_t*>(expertUpWeights) +
+              expertWeightBytes * expert;
+            const auto* __restrict__ sfbP = mxA.upSF + sfUpBytes * expert;
+            // C: E2M1 staging with an I / 2-byte row pitch and its scale factors
+            auto* __restrict__ cP = reinterpret_cast<uint8_t*>(task.cData[0]);
+            auto* __restrict__ sfcP = mxA.stagingSF + mx::sfBytes(roundEC, I / sfVec) * slot;
+            const auto* __restrict__ biasP = biasUp + static_cast<size_t>(I) * expert;
+            // nvfp4: the accumulator is scaled by the decode scales of A and B, and the output by the encode scale
+            // of the GEMM0 output tensor; mxfp4 has no tensor scales
+            float alphaG = 1.f;
+            float alphaU = 1.f;
+            float st = 1.f;
+            if constexpr (recipe == QuantRecipe::nvfp4) {
+              alphaG = mxA.inputScale * mxA.upGS[expert];
+              if constexpr (isGated) {
+                alphaU = mxA.inputScale * mxA.upVGS[expert];
+              }
+              st = fp4::nvfp4EncodeScale(mxA.interimScale);
+            }
+            const auto tileCoord = tile::idx2Coord(task.M() / bM, I / bN, task.tileIdx);
+            constexpr FPGEMM0 mainloop{};
+            auto acc = FPGEMM0::makeAccumulator();
+            if constexpr (isGated) {
+              const auto* __restrict__ bPv = reinterpret_cast<const uint8_t*>(expertUpVWeights) +
+                expertWeightBytes * expert;
+              const auto* __restrict__ sfbPv = mxA.upVSF + sfUpBytes * expert;
+              const auto* __restrict__ biasPv = biasUpV + static_cast<size_t>(I) * expert;
+              auto acc2 = FPGEMM0::makeAccumulator();
+              mainloop(workspace, aP, sfaP, bP, sfbP, bPv, sfbPv, acc, acc2, task.M(), I, H, tileCoord);
+              FPGEMM0::template epilogueGatedFP4<Activation>(acc, acc2, cP, sfcP, biasP, biasPv, alphaG, alphaU,
+                swishAlpha, swishBeta, st, task.M(), I, tileCoord);
+            }
+            else {
+              mainloop(workspace, aP, sfaP, bP, sfbP, acc, task.M(), I, H, tileCoord);
+              FPGEMM0::template epilogueFP4<Activation>(acc, cP, sfcP, biasP, alphaG, st, task.M(), I, tileCoord);
+            }
+          }
           else {
             const auto* aP = reinterpret_cast<const Element*>(task.aData);
             const auto* bP = expertUpWeights + expertWeightSize * task.localExpertIdx();
@@ -415,6 +479,34 @@ namespace flashmoe::processor
             auto acc = MXGEMM1::makeAccumulator();
             mainloop(workspace, aP, sfaP, bP, sfbP, acc, task.M(), H, I, tileCoord);
             MXGEMM1::template epilogueBF16<cublasdx::identity>(acc, cP, biasP, task.M(), H, tileCoord);
+          }
+          else if constexpr (isFP4(recipe)) {
+            // block-scaled FP4 GEMM1 with a bf16 output, so combine is unchanged
+            constexpr int bM = cute::get<0>(typename TileGEMM1::TileShape{});
+            constexpr int bN = cute::get<1>(typename TileGEMM1::TileShape{});
+            constexpr int sfVec = quantSFVecSize(recipe);
+            using FPGEMM1 = tile::sm120::FP4GEMM1<recipe, bM, bN, threads>;
+            const auto expert = task.localExpertIdx();
+            const auto slot = static_cast<size_t>(task.localPeerIdx()) * mxA.nLx + expert;
+            // A: the E2M1 GEMM0 staging and its scale factors
+            const auto* __restrict__ aP = reinterpret_cast<const uint8_t*>(task.aData);
+            const auto* __restrict__ sfaP = mxA.stagingSF + mx::sfBytes(roundEC, I / sfVec) * slot;
+            // B: E2M1 weights, [H, I / 2 bytes] (K-major) per expert
+            const auto* __restrict__ bP = reinterpret_cast<const uint8_t*>(expertDownWeights) +
+              expertWeightBytes * expert;
+            const auto* __restrict__ sfbP = mxA.downSF + mx::sfBytes(H, I / sfVec) * expert;
+            auto* __restrict__ cP = reinterpret_cast<Element*>(task.cData[1]);
+            const auto* __restrict__ biasP = biasDown + static_cast<size_t>(H) * expert;
+            // nvfp4: decode scales of the GEMM0 output (A) and of the down weights (B)
+            float alpha = 1.f;
+            if constexpr (recipe == QuantRecipe::nvfp4) {
+              alpha = mxA.interimScale * mxA.downGS[expert];
+            }
+            const auto tileCoord = tile::idx2Coord(task.M() / bM, H / bN, task.tileIdx);
+            constexpr FPGEMM1 mainloop{};
+            auto acc = FPGEMM1::makeAccumulator();
+            mainloop(workspace, aP, sfaP, bP, sfbP, acc, task.M(), H, I, tileCoord);
+            FPGEMM1::template epilogueBF16<cublasdx::identity>(acc, cP, biasP, alpha, task.M(), H, tileCoord);
           }
           else {
             const auto* aP = reinterpret_cast<const Element*>(task.aData);
