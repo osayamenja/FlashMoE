@@ -42,28 +42,33 @@ constexpr auto topo = flashmoe::defineTopology<$topo>(); // jit value
 constexpr auto mt = flashmoe::defineMLPType<$mt>(); // jit value
 using Element = flashmoe::DataType<$dt>::Type; // jit value
 constexpr auto act = flashmoe::defineAct<$act>(); // jit value
+// MXFP8: e4m3 weights and activations with UE8M0 block scales (sm_12x), bf16 tokens, bias and output
+constexpr auto qr = $quant == 1 ? flashmoe::QuantRecipe::mxfp8 : flashmoe::QuantRecipe::none; // jit value
 using AccumType = cuda::std::conditional_t<cuda::std::is_same_v<Element, double>, double, float>;
 constexpr auto cm = topK > 1 ? flashmoe::CombineMode::plural : flashmoe::CombineMode::single;
 
-// tile shapes
-constexpr auto bM = flashmoe::heuristics::getMoETileM<S, Arch>();
+// tile shapes, the block-scaled mainloop needs bM = 128
+constexpr auto bM = qr == flashmoe::QuantRecipe::mxfp8 ? 128 : flashmoe::heuristics::getMoETileM<S, Arch>();
 constexpr auto tkCap = cuda::std::is_same_v<Element, double> ? 32 : (mt == flashmoe::MLPMatmulType::vanilla ? 64 : (Arch >= 900 ? 64 : 32));
 constexpr auto bK0 = flashmoe::heuristics::getTileK<H, tkCap>();
 constexpr auto bK1 = flashmoe::heuristics::getTileK<I, tkCap>();
 constexpr auto bN0 = flashmoe::heuristics::getTileN<I, Element>();
 constexpr auto bN1 = flashmoe::heuristics::getTileN<H, Element>();
-constexpr auto pSK0 = flashmoe::heuristics::getPipeStages<H, bK0, Arch>();
-constexpr auto pSK1 = flashmoe::heuristics::getPipeStages<I, bK1, Arch>();
+constexpr auto gateCacheBytes = mt == flashmoe::MLPMatmulType::gated ? sizeof(Element) * bM * bN0 : 0;
+constexpr auto pSK0 = flashmoe::heuristics::getPipeStages<H, bK0, Arch, bM, bN0, sizeof(Element), gateCacheBytes>();
+constexpr auto pSK1 = flashmoe::heuristics::getPipeStages<I, bK1, Arch, bM, bN1, sizeof(Element)>();
 
 constexpr auto threadsGEMM0 = flashmoe::tile::suggest_thread_count<bM, bN0, bK0, Arch, Element, AccumType>();
 constexpr auto threadsGEMM1 = flashmoe::tile::suggest_thread_count<bM, bN1, bK1, Arch, Element, AccumType>();
-constexpr auto threads = cute::max(threadsGEMM0, threadsGEMM1, 64);
+constexpr auto threads = qr == flashmoe::QuantRecipe::mxfp8 ? flashmoe::tile::sm120::MXFP8Threads :
+  cute::max(threadsGEMM0, threadsGEMM1, 64);
 
 // [S, H] x [H, I] -> [S, I]
 using GEMM0Tile = cute::Shape<cute::Int<bM>, cute::Int<bN0>, cute::Int<bK0>, cute::Int<pSK0>>;
 // [S, I] x [I, H] -> [S, H]
 using GEMM1Tile = cute::Shape<cute::Int<bM>, cute::Int<bN1>, cute::Int<bK1>, cute::Int<pSK1>>;
-using Config = flashmoe::moe::MoEConfig<Element, Arch, threads, cm, mt, GEMM0Tile, GEMM1Tile>;
+using Config = flashmoe::moe::MoEConfig<Element, Arch, threads, cm, mt, GEMM0Tile, GEMM1Tile,
+  flashmoe::scheduler::PROCESSOR_STATE_SIZE, qr>;
 
 static std::uintptr_t moe_initialize(const size_t& numExperts, const size_t& EC,
   const int& epWorld, const int& myPE, const int& epRank, const int& devId, const int& nLx,
@@ -102,7 +107,7 @@ static std::uintptr_t moe_initialize(const size_t& numExperts, const size_t& EC,
     blocks, smemSize, static_cast<uint16_t>(epRank),
     static_cast<uint16_t>(epWorld), static_cast<uint16_t>(myPE),
     static_cast<uint16_t>(numExperts), static_cast<uint16_t>(nLx),
-    topo
+    topo, qr
   };
   const auto moeContext = flashmoe::initialize(args, Arch,expertToEpRank.data(), epRankToGlobalRank.data(), stream);
   auto* heapCtx = new flashmoe::Context(moeContext);
@@ -120,10 +125,17 @@ static void moe_forward(const std::uintptr_t& raw_ctx,
   const std::uintptr_t& localBiasDown,
   const std::uintptr_t& moeOut,
   const float& swishAlpha, const float& swishBeta,
-  const std::uintptr_t& stream_ptr) {
+  const std::uintptr_t& stream_ptr,
+  const std::uintptr_t& localExpertUpSF,
+  const std::uintptr_t& localExpertUpVSF,
+  const std::uintptr_t& localExpertDownSF) {
   const auto* ctx = reinterpret_cast<flashmoe::Context*>(raw_ctx);
   auto stream = reinterpret_cast<cudaStream_t>(stream_ptr);
   constexpr auto isGated = mt == flashmoe::MLPMatmulType::gated;
+  if (qr == flashmoe::QuantRecipe::mxfp8 && (localExpertUpSF == 0 || localExpertDownSF == 0 ||
+    (isGated && localExpertUpVSF == 0))) {
+    throw std::invalid_argument("MXFP8 requires the scale factors of the expert weights");
+  }
   const flashmoe::moe::KernelArgs kArgs{
     reinterpret_cast<const cuda::std::byte*>(tokens),
     reinterpret_cast<const cuda::std::byte*>(localExpertUpWeights),
@@ -133,7 +145,10 @@ static void moe_forward(const std::uintptr_t& raw_ctx,
     reinterpret_cast<const cuda::std::byte*>(localExpertDownWeights),
     reinterpret_cast<const cuda::std::byte*>(localBiasDown),
     reinterpret_cast<const int*>(expertCounts), reinterpret_cast<cuda::std::byte*>(moeOut),
-    S, H, I, E, EC, Arch, mt, bM, isGated ? swishAlpha : 1.f, isGated ? swishBeta : 1.f, false
+    S, H, I, E, EC, Arch, mt, bM, isGated ? swishAlpha : 1.f, isGated ? swishBeta : 1.f, false,
+    reinterpret_cast<const cuda::std::byte*>(localExpertUpSF),
+    reinterpret_cast<const cuda::std::byte*>(localExpertUpVSF),
+    reinterpret_cast<const cuda::std::byte*>(localExpertDownSF)
   };
 
   flashmoe::moe::forwardHost<Config, topo, act>(kArgs, *ctx, stream);
@@ -174,9 +189,12 @@ PYBIND11_MODULE($mod_name, m) {
     py::arg("local_expert_down"), 
     py::arg("local_bias_down"), 
     py::arg("moe_out"),
-    py::arg("swish_alpha"), 
+    py::arg("swish_alpha"),
     py::arg("swish_beta"),
-    py::arg("stream_ptr"));
+    py::arg("stream_ptr"),
+    py::arg("local_expert_up_sf") = 0,
+    py::arg("local_expert_up_v_sf") = 0,
+    py::arg("local_expert_down_sf") = 0);
   m.def("get_tIdx", &get_token_indices,
     py::arg("raw_ctx"));
   m.def("finalize", &moe_finalize,
@@ -519,8 +537,9 @@ constexpr auto bK0 = flashmoe::heuristics::getTileK<H, tkCap>();
 constexpr auto bK1 = flashmoe::heuristics::getTileK<I, tkCap>();
 constexpr auto bN0 = flashmoe::heuristics::getTileN<I, Element>();
 constexpr auto bN1 = flashmoe::heuristics::getTileN<H, Element>();
-constexpr auto pSK0 = flashmoe::heuristics::getPipeStages<H, bK0, Arch>();
-constexpr auto pSK1 = flashmoe::heuristics::getPipeStages<I, bK1, Arch>();
+constexpr auto gateCacheBytes = mt == flashmoe::MLPMatmulType::gated ? sizeof(Element) * bM * bN0 : 0;
+constexpr auto pSK0 = flashmoe::heuristics::getPipeStages<H, bK0, Arch, bM, bN0, sizeof(Element), gateCacheBytes>();
+constexpr auto pSK1 = flashmoe::heuristics::getPipeStages<I, bK1, Arch, bM, bN1, sizeof(Element)>();
 constexpr auto roundEC = cute::ceil_div(EC, bM) * bM;
 
 constexpr auto threadsGEMM0 = flashmoe::tile::suggest_thread_count<bM, bN0, bK0, Arch, Element, AccumType>();

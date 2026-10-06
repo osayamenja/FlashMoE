@@ -33,6 +33,12 @@ class DataType(IntEnum):
     FP32 = 2
     FP64 = 3
 
+class QuantType(IntEnum):
+    NONE = 0
+    # E4M3 weights and activations with one UE8M0 scale per 32 elements along K (sm_120/sm_121),
+    # tokens, bias and output stay in data_type (BF16). See flashmoe.quant.quantize_mxfp8.
+    MXFP8 = 1
+
 class ActivationType(IntEnum):
     IDENTITY = 0
     SILU = 1
@@ -53,6 +59,11 @@ class ForwardArgs:
     swish_alpha: float = 1.0
     swish_beta: float = 1.0
     stream_ptr: int
+    # QuantType.MXFP8 only: the expert weights above are e4m3 and these are their scale factors,
+    # as returned by flashmoe.quant.quantize_mxfp8
+    local_expert_up_sf: int = 0
+    local_expert_up_v_sf: int = 0
+    local_expert_down_sf: int = 0
     def __init__(self,
                  mt: MLPType,
                  tokens: int,
@@ -67,10 +78,16 @@ class ForwardArgs:
                  swish_alpha: float = 1.0,
                  swish_beta: float = 1.0,
                  local_expert_up_v: int = None,
-                 local_bias_up_v: int = None):
+                 local_bias_up_v: int = None,
+                 local_expert_up_sf: int = 0,
+                 local_expert_up_v_sf: int = 0,
+                 local_expert_down_sf: int = 0):
         # if GatedMLP, then mlp weights should be specified
         assert not mt == MLPType.GATED or local_expert_up_v is not None
         assert not mt == MLPType.GATED or local_bias_up_v is not None
+        self.local_expert_up_sf = local_expert_up_sf
+        self.local_expert_up_v_sf = local_expert_up_v_sf
+        self.local_expert_down_sf = local_expert_down_sf
         self.tokens = tokens
         self.expert_counts = expert_counts
         self.local_expert_up = local_expert_up
@@ -105,6 +122,7 @@ class InitArgs:
     num_local_experts: int
     stream_ptr: int
     expert_peer_capacity: int
+    quant: QuantType = QuantType.NONE
 
     def __init__(self,
                  data_type: DataType,
@@ -125,9 +143,13 @@ class InitArgs:
                  my_pe: int = None,
                  expert_map: List[int] = None,
                  rank_map: List[int] = None,
-                 expert_peer_capacity: int = None) -> None:
+                 expert_peer_capacity: int = None,
+                 quant: QuantType = QuantType.NONE) -> None:
         from math import ceil
         assert gpu_arch >= 700
+        # the block-scaled MXFP8 path is implemented for sm_120 / sm_121 with bf16 activations
+        assert quant == QuantType.NONE or (1200 <= gpu_arch < 1300 and data_type == DataType.BF16)
+        self.quant = quant
         self.data_type = data_type
         self.tokens_per_rank = tokens_per_rank
         self.token_dim = token_dim
@@ -269,15 +291,23 @@ def _get_compiled(arg: InitArgs, src: str, mod_prefix: str, mod_name: str):
         if so_path.exists():
             return _load_ext(mod_name, so_path)
 
-        subprocess.run([
+        arch = arg.gpu_arch // 10
+        # architectures >= 90 require the accelerated (arch-specific) feature set, e.g., 90a, 100a, 120a
+        cuda_arch = f"{arch}a" if arch >= 90 else f"{arch}"
+        cmake_args = [
             "cmake", "-S", str(cmake_source_dir), "-B", str(bdir), "-G", "Ninja",
             f"-DGENERATED_SRC={generated}",
             f"-DTARGET_MODULE_NAME={mod_name}",
-            f"-DCMAKE_CUDA_ARCHITECTURES={arg.gpu_arch // 10}",
+            f"-DCMAKE_CUDA_ARCHITECTURES={cuda_arch}",
             f"-DCPM_SOURCE_CACHE={Path.home() / '.cache' / 'cpm'}",
             "-DCMAKE_BUILD_TYPE=Release",
-            f"-DARCH={arg.gpu_arch // 10}"
-        ], check=True)
+            f"-DARCH={arch}"
+        ]
+        # optionally build against a local FlashMoE checkout instead of the pinned release
+        flashmoe_source = os.environ.get("FLASHMOE_SOURCE_DIR")
+        if flashmoe_source:
+            cmake_args.append(f"-DCPM_flashmoe_SOURCE={flashmoe_source}")
+        subprocess.run(cmake_args, check=True)
 
         subprocess.run([
             "cmake", "--build", str(bdir), "--parallel"

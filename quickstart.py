@@ -28,7 +28,8 @@ def run_fused_moe_forward_w_correctness_check(tokens_per_rank: int,
                                               num_experts: int,
                                               k: int,
                                               device_id: int,
-                                              use_torch_init: bool=False) -> None:
+                                              use_torch_init: bool=False,
+                                              fp8: bool=False) -> None:
     if use_torch_init:
         import torch.distributed as dist, os
         world_size = int(os.environ.get("WORLD_SIZE"))
@@ -63,10 +64,12 @@ def run_fused_moe_forward_w_correctness_check(tokens_per_rank: int,
                                   top_k=k,
                                   gpu_arch=arch,
                                   stream_ptr=stream_ptr,
-                                  device_id=device_id)
+                                  device_id=device_id,
+                                  quant=flashmoe.QuantType.MXFP8 if fp8 else flashmoe.QuantType.NONE)
     # call initialize
     flash_handle = flashmoe.initialize(init_args)
     router_handle = flashmoe.router.initialize(init_args)
+    # the reference runs in data_type with the unquantized weights
     ref_handle = flashmoe.reference.initialize(init_args)
 
     rank = flashmoe.cb.get_rank()
@@ -112,6 +115,14 @@ def run_fused_moe_forward_w_correctness_check(tokens_per_rank: int,
     local_bias_down = bias_down[
         rank * chunk_size: (rank + 1) * chunk_size
     ].contiguous()
+    sf = {}
+    if fp8:
+        # MXFP8: e4m3 expert weights and their block scales
+        local_expert_up, sf["local_expert_up_sf"] = flashmoe.quant.quantize_mxfp8(local_expert_up)
+        local_expert_up_v, sf["local_expert_up_v_sf"] = flashmoe.quant.quantize_mxfp8(local_expert_up_v)
+        local_expert_down, sf["local_expert_down_sf"] = flashmoe.quant.quantize_mxfp8(local_expert_down)
+        scales = list(sf.values())
+        sf = {name: t.data_ptr() for name, t in sf.items()}
     args = flashmoe.ForwardArgs(
         mt=flashmoe.MLPType.GATED,
         tokens=tokens.data_ptr(),
@@ -123,7 +134,8 @@ def run_fused_moe_forward_w_correctness_check(tokens_per_rank: int,
         local_expert_down=local_expert_down.data_ptr(),
         local_bias_down=local_bias_down.data_ptr(),
         moe_out=moe_out.data_ptr(),
-        stream_ptr=stream_ptr
+        stream_ptr=stream_ptr,
+        **sf
     )
     rfa = flashmoe.router.RouterForwardArgs(tokens=tokens.data_ptr(),
                                             weights=router_weights.data_ptr(),
@@ -157,7 +169,13 @@ def run_fused_moe_forward_w_correctness_check(tokens_per_rank: int,
     # compare fused kernel and reference
     match_count = (torch.isclose(moe_out, ref_out, rtol=8e-2, atol=8e-3)).sum().item()
     error_p = 1.0 - (match_count / (tokens_per_rank * token_dim))
-    print("{}, {:.4f}%".format(rank, error_p))
+    if fp8:
+        # against the unquantized reference, the MXFP8 quantization error dominates: report it instead
+        rel_frob = (moe_out.float() - ref_out.float()).norm() / ref_out.float().norm()
+        print("{}, {:.4f}%, relative Frobenius error vs {}: {:.2f}%".format(rank, error_p, data_type.name,
+                                                                         100 * rel_frob.item()))
+    else:
+        print("{}, {:.4f}%".format(rank, error_p))
     # call finalize
     flashmoe.finalize(flash_handle, stream_ptr)
     flashmoe.router.finalize(router_handle, stream_ptr)
@@ -300,6 +318,7 @@ def run_fused_moe_forward(tokens_per_rank: int,
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--torch-init", action="store_true")
+    parser.add_argument("--fp8", action="store_true", help="MXFP8 expert weights and activations (sm_120/sm_121)")
     args = parser.parse_args()
 
     # LLama4-Scout-17B-16E shapes
@@ -310,7 +329,8 @@ def main():
     k_ = 1
     device_id_ = flashmoe.get_local_rank()
     # call kernel
-    run_fused_moe_forward_w_correctness_check(tokens_per_rank_, token_dim_, ffn_size_, num_experts_, k_, device_id_, args.torch_init)
+    run_fused_moe_forward_w_correctness_check(tokens_per_rank_, token_dim_, ffn_size_, num_experts_, k_, device_id_,
+                                              args.torch_init, args.fp8)
 
 if __name__ == "__main__":
     main()

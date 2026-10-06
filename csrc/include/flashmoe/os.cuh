@@ -64,7 +64,7 @@ namespace flashmoe::os
     int threads,
     int bM,
     int pss,
-    typename ElementC
+    typename StagingElement // element type of GEMM0Staging
   >
   __device__ __forceinline__
   void start(cuda::std::byte* __restrict__ const& workspace, const int* __restrict__ expertCounts,
@@ -250,7 +250,7 @@ namespace flashmoe::os
         pL, lX, eL, status, taskBound, ctx.world, ctx.nLx, static_cast<uint>(ctx.nLx * ctx.world),
         ctx.epRank, ecTilesM * bM, E, I, tIdx, tilesN0, tilesN1, ecTilesM, stateNumber
       };
-      subscriber::start<topo, subscriberCount, bM, ElementC>(symHeap, args, fSbSL);
+      subscriber::start<topo, subscriberCount, bM, StagingElement>(symHeap, args, fSbSL);
     }
     __syncthreads();
     for (uint i = threadIdx.x; i < bScL; i += threads) {

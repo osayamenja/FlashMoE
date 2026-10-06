@@ -84,9 +84,9 @@ It leverages:
 ### 🏎️ Portability
 
 We support 
-- SM70 and above GPUs. Boosting compute performance for Hopper and Blackwell is on the roadmap.
+- SM70 and above GPUs, including consumer Blackwell (SM120/SM121: RTX 50 series, RTX PRO 6000 Blackwell, DGX Spark). Boosting compute performance for Hopper and Blackwell is on the roadmap.
 - NVLink and multi-node RDMA (EFA, IBGDA, libfabric as NVSHMEM [supports](https://docs.nvidia.com/nvshmem/release-notes-install-guide/install-guide/abstract.html#hardware-requirements)).
-- FP16, BF16, FP32 (TF32) and FP64. FP8 and even lower precision types are on the roadmap (we welcome contributions!)
+- FP16, BF16, FP32 (TF32) and FP64, plus [MXFP8](#mxfp8-sm120sm121) on SM120/SM121. Even lower precision types are on the roadmap (we welcome contributions!)
 
 ## Requirements
 - CUDA toolkit
@@ -218,11 +218,49 @@ and include the header file like below. See `csrc/tests/flashmoe.cu` for more us
 ```cpp
 #include <flashmoe/flashmoe.cuh>
 ```
+
+## MXFP8 (SM120/SM121)
+On RTX 50 series, RTX PRO 6000 Blackwell and DGX Spark GPUs, the expert GEMMs can run in MXFP8:
+E4M3 weights and activations with one UE8M0 scale per 32 elements along K, FP32 accumulation.
+The GEMMs use the block-scaled tensor core instructions of these GPUs
+(`mma.sync ... kind::mxf8f6f4.block_scale`), which, unlike BF16 with FP32 accumulation, run at full rate.
+- Tokens are quantized as they are dispatched, which also halves the dispatch traffic.
+- The GEMM0 epilogue quantizes the activations for GEMM1.
+- GEMM1 writes BF16, so combine and the output are unchanged.
+- Tokens, biases and the output stay BF16. H and I must be multiples of 128.
+
+Quantize the expert weights once with `flashmoe.quant.quantize_mxfp8`.
+Block FP8 checkpoints (128x128 scales, e.g. DeepSeek-V3) can be converted with `flashmoe.quant.blockfp8_to_mxfp8`.
+```python
+init_args = flashmoe.InitArgs(..., data_type=flashmoe.DataType.BF16, quant=flashmoe.QuantType.MXFP8)
+up_q, up_sf = flashmoe.quant.quantize_mxfp8(local_expert_up)          # [num_local_experts, I, H]
+up_v_q, up_v_sf = flashmoe.quant.quantize_mxfp8(local_expert_up_v)    # [num_local_experts, I, H]
+down_q, down_sf = flashmoe.quant.quantize_mxfp8(local_expert_down)    # [num_local_experts, H, I]
+args = flashmoe.ForwardArgs(...,
+                            local_expert_up=up_q.data_ptr(), local_expert_up_sf=up_sf.data_ptr(),
+                            local_expert_up_v=up_v_q.data_ptr(), local_expert_up_v_sf=up_v_sf.data_ptr(),
+                            local_expert_down=down_q.data_ptr(), local_expert_down_sf=down_sf.data_ptr())
+```
+`quickstart.py --fp8` is a complete example. In C++, set `QuantRecipe::mxfp8` in `moe::MoEConfig`, and see
+`csrc/tests/flashmoe.cu` (target `testFlashMoEFP8`) and `csrc/tests/gemmMXFP8.cu`.
+
+Single RTX 5090, gated SiLU MLP, latency of one MoE layer in ms (`testFlashMoE` vs. `testFlashMoEFP8`):
+
+| Model (H, I, E, k) | Tokens | BF16 | MXFP8 | Speedup |
+|---|---|---|---|---|
+| Llama4-Scout (5120, 8192, 16, 1) | 8192 | 12.50 | 4.38 | 2.86x |
+| Mixtral-8x7B (4096, 14336, 8, 2) | 8192 | 34.43 | 12.20 | 2.82x |
+| DeepSeek-V2-Lite (2048, 1408, 64, 6) | 4096 | 3.28 | 1.49 | 2.20x |
+| Qwen3-30B-A3B (2048, 768, 128, 8) | 4096 | 3.00 | 1.59 | 1.89x |
+
+On random data, the MXFP8 output deviates from the BF16 output by about 6% (relative Frobenius norm).
+The kernel itself matches a reference that applies the same quantization with FP32 GEMMs.
+
 ---
 
 ### ✅ Roadmap
 - [ ] Improve MMA for Hopper (WGMMA) and Blackwell (UTCMMA).
-- [ ] FP8
+- [x] FP8: MXFP8 on SM120/SM121 (Hopper and SM100 to follow)
 - [ ] Shared experts
 - [ ] AMD support
 - [ ] Backward pass
@@ -283,6 +321,7 @@ cmake --build . --target testFlashMoE --parallel
 export NVSHMEM_BOOTSTRAP=MPI
 mpirun -n <world> ./testFlashMoE <num tokens per rank> <token dim> <ffn dim> <num experts total> <top k>
 ```
+`testFlashMoEFP8` takes the same arguments and runs the MXFP8 path (SM120/SM121; so far tested on a single GPU).
 
 
 ## IDEs

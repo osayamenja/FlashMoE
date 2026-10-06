@@ -236,6 +236,19 @@ target_link_libraries(testFlashMoE PRIVATE nvshmem::nvshmem_host nvshmem::nvshme
 find_package(MPI REQUIRED COMPONENTS CXX)
 target_link_libraries(testFlashMoE PRIVATE MPI::MPI_CXX)
 
+# MXFP8 (W8A8) variant of testFlashMoE, see FLASHMOE_MXFP8 in tests/flashmoe.cu
+add_executable(testFlashMoEFP8
+        tests/flashmoe.cu
+)
+set_target_properties(testFlashMoEFP8 PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+        CUDA_RESOLVE_DEVICE_SYMBOLS ON
+)
+flash_target_lto(testFlashMoEFP8)
+target_compile_definitions(testFlashMoEFP8 PRIVATE FLASHMOE_MXFP8=1)
+target_link_libraries(testFlashMoEFP8 PRIVATE nvshmem::nvshmem_host nvshmem::nvshmem_device)
+target_link_libraries(testFlashMoEFP8 PRIVATE MPI::MPI_CXX)
+
 add_executable(testScheduler
         tests/scheduler.cu
 )
@@ -280,3 +293,9 @@ add_executable(testGatedGEMM
         tests/gatedGEMM.cu
 )
 flash_target_common(testGatedGEMM)
+
+add_executable(gemmMXFP8
+        tests/gemmMXFP8.cu
+)
+flash_target_common(gemmMXFP8)
+target_link_libraries(gemmMXFP8 PRIVATE CUDA::cublasLt)
