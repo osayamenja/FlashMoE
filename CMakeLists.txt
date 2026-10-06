@@ -23,6 +23,19 @@ target_include_directories(flashmoe INTERFACE
 target_compile_features(flashmoe INTERFACE cxx_std_20)
 
 # -------------------------------------------------------
+# CCCL
+#
+# Must come before find_package(NVSHMEM): NVSHMEMConfig.cmake calls find_dependency(CCCL) on the toolkit's copy,
+# which creates the CCCL::CCCL target first and shadows CCCL 3.1.3, so <cuda/memory> etc. are not found
+# with CUDA toolkits that bundle an older CCCL (e.g. 13.0).
+# -------------------------------------------------------
+CPMAddPackage(
+  NAME CCCL
+  GITHUB_REPOSITORY nvidia/cccl
+  VERSION 3.1.3
+)
+
+# -------------------------------------------------------
 # Required dependencies discoverable via find_package()
 # -------------------------------------------------------
 
@@ -166,12 +179,7 @@ message(STATUS "FlashMoE effective CUDA architectures: ${FLASHMOE_EFFECTIVE_CUDA
 # CPM dependencies
 # -------------------------------------------------------
 
-# CCCL
-CPMAddPackage(
-  NAME CCCL
-  GITHUB_REPOSITORY nvidia/cccl
-  VERSION 3.1.3
-)
+# CCCL (fetched at the top of this file, before find_package(NVSHMEM/mathdx))
 if(TARGET CCCL::CCCL)
   target_link_libraries(flashmoe INTERFACE CCCL::CCCL)
 else()
