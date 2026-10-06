@@ -69,18 +69,21 @@ namespace flashmoe {
     const size_t numExperts;
     const uint16_t numLocalExperts;
     const Topology topo;
+    // elementBytes is the size of the activations, bias and output, also for the block-scaled recipes
+    const QuantRecipe recipe;
 
     MoEArgs(const size_t &eb, const uint &S, const uint &H, const uint &I, const size_t &ec,
             const uint &bm, const uint &bn0, const uint &bn1, const uint &bk0, const uint bk1,
             const uint &_threads, const uint &ctas, const uint& sharedSize, const uint16_t &ep_rank, const uint16_t &ep_world,
             const uint16_t &mype, const uint16_t &experts,
-            const uint16_t &nlx, const Topology &topo_) : elementBytes(eb), sequenceLength(S),
+            const uint16_t &nlx, const Topology &topo_,
+            const QuantRecipe &qr = QuantRecipe::none) : elementBytes(eb), sequenceLength(S),
                                                           EC(ec),
                                                           tokenDim(H), ffnIntermediateSize(I), bM(bm), bN0(bn0),
                                                           bN1(bn1), bK0(bk0), bK1(bk1),
                                                           threads(_threads), blocks(ctas), smemSize(sharedSize), epRank(ep_rank),
                                                           epWorld(ep_world), myPE(mype), numExperts(experts),
-                                                          numLocalExperts(nlx), topo(topo_) {
+                                                          numLocalExperts(nlx), topo(topo_), recipe(qr) {
     }
   };
 
@@ -205,6 +208,28 @@ namespace flashmoe {
     if (args.ffnIntermediateSize % args.bN0 != 0 || args.ffnIntermediateSize % args.bK1 != 0) {
       throw std::runtime_error("Intermediate size should be multiples of tile dimensions");
     }
+    // mxfp8, mxfp4 or nvfp4
+    const bool blockScaled = isBlockScaled(args.recipe);
+    // Number of K elements per scale factor: 32 (mxfp8, mxfp4) or 16 (nvfp4)
+    const size_t sfVec = blockScaled ? static_cast<size_t>(quantSFVecSize(args.recipe)) : mx::BLOCK_SIZE;
+    if (blockScaled) {
+      // One scale factor atom spans 128 rows x 4 scales (4 * 32 = 128 columns, or 4 * 16 = 64 for nvfp4),
+      // see mx::sfOffset.
+      if (args.elementBytes != 2) {
+        throw std::runtime_error("Block-scaled recipes require 16-bit activations (fp16 or bf16): elementBytes should be 2");
+      }
+      if (args.bM != mx::SF_ROW_TILE) {
+        throw std::runtime_error("Block-scaled recipes require bM == 128");
+      }
+      if (args.tokenDim % (mx::BLOCK_SIZE * mx::SF_K_TILE) != 0 ||
+          args.ffnIntermediateSize % (mx::BLOCK_SIZE * mx::SF_K_TILE) != 0) {
+        throw std::runtime_error("Block-scaled recipes require the token dimension and the intermediate size to be "
+          "multiples of 128");
+      }
+      if (args.bK0 % mx::BLOCK_SIZE != 0 || args.bK1 % mx::BLOCK_SIZE != 0 || args.bN0 % mx::BLOCK_SIZE != 0) {
+        throw std::runtime_error("Block-scaled recipes require bK0, bK1 and bN0 to be multiples of 32");
+      }
+    }
     if (args.blocks < 2) {
       throw std::runtime_error("blocks must be at least 2");
     }
@@ -241,11 +266,20 @@ namespace flashmoe {
       throw std::runtime_error("failed to allocate signals via NVSHMEM");
     }
     // symmetric heap ~= 4*S*H
-    const auto heapLength = args.elementBytes * HEAP_STAGES * HEAP_CELLS * static_cast<size_t>(
-                              args.epWorld * args.numLocalExperts) * static_cast<size_t>(roundEC * args.tokenDim);
-    auto *sHeap = static_cast<cuda::std::byte *>(nvshmem_malloc(heapLength));
+    const auto heapLength = heapDataBytes(static_cast<size_t>(args.epWorld * args.numLocalExperts), roundEC,
+                                          args.tokenDim, args.elementBytes);
+    // Block-scaled recipes: the scale factors of the dispatched tokens are appended to the same symmetric allocation,
+    // so that their offsets are symmetric as well, i.e., a peer's scale factors are at remoteSHeap + the same offset.
+    const size_t heapSFLength = blockScaled ?
+                                  heapSFBytes(static_cast<size_t>(args.epWorld * args.numLocalExperts), roundEC,
+                                              args.tokenDim, sfVec) : 0;
+    auto *sHeap = static_cast<cuda::std::byte *>(nvshmem_malloc(heapLength + heapSFLength));
     if (sHeap == nullptr) {
       throw std::runtime_error("failed to allocate heap via NVSHMEM");
+    }
+    if (blockScaled) {
+      // Rows that are not dispatched (padding to bM) read these scales, so avoid NaN scales (0xFF).
+      CHECK_CUDA(cudaMemsetAsync(sHeap + heapLength, 0, heapSFLength, stream));
     }
     const auto supports32 = arch >= 1000;
     checkPtrAlignment(sHeap, supports32);
@@ -278,7 +312,18 @@ namespace flashmoe {
     cuda::std::byte *GEMM0Staging = nullptr;
     const size_t stagingLength = static_cast<size_t>(args.epWorld * args.numLocalExperts * roundEC) * args.
                                  ffnIntermediateSize;
-    CHECK_CUDA(cudaMallocAsync(&GEMM0Staging, stagingLength * args.elementBytes, stream));
+    // Block-scaled recipes: quantized elements (e4m3 for mxfp8, e2m1 for mxfp4 and nvfp4) with a row pitch of
+    // I * bits / 8 bytes, followed by the canonical scale factors of each [roundEC, I] staging matrix.
+    // The bit count is multiplied first: an e2m1 element is half a byte.
+    const size_t stagingBytes = blockScaled ?
+                                  (stagingLength * static_cast<size_t>(quantElementBits(args.recipe))) / 8 :
+                                  stagingLength * args.elementBytes;
+    const size_t stagingSFLength = blockScaled ? static_cast<size_t>(args.epWorld * args.numLocalExperts) *
+                                                 mx::sfBytes(roundEC, args.ffnIntermediateSize / sfVec) : 0;
+    CHECK_CUDA(cudaMallocAsync(&GEMM0Staging, stagingBytes + stagingSFLength, stream));
+    if (blockScaled) {
+      CHECK_CUDA(cudaMemsetAsync(GEMM0Staging + stagingBytes, 0, stagingSFLength, stream));
+    }
 
     BitSet *consumerBitMap = nullptr;
     const auto cbmLength = nSI(args.numExperts * ecTilesM * tilesN1, subscriberCount);
@@ -324,9 +369,11 @@ namespace flashmoe {
     CHECK_CUDA(cudaMemsetAsync(tileSync, 0, sizeof(uint) * gtqHeadsLength, stream));
 
     uint *statusQ = nullptr;
-    CHECK_CUDA(cudaMallocAsync(&statusQ, sizeof(uint) * processors, stream));
+    // padded to scheduler::MAX_PROCESSORS for the scheduler's branch-free readiness scan:
+    // the slots beyond the processors are never marked ready.
+    CHECK_CUDA(cudaMallocAsync(&statusQ, sizeof(uint) * scheduler::MAX_PROCESSORS, stream));
     static_assert(ReadySignal::observed == 0);
-    CHECK_CUDA(cudaMemsetAsync(statusQ, 0, sizeof(uint) * processors, stream));
+    CHECK_CUDA(cudaMemsetAsync(statusQ, 0, sizeof(uint) * scheduler::MAX_PROCESSORS, stream));
 
     uint8_t* stateNumbers = nullptr;
     CHECK_CUDA(cudaMallocAsync(&stateNumbers, sizeof(uint8_t) * args.blocks, stream));
@@ -343,6 +390,7 @@ namespace flashmoe {
       .tQ = tQ,
       .pTq = pTq,
       .GEMM0Staging = GEMM0Staging,
+      .GEMM0StagingSF = blockScaled ? GEMM0Staging + stagingBytes : nullptr,
       .consumerCombineBitMap = consumerBitMap,
       .producerCombineBitMap = producerBitMap,
       .pel = pel,
@@ -355,6 +403,7 @@ namespace flashmoe {
       .tokenIndices = tps,
       .stateNumbers = stateNumbers,
       .processors_v = cuda::fast_mod_div(processors),
+      .symHeapSFOffset = blockScaled ? heapLength : 0,
       .blocks = args.blocks,
       .smemSize = args.smemSize,
       .S = args.sequenceLength,
@@ -386,13 +435,24 @@ namespace flashmoe {
     bytes += sizeof(uint64_t) * (args.epWorld * args.numLocalExperts + (args.numExperts * ecTilesM * tilesN1));
     bytes += args.elementBytes * HEAP_STAGES * HEAP_CELLS * args.epWorld * args.numLocalExperts * roundEC * args.
         tokenDim;
+    const bool blockScaled = isBlockScaled(args.recipe);
+    const size_t sfVec = blockScaled ? static_cast<size_t>(quantSFVecSize(args.recipe)) : mx::BLOCK_SIZE;
+    if (blockScaled) {
+      bytes += heapSFBytes(static_cast<size_t>(args.epWorld * args.numLocalExperts), roundEC, args.tokenDim, sfVec);
+    }
     const size_t tQLength = subscriberTQLength<WARP_SIZE>(args.epWorld, args.numLocalExperts, ecTilesM, args.numExperts,
                                                           tilesN0,
                                                           tilesN1, args.threads - WARP_SIZE);
     const size_t secondaryTQL = secondaryTQLength(args.epWorld, args.numLocalExperts, ecTilesM, tilesN1);
     bytes += sizeof(Task) * (tQLength + secondaryTQL);
-    bytes += args.elementBytes * static_cast<size_t>(args.epWorld * args.numLocalExperts * roundEC) * args.
-        ffnIntermediateSize;
+    const size_t stagingLength = static_cast<size_t>(args.epWorld * args.numLocalExperts * roundEC) *
+        args.ffnIntermediateSize;
+    bytes += blockScaled ? (stagingLength * static_cast<size_t>(quantElementBits(args.recipe))) / 8 :
+        stagingLength * args.elementBytes;
+    if (blockScaled) {
+      bytes += static_cast<size_t>(args.epWorld * args.numLocalExperts) *
+          mx::sfBytes(roundEC, args.ffnIntermediateSize / sfVec);
+    }
     bytes += sizeof(BitSet) * nSI(args.numExperts * ecTilesM * tilesN1, subscriberCount);
     bytes += sizeof(uint8_t) * args.epWorld * args.numLocalExperts * ecTilesM * tilesN1;
     bytes += sizeof(PEL) * args.numExperts;
@@ -404,7 +464,7 @@ namespace flashmoe {
     bytes += sizeof(uint) * args.numExperts;
     bytes += sizeof(uint) * args.epWorld * args.numLocalExperts * ecTilesM;
     bytes += sizeof(uint) * args.epWorld * args.numLocalExperts * ecTilesM;
-    bytes += sizeof(uint) * processors;
+    bytes += sizeof(uint) * scheduler::MAX_PROCESSORS;
     bytes += sizeof(uint8_t) * args.blocks;
     return bytes;
   }

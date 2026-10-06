@@ -10,16 +10,22 @@
 #include "infra/signal.cuh"
 #include "infra/structures.cuh"
 #include "infra/task.cuh"
+#include "infra/trace.cuh"
 #include "infra/tq.cuh"
 
 namespace flashmoe {
   struct Context {
+    // [data region, scale factor region (block-scaled recipes: mxfp8, mxfp4, nvfp4)]
     cuda::std::byte *const symHeap = nullptr;
     uint64_t *const signals = nullptr; // [[world, num_local_experts], [E, tiles(roundEC), tiles(H)]]
     Task *const tQ = nullptr; // [subscriberTQLength]
     Task *const pTq = nullptr; //[secondaryTQLength]
     // [world, num_local_experts, roundEC, I] ~= [S, I]
+    // mxfp8: e4m3 elements, i.e., an I-byte row pitch; mxfp4 and nvfp4: e2m1 elements, i.e., an I / 2-byte row pitch.
+    // Block-scaled recipes: followed by GEMM0StagingSF
     cuda::std::byte *const GEMM0Staging = nullptr;
+    // Block-scaled recipes only: [world, num_local_experts, canonical scale factors of the [roundEC, I] staging matrix]
+    cuda::std::byte *const GEMM0StagingSF = nullptr;
     BitSet *const consumerCombineBitMap = nullptr; // nSI<subscriberCount>(tiles(S) * tiles(H))
     uint8_t *const producerCombineBitMap = nullptr; // [world, nLx, ecTilesM, N1] ~= tiles(S) * tiles(H)
     PEL *const pel = nullptr; // [E]
@@ -34,6 +40,8 @@ namespace flashmoe {
     TPS *const tokenIndices = nullptr; // [E, roundEC]
     uint8_t* const stateNumbers = nullptr; // [processorCTAs]
     const cuda::fast_mod_div<uint> processors_v;
+    // Block-scaled recipes only: byte offset of the scale factor region of symHeap, see heapSFBytes
+    const size_t symHeapSFOffset = 0;
     const uint blocks = 0;
     const uint smemSize = 0;
     const uint S = 0; //  max number of tokens for this rank
@@ -49,6 +57,10 @@ namespace flashmoe {
     const uint16_t epRank = 0;
     const uint16_t myPE = 0;
     const Topology topo = Topology::MIXED;
+#if FLASHMOE_TRACE
+    // FLASHMOE_TRACE only, see infra/trace.cuh; the caller sets it (on a copy of the Context) before a traced launch
+    trace::Buffers traceBuffers{};
+#endif
   };
 
   struct GateContext {

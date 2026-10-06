@@ -12,6 +12,59 @@ namespace flashmoe
         no
     };
 
+    /// Quantization recipe of the expert MLPs.
+    /// none: weights and activations are used in the element type of the layer (fp16, bf16, ...).
+    /// mxfp8: W8A8 with OCP microscaling, i.e., E4M3 weights and E4M3 activations carrying one UE8M0 scale per
+    ///        32 consecutive elements along the reduction dimension. Bias, router and combine stay in the element type.
+    /// mxfp4: W4A4 with OCP microscaling, i.e., E2M1 weights and activations carrying one UE8M0 scale per 32 consecutive
+    ///        elements along the reduction dimension. Bias, router and combine stay in the element type.
+    /// nvfp4: W4A4 with E2M1 weights and activations carrying one UE4M3 scale per 16 consecutive elements along the
+    ///        reduction dimension and one FP32 scale per tensor. Bias, router and combine stay in the element type.
+    enum class QuantRecipe {
+        none,
+        mxfp8,
+        mxfp4,
+        nvfp4
+    };
+
+    /// mxfp4 or nvfp4
+    __host__ __device__ __forceinline__
+    constexpr bool isFP4(const QuantRecipe& r) {
+        return r == QuantRecipe::mxfp4 || r == QuantRecipe::nvfp4;
+    }
+
+    /// Any recipe whose operands carry block scale factors in the canonical 128x4 layout, see infra/mx.cuh
+    __host__ __device__ __forceinline__
+    constexpr bool isBlockScaled(const QuantRecipe& r) {
+        return r != QuantRecipe::none;
+    }
+
+    /// Bits of one quantized element: 8 (mxfp8) or 4 (mxfp4, nvfp4). 0 for none.
+    __host__ __device__ __forceinline__
+    constexpr int quantElementBits(const QuantRecipe& r) {
+        return r == QuantRecipe::mxfp8 ? 8 : (isFP4(r) ? 4 : 0);
+    }
+
+    /// Number of consecutive elements along K that share one scale factor: 32 (mxfp8, mxfp4) or 16 (nvfp4). 0 for none.
+    __host__ __device__ __forceinline__
+    constexpr int quantSFVecSize(const QuantRecipe& r) {
+        return r == QuantRecipe::nvfp4 ? 16 : (r == QuantRecipe::none ? 0 : 32);
+    }
+
+    /// The combine of the tokens that a device sends to its own experts is fused into the GEMM1 epilogue: the tiles are
+    /// added to the output directly, with no write to the symmetric heap, no flag and no combine task (see
+    /// processor::start and os::start). It has been measured on SM120/SM121 only: other architectures keep the separate
+    /// combine tasks. Define FLASHMOE_FUSE_LOCAL_COMBINE as 1 (0) to switch the fusion on (off) for every architecture.
+    template <int arch>
+    __host__ __device__ __forceinline__
+    constexpr bool fusesLocalCombine() {
+#if defined(FLASHMOE_FUSE_LOCAL_COMBINE)
+        return FLASHMOE_FUSE_LOCAL_COMBINE != 0;
+#else
+        return arch >= 1200;
+#endif
+    }
+
     /// Packet Encoding Lookup info, retrievable in a single memory lookup
     /// Key is global expert index
     struct __align__(16) PEL {

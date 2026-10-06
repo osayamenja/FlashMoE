@@ -10,6 +10,7 @@
 #define FLASHMOE_SUBSCRIBER_CUH
 #include <cuda/atomic>
 #include <nvshmem.h>
+#include <cute/numeric/numeric_types.hpp>
 
 #include "infra/atomics.cuh"
 #include "infra/bitset.cuh"
@@ -18,6 +19,7 @@
 #include "infra/signal.cuh"
 #include "infra/structures.cuh"
 #include "infra/task.cuh"
+#include "infra/trace.cuh"
 
 namespace flashmoe::subscriber
 {
@@ -98,12 +100,14 @@ namespace flashmoe::subscriber
   }
 
   /// Decodes a single packet from the initial stage
+  /// StagingElement is the element type of GEMM0Staging, i.e., of the GEMM0 output, which is E4M3 for MXFP8 and
+  /// E2M1 for MXFP4 and NVFP4
   template <
     int subscriberCount,
     PacketStage s,
     PeerConnectivity p,
     int bM = -1,
-    typename Element = void>
+    typename StagingElement = void>
   struct Decoder {
     static_assert(s == PacketStage::initial);
     __device__ __forceinline__
@@ -124,7 +128,10 @@ namespace flashmoe::subscriber
       const auto sO = args.ecTilesM * (peer * args.nLx + ingredients.localExpertIdx);
       cuda::std::array<cuda::std::byte*, GEMMs> taskResults{};
       // Staging buffer for results of GEMM0
-      const size_t stagingOffset = static_cast<size_t>(args.roundEC) * args.I * sizeof(Element) *
+      // [roundEC, I] per (peer, expert); its block scale factors are in Context::GEMM0StagingSF
+      // Bytes of one slot: the bit count is multiplied first, since a 4-bit element is half a byte.
+      const size_t stagingOffset = (static_cast<size_t>(args.roundEC) * args.I *
+          static_cast<size_t>(cute::sizeof_bits_v<StagingElement>)) / 8 *
         static_cast<size_t>(peer * args.nLx + ingredients.localExpertIdx);
       taskResults[0] = args.GEMM0Staging + stagingOffset;
       // Egress packet buffer
@@ -178,6 +185,7 @@ namespace flashmoe::subscriber
       // instruction rather than 4 of them, which would have been the case if we updated the entire Task object.
       auto* tQp = &((args.tQ + DQ::sNext<DQType::stride, subscriberCount>(lTQHead++))->ingredients);
       cuda::ptx::st(cuda::ptx::space_global, tQp, ingredients);
+      FLASHMOE_TRACE_EVENT(subCombine, (ingredients.stash << 12) | ingredients.localExpertIdx, ingredients.M);
       cuda::atomic_ref<unsigned int, cuda::thread_scope_block> tqh{*args.tQHead};
       // notifies scheduler of work
       cuda::std::ignore = tqh.fetch_add(1, cuda::memory_order_release);
@@ -195,6 +203,7 @@ namespace flashmoe::subscriber
         cuda::ptx::st(cuda::ptx::space_global, tQp, ingredients);
       }
       lTQHead += args.tilesN1;
+      FLASHMOE_TRACE_EVENT(subCombine, ingredients.localExpertIdx, ingredients.M);
       cuda::atomic_ref<unsigned int, cuda::thread_scope_block> tqh{*args.tQHead};
       cuda::std::ignore = tqh.fetch_add(args.tilesN1, cuda::memory_order_release);
     }
@@ -218,7 +227,7 @@ namespace flashmoe::subscriber
   template <
     SubscriberStage s,
     Topology topo,
-    typename Element,
+    typename StagingElement,
     int subscriberCount,
     int bM
   >
@@ -234,8 +243,8 @@ namespace flashmoe::subscriber
       constexpr int sNW = subscriberCount / WARP_SIZE;
       const auto currentStateNumber = static_cast<uint16_t>(args.stateNumber);
       /// Flags has dimension [W, L], where W is expert parallel world and L is number of local experts
-      constexpr Decoder<subscriberCount, PacketStage::initial, PeerConnectivity::p2p, bM, Element> fPd{};
-      constexpr Decoder<subscriberCount, PacketStage::initial, PeerConnectivity::remote, bM, Element> fRd{};
+      constexpr Decoder<subscriberCount, PacketStage::initial, PeerConnectivity::p2p, bM, StagingElement> fPd{};
+      constexpr Decoder<subscriberCount, PacketStage::initial, PeerConnectivity::remote, bM, StagingElement> fRd{};
       constexpr int bSw = sizeof(uint) * 8U;
       const auto laneId = args.tIdx % WARP_SIZE;
       const auto warpId = args.tIdx / WARP_SIZE;
@@ -324,9 +333,12 @@ namespace flashmoe::subscriber
           const auto myLocalExIdx = flagIdx % args.nLx;
           const auto lXI = args.lX[myLocalExIdx];
           const auto* packet = symHeap.advance<0, 1>(peerIdx, myLocalExIdx);
+          FLASHMOE_TRACE_EVENT_LANE0(subPacket, (peerIdx << 12) | myLocalExIdx, sigPayload.routedTokens);
 
           Ingredients ingredients{};
           ingredients.localExpertIdx = myLocalExIdx;
+          // global expert index, inherited by the GEMM1 tasks: the GEMM1 of a local task combines its tile
+          ingredients.expertIdx = lXI.expertIndex;
           ingredients.taskType = TaskType::GEMM0;
           ingredients.peerIdx = pLI.pe;
           // pad here for compatibility
@@ -353,8 +365,8 @@ namespace flashmoe::subscriber
     }
   };
 
-  template <int subscriberCount, int bM, typename Element>
-  struct Subscriber<SubscriberStage::final, Topology::MIXED, Element, subscriberCount, bM> {
+  template <int subscriberCount, int bM, typename StagingElement>
+  struct Subscriber<SubscriberStage::final, Topology::MIXED, StagingElement, subscriberCount, bM> {
     __device__ __forceinline__
     void operator()(const Args& args,
                     BitSet* __restrict__ const& bitSet, uint64_t* __restrict__ const& flags,
@@ -515,8 +527,8 @@ namespace flashmoe::subscriber
     }
   };
 
-  template <int subscriberCount, int bM, typename Element>
-  struct Subscriber<SubscriberStage::final, Topology::NVLINK_ONLY, Element, subscriberCount, bM> {
+  template <int subscriberCount, int bM, typename StagingElement>
+  struct Subscriber<SubscriberStage::final, Topology::NVLINK_ONLY, StagingElement, subscriberCount, bM> {
     // every peer is P2P-connected
     __device__ __forceinline__
     void operator()(const Args& args, BitSet* __restrict__ const& bitSet, uint64_t* __restrict__ const& flags,
@@ -612,7 +624,7 @@ namespace flashmoe::subscriber
     Topology topo,
     unsigned int subscriberCount,
     int bM,
-    typename Element
+    typename StagingElement
   >
     requires(subscriberCount % WARP_SIZE == 0)
   __device__ __forceinline__
@@ -628,8 +640,8 @@ namespace flashmoe::subscriber
     // second stage
     const auto ssfC = args.E * args.ecSignalCount;
     const auto ssL = ssfC / subscriberCount + (args.tIdx < ssfC % subscriberCount);
-    constexpr Subscriber<SubscriberStage::initial, topo, Element, subscriberCount, bM> initialSubscriber{};
-    constexpr Subscriber<SubscriberStage::final, topo, Element, subscriberCount, bM> finalSubscriber{};
+    constexpr Subscriber<SubscriberStage::initial, topo, StagingElement, subscriberCount, bM> initialSubscriber{};
+    constexpr Subscriber<SubscriberStage::final, topo, StagingElement, subscriberCount, bM> finalSubscriber{};
 
     const auto laneId = args.tIdx % WARP_SIZE;
     uint interrupt = 0;

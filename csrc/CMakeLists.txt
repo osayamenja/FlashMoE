@@ -22,6 +22,9 @@ endif ()
 
 project(flashmoe CUDA CXX)
 
+# In-kernel task tracer, see include/flashmoe/infra/trace.cuh; compiled into the testFlashMoE* targets only.
+option(FLASHMOE_TRACE "Record a timeline of the dispatch, scheduler, subscriber and processor tasks (testFlashMoE*)" OFF)
+
 # flags
 add_library(flashmoe_warnings INTERFACE)
 
@@ -215,6 +218,9 @@ function(flash_target_lto tgt)
             NUM_SMS=${CUDA_NUM_SMS}
             FLASHMOE_NVTX=1
     )
+    if(FLASHMOE_TRACE)
+        target_compile_definitions(${tgt} PRIVATE FLASHMOE_TRACE=1)
+    endif()
 endfunction()
 add_executable(testFlashMoE
         tests/flashmoe.cu
@@ -235,6 +241,44 @@ set_target_properties(nvshmem::nvshmem_host PROPERTIES
 target_link_libraries(testFlashMoE PRIVATE nvshmem::nvshmem_host nvshmem::nvshmem_device)
 find_package(MPI REQUIRED COMPONENTS CXX)
 target_link_libraries(testFlashMoE PRIVATE MPI::MPI_CXX)
+
+# MXFP8 (W8A8) variant of testFlashMoE, see FLASHMOE_MXFP8 in tests/flashmoe.cu
+add_executable(testFlashMoEFP8
+        tests/flashmoe.cu
+)
+set_target_properties(testFlashMoEFP8 PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+        CUDA_RESOLVE_DEVICE_SYMBOLS ON
+)
+flash_target_lto(testFlashMoEFP8)
+target_compile_definitions(testFlashMoEFP8 PRIVATE FLASHMOE_MXFP8=1)
+target_link_libraries(testFlashMoEFP8 PRIVATE nvshmem::nvshmem_host nvshmem::nvshmem_device)
+target_link_libraries(testFlashMoEFP8 PRIVATE MPI::MPI_CXX)
+
+# MXFP4 and NVFP4 (W4A4) variants of testFlashMoE, see FLASHMOE_MXFP4 and FLASHMOE_NVFP4 in tests/flashmoe.cu
+add_executable(testFlashMoEMXFP4
+        tests/flashmoe.cu
+)
+set_target_properties(testFlashMoEMXFP4 PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+        CUDA_RESOLVE_DEVICE_SYMBOLS ON
+)
+flash_target_lto(testFlashMoEMXFP4)
+target_compile_definitions(testFlashMoEMXFP4 PRIVATE FLASHMOE_MXFP4=1)
+target_link_libraries(testFlashMoEMXFP4 PRIVATE nvshmem::nvshmem_host nvshmem::nvshmem_device)
+target_link_libraries(testFlashMoEMXFP4 PRIVATE MPI::MPI_CXX)
+
+add_executable(testFlashMoENVFP4
+        tests/flashmoe.cu
+)
+set_target_properties(testFlashMoENVFP4 PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+        CUDA_RESOLVE_DEVICE_SYMBOLS ON
+)
+flash_target_lto(testFlashMoENVFP4)
+target_compile_definitions(testFlashMoENVFP4 PRIVATE FLASHMOE_NVFP4=1)
+target_link_libraries(testFlashMoENVFP4 PRIVATE nvshmem::nvshmem_host nvshmem::nvshmem_device)
+target_link_libraries(testFlashMoENVFP4 PRIVATE MPI::MPI_CXX)
 
 add_executable(testScheduler
         tests/scheduler.cu
@@ -280,3 +324,15 @@ add_executable(testGatedGEMM
         tests/gatedGEMM.cu
 )
 flash_target_common(testGatedGEMM)
+
+add_executable(gemmMXFP8
+        tests/gemmMXFP8.cu
+)
+flash_target_common(gemmMXFP8)
+target_link_libraries(gemmMXFP8 PRIVATE CUDA::cublasLt)
+
+add_executable(gemmFP4
+        tests/gemmFP4.cu
+)
+flash_target_common(gemmFP4)
+target_link_libraries(gemmFP4 PRIVATE CUDA::cublasLt)
