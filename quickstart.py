@@ -244,7 +244,7 @@ def run_fused_moe_forward_w_correctness_check(tokens_per_rank: int,
     stream.sync()
     # compare fused kernel and reference
     match_count = (torch.isclose(moe_out, ref_out, rtol=8e-2, atol=8e-3)).sum().item()
-    error_p = 1.0 - (match_count / (tokens_per_rank * token_dim))
+    error_p = 100.0 * (1.0 - (match_count / (tokens_per_rank * token_dim)))
     if quant != flashmoe.QuantType.NONE:
         # against the unquantized reference, the quantization error dominates: report it instead
         rel_frob = (moe_out.float() - ref_out.float()).norm() / ref_out.float().norm()
