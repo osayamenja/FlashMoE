@@ -269,15 +269,23 @@ def _get_compiled(arg: InitArgs, src: str, mod_prefix: str, mod_name: str):
         if so_path.exists():
             return _load_ext(mod_name, so_path)
 
-        subprocess.run([
+        arch = arg.gpu_arch // 10
+        # architectures >= 90 require the accelerated (arch-specific) feature set, e.g., 90a, 100a, 120a
+        cuda_arch = f"{arch}a" if arch >= 90 else f"{arch}"
+        cmake_args = [
             "cmake", "-S", str(cmake_source_dir), "-B", str(bdir), "-G", "Ninja",
             f"-DGENERATED_SRC={generated}",
             f"-DTARGET_MODULE_NAME={mod_name}",
-            f"-DCMAKE_CUDA_ARCHITECTURES={arg.gpu_arch // 10}",
+            f"-DCMAKE_CUDA_ARCHITECTURES={cuda_arch}",
             f"-DCPM_SOURCE_CACHE={Path.home() / '.cache' / 'cpm'}",
             "-DCMAKE_BUILD_TYPE=Release",
-            f"-DARCH={arg.gpu_arch // 10}"
-        ], check=True)
+            f"-DARCH={arch}"
+        ]
+        # optionally build against a local FlashMoE checkout instead of the pinned release
+        flashmoe_source = os.environ.get("FLASHMOE_SOURCE_DIR")
+        if flashmoe_source:
+            cmake_args.append(f"-DCPM_flashmoe_SOURCE={flashmoe_source}")
+        subprocess.run(cmake_args, check=True)
 
         subprocess.run([
             "cmake", "--build", str(bdir), "--parallel"

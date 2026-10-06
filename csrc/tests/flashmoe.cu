@@ -787,9 +787,12 @@ void drive(const int argc, char** argv) {
   if (I <= bK1 || I % bK1 != 0 || I < bN0 || I % bN0 != 0) {
     throw std::invalid_argument("I is invalid");
   }
-  constexpr auto pS = arch >= 900 ? 3 : arch >= 800 ? 2 : 1; // Hopper 3
   constexpr auto bM = cuda::std::is_same_v<Element, double> ? 64 : 128; // hopper, S >= 4096 -> bM = 256
   static_assert(bM >= 1);
+  // Hopper 3, Ampere 2; reduced further if the tiles do not fit in shared memory, e.g., 99 KB on sm_120
+  constexpr auto gateCacheBytes = mt == flashmoe::MLPMatmulType::gated ? sizeof(Element) * bM * bN0 : 0;
+  constexpr auto pS0 = flashmoe::heuristics::getMaxPipeStages<bK0, arch, bM, bN0, sizeof(Element), gateCacheBytes>();
+  constexpr auto pS1 = flashmoe::heuristics::getMaxPipeStages<bK1, arch, bM, bN1, sizeof(Element)>();
   if (S < 1 || (S > bM && S % bM != 0)) {
     throw std::invalid_argument("S is invalid for this benchmark");
   }
@@ -800,33 +803,33 @@ void drive(const int argc, char** argv) {
     // Any E, where E % world == 0 holds, is supported, we restrict to 8 here to minimize compilation times.
     case 8: {
       if (k > 1) {
-        kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, pS, flashmoe::CombineMode::plural, act, mt,
+        kickstart<Element, AccumType, arch, bM, bN0, bK0, pS0, bN1, bK1, pS1, flashmoe::CombineMode::plural, act, mt,
         flashmoe::GateReductionLevel::singleBlock, 8>(opts);
       }
       else {
-        kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, pS, flashmoe::CombineMode::single, act, mt,
+        kickstart<Element, AccumType, arch, bM, bN0, bK0, pS0, bN1, bK1, pS1, flashmoe::CombineMode::single, act, mt,
         flashmoe::GateReductionLevel::singleBlock, 8>(opts);
       }
     }
       break;
     case 16: {
       if (k > 1) {
-        kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, pS, flashmoe::CombineMode::plural, act, mt,
+        kickstart<Element, AccumType, arch, bM, bN0, bK0, pS0, bN1, bK1, pS1, flashmoe::CombineMode::plural, act, mt,
         flashmoe::GateReductionLevel::singleBlock, 16>(opts);
       }
       else {
-        kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, pS, flashmoe::CombineMode::single, act, mt,
+        kickstart<Element, AccumType, arch, bM, bN0, bK0, pS0, bN1, bK1, pS1, flashmoe::CombineMode::single, act, mt,
         flashmoe::GateReductionLevel::singleBlock, 16>(opts);
       }
     }
       break;
     case 32: {
       if (k > 1) {
-        kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, pS, flashmoe::CombineMode::plural, act, mt,
+        kickstart<Element, AccumType, arch, bM, bN0, bK0, pS0, bN1, bK1, pS1, flashmoe::CombineMode::plural, act, mt,
         flashmoe::GateReductionLevel::singleBlock, 32>(opts);
       }
       else {
-        kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, pS, flashmoe::CombineMode::single, act, mt,
+        kickstart<Element, AccumType, arch, bM, bN0, bK0, pS0, bN1, bK1, pS1, flashmoe::CombineMode::single, act, mt,
         flashmoe::GateReductionLevel::singleBlock, 32>(opts);
       }
     }
@@ -834,11 +837,11 @@ void drive(const int argc, char** argv) {
     default: {
       if (E % 32 == 0) {
         if (k > 1) {
-          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, pS, flashmoe::CombineMode::plural, act, mt,
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS0, bN1, bK1, pS1, flashmoe::CombineMode::plural, act, mt,
           flashmoe::GateReductionLevel::multiBlock, 32>(opts);
         }
         else {
-          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS, bN1, bK1, pS, flashmoe::CombineMode::single, act, mt,
+          kickstart<Element, AccumType, arch, bM, bN0, bK0, pS0, bN1, bK1, pS1, flashmoe::CombineMode::single, act, mt,
           flashmoe::GateReductionLevel::multiBlock, 32>(opts);
         }
       }
