@@ -98,12 +98,13 @@ namespace flashmoe::subscriber
   }
 
   /// Decodes a single packet from the initial stage
+  /// StagingElement is the element type of GEMM0Staging, i.e., of the GEMM0 output, which is E4M3 for MXFP8
   template <
     int subscriberCount,
     PacketStage s,
     PeerConnectivity p,
     int bM = -1,
-    typename Element = void>
+    typename StagingElement = void>
   struct Decoder {
     static_assert(s == PacketStage::initial);
     __device__ __forceinline__
@@ -124,7 +125,8 @@ namespace flashmoe::subscriber
       const auto sO = args.ecTilesM * (peer * args.nLx + ingredients.localExpertIdx);
       cuda::std::array<cuda::std::byte*, GEMMs> taskResults{};
       // Staging buffer for results of GEMM0
-      const size_t stagingOffset = static_cast<size_t>(args.roundEC) * args.I * sizeof(Element) *
+      // [roundEC, I] per (peer, expert); its MXFP8 scale factors are in Context::GEMM0StagingSF
+      const size_t stagingOffset = static_cast<size_t>(args.roundEC) * args.I * sizeof(StagingElement) *
         static_cast<size_t>(peer * args.nLx + ingredients.localExpertIdx);
       taskResults[0] = args.GEMM0Staging + stagingOffset;
       // Egress packet buffer
@@ -218,7 +220,7 @@ namespace flashmoe::subscriber
   template <
     SubscriberStage s,
     Topology topo,
-    typename Element,
+    typename StagingElement,
     int subscriberCount,
     int bM
   >
@@ -234,8 +236,8 @@ namespace flashmoe::subscriber
       constexpr int sNW = subscriberCount / WARP_SIZE;
       const auto currentStateNumber = static_cast<uint16_t>(args.stateNumber);
       /// Flags has dimension [W, L], where W is expert parallel world and L is number of local experts
-      constexpr Decoder<subscriberCount, PacketStage::initial, PeerConnectivity::p2p, bM, Element> fPd{};
-      constexpr Decoder<subscriberCount, PacketStage::initial, PeerConnectivity::remote, bM, Element> fRd{};
+      constexpr Decoder<subscriberCount, PacketStage::initial, PeerConnectivity::p2p, bM, StagingElement> fPd{};
+      constexpr Decoder<subscriberCount, PacketStage::initial, PeerConnectivity::remote, bM, StagingElement> fRd{};
       constexpr int bSw = sizeof(uint) * 8U;
       const auto laneId = args.tIdx % WARP_SIZE;
       const auto warpId = args.tIdx / WARP_SIZE;
@@ -353,8 +355,8 @@ namespace flashmoe::subscriber
     }
   };
 
-  template <int subscriberCount, int bM, typename Element>
-  struct Subscriber<SubscriberStage::final, Topology::MIXED, Element, subscriberCount, bM> {
+  template <int subscriberCount, int bM, typename StagingElement>
+  struct Subscriber<SubscriberStage::final, Topology::MIXED, StagingElement, subscriberCount, bM> {
     __device__ __forceinline__
     void operator()(const Args& args,
                     BitSet* __restrict__ const& bitSet, uint64_t* __restrict__ const& flags,
@@ -515,8 +517,8 @@ namespace flashmoe::subscriber
     }
   };
 
-  template <int subscriberCount, int bM, typename Element>
-  struct Subscriber<SubscriberStage::final, Topology::NVLINK_ONLY, Element, subscriberCount, bM> {
+  template <int subscriberCount, int bM, typename StagingElement>
+  struct Subscriber<SubscriberStage::final, Topology::NVLINK_ONLY, StagingElement, subscriberCount, bM> {
     // every peer is P2P-connected
     __device__ __forceinline__
     void operator()(const Args& args, BitSet* __restrict__ const& bitSet, uint64_t* __restrict__ const& flags,
@@ -612,7 +614,7 @@ namespace flashmoe::subscriber
     Topology topo,
     unsigned int subscriberCount,
     int bM,
-    typename Element
+    typename StagingElement
   >
     requires(subscriberCount % WARP_SIZE == 0)
   __device__ __forceinline__
@@ -628,8 +630,8 @@ namespace flashmoe::subscriber
     // second stage
     const auto ssfC = args.E * args.ecSignalCount;
     const auto ssL = ssfC / subscriberCount + (args.tIdx < ssfC % subscriberCount);
-    constexpr Subscriber<SubscriberStage::initial, topo, Element, subscriberCount, bM> initialSubscriber{};
-    constexpr Subscriber<SubscriberStage::final, topo, Element, subscriberCount, bM> finalSubscriber{};
+    constexpr Subscriber<SubscriberStage::initial, topo, StagingElement, subscriberCount, bM> initialSubscriber{};
+    constexpr Subscriber<SubscriberStage::final, topo, StagingElement, subscriberCount, bM> finalSubscriber{};
 
     const auto laneId = args.tIdx % WARP_SIZE;
     uint interrupt = 0;

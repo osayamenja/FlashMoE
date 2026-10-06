@@ -12,6 +12,15 @@ namespace flashmoe
         no
     };
 
+    /// Quantization recipe of the expert MLPs.
+    /// none: weights and activations are used in the element type of the layer (fp16, bf16, ...).
+    /// mxfp8: W8A8 with OCP microscaling, i.e., E4M3 weights and E4M3 activations carrying one UE8M0 scale per
+    ///        32 consecutive elements along the reduction dimension. Bias, router and combine stay in the element type.
+    enum class QuantRecipe {
+        none,
+        mxfp8
+    };
+
     /// Packet Encoding Lookup info, retrievable in a single memory lookup
     /// Key is global expert index
     struct __align__(16) PEL {

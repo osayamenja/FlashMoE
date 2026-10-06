@@ -14,12 +14,16 @@
 
 namespace flashmoe {
   struct Context {
+    // [data region, MXFP8 scale factor region]
     cuda::std::byte *const symHeap = nullptr;
     uint64_t *const signals = nullptr; // [[world, num_local_experts], [E, tiles(roundEC), tiles(H)]]
     Task *const tQ = nullptr; // [subscriberTQLength]
     Task *const pTq = nullptr; //[secondaryTQLength]
     // [world, num_local_experts, roundEC, I] ~= [S, I]
+    // MXFP8: e4m3 elements, i.e., an I-byte row pitch, followed by GEMM0StagingSF
     cuda::std::byte *const GEMM0Staging = nullptr;
+    // MXFP8 only: [world, num_local_experts, canonical scale factors of the [roundEC, I] staging matrix]
+    cuda::std::byte *const GEMM0StagingSF = nullptr;
     BitSet *const consumerCombineBitMap = nullptr; // nSI<subscriberCount>(tiles(S) * tiles(H))
     uint8_t *const producerCombineBitMap = nullptr; // [world, nLx, ecTilesM, N1] ~= tiles(S) * tiles(H)
     PEL *const pel = nullptr; // [E]
@@ -34,6 +38,8 @@ namespace flashmoe {
     TPS *const tokenIndices = nullptr; // [E, roundEC]
     uint8_t* const stateNumbers = nullptr; // [processorCTAs]
     const cuda::fast_mod_div<uint> processors_v;
+    // MXFP8 only: byte offset of the scale factor region of symHeap, see heapSFBytes
+    const size_t symHeapSFOffset = 0;
     const uint blocks = 0;
     const uint smemSize = 0;
     const uint S = 0; //  max number of tokens for this rank
