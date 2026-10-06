@@ -22,46 +22,149 @@
 
 namespace flashmoe
 {
-  /// MXFP8 recipe applied while a token is copied to its packet: quantizes the row src[0, H) to E4M3 bytes dst[0, H)
-  /// and writes the UE8M0 scale of every 32 elements to sf, the canonical layout (mx::sfOffset) of a [rows, H] matrix,
-  /// at row sfRow. Bit-identical to mx::quantizeMXFP8.
-  /// Every thread converts 8 consecutive elements (16 B of input); the 4 adjacent threads that share a block of
-  /// 32 elements exchange their amax with shuffles, so all `threads` threads of the CTA must call this function
-  /// together, with the same arguments except for threadIdx. The loop bound is uniform across the CTA,
-  /// the lanes past the end of the row participate in the shuffles with amax = 0.
-  template <int threads, typename Element>
-    requires(sizeof(Element) == 2 && mx::MXInput<Element>)
+  /// Quantizing dispatch, see quantizeTokens: the number of 16 B chunks that every lane of a warp loads back to back
+  /// and quantizes together.
+  constexpr int QUANT_CHUNK_GROUP = 4;
+
+  /// Offset of the scale of the k-block kBlock of a row from that of the k-block 0 in the canonical layout of
+  /// mx::sfOffset: sfOffset(row, kBlock, n) == sfOffset(row, 0, n) + sfBlockOffset(kBlock)
   __device__ __forceinline__
-  void quantizeToken(const Element* __restrict__ const& src, uint8_t* __restrict__ const& dst,
-                     uint8_t* __restrict__ const& sf, const int& sfRow, const int& H) {
-    constexpr int vec = 16 / sizeof(Element); // elements per thread
-    constexpr int lanesPerBlock = mx::BLOCK_SIZE / vec;
-    static_assert(vec == 8 && threads % lanesPerBlock == 0);
-    const int chunks = H / vec;
-    const int numKBlocks = H / mx::BLOCK_SIZE;
-    const int trips = cute::ceil_div(chunks, threads);
-    for (int t = 0; t < trips; ++t) {
-      const int k = static_cast<int>(threadIdx.x) + t * threads;
-      const bool valid = k < chunks;
-      float x[vec];
-      uint32_t amaxBits = 0U; // |x| as an integer is monotonic in |x| and orders NaN > Inf > finite
-      if (valid) {
-        alignas(16) Element e[vec];
-        *reinterpret_cast<uint4*>(e) = __ldg(reinterpret_cast<const uint4*>(src) + k);
-        #pragma unroll
-        for (int i = 0; i < vec; ++i) {
-          x[i] = mx::detail::toFloat(e[i]);
-          amaxBits = max(amaxBits, __float_as_uint(x[i]) & 0x7FFFFFFFU);
-        }
-      }
+  constexpr size_t sfBlockOffset(const int& kBlock) {
+    return static_cast<size_t>(kBlock / mx::SF_K_TILE) * mx::SF_ATOM_BYTES + kBlock % mx::SF_K_TILE;
+  }
+
+  /// Global stores that are executed only if pred holds. They are predicated instructions and not branches, so that
+  /// the quantization of several chunks stays one straight line of code.
+  __device__ __forceinline__
+  void storeByteIf(const bool& pred, uint8_t* const& ptr, const uint32_t& v) {
+    asm volatile("{\n\t.reg .pred p;\n\tsetp.ne.u32 p, %0, 0;\n\t@p st.global.u8 [%1], %2;\n}"
+      :: "r"(static_cast<uint32_t>(pred)), "l"(ptr), "r"(v) : "memory");
+  }
+
+  __device__ __forceinline__
+  void storeWordIf(const bool& pred, uint8_t* const& ptr, const uint32_t& v) {
+    asm volatile("{\n\t.reg .pred p;\n\tsetp.ne.u32 p, %0, 0;\n\t@p st.global.u32 [%1], %2;\n}"
+      :: "r"(static_cast<uint32_t>(pred)), "l"(ptr), "r"(v) : "memory");
+  }
+
+  __device__ __forceinline__
+  void storeWord2If(const bool& pred, uint8_t* const& ptr, const uint32_t& lo, const uint32_t& hi) {
+    asm volatile("{\n\t.reg .pred p;\n\tsetp.ne.u32 p, %0, 0;\n\t@p st.global.v2.u32 [%1], {%2, %3};\n}"
+      :: "r"(static_cast<uint32_t>(pred)), "l"(ptr), "r"(lo), "r"(hi) : "memory");
+  }
+
+  /// fp4::ue8m0FromAmaxFP4 with selects instead of branches: the branches end the straight line of code that
+  /// quantizeChunks wants. Same results, see the bit-identity test.
+  __device__ __forceinline__
+  uint8_t ue8m0FromAmaxFP4Select(const float& amax) {
+    const uint32_t bits = __float_as_uint(amax) & 0x7FFFFFFFU;
+    const uint32_t biased = bits >> 23;
+    const int e = static_cast<int>(biased) - 2 + ((bits & 0x7FFFFFU) > 0x400000U ? 1 : 0);
+    uint32_t sfByte = static_cast<uint32_t>(max(e, static_cast<int>(mx::UE8M0_MIN)));
+    sfByte = biased == 0xFFU ? static_cast<uint32_t>(mx::UE8M0_NAN) : sfByte;
+    return static_cast<uint8_t>(sfByte);
+  }
+
+  /// The factor the elements of a block with the UE8M0 scale e are multiplied by before the conversion, 2^(127 - e)
+  /// (mx::ue8m0ToRcpFloat), and 1 for a NaN / Inf block (scale mx::UE8M0_NAN), with selects instead of branches.
+  __device__ __forceinline__
+  float ue8m0EncodeScaleSelect(const uint8_t& e) {
+    uint32_t bits = (254U - e) << 23;
+    bits = e == 254 ? 0x00400000U : bits;
+    bits = e == mx::UE8M0_NAN ? 0x3F800000U : bits;
+    return __uint_as_float(bits);
+  }
+
+  /// Two bf16 in the low (first) and the high (second) half of a 32 bit word
+  __device__ __forceinline__
+  __nv_bfloat162 asBF162(const uint32_t& bits) {
+    return *reinterpret_cast<const __nv_bfloat162*>(&bits);
+  }
+
+  __device__ __forceinline__
+  uint32_t asBits(const __nv_bfloat162& v) {
+    return *reinterpret_cast<const uint32_t*>(&v);
+  }
+
+  /// The maxima of |x| over the even and the odd elements of the 8 bf16 of a 16 B chunk, in the low and the high half of
+  /// the result. NaN propagates: the result is NaN if an element is NaN.
+  __device__ __forceinline__
+  __nv_bfloat162 chunkAbsMax(const uint4& raw) {
+    const auto a0 = __habs2(asBF162(raw.x));
+    const auto a1 = __habs2(asBF162(raw.y));
+    const auto a2 = __habs2(asBF162(raw.z));
+    const auto a3 = __habs2(asBF162(raw.w));
+    return __hmax2_nan(__hmax2_nan(a0, a1), __hmax2_nan(a2, a3));
+  }
+
+  /// Block-scaled recipe applied while a token is copied to its packet. Every lane converts `groups` 16 B chunks of a
+  /// row (raw), the chunks k0, k0 + 32, ..., i.e., 8 consecutive bf16 [8 k, 8 k + 8) each:
+  /// recipe mxfp8: 8 E4M3 bytes at dst + 8 k and the UE8M0 scale of the 32 elements to sf, in the canonical layout
+  /// (mx::sfOffset) of a [rows, H] matrix, where sfRow = mx::sfOffset(row, 0, H / 32) is the offset of the row.
+  /// Bit-identical to mx::quantizeMXFP8.
+  /// recipe mxfp4 / nvfp4: 8 E2M1 (two elements per byte, the even element in the low nibble) = 4 B at dst + 4 k and
+  /// the scale of the 32 (UE8M0) or 16 (UE4M3) elements to sf. st is the encode scale 1 / gs of the nvfp4 token tensor
+  /// and unused for mxfp4. Bit-identical to fp4::quantizeFP4 with the same st.
+  /// The lanes of a scale block (4 for mxfp8 and mxfp4, 2 for nvfp4) exchange their amax with shuffles: all 32 lanes of
+  /// the warp must call this function together, with the same arguments except for raw and k0. The chunks past the
+  /// end of the row (k >= chunks) may hold any bits: they only share scale blocks with each other, as H is a multiple
+  /// of 32, and they are not stored.
+  /// The groups are independent and there is no branch in here, so that they are interleaved by the compiler: the
+  /// amax of all of them, then the shuffles of all of them (two chunks per shuffle, packed as bf16x2), then the
+  /// conversions and the stores. Only the NaN-ness and the magnitude of the amax matter to the scales, so that the
+  /// amax is the NaN propagating maximum of the bf16, which is the same as the maximum of the integer |bits|
+  /// (monotonic in |x|, NaN > Inf > finite) that the quantizer kernels use.
+  template <QuantRecipe r, typename Element, int groups>
+    requires(isBlockScaled(r) && cuda::std::is_same_v<Element, __nv_bfloat16>)
+  __device__ __forceinline__
+  void quantizeChunks(const uint4 (&raw)[groups], const int& k0, const int& chunks,
+                      uint8_t* __restrict__ const& dst, uint8_t* __restrict__ const& sf, const size_t& sfRow,
+                      const float& st) {
+    constexpr int vec = 16 / sizeof(Element); // elements per lane
+    constexpr int lanesPerBlock = quantSFVecSize(r) / vec;
+    constexpr int pairs = (groups + 1) / 2;
+    static_assert(vec == 8 && WARP_SIZE % lanesPerBlock == 0);
+    __nv_bfloat162 amax[pairs]; // the amax of the chunks 2 i (low half) and 2 i + 1 (high half)
+    #pragma unroll
+    for (int i = 0; i < pairs; ++i) {
+      // (even, odd) maxima of the two chunks -> (chunk 2 i, chunk 2 i + 1) with the maxima of the even and the odd
+      // elements merged
+      const uint32_t a = asBits(chunkAbsMax(raw[2 * i]));
+      const uint32_t b = asBits(chunkAbsMax(raw[cute::min(2 * i + 1, groups - 1)]));
+      amax[i] = __hmax2_nan(asBF162(__byte_perm(a, b, 0x5410U)), asBF162(__byte_perm(a, b, 0x7632U)));
+    }
+    #pragma unroll
+    for (int o = lanesPerBlock / 2; o > 0; o >>= 1) {
       #pragma unroll
-      for (int o = lanesPerBlock / 2; o > 0; o >>= 1) {
-        amaxBits = max(amaxBits, __shfl_xor_sync(0xFFFFFFFFU, amaxBits, o));
+      for (int i = 0; i < pairs; ++i) {
+        amax[i] = __hmax2_nan(amax[i], asBF162(__shfl_xor_sync(0xFFFFFFFFU, asBits(amax[i]), o)));
       }
-      if (valid) {
-        const uint8_t sfByte = mx::ue8m0FromAmax(__uint_as_float(amaxBits));
+    }
+    // 32 chunks are 32 / lanesPerBlock scale blocks, a multiple of the 4 k-blocks of an atom of the layout of the
+    // scales: the scale of the group g is that of the group 0 plus g atom rows
+    static_assert((WARP_SIZE / lanesPerBlock) % mx::SF_K_TILE == 0);
+    constexpr size_t sfGroupBytes = static_cast<size_t>(WARP_SIZE / lanesPerBlock / mx::SF_K_TILE) * mx::SF_ATOM_BYTES;
+    uint8_t* __restrict__ const sfLane = sf + sfRow + sfBlockOffset(k0 / lanesPerBlock);
+    const bool leader = k0 % lanesPerBlock == 0;
+    #pragma unroll
+    for (int g = 0; g < groups; ++g) {
+      const int k = k0 + g * WARP_SIZE;
+      const bool valid = k < chunks;
+      // a bf16 is the upper half of the float with the same value
+      const uint32_t amaxPair = asBits(amax[g / 2]);
+      const float blockAmax = __uint_as_float(g % 2 == 0 ? amaxPair << 16 : amaxPair & 0xFFFF0000U);
+      const uint32_t words[4] = {raw[g].x, raw[g].y, raw[g].z, raw[g].w};
+      float x[vec];
+      #pragma unroll
+      for (int i = 0; i < vec / 2; ++i) {
+        x[2 * i] = __uint_as_float(words[i] << 16);
+        x[2 * i + 1] = __uint_as_float(words[i] & 0xFFFF0000U);
+      }
+      uint8_t sfByte;
+      if constexpr (r == QuantRecipe::mxfp8) {
+        sfByte = mx::ue8m0FromAmax(blockAmax);
         // NaN / Inf block: the scale is NaN, the payload is irrelevant but kept finite-saturated
-        const float inv = sfByte == mx::UE8M0_NAN ? 1.0f : mx::ue8m0ToRcpFloat(sfByte);
+        const float inv = ue8m0EncodeScaleSelect(sfByte);
         uint32_t w[vec / 4];
         #pragma unroll
         for (int i = 0; i < vec / 4; ++i) {
@@ -69,78 +172,132 @@ namespace flashmoe
           const uint32_t hi = mx::packE4M3x2(x[4 * i + 2] * inv, x[4 * i + 3] * inv);
           w[i] = lo | (hi << 16);
         }
-        *reinterpret_cast<uint2*>(dst + static_cast<size_t>(k) * vec) = make_uint2(w[0], w[1]);
-        if (k % lanesPerBlock == 0) {
-          sf[mx::sfOffset(sfRow, k / lanesPerBlock, numKBlocks)] = sfByte;
-        }
+        storeWord2If(valid, dst + static_cast<size_t>(k) * vec, w[0], w[1]);
       }
-    }
-  }
-
-  /// MXFP4 / NVFP4 recipe applied while a token is copied to its packet: quantizes the row src[0, H) to E2M1 (two
-  /// elements per byte, the even element in the low nibble) dst[0, H / 2) and writes the scale of every VS elements,
-  /// UE8M0 per 32 (mxfp4) or UE4M3 per 16 (nvfp4), to sf, the canonical layout (mx::sfOffset) of a [rows, H] matrix, at
-  /// row sfRow. st is the encode scale 1 / gs of the nvfp4 token tensor and unused for mxfp4.
-  /// Bit-identical to fp4::quantizeFP4 with the same st.
-  /// Every thread converts 8 consecutive elements (16 B of input) into 4 B of output with fp4::quantize8, which is
-  /// warp-collective: the lanes of a scale block (4 for mxfp4, 2 for nvfp4) exchange their amax with shuffles, so all
-  /// `threads` threads of the CTA must call this function together, with the same arguments except for threadIdx.
-  /// The loop bound is uniform across the CTA, the lanes past the end of the row participate with zeros.
-  template <int threads, QuantRecipe r, typename Element>
-    requires(isFP4(r) && sizeof(Element) == 2 && mx::MXInput<Element>)
-  __device__ __forceinline__
-  void quantizeTokenFP4(const Element* __restrict__ const& src, uint8_t* __restrict__ const& dst,
-                        uint8_t* __restrict__ const& sf, const int& sfRow, const int& H, const float& st) {
-    constexpr int vec = 16 / sizeof(Element); // elements per thread
-    constexpr int vs = quantSFVecSize(r);
-    constexpr int lanesPerBlock = vs / vec;
-    static_assert(vec == 8 && threads % WARP_SIZE == 0 && WARP_SIZE % lanesPerBlock == 0);
-    const int chunks = H / vec;
-    const int numKBlocks = H / vs;
-    const int trips = cute::ceil_div(chunks, threads);
-    for (int t = 0; t < trips; ++t) {
-      const int k = static_cast<int>(threadIdx.x) + t * threads;
-      const bool valid = k < chunks;
-      float x[vec] = {};
-      if (valid) {
-        alignas(16) Element e[vec];
-        *reinterpret_cast<uint4*>(e) = __ldg(reinterpret_cast<const uint4*>(src) + k);
+      else {
+        float enc;
+        if constexpr (r == QuantRecipe::mxfp4) {
+          sfByte = ue8m0FromAmaxFP4Select(blockAmax);
+          enc = ue8m0EncodeScaleSelect(sfByte);
+        }
+        else {
+          sfByte = fp4::nvfp4ScaleFromAmax(blockAmax, st);
+          enc = fp4::blockEncodeScale<r>(sfByte, st);
+        }
+        uint32_t w = 0U;
         #pragma unroll
-        for (int i = 0; i < vec; ++i) {
-          x[i] = mx::detail::toFloat(e[i]);
+        for (int i = 0; i < 4; ++i) {
+          w |= static_cast<uint32_t>(fp4::packE2M1x2(x[2 * i] * enc, x[2 * i + 1] * enc)) << (8 * i);
         }
-      }
-      uint8_t sfByte = 0;
-      const uint32_t w = fp4::quantize8<r>(x, st, sfByte);
-      if (valid) {
         // 8 E2M1 = 4 B
-        *reinterpret_cast<uint32_t*>(dst + static_cast<size_t>(k) * (vec / 2)) = w;
-        if (k % lanesPerBlock == 0) {
-          sf[mx::sfOffset(sfRow, k / lanesPerBlock, numKBlocks)] = sfByte;
-        }
+        storeWordIf(valid, dst + static_cast<size_t>(k) * (vec / 2), w);
       }
+      storeByteIf(valid && leader, sfLane + g * sfGroupBytes, static_cast<uint32_t>(sfByte));
     }
   }
 
-  /// quantizeToken / quantizeTokenFP4 by recipe; st is only used by nvfp4
-  template <int threads, QuantRecipe r, typename Element>
-    requires(isBlockScaled(r) && sizeof(Element) == 2 && mx::MXInput<Element>)
+  /// Quantizing copy of the `count` tokens that a CTA dispatches to the packet of one expert (recipe mxfp8, mxfp4,
+  /// nvfp4): the row p in [0, count) of the CTA is the row first + p * stride of the packet and holds the token
+  /// tokenIds[first + p * stride].tokenIdx. dst is the E4M3 (H bytes per row) or E2M1 (H / 2 bytes per row) packet
+  /// and sf its scale factor region, see quantizeChunks.
+  /// Warp per token: the warp w of the CTA takes the rows w, w + warps, ... (warps = threads / 32). The 16 B chunks of
+  /// a token are split into units of chunkGroup chunks per lane (a lane takes the chunks lane, lane + 32, ...). The
+  /// loads of a unit are issued back to back, one unit before it is quantized: a lane always has chunkGroup loads in
+  /// flight and chunkGroup independent quantizations to interleave (the previous version dispatched the tokens one
+  /// after the other, each with a dependent load -> amax shuffle -> quantize -> store chain per lane; deeper
+  /// prefetching did not help). The ids of the tokens are loaded two tokens ahead of the loads. The last unit of a row,
+  /// when H / 8 is not a multiple of chunkGroup * 32, is quantized as if it were full: the chunks past the end of
+  /// the row are loaded from the last chunk, they only share scale blocks with each other (H is a multiple of 32)
+  /// and are not stored.
+  /// Nothing here synchronizes the CTA, the caller does that before the packet is announced; the control flow is
+  /// uniform across the warp, as quantizeChunks is warp-collective.
+  template <int threads, QuantRecipe r, int chunkGroup, typename Element>
+    requires(isBlockScaled(r) && cuda::std::is_same_v<Element, __nv_bfloat16>)
   __device__ __forceinline__
-  void quantizeTokenRow(const Element* __restrict__ const& src, uint8_t* __restrict__ const& dst,
-                        uint8_t* __restrict__ const& sf, const int& sfRow, const int& H, const float& st) {
-    if constexpr (r == QuantRecipe::mxfp8) {
-      quantizeToken<threads>(src, dst, sf, sfRow, H);
-    }
-    else {
-      quantizeTokenFP4<threads, r>(src, dst, sf, sfRow, H, st);
+  void quantizeTokens(const Element* __restrict__ const& tokens, const TPS* __restrict__ const& tokenIds,
+                      uint8_t* __restrict__ const& dst, uint8_t* __restrict__ const& sf, const int& first,
+                      const int& stride, const int& count, const int& H, const float& st) {
+    constexpr int vec = 16 / sizeof(Element); // elements per lane
+    constexpr int warps = threads / WARP_SIZE;
+    constexpr int span = WARP_SIZE * chunkGroup; // chunks of a unit
+    static_assert(threads % WARP_SIZE == 0 && chunkGroup >= 1);
+    // the shuffle tells the compiler that the warp index, and so the control flow below, is uniform across the warp
+    const int warp = __shfl_sync(0xFFFFFFFFU, static_cast<int>(threadIdx.x) / WARP_SIZE, 0);
+    const int lane = static_cast<int>(threadIdx.x) % WARP_SIZE;
+    const int chunks = H / vec; // 16 B chunks of a row
+    const int unitsPerRow = cute::ceil_div(chunks, span);
+    const size_t rowBytes = static_cast<size_t>(H) * quantElementBits(r) / 8;
+    const int sfBlocks = H / quantSFVecSize(r);
+    // this warp quantizes the rows (slots) warp + s * warps, s < slots
+    const int slots = count > warp ? (count - warp + warps - 1) / warps : 0;
+    const auto tokenOf = [&](const int& s) {
+      return s < slots ? tokenIds[first + (warp + s * warps) * stride].tokenIdx : 0U;
+    };
+    uint4 bufA[chunkGroup];
+    uint4 bufB[chunkGroup];
+    // loads: the unit u of the slot s with the chunks [u * span, (u + 1) * span) of the token idCur,
+    // the tokens of the slots s + 1 and s + 2 are idNext and idNext2
+    int fs = 0;
+    int fu = 0;
+    uint32_t idCur = tokenOf(0);
+    uint32_t idNext = tokenOf(1);
+    uint32_t idNext2 = tokenOf(2);
+    const auto fetch = [&](uint4 (&b)[chunkGroup]) {
+      if (fs < slots) {
+        const auto* __restrict__ src = reinterpret_cast<const uint4*>(tokens + static_cast<size_t>(idCur) * H);
+        #pragma unroll
+        for (int g = 0; g < chunkGroup; ++g) {
+          b[g] = __ldg(src + cute::min(fu * span + g * WARP_SIZE + lane, chunks - 1));
+        }
+      }
+      if (fu + 1 == unitsPerRow) {
+        fu = 0;
+        ++fs;
+        idCur = idNext;
+        idNext = idNext2;
+        idNext2 = tokenOf(fs + 2);
+      }
+      else {
+        ++fu;
+      }
+    };
+    // quantization: the unit u of the slot s
+    int s = 0;
+    int u = 0;
+    int intraIdx = first + warp * stride; // row of the packet of the slot
+    uint8_t* __restrict__ row = dst + static_cast<size_t>(intraIdx) * rowBytes;
+    size_t sfRow = mx::sfOffset(intraIdx, 0, sfBlocks);
+    // quantizes the unit that is in cur and fetches the unit that follows it into next
+    const auto step = [&](uint4 (&cur)[chunkGroup], uint4 (&next)[chunkGroup]) {
+      fetch(next);
+      quantizeChunks<r, Element>(cur, u * span + lane, chunks, row, sf, sfRow, st);
+      if (u + 1 == unitsPerRow) {
+        u = 0;
+        ++s;
+        intraIdx = first + (warp + s * warps) * stride;
+        row = dst + static_cast<size_t>(intraIdx) * rowBytes;
+        sfRow = mx::sfOffset(intraIdx, 0, sfBlocks);
+      }
+      else {
+        ++u;
+      }
+    };
+    fetch(bufA);
+    // two units per trip, so that the buffers swap their roles without copies
+    while (s < slots) {
+      step(bufA, bufB);
+      if (s >= slots) {
+        break;
+      }
+      step(bufB, bufA);
     }
   }
 
   // MoE tokens dispatch
-  // recipe == mxfp8: tokens are quantized to E4M3 while they are copied, see quantizeToken.
+  // recipe == mxfp8: tokens are quantized to E4M3 while they are copied, see quantizeTokens.
   // The packet holds the E4M3 rows with an H-byte pitch and its scale factors are written to the scale factor region
   // of the symmetric heap, see Heap::advanceSF.
-  // recipe == mxfp4 / nvfp4: the same with E2M1 rows, i.e., an H / 2-byte pitch, see quantizeTokenFP4. st is the
+  // recipe == mxfp4 / nvfp4: the same with E2M1 rows, i.e., an H / 2-byte pitch, see quantizeTokens. st is the
   // nvfp4 encode scale of the tokens, 1 / inputScale.
   template <
     Topology topo,
@@ -248,7 +405,16 @@ namespace flashmoe
           lI.remoteSHeap + symHeap.advanceSFOffset<0, 1>(epRank, lI.expertLocalIdx));
       }
       if (routedTokens) {
-        const auto partition = routedTokens / superBlockSize + (lBid < routedTokens % superBlockSize);
+        // tokens of this CTA
+        const auto cTokens = routedTokens / superBlockSize + (lBid < routedTokens % superBlockSize);
+        if constexpr (quantize) {
+          // warp per token quantize + copy: the packet is E4M3 (H-byte row pitch) or E2M1 (H / 2 bytes)
+          quantizeTokens<threads, recipe, QUANT_CHUNK_GROUP>(tokens,
+            _tokenIds + static_cast<size_t>(expertIdx) * roundEC, reinterpret_cast<uint8_t*>(peerHeap), peerSF, lBid,
+            superBlockSize, static_cast<int>(cTokens), H, st);
+        }
+        // coalesced vectorized copy of the tokens as they are, all of them are done above for the quantized recipes
+        const auto partition = quantize ? 0 : cTokens;
         const auto trips = partition / batch;
         for (int i = 0; i < trips; ++i) {
           #pragma unroll
@@ -269,19 +435,12 @@ namespace flashmoe
           for (int j = 0; j < batch; ++j) {
             const auto tokenIdx = rTID[j];
             const auto intraIdx = lBid + (j + i * batch) * superBlockSize;
-            if constexpr (quantize) {
-              // coalesced quantize + copy: the packet is E4M3 (H-byte row pitch) or E2M1 (H / 2 bytes)
-              quantizeTokenRow<threads, recipe>(tokens + static_cast<size_t>(tokenIdx) * H,
-                reinterpret_cast<uint8_t*>(peerHeap) + static_cast<size_t>(intraIdx) * rowBytes, peerSF, intraIdx, H, st);
-            }
-            else {
-              auto* __restrict__ localPH = peerHeap + intraIdx * vH;
-              const auto* __restrict__ aP = vTokens + tokenIdx * vH;
-              // coalesced vectorized copy
-              for (int k = static_cast<int>(threadIdx.x); k < vH; k += threads) {
-                const auto v = cuda::ptx::ld_nc_L1_no_allocate_L2_256B(cuda::ptx::space_global, aP + k);
-                cuda::ptx::st(cuda::ptx::space_global, localPH + k, v);
-              }
+            auto* __restrict__ localPH = peerHeap + intraIdx * vH;
+            const auto* __restrict__ aP = vTokens + tokenIdx * vH;
+            // coalesced vectorized copy
+            for (int k = static_cast<int>(threadIdx.x); k < vH; k += threads) {
+              const auto v = cuda::ptx::ld_nc_L1_no_allocate_L2_256B(cuda::ptx::space_global, aP + k);
+              cuda::ptx::st(cuda::ptx::space_global, localPH + k, v);
             }
           }
         }
@@ -299,18 +458,11 @@ namespace flashmoe
             if (j < residue) {
               const auto tokenIdx = rTID[j];
               const auto intraIdx = lBid + (j + trips * batch) * superBlockSize;
-              if constexpr (quantize) {
-                quantizeTokenRow<threads, recipe>(tokens + static_cast<size_t>(tokenIdx) * H,
-                  reinterpret_cast<uint8_t*>(peerHeap) + static_cast<size_t>(intraIdx) * rowBytes, peerSF, intraIdx, H,
-                  st);
-              }
-              else {
-                auto* __restrict__ localPH = peerHeap + intraIdx * vH;
-                const auto* __restrict__ aP = vTokens + tokenIdx * vH;
-                for (int k = static_cast<int>(threadIdx.x); k < vH; k += threads) {
-                  const auto v = cuda::ptx::ld_nc_L1_no_allocate_L2_256B(cuda::ptx::space_global, aP + k);
-                  cuda::ptx::st(cuda::ptx::space_global, localPH + k, v);
-                }
+              auto* __restrict__ localPH = peerHeap + intraIdx * vH;
+              const auto* __restrict__ aP = vTokens + tokenIdx * vH;
+              for (int k = static_cast<int>(threadIdx.x); k < vH; k += threads) {
+                const auto v = cuda::ptx::ld_nc_L1_no_allocate_L2_256B(cuda::ptx::space_global, aP + k);
+                cuda::ptx::st(cuda::ptx::space_global, localPH + k, v);
               }
             }
           }
