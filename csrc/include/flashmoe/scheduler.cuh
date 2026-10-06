@@ -19,6 +19,7 @@
 #include "infra/bitset.cuh"
 #include "infra/checks.cuh"
 #include "infra/dq.cuh"
+#include "infra/trace.cuh"
 #include "infra/tq.cuh"
 
 namespace flashmoe::scheduler
@@ -42,6 +43,7 @@ namespace flashmoe::scheduler
                 const uint& canSchedule, const uint& qIdx, uint& lRQIdx,
                 const uint& gRQIdx, uint* __restrict__ const& rQ,
                 TQSignal* __restrict__ const& pDB) {
+    FLASHMOE_TRACE_STAMP(tBatch);
     cutlass::Array<uint, WORK_SET_SIZE> wSet{};
     static_assert(sizeof(TQSignal) == sizeof(uint64_t) && alignof(TQSignal) == alignof(uint64_t));
     auto sig = TQSignal{0U, 0U};
@@ -76,6 +78,7 @@ namespace flashmoe::scheduler
         pdb.store(cuda::std::bit_cast<uint64_t>(sig), cuda::memory_order_release);
       }
     }
+    FLASHMOE_TRACE_BATCH(tBatch, dqt == DQType::stride, qIdx, canSchedule);
   }
 
   template <
@@ -128,6 +131,7 @@ namespace flashmoe::scheduler
         // Aggregate tally across the warp
         __syncwarp();
         WarpScan(wSt).InclusiveSum(lPt, startIdx, processorTally);
+        FLASHMOE_TRACE_EVENT_LANE0(schedScan, processorTally, taskTally);
         startIdx -= lPt;
         // write to rQ
         const auto qSIdx = gRQIdx + prefixTaskSum;
@@ -446,6 +450,7 @@ namespace flashmoe::scheduler
       }
       __syncwarp();
       tTB = __shfl_sync(0xffffffff, tTB, 0);
+      FLASHMOE_TRACE_EVENT_LANE0(schedSweep, 0, scheduled);
     }
     __syncwarp();
     // interrupt subscribers

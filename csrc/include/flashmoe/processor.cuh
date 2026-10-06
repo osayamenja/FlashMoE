@@ -16,6 +16,7 @@
 #include "infra/signal.cuh"
 #include "infra/structures.cuh"
 #include "infra/task.cuh"
+#include "infra/trace.cuh"
 #include "tile.cuh" // cublasdx and tileGEMM
 #include "tile_sm120_mxfp8.cuh" // block-scaled MXFP8 tile GEMM
 #include "tile_sm120_fp4.cuh" // block-scaled MXFP4 / NVFP4 tile GEMM
@@ -45,6 +46,7 @@ namespace flashmoe::processor
     // compute Tile
     constexpr TileGEMM tileMainloop{};
     tileMainloop(workspace, a, b, accumulator, M, N, K, tileCoord);
+    FLASHMOE_TRACE_EVENT_T0(procMainDone, 0, 0);
     // gmem -> rmem: prefetch bias
     const auto gD = tile::getBias<BM{}, BN{}>(bias, M, N, cute::select<0, 1>(tileCoord));
     auto d_frag = cublasdx::make_fragment_like<ElementC>(accumulator.get_results());
@@ -123,6 +125,7 @@ namespace flashmoe::processor
     cublasdx::copy_fragment<cublasdx::alignment_of<BLAS>::c>(d_frag, sGate, accumulator);
     // now, compute v tile
     tileMainloop(workspace, a, bV, accumulator, M, N, K, tileCoord);
+    FLASHMOE_TRACE_EVENT_T0(procMainDone, 0, 0);
     auto cv_frag = accumulator.get_results();
     const auto gV = tile::getBias<BM{}, BN{}>(biasV, M, N, cute::select<0, 1>(tileCoord));
     cublasdx::copy_fragment<cublasdx::alignment_of<BLAS>::c>(gV, d_frag, accumulator);
@@ -290,11 +293,13 @@ namespace flashmoe::processor
       if (threadIdx.x / WARP_SIZE == 0) {
         if (threadIdx.x == 0) {
           cuda::atomic_ref<uint64_t, cuda::thread_scope_device> doorbell{*pA.pDB};
+          FLASHMOE_TRACE_EVENT(procWaitBegin, 0, 0);
           // await new task from scheduler
           auto payload = cuda::std::bit_cast<TQSignal>(doorbell.load(cuda::memory_order_acquire));
           while (payload.signal == tqs.signal && payload.interrupt == 0) {
             payload = cuda::std::bit_cast<TQSignal>(doorbell.load(cuda::memory_order_acquire));
           }
+          FLASHMOE_TRACE_EVENT(procDoorbell, payload.interrupt, payload.decodeSig());
           if (payload.interrupt) {
             // we need to clear out our mailbox to ensure it's ready for a subsequent epoch
             constexpr auto TQSZero = cuda::std::bit_cast<uint64_t>(TQSignal{0, 0});
@@ -322,6 +327,9 @@ namespace flashmoe::processor
       __syncthreads();
       tqs.interrupt = globalInterrupt;
       if (!tqs.interrupt) {
+        FLASHMOE_TRACE_EVENT_T0(procTaskLoaded,
+          (static_cast<uint>(currentTask.getTaskType()) << 16) | currentTask.localExpertIdx(),
+          currentTask.getTaskType() == TaskType::combine ? currentTask.combineTileIdx() : currentTask.tileIdx);
         // shared -> registers
         switch (const auto task = currentTask; task.getTaskType()) {
         case TaskType::GEMM0: {
@@ -356,11 +364,13 @@ namespace flashmoe::processor
               const auto* __restrict__ biasPv = biasUpV + static_cast<size_t>(I) * expert;
               auto acc2 = MXGEMM0::makeAccumulator();
               mainloop(workspace, aP, sfaP, bP, sfbP, bPv, sfbPv, acc, acc2, task.M(), I, H, tileCoord);
+              FLASHMOE_TRACE_EVENT_T0(procMainDone, 0, 0);
               MXGEMM0::template epilogueGatedMXFP8<Activation>(acc, acc2, cP, sfcP, biasP, biasPv,
                 swishAlpha, swishBeta, task.M(), I, tileCoord);
             }
             else {
               mainloop(workspace, aP, sfaP, bP, sfbP, acc, task.M(), I, H, tileCoord);
+              FLASHMOE_TRACE_EVENT_T0(procMainDone, 0, 0);
               MXGEMM0::template epilogueMXFP8<Activation>(acc, cP, sfcP, biasP, task.M(), I, tileCoord);
             }
           }
@@ -408,11 +418,13 @@ namespace flashmoe::processor
               const auto* __restrict__ biasPv = biasUpV + static_cast<size_t>(I) * expert;
               auto acc2 = FPGEMM0::makeAccumulator();
               mainloop(workspace, aP, sfaP, bP, sfbP, bPv, sfbPv, acc, acc2, task.M(), I, H, tileCoord);
+              FLASHMOE_TRACE_EVENT_T0(procMainDone, 0, 0);
               FPGEMM0::template epilogueGatedFP4<Activation>(acc, acc2, cP, sfcP, biasP, biasPv, alphaG, alphaU,
                 swishAlpha, swishBeta, st, task.M(), I, tileCoord);
             }
             else {
               mainloop(workspace, aP, sfaP, bP, sfbP, acc, task.M(), I, H, tileCoord);
+              FLASHMOE_TRACE_EVENT_T0(procMainDone, 0, 0);
               FPGEMM0::template epilogueFP4<Activation>(acc, cP, sfcP, biasP, alphaG, st, task.M(), I, tileCoord);
             }
           }
@@ -478,6 +490,7 @@ namespace flashmoe::processor
             constexpr MXGEMM1 mainloop{};
             auto acc = MXGEMM1::makeAccumulator();
             mainloop(workspace, aP, sfaP, bP, sfbP, acc, task.M(), H, I, tileCoord);
+            FLASHMOE_TRACE_EVENT_T0(procMainDone, 0, 0);
             MXGEMM1::template epilogueBF16<cublasdx::identity>(acc, cP, biasP, task.M(), H, tileCoord);
           }
           else if constexpr (isFP4(recipe)) {
@@ -506,6 +519,7 @@ namespace flashmoe::processor
             constexpr FPGEMM1 mainloop{};
             auto acc = FPGEMM1::makeAccumulator();
             mainloop(workspace, aP, sfaP, bP, sfbP, acc, task.M(), H, I, tileCoord);
+            FLASHMOE_TRACE_EVENT_T0(procMainDone, 0, 0);
             FPGEMM1::template epilogueBF16<cublasdx::identity>(acc, cP, biasP, alpha, task.M(), H, tileCoord);
           }
           else {
@@ -588,6 +602,9 @@ namespace flashmoe::processor
         }
         break;
         }
+        FLASHMOE_TRACE_EVENT_T0(procTaskDone,
+          (static_cast<uint>(currentTask.getTaskType()) << 16) | currentTask.tileSize(),
+          currentTask.getTaskType() == TaskType::combine ? currentTask.combineTileIdx() : currentTask.tileIdx);
       }
     }
   }

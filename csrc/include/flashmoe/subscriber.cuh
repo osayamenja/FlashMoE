@@ -19,6 +19,7 @@
 #include "infra/signal.cuh"
 #include "infra/structures.cuh"
 #include "infra/task.cuh"
+#include "infra/trace.cuh"
 
 namespace flashmoe::subscriber
 {
@@ -184,6 +185,7 @@ namespace flashmoe::subscriber
       // instruction rather than 4 of them, which would have been the case if we updated the entire Task object.
       auto* tQp = &((args.tQ + DQ::sNext<DQType::stride, subscriberCount>(lTQHead++))->ingredients);
       cuda::ptx::st(cuda::ptx::space_global, tQp, ingredients);
+      FLASHMOE_TRACE_EVENT(subCombine, (ingredients.stash << 12) | ingredients.localExpertIdx, ingredients.M);
       cuda::atomic_ref<unsigned int, cuda::thread_scope_block> tqh{*args.tQHead};
       // notifies scheduler of work
       cuda::std::ignore = tqh.fetch_add(1, cuda::memory_order_release);
@@ -201,6 +203,7 @@ namespace flashmoe::subscriber
         cuda::ptx::st(cuda::ptx::space_global, tQp, ingredients);
       }
       lTQHead += args.tilesN1;
+      FLASHMOE_TRACE_EVENT(subCombine, ingredients.localExpertIdx, ingredients.M);
       cuda::atomic_ref<unsigned int, cuda::thread_scope_block> tqh{*args.tQHead};
       cuda::std::ignore = tqh.fetch_add(args.tilesN1, cuda::memory_order_release);
     }
@@ -330,6 +333,7 @@ namespace flashmoe::subscriber
           const auto myLocalExIdx = flagIdx % args.nLx;
           const auto lXI = args.lX[myLocalExIdx];
           const auto* packet = symHeap.advance<0, 1>(peerIdx, myLocalExIdx);
+          FLASHMOE_TRACE_EVENT_LANE0(subPacket, (peerIdx << 12) | myLocalExIdx, sigPayload.routedTokens);
 
           Ingredients ingredients{};
           ingredients.localExpertIdx = myLocalExIdx;

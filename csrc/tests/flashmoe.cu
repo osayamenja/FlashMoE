@@ -1107,6 +1107,57 @@ void kickstart(const Options& opts) {
   cudaDeviceProp prop{};
   CHECK_CUDA(cudaGetDeviceProperties(&prop, devId)); // Get properties for current rank
   const auto sms = "sm_" + std::to_string(Arch / 10);
+#if defined(FLASHMOE_TRACE) && FLASHMOE_TRACE
+  // One extra, traced launch after the timed region. It is only done if FLASHMOE_TRACE_DIR is set and writes
+  // ${FLASHMOE_TRACE_DIR}/trace_<tag>.bin (records, see infra/trace.cuh) and trace_<tag>.json (shapes and tiles);
+  // <tag> is ${FLASHMOE_TRACE_TAG} or <recipe>_S<S>_H<H>_I<I>_E<E>_k<k>. tests/trace_summary.py reads them.
+  if (const char* traceDir = std::getenv("FLASHMOE_TRACE_DIR"); traceDir != nullptr && traceDir[0] != '\0') {
+    const char* traceTag = std::getenv("FLASHMOE_TRACE_TAG");
+    const auto tag = traceTag != nullptr && traceTag[0] != '\0' ? std::string(traceTag) :
+      std::string(testRecipe == flashmoe::QuantRecipe::none ? "bf16" : testRecipeName).append("_S")
+      .append(std::to_string(opts.S)).append("_H").append(std::to_string(opts.H))
+      .append("_I").append(std::to_string(opts.I)).append("_E").append(std::to_string(opts.E))
+      .append("_k").append(std::to_string(opts.k));
+    const auto base = std::string(traceDir).append("/trace_").append(tag);
+    constexpr uint32_t traceCapacity = 4096; // records per processor / dispatch block
+    constexpr uint32_t traceOSCapacity = 32768; // records of the OS block
+    const auto traceBlocks = static_cast<uint32_t>(blocks);
+    const auto traceBuffers = flashmoe::trace::allocate(traceBlocks, traceCapacity, traceOSCapacity);
+    flashmoe::trace::reset(traceBuffers, traceBlocks, stream);
+    auto tracedContext = moeContext;
+    tracedContext.traceBuffers = traceBuffers;
+    CHECK_CUDA(cudaStreamSynchronize(stream));
+    CHECK_CUDA(cudaEventRecord(start, stream));
+    if (moeContext.topo == flashmoe::Topology::NVLINK_ONLY) {
+      flashmoe::moe::forwardHost<Config, flashmoe::Topology::NVLINK_ONLY, act>(kArgs, tracedContext, stream);
+    }
+    else {
+      flashmoe::moe::forwardHost<Config, flashmoe::Topology::MIXED, act>(kArgs, tracedContext, stream);
+    }
+    CHECK_CUDA(cudaEventRecord(stop, stream));
+    CHECK_CUDA(cudaEventSynchronize(stop));
+    float tracedMs = 0.0f;
+    CHECK_CUDA(cudaEventElapsedTime(&tracedMs, start, stop));
+    if (!flashmoe::trace::writeFile(traceBuffers, traceBlocks, (base + ".bin").c_str(), stream)) {
+      printf("trace: cannot write %s.bin\n", base.c_str());
+    }
+    else if (FILE* json = fopen((base + ".json").c_str(), "w"); json != nullptr) {
+      fprintf(json, "{\"version\": 1, \"tag\": \"%s\", \"bin\": \"trace_%s.bin\", \"recipe\": \"%s\", \"element\": \"%s\", "
+        "\"S\": %lu, \"H\": %lu, \"I\": %lu, \"E\": %lu, \"k\": %lu, \"EC\": %lu, \"mlp\": \"%s\", "
+        "\"bM\": %d, \"bN0\": %d, \"bK0\": %d, \"bN1\": %d, \"bK1\": %d, \"threads\": %d, "
+        "\"tilesN0\": %d, \"tilesN1\": %d, \"blocks\": %u, \"processors\": %u, \"sms\": %d, \"blocksPerSM\": %d, "
+        "\"capacity\": %u, \"osCapacity\": %u, \"tracedLaunchMs\": %f, \"timedMs\": %f, \"timer\": \"globaltimer_ns\", "
+        "\"device\": \"%s\"}\n",
+        tag.c_str(), tag.c_str(), testRecipe == flashmoe::QuantRecipe::none ? "none" : testRecipeName, es,
+        opts.S, opts.H, opts.I, opts.E, opts.k, opts.EC, mt_string<mt>(),
+        bM, bN0, bK0, bN1, bK1, threads, static_cast<int>(opts.I / bN0), static_cast<int>(tilesN1),
+        traceBlocks, traceBlocks - 1, num_sms, bps, traceCapacity, traceOSCapacity, tracedMs, m_time_ms, prop.name);
+      fclose(json);
+      printf("trace: wrote %s.bin and %s.json, traced launch %.3f ms\n", base.c_str(), base.c_str(), tracedMs);
+    }
+    flashmoe::trace::release(traceBuffers);
+  }
+#endif
 #if defined(FLASHMOE_TEST_QUANT) && FLASHMOE_TEST_QUANT
   printf("%d, %s, %s, %lu, %lu, %lu, %lu, %lu, %f, %lf, %lf, %lu, %s, %s, %s, %s, %d, %d, %d, %d, %d, %d, %d, %d, %d, %.1e, %.1e, %d, %d, %d, %lf\n",
          epRank, es, testRecipeName, opts.S, opts.H, opts.I, opts.E, opts.k, m_time_ms, ep, relFro * 100.0, opts.EC,

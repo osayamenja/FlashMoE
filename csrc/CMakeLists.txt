@@ -22,6 +22,9 @@ endif ()
 
 project(flashmoe CUDA CXX)
 
+# In-kernel task tracer, see include/flashmoe/infra/trace.cuh; compiled into the testFlashMoE* targets only.
+option(FLASHMOE_TRACE "Record a timeline of the dispatch, scheduler, subscriber and processor tasks (testFlashMoE*)" OFF)
+
 # flags
 add_library(flashmoe_warnings INTERFACE)
 
@@ -215,6 +218,9 @@ function(flash_target_lto tgt)
             NUM_SMS=${CUDA_NUM_SMS}
             FLASHMOE_NVTX=1
     )
+    if(FLASHMOE_TRACE)
+        target_compile_definitions(${tgt} PRIVATE FLASHMOE_TRACE=1)
+    endif()
 endfunction()
 add_executable(testFlashMoE
         tests/flashmoe.cu

@@ -10,6 +10,7 @@
 #include "infra/signal.cuh"
 #include "infra/structures.cuh"
 #include "infra/task.cuh"
+#include "infra/trace.cuh"
 #include "infra/tq.cuh"
 
 namespace flashmoe {
@@ -56,6 +57,10 @@ namespace flashmoe {
     const uint16_t epRank = 0;
     const uint16_t myPE = 0;
     const Topology topo = Topology::MIXED;
+#if FLASHMOE_TRACE
+    // FLASHMOE_TRACE only, see infra/trace.cuh; the caller sets it (on a copy of the Context) before a traced launch
+    trace::Buffers traceBuffers{};
+#endif
   };
 
   struct GateContext {

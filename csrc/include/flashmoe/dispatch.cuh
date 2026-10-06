@@ -17,6 +17,7 @@
 #include "infra/packed.cuh"
 #include "infra/signal.cuh"
 #include "infra/structures.cuh"
+#include "infra/trace.cuh"
 #include "infra/vt.cuh"
 
 namespace flashmoe
@@ -234,6 +235,7 @@ namespace flashmoe
       const auto flagOffset = epRank * lI.nLocalExperts + lI.expertLocalIdx;
       // note that for DropTokens:no, we set EC to be the entire sequence length (S) to accommodate the worst-case
       const auto routedTokens = cute::min(lI.eC, EC);
+      FLASHMOE_TRACE_EVENT_T0(dispatchBegin, expertIdx, routedTokens);
       auto* __restrict__ peerHeap = reinterpret_cast<VectorElement*>(topo == Topology::MIXED && lI.isRemote ?
         symHeap.advance<0, 0>(lI.peer, lI.expertLocalIdx): lI.remoteSHeap +
         symHeap.advanceOffset<0, 1>(epRank, lI.expertLocalIdx));
@@ -384,6 +386,7 @@ namespace flashmoe
           sf.store(cuda::std::bit_cast<uint64_t>(sigPayload), cuda::memory_order_release);
         }
       }
+      FLASHMOE_TRACE_EVENT_T0(dispatchEnd, expertIdx, 0);
     }
   }
 }
