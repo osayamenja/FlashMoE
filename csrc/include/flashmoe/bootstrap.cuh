@@ -414,9 +414,8 @@ namespace flashmoe {
 #if defined(FLASHMOE_NVTX) && FLASHMOE_NVTX
     const flashmoeRange range{"FlashMoE::initializeGate"};
 #endif
-    int *ecGuards = nullptr;
-    CHECK_CUDA(cudaMallocAsync(&ecGuards, sizeof(int) * numExperts, stream));
-    CHECK_CUDA(cudaMemsetAsync(ecGuards, flashmoe::STALE_AS_BYTE, sizeof(int) * numExperts, stream));
+    TPS *staging = nullptr;
+    CHECK_CUDA(cudaMallocAsync(&staging, sizeof(TPS) * numExperts * S, stream));
     SoftmaxStatePacked *ssp = nullptr;
     RingTopKPayload *rtp = nullptr;
     if (numExperts > bNGate) {
@@ -427,7 +426,7 @@ namespace flashmoe {
       CHECK_CUDA(cudaMallocAsync(&rtp, 2 * sizeof(RingTopKPayload) * S * tE, stream));
       CHECK_CUDA(cudaMemsetAsync(rtp, 0, 2 * sizeof(RingTopKPayload) * S * tE, stream));
     }
-    return GateContext{ecGuards, ssp, rtp};
+    return GateContext{staging, ssp, rtp};
   }
 
   __host__ __forceinline__
@@ -435,7 +434,7 @@ namespace flashmoe {
 #if defined(FLASHMOE_NVTX) && FLASHMOE_NVTX
     const flashmoeRange range{"FlashMoE::finalizeGate"};
 #endif
-    CHECK_CUDA(cudaFreeAsync(gCtx.ecGuards, stream));
+    CHECK_CUDA(cudaFreeAsync(gCtx.staging, stream));
     if (gCtx.ssp != nullptr) {
       CHECK_CUDA(cudaFreeAsync(gCtx.ssp, stream));
     }

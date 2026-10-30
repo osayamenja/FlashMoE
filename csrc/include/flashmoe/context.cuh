@@ -52,7 +52,7 @@ namespace flashmoe {
   };
 
   struct GateContext {
-    int *const ecGuards = nullptr; // [E]
+    TPS *const staging = nullptr; // [E, S], one record per input row
     SoftmaxStatePacked *const ssp = nullptr; // [S, tiles(E)]
     RingTopKPayload *const rtp = nullptr; // [2, S, tiles(E)]
     uint blocks = 0;

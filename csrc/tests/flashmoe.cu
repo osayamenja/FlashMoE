@@ -403,7 +403,7 @@ void kickstart(const Options& opts) {
   constexpr auto rl = flashmoe::gate::ReturnLogits::no;
   using GateTile = cute::Shape<cute::Int<bM>, cute::Int<bNGate>, cute::Int<bK0>, cute::Int<pSK0>>;
   constexpr int gateThreads = cute::max(flashmoe::tile::suggest_thread_count<bM, bNGate, bK0, Arch, Element, AccumType>(), bM);
-  auto gateKernel = flashmoe::gate::forwardKernel<GateTile, Arch, gateThreads, grl, sro, rl, AccumType, Element>;
+  auto gateKernel = flashmoe::gate::stageKernel<GateTile, Arch, gateThreads, grl, sro, rl, AccumType, Element>;
   constexpr auto gateShared = cutlass::round_up(cute::max(sizeof(Element) * bK0 * pSK0 * (bM + bNGate),
     sizeof(flashmoe::gate::SoftType) * bM * bNGate), flashmoe::MAX_ALIGNMENT);
   if (gateShared > maxSharedMemory) {
@@ -564,8 +564,8 @@ void kickstart(const Options& opts) {
     .roundEC = cute::ceil_div(static_cast<int>(opts.EC), bM) * bM
   };
   // run fused gate to populate tokenIndices and expertCounts
-  flashmoe::gate::forwardKernel<GateTile, Arch, gateThreads, grl, sro, rl, AccumType, Element>
-  <<<gateBlocks, gateThreads, gateShared, stream>>>(gkArgs, gateCtx);
+  CHECK_CUDA((flashmoe::gate::forward<GateTile, Arch, gateThreads, grl, sro, rl, AccumType, Element>
+    (gkArgs, gateCtx, gateBlocks, gateShared, stream)));
   auto flashMK = [&](const flashmoe::Topology topology, const uint& k_runs) {
     if (topology == flashmoe::Topology::NVLINK_ONLY) {
       for (int i = 0; i < k_runs; ++i) {

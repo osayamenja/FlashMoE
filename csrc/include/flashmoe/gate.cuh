@@ -86,6 +86,61 @@ namespace flashmoe::gate
     const int roundEC = 0;
   };
 
+  template<int bM, int bN>
+  __device__ __forceinline__
+  void stageTile(const GateKernelArgs& kArgs, const GateContext& ctx,
+                 const int tileM, const int tileN, const int (&selected)[bN],
+                 const SoftType (&probabilities)[bN], const SoftType combineWeight) {
+    const int token = tileM * bM + threadIdx.x;
+    if (threadIdx.x >= bM || token >= kArgs.S) {
+      return;
+    }
+    #pragma unroll
+    for (int i = 0; i < bN; ++i) {
+      const int expert = tileN * bN + i;
+      ctx.staging[static_cast<size_t>(expert) * kArgs.S + token] = selected[i]
+        ? TPS{static_cast<uint32_t>(token), fdividef(probabilities[i], combineWeight)}
+        : TPS{cuda::std::numeric_limits<uint32_t>::max(), 0.f};
+    }
+  }
+
+  constexpr int capacityThreads = 128;
+  constexpr int capacityItems = 8;
+
+  static __global__ void capacityKernel(const __grid_constant__ GateKernelArgs kArgs,
+                                       const TPS* staging) {
+    __shared__ BlockScan<capacityThreads>::TempStorage scan;
+    const int expert = blockIdx.x;
+    int total = 0;
+    for (int base = 0; base < kArgs.S; base += capacityThreads * capacityItems) {
+      TPS records[capacityItems];
+      int selected[capacityItems], positions[capacityItems];
+      #pragma unroll
+      for (int i = 0; i < capacityItems; ++i) {
+        const int token = base + threadIdx.x * capacityItems + i;
+        records[i] = token < kArgs.S
+          ? staging[static_cast<size_t>(expert) * kArgs.S + token]
+          : TPS{cuda::std::numeric_limits<uint32_t>::max(), 0.f};
+        // A selected record may legitimately have probability zero.
+        selected[i] = records[i].tokenIdx != cuda::std::numeric_limits<uint32_t>::max();
+      }
+      int aggregate;
+      BlockScan<capacityThreads>(scan).ExclusiveSum(selected, positions, aggregate);
+      #pragma unroll
+      for (int i = 0; i < capacityItems; ++i) {
+        const int slot = total + positions[i];
+        if (selected[i] && slot < kArgs.EC) {
+          kArgs.tokenIds[static_cast<size_t>(expert) * kArgs.roundEC + slot] = records[i];
+        }
+      }
+      total += aggregate;
+      __syncthreads();
+    }
+    if (threadIdx.x == 0) {
+      kArgs.expertCounts[expert] = total;
+    }
+  }
+
   /// Fused GEMM, softmax, topKMask, assuming blocks >= tiles.N
   template <
     GateReductionLevel g,
@@ -105,8 +160,6 @@ namespace flashmoe::gate
       constexpr auto bM = cute::get<0>(typename TileGEMM::TileShape{});
       constexpr auto bN = cute::get<1>(typename TileGEMM::TileShape{});
       constexpr auto bK = cute::get<2>(typename TileGEMM::TileShape{});
-      const auto tokenIds = make_tensor(cute::make_gmem_ptr(kArgs.tokenIds),
-                                        cute::make_layout(cute::make_shape(kArgs.E, kArgs.roundEC), cute::LayoutRight{}));
       const auto tilesM = cute::ceil_div(kArgs.S, bM);
       // assert(E % bN == 0)
       const auto tilesN = kArgs.E / bN;
@@ -339,48 +392,8 @@ namespace flashmoe::gate
           mCw += sV;
         }
       }
-      // finalize routing table construction
-      __shared__ int startIndices[bN];
-      using BTS = BlockScan<threads>::TempStorage;
-      __shared__ __align__(alignof(BTS)) BTS scanTempStorage[bN];
-      int myIndices[bN];
-      // scan down the column
-      constexpr int sl = cute::ceil_div(bN, threads); // typically 1
-      int stash[sl];
-      #pragma unroll
-      for (int i = 0; i < sl; ++i) {
-        stash[i] = 0;
-      }
-      #pragma unroll
-      for (int i = 0; i < bN; ++i) {
-        int selected = 0;
-        BlockScan<threads>(scanTempStorage[i]).InclusiveSum(rTK[i], myIndices[i], selected);
-        stash[i / threads] = threadIdx.x == (i % threads) ? selected : stash[i / threads];
-      }
-      #pragma unroll
-      for (int i = 0; i < sl; ++i) {
-        const int idx = threadIdx.x + i * threads;
-        if (idx < bN) {
-          const int expertIdx = bN * cute::get<1>(tileCoord) + idx;
-          startIndices[idx] = guardedAtomicAdd(ctx.ecGuards + expertIdx,
-                                               kArgs.expertCounts + expertIdx, stash[i], tilesM);
-        }
-      }
-      __syncthreads();
-      #pragma unroll
-      for (int i = 0; i < bN; ++i) {
-        myIndices[i] = startIndices[i] + myIndices[i] - 1;
-      }
-      #pragma unroll
-      for (int i = 0; i < bN; ++i) {
-        if (rTK[i] && myIndices[i] < kArgs.EC) {
-          const auto expertIdx = bN * cute::get<1>(tileCoord) + i;
-          tokenIds(expertIdx, myIndices[i]) = TPS{
-            bM * cute::get<0>(tileCoord) + threadIdx.x,
-            fdividef(reginald[i], mCw)
-          };
-        }
-      }
+      stageTile<bM, bN>(kArgs, ctx, cute::get<0>(tileCoord),
+                       cute::get<1>(tileCoord), rTK, reginald, mCw);
     }
   };
 
@@ -401,8 +414,6 @@ namespace flashmoe::gate
       constexpr auto bM = cute::get<0>(typename TileGEMM::TileShape{});
       constexpr auto bN = cute::get<1>(typename TileGEMM::TileShape{});
       constexpr auto bK = cute::get<2>(typename TileGEMM::TileShape{});
-      const auto tokenIds = make_tensor(cute::make_gmem_ptr(kArgs.tokenIds),
-                                        cute::make_layout(cute::make_shape(kArgs.E, kArgs.roundEC), cute::LayoutRight{}));
       const auto tilesM = cute::ceil_div(kArgs.S, bM);
       constexpr int tilesN = 1;
       const auto tilesK = kArgs.H / bK;
@@ -521,46 +532,8 @@ namespace flashmoe::gate
           mCw += sV;
         }
       }
-      __shared__ int startIndices[bN];
-      using BTS = BlockScan<threads>::TempStorage;
-      __shared__ __align__(alignof(BTS)) BTS scanTempStorage[bN];
-      int myIndices[bN];
-      // scan down the column
-      constexpr int sl = cute::ceil_div(bN, threads); // typically 1
-      int stash[sl];
-      #pragma unroll
-      for (int i = 0; i < sl; ++i) {
-        stash[i] = 0;
-      }
-      #pragma unroll
-      for (int i = 0; i < bN; ++i) {
-        int selected = 0;
-        BlockScan<threads>(scanTempStorage[i]).InclusiveSum(rTK[i], myIndices[i], selected);
-        stash[i / threads] = threadIdx.x == (i % threads) ? selected : stash[i / threads];
-      }
-      #pragma unroll
-      for (int i = 0; i < sl; ++i) {
-        const int expertIdx = threadIdx.x + i * threads;
-        if (expertIdx < bN) {
-          startIndices[expertIdx] = guardedAtomicAdd(ctx.ecGuards + expertIdx,
-            kArgs.expertCounts + expertIdx, stash[i], tilesM);
-        }
-      }
-      __syncthreads();
-      #pragma unroll
-      for (int i = 0; i < bN; ++i) {
-        myIndices[i] = startIndices[i] + myIndices[i] - 1;
-      }
-      // TODO emit topk_weights and topk_ids
-      #pragma unroll
-      for (int i = 0; i < bN; ++i) {
-        if (rTK[i] && myIndices[i] < kArgs.EC) {
-          tokenIds(i, myIndices[i]) = TPS{
-            bM * cute::get<0>(tileCoord) + threadIdx.x,
-            fdividef(reginald[i], mCw)
-          };
-        }
-      }
+      stageTile<bM, bN>(kArgs, ctx, cute::get<0>(tileCoord),
+                       cute::get<1>(tileCoord), rTK, reginald, mCw);
     }
   };
 
@@ -573,7 +546,7 @@ namespace flashmoe::gate
     typename ElementR
   >
   __device__ __forceinline__
-  void forward(void* __restrict__ const& workspace, const GateKernelArgs& kArgs, const GateContext& ctx) {
+  void stage(void* __restrict__ const& workspace, const GateKernelArgs& kArgs, const GateContext& ctx) {
     // assert(blocks >= E / bN)
     using TileShape = TileGEMM::TileShape;
     constexpr int bM = cute::get<0>(TileShape{});
@@ -597,14 +570,32 @@ namespace flashmoe::gate
         typename ElementR = float
     >
   __launch_bounds__(threads, 1)
-  __global__ void forwardKernel(const __grid_constant__ GateKernelArgs kArgs, const __grid_constant__ GateContext ctx) {
+  __global__ void stageKernel(const __grid_constant__ GateKernelArgs kArgs, const __grid_constant__ GateContext ctx) {
     constexpr int bM = cute::get<0>(TileShape{});
     constexpr int bN = cute::get<1>(TileShape{});
     constexpr int bK = cute::get<2>(TileShape{});
     constexpr int pipeStages = cute::get<3>(TileShape{});
     using TileGEMM = tile::CollectiveMainloop<bM, bN, bK, Arch, Element, AccumType, threads, pipeStages>;
     extern __shared__ __align__(TileGEMM::GeneralAlignment::value) cuda::std::byte gateWorkspace[];
-    gate::forward<TileGEMM, grl, sro, r, Element, ElementR>(gateWorkspace, kArgs, ctx);
+    gate::stage<TileGEMM, grl, sro, r, Element, ElementR>(gateWorkspace, kArgs, ctx);
+  }
+
+  template<typename TileShape, int Arch, int threads,
+           GateReductionLevel grl = GateReductionLevel::singleBlock,
+           SoftMaxOptimizationLevel sro = SoftMaxOptimizationLevel::none,
+           ReturnLogits r = ReturnLogits::yes,
+           typename AccumType, typename Element, typename ElementR = float>
+  __host__ __forceinline__
+  cudaError_t forward(const GateKernelArgs& kArgs, const GateContext& ctx,
+                      int blocks, int sharedBytes, cudaStream_t stream) {
+    stageKernel<TileShape, Arch, threads, grl, sro, r, AccumType, Element, ElementR>
+      <<<blocks, threads, sharedBytes, stream>>>(kArgs, ctx);
+    const auto error = cudaGetLastError();
+    if (error != cudaSuccess) {
+      return error;
+    }
+    capacityKernel<<<kArgs.E, capacityThreads, 0, stream>>>(kArgs, ctx.staging);
+    return cudaGetLastError();
   }
 }
 #endif //GATE_CUH

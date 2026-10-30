@@ -239,7 +239,7 @@ using GEMMTile = cute::Shape<cute::Int<bM>, cute::Int<bN>, cute::Int<bK>, cute::
 
 static std::uintptr_t gate_initialize(const int& devId, const std::uintptr_t stream_ptr) {
   auto stream = reinterpret_cast<cudaStream_t>(stream_ptr);
-  auto kernel = flashmoe::gate::forwardKernel<GEMMTile, Arch, threads, grl, sro, rl, AccumType, Element, ElementRouting>;
+  auto kernel = flashmoe::gate::stageKernel<GEMMTile, Arch, threads, grl, sro, rl, AccumType, Element, ElementRouting>;
   
   int maxSharedMemory = 0;
   CHECK_CUDA(cudaDeviceGetAttribute(&maxSharedMemory,cudaDevAttrMaxSharedMemoryPerBlockOptin, devId));
@@ -285,8 +285,8 @@ static void gate_forward(const std::uintptr_t& raw_ctx,
     .EC = EC,
     .roundEC = cute::ceil_div(EC, bM) * bM
   };
-  flashmoe::gate::forwardKernel<GEMMTile, Arch, threads, grl, sro, rl, AccumType, Element, ElementRouting>
-  <<<ctx->blocks, threads, smemSize, stream>>>(kArgs, *ctx);
+  CHECK_CUDA((flashmoe::gate::forward<GEMMTile, Arch, threads, grl, sro, rl, AccumType, Element, ElementRouting>
+    (kArgs, *ctx, ctx->blocks, smemSize, stream)));
 }
 
 static void gate_finalize(const std::uintptr_t& raw_ctx, const std::uintptr_t stream_ptr) {

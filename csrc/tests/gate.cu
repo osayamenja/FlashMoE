@@ -42,7 +42,7 @@ struct __align__(16) GateArgs {
   uint* tokenIds;
   matx::index_t* tokenIds_ref;
   int* eCounts;
-  int* eCGuards;
+  flashmoe::TPS* staging;
   matx::index_t* eCounts_ref;
   matx::index_t* topK;
   flashmoe::SoftmaxStatePacked* rSp;
@@ -220,13 +220,13 @@ auto gk_run(matx::cudaExecutor& exec, const GateArgs& gArgs, const int& blocks, 
   };
 
   const flashmoe::GateContext ctx {
-    .ecGuards = gArgs.eCGuards,
+    .staging = gArgs.staging,
     .ssp = gArgs.rSp,
     .rtp = gArgs.rTp,
   };
   auto kernel = [&]() {
-    flashmoe::gate::forwardKernel<TileShape, Arch, threads, grl, sro, flashmoe::gate::ReturnLogits::yes, AccumType, Element, ElementC>
-      <<<blocks, threads, sharedSize, exec.getStream()>>>(kArgs, ctx);
+    CHECK_CUDA((flashmoe::gate::forward<TileShape, Arch, threads, grl, sro, flashmoe::gate::ReturnLogits::yes, AccumType, Element, ElementC>
+      (kArgs, ctx, blocks, sharedSize, exec.getStream())));
   };
   kernel();
   CHECK_CUDA(cudaPeekAtLastError());
@@ -283,7 +283,7 @@ void driver(const size_t& S, const size_t& E, const size_t& H, const int& k, con
   uint* tokenIds_idx = nullptr; // TPS is a packed struct of float and int
   matx::index_t* tokenIds_ref = nullptr;
   int* eCounts = nullptr;
-  int* eCGuards = nullptr;
+  flashmoe::TPS* staging = nullptr;
   matx::index_t* eCounts_ref = nullptr;
   matx::index_t* topK = nullptr;
   flashmoe::SoftmaxStatePacked* rSp = nullptr;
@@ -293,8 +293,7 @@ void driver(const size_t& S, const size_t& E, const size_t& H, const int& k, con
   const auto roundM = static_cast<size_t>(cute::max(M, bM));
   const auto roundEC = static_cast<size_t>(cute::max(eCap, bM));
   CHECK_CUDA(cudaMallocAsync(&eCounts, E * sizeof(int), stream));
-  CHECK_CUDA(cudaMallocAsync(&eCGuards, E * sizeof(int), stream));
-  CHECK_CUDA(cudaMemsetAsync(eCGuards, flashmoe::STALE_AS_BYTE, E * sizeof(int), stream));
+  CHECK_CUDA(cudaMallocAsync(&staging, E * S * sizeof(flashmoe::TPS), stream));
   CHECK_CUDA(cudaMallocAsync(&tokens, roundM * K * sizeof(Element), stream));
   CHECK_CUDA(cudaMallocAsync(&gateWeights, K * N * sizeof(Element), stream));
   CHECK_CUDA(cudaMallocAsync(&routing, roundM * N * sizeof(ElementC), stream));
@@ -322,7 +321,7 @@ void driver(const size_t& S, const size_t& E, const size_t& H, const int& k, con
   using AccumType = float;
   using TileShape = cute::Shape<cute::Int<bM>, cute::Int<bN>, cute::Int<bK>, cute::Int<pipeStages>>;
   constexpr int threads = cute::max(flashmoe::tile::suggest_thread_count<bM, bN, bK, Arch, Element, AccumType>(), bM);
-  auto kernel = flashmoe::gate::forwardKernel<TileShape, Arch, threads, grl, sro, flashmoe::gate::ReturnLogits::yes,
+  auto kernel = flashmoe::gate::stageKernel<TileShape, Arch, threads, grl, sro, flashmoe::gate::ReturnLogits::yes,
   AccumType, Element, ElementC>;
   int bps = 0;
   constexpr auto sharedSize = cute::max(bK * pipeStages * (bM + bN) * sizeof(Element),
@@ -358,7 +357,7 @@ void driver(const size_t& S, const size_t& E, const size_t& H, const int& k, con
     routing_interim,
     tokenIds,
     tokenIds_idx,
-    tokenIds_ref, eCounts, eCGuards, eCounts_ref, topK, rSp, rTp,
+    tokenIds_ref, eCounts, staging, eCounts_ref, topK, rSp, rTp,
     static_cast<int>(S), static_cast<int>(H), static_cast<int>(E), k, static_cast<int>(eCap), static_cast<int>(roundEC),
     rtol, atol
   };
@@ -381,7 +380,7 @@ void driver(const size_t& S, const size_t& E, const size_t& H, const int& k, con
   cudaFreeAsync(routing, stream);
   cudaFreeAsync(tokenIds, stream);
   cudaFreeAsync(eCounts, stream);
-  cudaFreeAsync(eCGuards, stream);
+  cudaFreeAsync(staging, stream);
   if (checkCorrectness) {
     cudaFreeAsync(routing_ref, stream);
     cudaFreeAsync(tokenIds_idx, stream);

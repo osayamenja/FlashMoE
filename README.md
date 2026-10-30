@@ -153,6 +153,29 @@ if __name__ == "__main__":
     flashmoe.finalize(flash_handle)
     flashmoe.router.finalize(router_handle)
 ```
+
+### Capacity-limited routing
+
+For each expert, the router retains the first `expert_peer_capacity` selected
+tokens in ascending input-row order on each rank, rather than CTA arrival order.
+`expert_counts` still reports demand before dropping, and the selected combine
+weights retain the existing normalization. Projection, softmax and top-k
+selection are unchanged.
+
+Routing first stages every assignment without dropping, then a second GPU
+kernel compacts each expert's records in input-row order and applies capacity.
+Both launches use the caller's stream; there is no host-side sorting or copy.
+The router context holds `S * E` token/probability records (8 bytes each),
+replacing the previous `E` integer guards. No per-call workspace clearing is
+needed. C++ callers use `gate::forward` to launch both passes and
+`gate::stageKernel` for occupancy queries; the Python API is unchanged.
+`testGateCapacity` exercises capacity overflow, context/graph reuse and
+different tile schedules. This policy does not promise bitwise determinism
+of distributed expert computation or floating-point combination.
+
+The Python JIT uses the checkout's native headers when present; packaged
+installs fetch the matching pinned native revision rather than older headers.
+
 ## Running a Python Program
 We suggest running these to verify that you meet all installation requirements.
 

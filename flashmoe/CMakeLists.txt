@@ -78,11 +78,15 @@ pybind11_add_module(${TARGET_MODULE_NAME} MODULE ${GENERATED_SRC})
 
 set(ENV{NVSHMEM_BUILD_LTOIR_LIBRARY} ON)
 set(NVSHMEM_BUILD_LTOIR_LIBRARY ON)
-CPMAddPackage(
+if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/../csrc/include/flashmoe/gate.cuh")
+  add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/.." flashmoe-native)
+else()
+  CPMAddPackage(
         NAME flashmoe
-        GITHUB_REPOSITORY osayamenja/flashmoe
-        GIT_TAG v0.1.2
-)
+        URL https://github.com/osayamenja/FlashMoE/archive/a9871288c6b2494cc15cbb3aeb0801e2564aa48e.tar.gz
+        URL_HASH SHA256=81a202dc4ee549fb560ecd49ac40014f0c54c8ad0c14be3efb9c89a7fa9ccd9f
+  )
+endif()
 
 target_link_libraries(${TARGET_MODULE_NAME} PRIVATE flashmoe::flashmoe)
 

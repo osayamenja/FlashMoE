@@ -266,6 +266,11 @@ add_executable(testGate
 )
 flash_target_common(testGate)
 
+add_executable(testGateCapacity
+        tests/gate_capacity.cu
+)
+flash_target_common(testGateCapacity)
+
 add_executable(testCombine
         tests/combine.cu
 )

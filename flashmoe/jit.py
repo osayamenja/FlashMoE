@@ -174,13 +174,22 @@ def _source_fingerprint() -> str:
     include_dir = root / "csrc" / "include"
 
     h = hashlib.sha256()
-    h.update(b"flashmoe-jit-v1")
+    h.update(b"flashmoe-jit-v2")
 
-    files = sorted(include_dir.glob("**/*.cuh"))
+    files = [root / "flashmoe" / "CMakeLists.txt"]
+    files.extend((root / "flashmoe" / "cmake").glob("**/*.cmake"))
 
-    for path in files:
-        h.update(str(path.relative_to(root)).encode())
+    # Match the checkout-versus-pinned-archive selection in the JIT CMakeLists.
+    if (include_dir / "flashmoe" / "gate.cuh").exists():
+        files.append(root / "CMakeLists.txt")
+        files.extend(include_dir.glob("**/*.cuh"))
+        files.extend((root / "csrc" / "cmake").glob("**/*.cmake"))
+
+    for path in sorted(files):
+        h.update(path.relative_to(root).as_posix().encode())
+        h.update(b"\0")
         h.update(path.read_bytes())
+        h.update(b"\0")
 
     return h.hexdigest()[:16]
 
@@ -200,7 +209,9 @@ def _get_compiled(arg: InitArgs, src: str, mod_prefix: str, mod_name: str):
     cache = Path(os.environ.get("FLASHMOE_CACHE_DIR", str(Path.home() / ".cache" / "flashmoe_jit")))
     cache.mkdir(parents=True, exist_ok=True)
 
-    key = hashlib.sha256(f"{mod_name}|py{sys.version_info[:2]}|{src}".encode()).hexdigest()[:16]
+    key = hashlib.sha256(
+        f"{mod_name}|py{sys.version_info[:2]}|{_source_fingerprint()}|{src}".encode()
+    ).hexdigest()[:16]
 
     build_root = cache / f"{mod_name}_{key}"
     build_root.mkdir(parents=True, exist_ok=True)
@@ -269,11 +280,13 @@ def _get_compiled(arg: InitArgs, src: str, mod_prefix: str, mod_name: str):
         if so_path.exists():
             return _load_ext(mod_name, so_path)
 
+        arch = arg.gpu_arch // 10
+        arch_tag = f"{arch}a" if arch >= 90 else str(arch)
         subprocess.run([
             "cmake", "-S", str(cmake_source_dir), "-B", str(bdir), "-G", "Ninja",
             f"-DGENERATED_SRC={generated}",
             f"-DTARGET_MODULE_NAME={mod_name}",
-            f"-DCMAKE_CUDA_ARCHITECTURES={arg.gpu_arch // 10}",
+            f"-DCMAKE_CUDA_ARCHITECTURES={arch_tag}",
             f"-DCPM_SOURCE_CACHE={Path.home() / '.cache' / 'cpm'}",
             "-DCMAKE_BUILD_TYPE=Release",
             f"-DARCH={arg.gpu_arch // 10}"
